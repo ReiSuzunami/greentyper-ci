@@ -1,10 +1,14 @@
 # GreenTyper
 
+[![Temporary public CI](https://github.com/ReiSuzunami/greentyper-ci/actions/workflows/ci.yml/badge.svg)](https://github.com/ReiSuzunami/greentyper-ci/actions/workflows/ci.yml)
+
 GreenTyper is a Windows-first coding-agent runtime written in Rust. It is designed to remain responsive on memory-constrained developer laptops while supporting recoverable long-running work, provider portability, first-class Agent Teams, Skills, MCP, Durable Memory, and Compaction.
 
 GreenTyper is an independent product with selected Codex-compatible protocol and Agent semantics. It is not a Codex CLI clone, a command-compatible replacement, or a wrapper around another agent process.
 
 > Status: repository scaffolded, feature implementation not started. The repository contains the agreed domain model, architecture decisions, contracts, code layout, and implementation plan.
+
+> Repository topology: [`ReiSuzunami/greentyper`](https://github.com/ReiSuzunami/greentyper) is the private canonical repository. [`ReiSuzunami/greentyper-ci`](https://github.com/ReiSuzunami/greentyper-ci) is a temporary public, non-authoritative mirror used only for hosted CI and build artifacts. See the [repository policy](docs/repository-policy.md).
 
 ## Product Shape
 
@@ -34,6 +38,7 @@ Initial design budgets include a headless idle Private Bytes limit of 25 MB, a s
 - [Configuration and command surface](docs/configuration.md)
 - [Testing strategy](docs/testing.md)
 - [Implementation plan](docs/implementation-plan.md)
+- [Repository policy](docs/repository-policy.md)
 - [Architecture Decision Records](docs/adr/README.md)
 
 ## Non-goals for v1

@@ -51,3 +51,4 @@ GreenTyper records decisions here when they constrain later implementation. Each
 ## Repository structure
 
 - [0029 - Organize code as a three-package Cargo workspace](0029-organize-code-as-three-package-workspace.md): keep runtime policy deep, dependency direction simple, and acceptance delivery isolated.
+- [0030 - Use a temporary public CI mirror](0030-use-a-temporary-public-ci-mirror.md): keep private development canonical while hosted builds run against an explicitly disposable public mirror.

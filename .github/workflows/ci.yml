@@ -1,0 +1,83 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+
+jobs:
+  quality:
+    if: github.repository == 'ReiSuzunami/greentyper-ci'
+    name: Quality / macOS ARM
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Record toolchain and host
+        run: |
+          rustc -Vv
+          uname -a
+          uname -m
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Check workspace
+        run: cargo check --workspace --all-targets --locked
+      - name: Test workspace
+        run: cargo test --workspace --all-targets --locked
+      - name: Lint workspace
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  windows:
+    if: github.repository == 'ReiSuzunami/greentyper-ci'
+    name: Windows x64 build
+    runs-on: windows-2025
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Record toolchain and host
+        shell: pwsh
+        run: |
+          rustc -Vv
+          Get-ComputerInfo | Select-Object WindowsProductName, WindowsVersion, OsBuildNumber, OsArchitecture
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Check workspace
+        run: cargo check --workspace --all-targets --locked
+      - name: Test workspace
+        run: cargo test --workspace --all-targets --locked
+      - name: Lint workspace
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Build release binaries
+        run: cargo build --workspace --release --locked
+      - name: Package portable build
+        id: package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item target/release/greentyper.exe dist/
+          Copy-Item target/release/greentyper-acceptance.exe dist/
+          Copy-Item README.md, LICENSE dist/
+          $archive = "greentyper-windows-x86-64-v3-$env:GITHUB_SHA.zip"
+          Compress-Archive -Path dist/* -DestinationPath $archive -Force
+          "archive=$archive" >> $env:GITHUB_OUTPUT
+      - name: Upload portable build
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: greentyper-windows-x86-64-v3-${{ github.sha }}
+          path: ${{ steps.package.outputs.archive }}
+          if-no-files-found: error
+          retention-days: 14
