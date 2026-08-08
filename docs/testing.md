@@ -1,0 +1,137 @@
+# Testing Strategy
+
+## Goals
+
+Testing must prove five things independently: canonical behavior, recovery, effect safety, authority isolation, and the Performance Contract. Provider availability and network timing are not substitutes for deterministic local evidence.
+
+Tests target deep-module interfaces. Internal helpers are tested directly only when they implement a dense pure algorithm; otherwise behavior is asserted through the owning module so refactors do not multiply shallow tests.
+
+## Test Layers
+
+### Pure and Property Tests
+
+Cover canonical identifiers and state transitions, configuration merging, context accounting, token-class normalization, price calculations, Usage Window membership, Task graph invariants, capability subset rules, Read Set validation, deterministic tool identities, and event serialization.
+
+Property tests must include:
+
+- Event replay is deterministic for any valid prefix.
+- Config resolution is deterministic and respects built-in < user < project < CLI precedence.
+- Delegation never creates a capability outside the parent snapshot.
+- One writable worktree never has two simultaneous Workspace Leases.
+- Usage Rollups equal aggregation over their source Usage Records.
+- Half-open and cross-midnight Usage Windows assign an attempt at most once per named window; overlapping windows remain independent.
+- Usage Window tests cover both occurrences of a repeated DST hour, the absence of instants in a skipped hour, versioned time-zone rule provenance, and rejection when Windows `local` cannot resolve to an IANA zone.
+- Compaction never changes the Event Ledger or Tool Ledger.
+- Append-only memory supersession leaves one deterministic active lineage.
+
+### Golden Protocol Tests
+
+Store redacted request/event fixtures for OpenAI Responses, OpenAI Chat Completions, and Anthropic Messages. Golden tests exercise canonical translation, streaming text, reasoning data, tool calls, usage, cache fields, service tier, incomplete responses, provider errors, and unknown fields.
+
+Raw provider events remain fixture evidence; assertions target canonical Items, Events, and Usage Records. A protocol fixture update requires a reviewed explanation of the upstream change.
+
+### Module Contract Tests
+
+Each deep module is tested through its Interface:
+
+- Runtime Kernel: Turn admission, cancellation, budgets, recovery, and terminal outcomes
+- Ledger Store: append, sync boundaries, replay, migration, backup, compare-and-swap, and corrupt-tail handling
+- Provider Runtime: capability freeze, dialect/transport fallback, epoch changes, retry classification, and usage normalization
+- Tool Runtime: approvals, idempotency, ambiguous outcomes, sandbox policy, and MCP isolation
+- Agent Team Runtime: Task ownership, Delegation, messaging, failure propagation, and Completion Capsules
+- Workspace Coordinator: leases, worktree allocation, Read Set revalidation, merge, and conflict reporting
+- Context Engine: pressure thresholds, artifact offload, folds, checkpoints, rebase, memory retrieval, and stale-result rejection
+- Config Runtime: schema coverage, drafts, effective provenance, atomic writes, and application timing
+
+True external dependencies use mock adapters. Windows facilities use focused integration tests around audited wrappers rather than exposing platform details through every module.
+
+### Crash and Recovery Tests
+
+Crash injection runs at every Durability Boundary and representative byte offsets around storage commits. Restart must produce one of two explicit outcomes: the effect is known and not repeated, or the effect is ambiguous and blocked for reconciliation.
+
+Required scenarios include:
+
+- Process exit before and after approval durability
+- Exit during streaming batch append
+- Exit before, during, and after a tool side effect
+- Truncated or checksum-invalid Ledger tail
+- Checkpoint compare-and-swap conflict
+- Skill content changed before resume
+- Provider reconnect after partial output or tool call
+- Schema migration interrupted before replacement
+
+### Security and Isolation Tests
+
+- Credentials never appear in TOML, Ledger records, checkpoints, logs, bundles, or command history.
+- Changing Provider Origin cannot silently reuse a credential or catalog price.
+- Remote origins require HTTPS; plain HTTP succeeds only for a loopback host with that profile's explicit insecure-loopback opt-in.
+- Tool filesystem, process, and network authority are tested independently.
+- Child processes remain inside Job Object lifetime and resource policy.
+- MCP outputs and discovery metadata cannot create instructions, endpoints, approvals, or capabilities.
+- Delegated Agents cannot access parent-only credentials, worktrees, tools, or Approval Grants.
+- Diagnostic Bundle redaction is tested with adversarial paths, headers, tokens, and tool output.
+
+### Fuzzing
+
+Fuzz parsers and state machines that accept untrusted or crash-sensitive input:
+
+- SSE, WebSocket, Chat Completions, Responses, and Messages events
+- MCP messages and elicitation payloads
+- Config TOML and schema migrations
+- Event Ledger framing and recovery scans
+- Tool-call arguments and streamed JSON
+- Terminal input and width calculations
+- Memory and checkpoint import formats
+
+Fuzz failures become minimized regression fixtures.
+
+### UI and Command Tests
+
+Golden terminal tests cover root Slash Panel size, hierarchical Command Path completion, scoped fuzzy matching, Config Center navigation, narrow-width statusline degradation, expanded status details, model selector states, approval/blocker visibility, and text-fit constraints.
+
+Tests assert that `/config pro url` resolves to the focused Provider editor without registering a flat root command. Every Config Object must have a generic or purpose-built editor route. Credential fields must never support read-back.
+
+## Provider Testing
+
+Deterministic local simulators are the required gate. They support success, slow streams, malformed events, disconnects, resumable and non-resumable partial output, reordered tool fragments, missing usage, unknown usage fields, and retryable/fatal errors.
+
+Live provider tests are opt-in and credential-gated. They verify current integration for OpenAI, DeepSeek, and OpenCode Go but do not run on untrusted pull requests and do not gate local performance. Model-catalog refresh work records the source URL and observation date.
+
+## Performance Testing
+
+All performance work follows the [Performance Contract](performance-contract.md). Microbenchmarks may explain a result but cannot approve a release.
+
+- Developer machines: quick local regressions and allocation profiles
+- GitHub-hosted Windows: correctness and coarse smoke measurements
+- FMDev: fixed 30-run p50/p95 regression suites, warning above 5%, block above 10%
+- Target Machine: signed asynchronous Acceptance Run for absolute release evidence
+
+Results include main process, TUI, per-Agent increment, child processes, and total process tree. Compiler and user-command cost remains visible but separately attributed.
+
+## CI Matrix
+
+| Environment | Required evidence |
+| --- | --- |
+| Windows 11 x64 | Build, unit/property/golden tests, integration, crash recovery, fuzz smoke, packaging, x86-64-v3 build-flag and startup feature-guard verification |
+| FMDev | Windows suite plus repeatable performance regression package |
+| macOS ARM | Build, formatting/lints, pure core tests, provider fixture tests |
+| Linux x64 | Build and pure core tests where supported; not a v1 product gate |
+
+Sanitizer, loom-style concurrency exploration, or equivalent tools should run on a supported CI host when they add evidence unavailable on Windows. Platform-specific behavior still requires Windows tests.
+
+## Release Gate
+
+A release candidate is acceptable only when:
+
+1. Windows correctness, recovery, security, migration, and packaging suites pass.
+2. Protocol fixtures cover every enabled Provider Dialect and required capability.
+3. FMDev passes the provisional numeric budgets and relative performance gates.
+4. The asynchronous Target Machine package passes, or the absence of a run is explicitly accepted and documented.
+5. On-disk migrations were tested from every supported released schema.
+6. No known failure can duplicate a successful or ambiguous external effect.
+
+The Windows artifact must self-report the same x86-64-v3 baseline recorded by its build manifest, and CI must execute its CPU-feature guard. The Target ZIP must match the candidate ID, source revision, executable hash, workload version, and configuration hash in the release evidence record. A Target waiver is approved by the Release Owner, is scoped to one executable hash, and permits only a pre-Alpha candidate; it never replaces the passing Target run required for Alpha.
+
+## Test Data Rules
+
+Fixtures use synthetic repositories, prompts, credentials, paths, and responses. Real user content and production keys never enter source control or CI artifacts. Failure bundles apply the same redaction policy as Diagnostic Bundles.

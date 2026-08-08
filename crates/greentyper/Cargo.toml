@@ -1,0 +1,15 @@
+[package]
+name = "greentyper"
+description = "Windows-first GreenTyper coding-agent runtime"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+greentyper-core = { path = "../greentyper-core" }
+
+[lints]
+workspace = true

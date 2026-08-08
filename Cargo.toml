@@ -1,0 +1,28 @@
+[workspace]
+members = [
+    "crates/greentyper",
+    "crates/greentyper-acceptance",
+    "crates/greentyper-core",
+]
+default-members = [
+    "crates/greentyper",
+    "crates/greentyper-core",
+]
+resolver = "3"
+
+[workspace.package]
+version = "0.0.0"
+authors = ["ReiSuzunami <i@rei.rs>"]
+edition = "2024"
+rust-version = "1.92"
+license = "Apache-2.0"
+publish = false
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+panic = "abort"
+strip = "symbols"

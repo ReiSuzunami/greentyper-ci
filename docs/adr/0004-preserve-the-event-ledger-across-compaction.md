@@ -1,0 +1,3 @@
+# Preserve the Event Ledger across compaction
+
+The Event Ledger will remain the authoritative history while Compaction replaces only derived Context Views and Context Checkpoints. GreenTyper accepts configurable local storage cost to preserve recovery, audit, branching, and multi-Agent correctness; retention or pruning must be an explicit policy rather than a side effect of context pressure. Records governing approvals, task ownership, and tool side effects cross a synchronous Durability Boundary before execution or acknowledgement, while recoverable streaming text may be committed in short batches.

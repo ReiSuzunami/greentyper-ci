@@ -1,0 +1,3 @@
+# Make every Config Object UI-editable
+
+Every supported Config Object will be defined once in a Config Schema that drives TOML serialization, defaulting, validation, TUI editors, CLI operations, and App Server introspection, with purpose-built wizards only where a generic editor would hide important workflow. The TUI is a first-class configuration editor rather than a file viewer: it shows effective value, source layer, target layer, and application timing, stages changes as a Config Draft, validates and commits them atomically with a backup, and routes credentials through secure bind, replace, and forget operations without exposing their values.
