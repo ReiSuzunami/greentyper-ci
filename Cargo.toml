@@ -14,7 +14,7 @@ resolver = "3"
 version = "0.0.0"
 authors = ["ReiSuzunami <i@rei.rs>"]
 edition = "2024"
-rust-version = "1.92"
+rust-version = "1.97"
 license = "Apache-2.0"
 publish = false
 
