@@ -62,7 +62,7 @@ fn compiled_implementation() -> AppResult<CompiledImplementation> {
     if cfg!(feature = "bench-allocator-snmalloc") {
         return Ok(CompiledImplementation {
             name: "snmalloc",
-            dependencies: "snmalloc-rs=0.7.4;features=default(build_cmake,usewait-on-address);native-cpu=off",
+            dependencies: "snmalloc-rs=0.7.4;features=default(build_cmake,usewait-on-address);native-cpu=off;windows-msvc-cxxflags=/wd4864",
         });
     }
     if cfg!(feature = "bench-allocator-mimalloc") {

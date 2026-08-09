@@ -94,6 +94,8 @@ jobs:
       - name: Test Mimalloc candidate
         run: cargo test -p greentyper-acceptance --all-targets --features bench-allocator-mimalloc --locked
       - name: Test Snmalloc candidate
+        env:
+          CXXFLAGS: /wd4864
         run: cargo test -p greentyper-acceptance --all-targets --features bench-allocator-snmalloc --locked
       - name: Lint workspace
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
@@ -108,6 +110,8 @@ jobs:
       - name: Lint Mimalloc candidate
         run: cargo clippy -p greentyper-acceptance --all-targets --features bench-allocator-mimalloc --locked -- -D warnings
       - name: Lint Snmalloc candidate
+        env:
+          CXXFLAGS: /wd4864
         run: cargo clippy -p greentyper-acceptance --all-targets --features bench-allocator-snmalloc --locked -- -D warnings
       - name: Build release binaries
         run: cargo build --workspace --release --locked
@@ -124,6 +128,8 @@ jobs:
       - name: Build Mimalloc candidate runner
         run: cargo build -p greentyper-acceptance --release --features bench-allocator-mimalloc --target-dir target/bench-allocator-mimalloc --locked
       - name: Build Snmalloc candidate runner
+        env:
+          CXXFLAGS: /wd4864
         run: cargo build -p greentyper-acceptance --release --features bench-allocator-snmalloc --target-dir target/bench-allocator-snmalloc --locked
       - name: Verify CPU baseline and acceptance harness
         shell: pwsh
