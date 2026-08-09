@@ -30,11 +30,12 @@ let (mut runtime, recovered_team) = RuntimeKernel::open_with_team(
     team_ledger_path,
     max_active_agents,
 )?;
-runtime.dispatch_team(TeamCommand::AdmitRoot {
+let operation = runtime.dispatch_team(TeamCommand::AdmitRoot {
     task,
     budget,
     capabilities,
 })?;
+runtime.acknowledge_team_operation(operation.operation)?;
 for session in recovered_team.into_sessions() {
     // Kernel-derived authority; no AgentId-to-session conversion exists.
 }
@@ -83,14 +84,25 @@ holds both dedicated writers, validates the Team replay, and returns one
 `KernelTeamRecovery` containing every non-terminal process-local Session.
 Terminal Agents are omitted; old Sessions remain invalid. The same typed Kernel
 dispatch interface admits the single root and rejects duplicates without
-mutation. This is core authority/recovery evidence, not yet a product scheduling
-or output protocol. Private core tests inject errors at write, flush, and sync
-boundaries and kill authenticated child processes before write, inside the
+mutation. Each Kernel command synchronously commits a monotonic operation
+identity in the same Team transaction. A complete operation without its later
+acknowledgement is exposed in `KernelTeamSnapshot.operations` and blocks new
+commands until explicit acknowledgement reconciliation; operation IDs never
+authorize Agent commands. This is core authority/recovery evidence, not yet a
+product scheduling or output protocol. Private core tests inject errors at
+eight write, flush, and sync boundaries for both command and acknowledgement
+frames and kill authenticated child processes before write, inside the
 frame, after flush, and after sync-before-publish. An I/O error poisons the live
 writer; process termination leaves no writer to continue. Both require reopen,
 which yields either a known complete prefix or a complete transaction whose
-caller acknowledgement remains ambiguous. No case automatically repeats the
+caller acknowledgement remains pending. No case automatically repeats the
 command.
+
+The Team operation gate is independent of the single-Agent Turn
+`RecoveryStatus`: the two provisional Ledgers have separate recovery state and
+writer ownership. A pending Team acknowledgement blocks Team commands, while a
+pending single-Agent Turn continues to block only `execute`. Product scheduling
+across both state machines remains part of the later Team driver.
 
 ## Ledger Adapter
 
@@ -160,16 +172,17 @@ protocol.
 ## Still Pending
 
 - Product CLI and Provider/Tool driving over the Kernel-owned Agent Team seam,
-  including user-visible Team acknowledgement. Core already owns the dedicated
-  adapter, gates root admission, and issues one consumable complete
-  non-terminal Session bundle per validated open without an ID-to-session
-  conversion.
+  including delivery of the already-persisted operation receipt to a
+  user-visible sink before the Kernel acknowledgement call. Core already owns
+  the dedicated adapter, operation journal, explicit acknowledgement surface,
+  root gate, and one consumable complete non-terminal Session bundle per
+  validated open without an ID-to-session conversion.
 - Complete Config Schema default/constraint/normalization/migration metadata,
   TUI/App Server editors, Provider Templates/catalogs, and credential storage.
 - Real provider dialects, transport, reconnect policy, credentials, and usage
   normalization.
 - Tool effects, Approval Grants, workspaces, checkpoints, and migrations.
-- Kernel-persisted Team operation identity and acknowledgement reconciliation;
-  byte-offset process termination around every remaining Runtime durability
-  boundary; fuzzing; and SQLite VFS fault injection.
+- Byte-offset process termination around every remaining Runtime, Provider,
+  Tool, delivery, and product acknowledgement boundary; fuzzing; and SQLite VFS
+  fault injection.
 - Headless idle CPU and memory evidence on FMDev and the Target Machine.

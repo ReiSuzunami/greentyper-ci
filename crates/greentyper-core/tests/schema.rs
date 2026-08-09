@@ -26,7 +26,7 @@ fn every_persisted_schema_has_an_explicit_current_version() {
     assert_eq!(SchemaKind::DeterministicFixture.current().get(), 1);
     assert_eq!(SchemaKind::LedgerFormat.current().get(), 1);
     assert_eq!(SchemaKind::RuntimeEvent.current().get(), 1);
-    assert_eq!(SchemaKind::TeamEvent.current().get(), 1);
+    assert_eq!(SchemaKind::TeamEvent.current().get(), 2);
 }
 
 #[test]
@@ -43,13 +43,20 @@ fn benchmark_schema_one_is_historical_and_not_reinterpreted_as_two() {
 }
 
 #[test]
-fn team_event_schema_rejects_zero_and_future_versions() {
+fn team_event_schema_requires_current_and_rejects_zero_or_future_versions() {
     assert_eq!(
         SchemaKind::TeamEvent.require_current(0),
         Err(SchemaError::ZeroVersion)
     );
     assert!(matches!(
-        SchemaKind::TeamEvent.require_current(2),
+        SchemaKind::TeamEvent.require_current(1),
+        Err(SchemaError::Unsupported {
+            kind: SchemaKind::TeamEvent,
+            ..
+        })
+    ));
+    assert!(matches!(
+        SchemaKind::TeamEvent.require_current(3),
         Err(SchemaError::Unsupported {
             kind: SchemaKind::TeamEvent,
             ..

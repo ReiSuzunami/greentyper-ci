@@ -45,6 +45,13 @@ identifier!(AgentId);
 identifier!(MessageId);
 identifier!(EventSeq);
 identifier!(TransactionId);
+identifier!(TeamOperationId);
+
+impl TeamOperationId {
+    fn from_next(value: u64) -> Result<Self, TeamError> {
+        fresh_identifier(value).map(Self)
+    }
+}
 
 /// Process-local authority to act as one Agent.
 ///
@@ -452,6 +459,15 @@ pub enum TeamEventKind {
         agent: AgentId,
         blocked_by: TaskId,
     },
+    OperationCommitted {
+        operation: TeamOperationId,
+        transaction: TransactionId,
+    },
+    OperationAcknowledged {
+        operation: TeamOperationId,
+        committed_transaction: TransactionId,
+        acknowledgement_transaction: TransactionId,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -491,6 +507,35 @@ pub struct TeamCommit {
     pub durability: CommitDurability,
     pub events: Vec<TeamEvent>,
     pub outcome: CommandOutcome,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TeamOperationStatus {
+    CommittedAwaitingAcknowledgement,
+    Acknowledged,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TeamOperationRecord {
+    pub operation: TeamOperationId,
+    pub transaction: TransactionId,
+    pub first_sequence: EventSeq,
+    pub last_sequence: EventSeq,
+    pub event_count: u32,
+    pub acknowledgement_transaction: Option<TransactionId>,
+    pub status: TeamOperationStatus,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TeamOperationCommit {
+    pub operation: TeamOperationId,
+    pub commit: TeamCommit,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TeamOperationAcknowledgeOutcome {
+    Durable(TeamDurabilityReceipt),
+    AlreadyAcknowledged,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -564,6 +609,9 @@ pub enum TeamError {
         agent: AgentId,
         status: AgentStatus,
         operation: &'static str,
+    },
+    UnknownOperation {
+        operation: TeamOperationId,
     },
     IdentifierExhausted,
     InvariantViolation {
@@ -683,6 +731,9 @@ impl fmt::Display for TeamError {
                 "Agent {} cannot {operation} while {status:?}",
                 agent.get()
             ),
+            Self::UnknownOperation { operation } => {
+                write!(formatter, "unknown Team operation {}", operation.get())
+            }
             Self::IdentifierExhausted => write!(formatter, "Agent Team identifier space exhausted"),
             Self::InvariantViolation { detail } => {
                 write!(formatter, "Agent Team invariant violated: {detail}")
@@ -827,6 +878,52 @@ impl TeamRuntime {
     }
 
     fn prepare(&self, command: TeamCommand) -> Result<PreparedTeamTransaction, TeamError> {
+        let (events, outcome) = self.plan(command)?;
+        self.prepare_transaction(events, outcome)
+    }
+
+    fn prepare_operation(
+        &self,
+        operation: TeamOperationId,
+        command: TeamCommand,
+    ) -> Result<PreparedTeamTransaction, TeamError> {
+        let transaction = self.fresh_transaction_id()?;
+        let (mut events, outcome) = self.plan(command)?;
+        events.insert(
+            0,
+            TeamEventKind::OperationCommitted {
+                operation,
+                transaction,
+            },
+        );
+        let prepared = self.prepare_events(transaction, events)?;
+        Ok(PreparedTeamTransaction { prepared, outcome })
+    }
+
+    fn prepare_operation_acknowledgement(
+        &self,
+        operation: TeamOperationId,
+    ) -> Result<PreparedTeamEvents, TeamError> {
+        let record = self
+            .state
+            .operations
+            .get(&operation)
+            .ok_or(TeamError::UnknownOperation { operation })?;
+        let acknowledgement_transaction = self.fresh_transaction_id()?;
+        self.prepare_events(
+            acknowledgement_transaction,
+            vec![TeamEventKind::OperationAcknowledged {
+                operation,
+                committed_transaction: record.transaction,
+                acknowledgement_transaction,
+            }],
+        )
+    }
+
+    fn plan(
+        &self,
+        command: TeamCommand,
+    ) -> Result<(Vec<TeamEventKind>, CommandOutcome), TeamError> {
         let (events, outcome) = match command {
             TeamCommand::AdmitRoot {
                 task,
@@ -863,8 +960,7 @@ impl TeamRuntime {
                 self.plan_cancellation(agent, reason)?
             }
         };
-
-        self.prepare_transaction(events, outcome)
+        Ok((events, outcome))
     }
 
     #[must_use]
@@ -909,6 +1005,53 @@ impl TeamRuntime {
     #[must_use]
     pub fn event_log(&self) -> &[TeamEvent] {
         &self.event_log
+    }
+
+    fn next_operation_id(&self) -> Result<TeamOperationId, TeamError> {
+        TeamOperationId::from_next(next_identifier(
+            self.state
+                .operations
+                .keys()
+                .map(|operation| operation.get()),
+        )?)
+    }
+
+    fn operation_records(&self) -> Vec<TeamOperationRecord> {
+        self.event_log
+            .iter()
+            .filter_map(|event| {
+                let TeamEventKind::OperationCommitted {
+                    operation,
+                    transaction,
+                } = &event.kind
+                else {
+                    return None;
+                };
+                let record = self
+                    .state
+                    .operations
+                    .get(operation)
+                    .expect("operation marker was folded into Team state");
+                let last_sequence = event
+                    .sequence
+                    .get()
+                    .checked_add(u64::from(event.events_in_transaction) - 1)
+                    .expect("validated Team event sequence");
+                Some(TeamOperationRecord {
+                    operation: *operation,
+                    transaction: *transaction,
+                    first_sequence: event.sequence,
+                    last_sequence: EventSeq(last_sequence),
+                    event_count: event.events_in_transaction,
+                    acknowledgement_transaction: record.acknowledgement_transaction,
+                    status: if record.acknowledgement_transaction.is_some() {
+                        TeamOperationStatus::Acknowledged
+                    } else {
+                        TeamOperationStatus::CommittedAwaitingAcknowledgement
+                    },
+                })
+            })
+            .collect()
     }
 
     pub fn recover(
@@ -963,6 +1106,12 @@ impl TeamRuntime {
             }
 
             let mut candidate = runtime.state.clone();
+            validate_operation_transaction(&events[cursor..cursor + event_count]).map_err(
+                |source| RecoveryError::InvalidEvent {
+                    sequence: first.sequence,
+                    source,
+                },
+            )?;
             for offset in 0..event_count {
                 let event = &events[cursor + offset];
                 let expected_event_sequence = expected_sequence.checked_add(offset as u64).ok_or(
@@ -1286,6 +1435,15 @@ impl TeamRuntime {
         outcome: CommandOutcome,
     ) -> Result<PreparedTeamTransaction, TeamError> {
         let transaction = self.fresh_transaction_id()?;
+        let prepared = self.prepare_events(transaction, base_events)?;
+        Ok(PreparedTeamTransaction { prepared, outcome })
+    }
+
+    fn prepare_events(
+        &self,
+        transaction: TransactionId,
+        base_events: Vec<TeamEventKind>,
+    ) -> Result<PreparedTeamEvents, TeamError> {
         let mut candidate = self.state.clone();
         let mut event_kinds = Vec::with_capacity(base_events.len() + 8);
         for event in base_events {
@@ -1316,6 +1474,7 @@ impl TeamRuntime {
                 kind,
             })
             .collect();
+        validate_operation_transaction(&events)?;
         let next_transaction = self
             .next_transaction
             .checked_add(1)
@@ -1325,12 +1484,11 @@ impl TeamRuntime {
         let next_message =
             next_identifier(candidate.messages.iter().map(|message| message.id.get()))?;
 
-        Ok(PreparedTeamTransaction {
+        Ok(PreparedTeamEvents {
             candidate,
             transaction,
             revision: EventSeq(last_sequence),
             events,
-            outcome,
             next_transaction,
             next_task,
             next_agent,
@@ -1343,12 +1501,24 @@ impl TeamRuntime {
         prepared: PreparedTeamTransaction,
         durability: CommitDurability,
     ) -> TeamCommit {
-        let PreparedTeamTransaction {
+        let PreparedTeamTransaction { prepared, outcome } = prepared;
+        let published = self.publish_events(prepared);
+
+        TeamCommit {
+            transaction: published.transaction,
+            revision: published.revision,
+            durability,
+            events: published.events,
+            outcome,
+        }
+    }
+
+    fn publish_events(&mut self, prepared: PreparedTeamEvents) -> PublishedTeamEvents {
+        let PreparedTeamEvents {
             candidate,
             transaction,
             revision,
             events,
-            outcome,
             next_transaction,
             next_task,
             next_agent,
@@ -1362,12 +1532,10 @@ impl TeamRuntime {
         self.next_agent = next_agent;
         self.next_message = next_message;
 
-        TeamCommit {
+        PublishedTeamEvents {
             transaction,
             revision,
-            durability,
             events,
-            outcome,
         }
     }
 
@@ -1498,15 +1666,25 @@ impl TeamRuntime {
 }
 
 struct PreparedTeamTransaction {
+    prepared: PreparedTeamEvents,
+    outcome: CommandOutcome,
+}
+
+struct PreparedTeamEvents {
     candidate: TeamState,
     transaction: TransactionId,
     revision: EventSeq,
     events: Vec<TeamEvent>,
-    outcome: CommandOutcome,
     next_transaction: u64,
     next_task: u64,
     next_agent: u64,
     next_message: u64,
+}
+
+struct PublishedTeamEvents {
+    transaction: TransactionId,
+    revision: EventSeq,
+    events: Vec<TeamEvent>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1515,6 +1693,13 @@ struct TeamState {
     tasks: BTreeMap<TaskId, TaskRecord>,
     agents: BTreeMap<AgentId, AgentRecord>,
     messages: Vec<MessageView>,
+    operations: BTreeMap<TeamOperationId, OperationRecord>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct OperationRecord {
+    transaction: TransactionId,
+    acknowledgement_transaction: Option<TransactionId>,
 }
 
 #[derive(Clone, Debug)]
@@ -1977,6 +2162,73 @@ impl TeamState {
                 }
                 record.status = AgentStatus::Blocked;
             }
+            TeamEventKind::OperationCommitted {
+                operation,
+                transaction,
+            } => {
+                validate_stored_identifier(operation.get(), "Team operation")?;
+                validate_stored_identifier(transaction.get(), "Team operation transaction")?;
+                let expected =
+                    next_identifier(self.operations.keys().map(|operation| operation.get()))?;
+                if operation.get() != expected {
+                    return invariant(format!(
+                        "expected Team operation identifier {expected}, found {}",
+                        operation.get()
+                    ));
+                }
+                if self
+                    .operations
+                    .insert(
+                        *operation,
+                        OperationRecord {
+                            transaction: *transaction,
+                            acknowledgement_transaction: None,
+                        },
+                    )
+                    .is_some()
+                {
+                    return invariant(format!(
+                        "Team operation {} was committed twice",
+                        operation.get()
+                    ));
+                }
+            }
+            TeamEventKind::OperationAcknowledged {
+                operation,
+                committed_transaction,
+                acknowledgement_transaction,
+            } => {
+                validate_stored_identifier(operation.get(), "Team operation")?;
+                validate_stored_identifier(
+                    committed_transaction.get(),
+                    "committed Team operation transaction",
+                )?;
+                validate_stored_identifier(
+                    acknowledgement_transaction.get(),
+                    "Team operation acknowledgement transaction",
+                )?;
+                let record =
+                    self.operations
+                        .get_mut(operation)
+                        .ok_or(TeamError::UnknownOperation {
+                            operation: *operation,
+                        })?;
+                if record.transaction != *committed_transaction {
+                    return invariant(format!(
+                        "Team operation {} acknowledgement targets transaction {}, expected {}",
+                        operation.get(),
+                        committed_transaction.get(),
+                        record.transaction.get()
+                    ));
+                }
+                if record.acknowledgement_transaction.is_some() {
+                    return invariant(format!(
+                        "Team operation {} was acknowledged twice",
+                        operation.get()
+                    ));
+                }
+                record.acknowledgement_transaction = Some(*acknowledgement_transaction);
+            }
         }
         Ok(())
     }
@@ -2051,6 +2303,26 @@ impl TeamState {
             .is_some_and(|root| !self.agents.contains_key(&root))
         {
             return invariant("root Agent is missing".into());
+        }
+        for (index, (operation, record)) in self.operations.iter().enumerate() {
+            let expected = u64::try_from(index)
+                .ok()
+                .and_then(|value| value.checked_add(1))
+                .ok_or(TeamError::IdentifierExhausted)?;
+            if operation.get() != expected {
+                return invariant(format!(
+                    "Team operation identifiers are not contiguous at {expected}"
+                ));
+            }
+            if record
+                .acknowledgement_transaction
+                .is_some_and(|transaction| transaction <= record.transaction)
+            {
+                return invariant(format!(
+                    "Team operation {} acknowledgement precedes its commit",
+                    operation.get()
+                ));
+            }
         }
         for task in self.tasks.values() {
             let owner = task.owner.ok_or_else(|| TeamError::InvariantViolation {
@@ -2237,6 +2509,50 @@ fn apply_planned(
 ) -> Result<(), TeamError> {
     state.apply(&event, max_active_agents)?;
     events.push(event);
+    Ok(())
+}
+
+fn validate_operation_transaction(events: &[TeamEvent]) -> Result<(), TeamError> {
+    let committed: Vec<_> = events
+        .iter()
+        .filter(|event| matches!(event.kind, TeamEventKind::OperationCommitted { .. }))
+        .collect();
+    let acknowledged: Vec<_> = events
+        .iter()
+        .filter(|event| matches!(event.kind, TeamEventKind::OperationAcknowledged { .. }))
+        .collect();
+
+    if let Some(event) = committed.first() {
+        if committed.len() != 1 || !acknowledged.is_empty() || event.index_in_transaction != 0 {
+            return invariant(
+                "Team operation command transaction has invalid journal framing".into(),
+            );
+        }
+        let TeamEventKind::OperationCommitted { transaction, .. } = &event.kind else {
+            unreachable!("filtered Team operation marker")
+        };
+        if *transaction != event.transaction {
+            return invariant("Team operation marker transaction does not match its frame".into());
+        }
+    } else if let Some(event) = acknowledged.first() {
+        if acknowledged.len() != 1 || events.len() != 1 {
+            return invariant("Team operation acknowledgement must be its own transaction".into());
+        }
+        let TeamEventKind::OperationAcknowledged {
+            committed_transaction,
+            acknowledgement_transaction,
+            ..
+        } = &event.kind
+        else {
+            unreachable!("filtered Team operation acknowledgement")
+        };
+        if *acknowledgement_transaction != event.transaction
+            || committed_transaction.get() >= acknowledgement_transaction.get()
+        {
+            return invariant("Team operation acknowledgement transaction is invalid".into());
+        }
+    }
+
     Ok(())
 }
 

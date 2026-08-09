@@ -6,8 +6,9 @@ use std::fmt;
 use std::path::Path;
 
 use crate::agent_team::{
-    AgentSession, DurableTeamError, DurableTeamRuntime, TeamCommand, TeamCommit, TeamError,
-    TeamSnapshot,
+    AgentSession, DurableTeamError, DurableTeamRuntime, TeamCommand, TeamError,
+    TeamOperationAcknowledgeOutcome, TeamOperationCommit, TeamOperationId, TeamOperationRecord,
+    TeamOperationStatus, TeamSnapshot,
 };
 use crate::config::{ConfigEpoch, ConfigError, ConfigLayer, ConfigLayers, ConfigSource};
 use crate::ledger::{
@@ -68,6 +69,7 @@ pub struct KernelTeamSnapshot {
     pub projection: TeamSnapshot,
     pub ledger_head: LedgerHead,
     pub recovered_tail_bytes: u64,
+    pub operations: Vec<TeamOperationRecord>,
 }
 
 /// Per-open execution authority rebound from a validated Agent Team replay.
@@ -168,7 +170,36 @@ impl KernelTeam {
             projection: runtime.snapshot(),
             ledger_head: runtime.ledger_head(),
             recovered_tail_bytes: runtime.recovered_tail_bytes(),
+            operations: runtime.operation_records(),
         }
+    }
+
+    fn dispatch(&mut self, command: TeamCommand) -> Result<TeamOperationCommit, RuntimeError> {
+        if let Some(record) =
+            self.runtime.operation_records().into_iter().find(|record| {
+                record.status == TeamOperationStatus::CommittedAwaitingAcknowledgement
+            })
+        {
+            return Err(RuntimeError::TeamOperationReconciliationRequired(
+                record.operation,
+            ));
+        }
+        let operation = self
+            .runtime
+            .next_operation_id()
+            .map_err(RuntimeError::Team)?;
+        self.runtime
+            .dispatch_operation(operation, command)
+            .map_err(RuntimeError::Team)
+    }
+
+    fn acknowledge(
+        &mut self,
+        operation: TeamOperationId,
+    ) -> Result<TeamOperationAcknowledgeOutcome, RuntimeError> {
+        self.runtime
+            .acknowledge_operation(operation)
+            .map_err(RuntimeError::Team)
     }
 }
 
@@ -250,8 +281,19 @@ impl RuntimeKernel {
         self.team.as_ref().map(KernelTeam::snapshot)
     }
 
-    pub fn dispatch_team(&mut self, command: TeamCommand) -> Result<TeamCommit, RuntimeError> {
+    pub fn dispatch_team(
+        &mut self,
+        command: TeamCommand,
+    ) -> Result<TeamOperationCommit, RuntimeError> {
         self.dispatch_team_command(command)
+    }
+
+    pub fn acknowledge_team_operation(
+        &mut self,
+        operation: TeamOperationId,
+    ) -> Result<TeamOperationAcknowledgeOutcome, RuntimeError> {
+        let team = self.team.as_mut().ok_or(RuntimeError::TeamUnavailable)?;
+        team.acknowledge(operation)
     }
 
     pub fn execute(
@@ -349,9 +391,12 @@ impl RuntimeKernel {
         }
     }
 
-    fn dispatch_team_command(&mut self, command: TeamCommand) -> Result<TeamCommit, RuntimeError> {
+    fn dispatch_team_command(
+        &mut self,
+        command: TeamCommand,
+    ) -> Result<TeamOperationCommit, RuntimeError> {
         let team = self.team.as_mut().ok_or(RuntimeError::TeamUnavailable)?;
-        team.runtime.dispatch(command).map_err(RuntimeError::Team)
+        team.dispatch(command)
     }
 
     fn drive_pending(
@@ -1298,6 +1343,7 @@ pub enum RuntimeError {
     InvalidInput(&'static str),
     InvalidProviderOutput(&'static str),
     TeamUnavailable,
+    TeamOperationReconciliationRequired(TeamOperationId),
     InvalidTeamConfiguration(&'static str),
     UnsupportedRuntimeEventSchema { supported: u16, actual: u16 },
     CorruptEvent(&'static str),
@@ -1322,6 +1368,11 @@ impl fmt::Display for RuntimeError {
                 write!(formatter, "invalid provider output: {reason}")
             }
             Self::TeamUnavailable => write!(formatter, "Runtime Kernel has no Agent Team"),
+            Self::TeamOperationReconciliationRequired(operation) => write!(
+                formatter,
+                "Team operation {} requires acknowledgement reconciliation",
+                operation.get()
+            ),
             Self::InvalidTeamConfiguration(reason) => {
                 write!(formatter, "invalid Agent Team configuration: {reason}")
             }

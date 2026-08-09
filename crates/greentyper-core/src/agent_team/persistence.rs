@@ -11,6 +11,7 @@ use crate::schema::SchemaKind;
 use super::*;
 
 const TEAM_EVENT_SCHEMA: u16 = SchemaKind::TeamEvent.current().get();
+const TEAM_EVENT_SCHEMA_V1: u16 = 1;
 
 /// File-backed adapter for [`TeamRuntime`].
 ///
@@ -83,8 +84,95 @@ impl DurableTeamRuntime {
         self.runtime.trusted_rebind_nonterminal_sessions()
     }
 
+    pub(crate) fn next_operation_id(&self) -> Result<TeamOperationId, DurableTeamError> {
+        self.runtime
+            .next_operation_id()
+            .map_err(DurableTeamError::Team)
+    }
+
+    pub(crate) fn operation_records(&self) -> Vec<TeamOperationRecord> {
+        self.runtime.operation_records()
+    }
+
+    /// Dispatches through the standalone durable policy adapter.
+    ///
+    /// This low-level seam intentionally has no Kernel operation identity or
+    /// acknowledgement. Product Team driving goes through
+    /// [`crate::runtime::RuntimeKernel::dispatch_team`].
     pub fn dispatch(&mut self, command: TeamCommand) -> Result<TeamCommit, DurableTeamError> {
         self.dispatch_with(command, FileLedger::append)
+    }
+
+    pub(crate) fn dispatch_operation(
+        &mut self,
+        operation: TeamOperationId,
+        command: TeamCommand,
+    ) -> Result<TeamOperationCommit, DurableTeamError> {
+        self.dispatch_operation_with(operation, command, FileLedger::append)
+    }
+
+    fn dispatch_operation_with<F>(
+        &mut self,
+        operation: TeamOperationId,
+        command: TeamCommand,
+        append: F,
+    ) -> Result<TeamOperationCommit, DurableTeamError>
+    where
+        F: FnOnce(
+            &mut FileLedger,
+            LedgerHead,
+            &[EventData],
+        ) -> Result<DurabilityReceipt, LedgerError>,
+    {
+        let prepared = self
+            .runtime
+            .prepare_operation(operation, command)
+            .map_err(DurableTeamError::Team)?;
+        let receipt = self.append_prepared(&prepared.prepared, append)?;
+        let commit = self
+            .runtime
+            .publish(prepared, CommitDurability::Synchronous(receipt));
+        Ok(TeamOperationCommit { operation, commit })
+    }
+
+    pub(crate) fn acknowledge_operation(
+        &mut self,
+        operation: TeamOperationId,
+    ) -> Result<TeamOperationAcknowledgeOutcome, DurableTeamError> {
+        self.acknowledge_operation_with(operation, FileLedger::append)
+    }
+
+    fn acknowledge_operation_with<F>(
+        &mut self,
+        operation: TeamOperationId,
+        append: F,
+    ) -> Result<TeamOperationAcknowledgeOutcome, DurableTeamError>
+    where
+        F: FnOnce(
+            &mut FileLedger,
+            LedgerHead,
+            &[EventData],
+        ) -> Result<DurabilityReceipt, LedgerError>,
+    {
+        let record = self
+            .runtime
+            .operation_records()
+            .into_iter()
+            .find(|record| record.operation == operation)
+            .ok_or(DurableTeamError::Team(TeamError::UnknownOperation {
+                operation,
+            }))?;
+        if record.status == TeamOperationStatus::Acknowledged {
+            return Ok(TeamOperationAcknowledgeOutcome::AlreadyAcknowledged);
+        }
+
+        let prepared = self
+            .runtime
+            .prepare_operation_acknowledgement(operation)
+            .map_err(DurableTeamError::Team)?;
+        let receipt = self.append_prepared(&prepared, append)?;
+        self.runtime.publish_events(prepared);
+        Ok(TeamOperationAcknowledgeOutcome::Durable(receipt))
     }
 
     fn dispatch_with<F>(
@@ -103,6 +191,24 @@ impl DurableTeamRuntime {
             .runtime
             .prepare(command)
             .map_err(DurableTeamError::Team)?;
+        let receipt = self.append_prepared(&prepared.prepared, append)?;
+        Ok(self
+            .runtime
+            .publish(prepared, CommitDurability::Synchronous(receipt)))
+    }
+
+    fn append_prepared<F>(
+        &mut self,
+        prepared: &PreparedTeamEvents,
+        append: F,
+    ) -> Result<TeamDurabilityReceipt, DurableTeamError>
+    where
+        F: FnOnce(
+            &mut FileLedger,
+            LedgerHead,
+            &[EventData],
+        ) -> Result<DurabilityReceipt, LedgerError>,
+    {
         let team_head = runtime_head(&self.runtime);
         let ledger_head = self.ledger.head();
         if ledger_head != team_head {
@@ -118,8 +224,7 @@ impl DurableTeamRuntime {
             .collect::<Result<Vec<_>, _>>()?;
         let receipt =
             append(&mut self.ledger, team_head, &encoded).map_err(DurableTeamError::Ledger)?;
-        let durability = CommitDurability::Synchronous(team_receipt(receipt));
-        Ok(self.runtime.publish(prepared, durability))
+        Ok(team_receipt(receipt))
     }
 
     #[cfg(test)]
@@ -132,6 +237,35 @@ impl DurableTeamRuntime {
         F: FnOnce(&mut std::fs::File, &[u8]) -> std::io::Result<()>,
     {
         self.dispatch_with(command, |ledger, head, events| {
+            ledger.append_with_test_io(head, events, write_frame)
+        })
+    }
+
+    #[cfg(test)]
+    fn dispatch_operation_with_test_io<F>(
+        &mut self,
+        operation: TeamOperationId,
+        command: TeamCommand,
+        write_frame: F,
+    ) -> Result<TeamOperationCommit, DurableTeamError>
+    where
+        F: FnOnce(&mut std::fs::File, &[u8]) -> std::io::Result<()>,
+    {
+        self.dispatch_operation_with(operation, command, |ledger, head, events| {
+            ledger.append_with_test_io(head, events, write_frame)
+        })
+    }
+
+    #[cfg(test)]
+    fn acknowledge_operation_with_test_io<F>(
+        &mut self,
+        operation: TeamOperationId,
+        write_frame: F,
+    ) -> Result<TeamOperationAcknowledgeOutcome, DurableTeamError>
+    where
+        F: FnOnce(&mut std::fs::File, &[u8]) -> std::io::Result<()>,
+    {
+        self.acknowledge_operation_with(operation, |ledger, head, events| {
             ledger.append_with_test_io(head, events, write_frame)
         })
     }
@@ -269,6 +403,24 @@ fn encode_event_data(kind: &TeamEventKind) -> Result<EventData, DurableTeamError
             encoder.identifier(blocked_by.get());
             17
         }
+        TeamEventKind::OperationCommitted {
+            operation,
+            transaction,
+        } => {
+            encoder.identifier(operation.get());
+            encoder.identifier(transaction.get());
+            18
+        }
+        TeamEventKind::OperationAcknowledged {
+            operation,
+            committed_transaction,
+            acknowledgement_transaction,
+        } => {
+            encoder.identifier(operation.get());
+            encoder.identifier(committed_transaction.get());
+            encoder.identifier(acknowledgement_transaction.get());
+            19
+        }
     };
 
     Ok(EventData {
@@ -279,11 +431,16 @@ fn encode_event_data(kind: &TeamEventKind) -> Result<EventData, DurableTeamError
 }
 
 fn decode_event_data(data: &EventData) -> Result<TeamEventKind, DurableTeamError> {
-    if data.schema != TEAM_EVENT_SCHEMA {
+    if !matches!(data.schema, TEAM_EVENT_SCHEMA_V1 | TEAM_EVENT_SCHEMA) {
         return Err(DurableTeamError::UnsupportedTeamEventSchema {
             supported: TEAM_EVENT_SCHEMA,
             actual: data.schema,
         });
+    }
+    if data.schema == TEAM_EVENT_SCHEMA_V1 && data.kind > 17 {
+        return Err(DurableTeamError::CorruptEvent(
+            "Team Event kind is unavailable in schema one",
+        ));
     }
     let mut decoder = Decoder::new(&data.payload);
     let kind = match data.kind {
@@ -353,6 +510,15 @@ fn decode_event_data(data: &EventData) -> Result<TeamEventKind, DurableTeamError
         17 => TeamEventKind::AgentBlocked {
             agent: decode_agent(&mut decoder)?,
             blocked_by: decode_task(&mut decoder)?,
+        },
+        18 => TeamEventKind::OperationCommitted {
+            operation: decode_operation(&mut decoder)?,
+            transaction: decode_transaction(&mut decoder)?,
+        },
+        19 => TeamEventKind::OperationAcknowledged {
+            operation: decode_operation(&mut decoder)?,
+            committed_transaction: decode_transaction(&mut decoder)?,
+            acknowledgement_transaction: decode_transaction(&mut decoder)?,
         },
         _ => return Err(DurableTeamError::CorruptEvent("unknown Team Event kind")),
     };
@@ -535,6 +701,14 @@ fn decode_agent(decoder: &mut Decoder<'_>) -> Result<AgentId, DurableTeamError> 
 
 fn decode_message(decoder: &mut Decoder<'_>) -> Result<MessageId, DurableTeamError> {
     Ok(MessageId(decoder.identifier()?))
+}
+
+fn decode_operation(decoder: &mut Decoder<'_>) -> Result<TeamOperationId, DurableTeamError> {
+    Ok(TeamOperationId(decoder.identifier()?))
+}
+
+fn decode_transaction(decoder: &mut Decoder<'_>) -> Result<TransactionId, DurableTeamError> {
+    Ok(TransactionId(decoder.identifier()?))
 }
 
 fn decode_identifier(value: u64) -> Result<u64, DurableTeamError> {
@@ -1413,6 +1587,15 @@ mod tests {
             TeamEventKind::AgentCancelled { agent },
             TeamEventKind::TaskBlocked { task, blocked_by },
             TeamEventKind::AgentBlocked { agent, blocked_by },
+            TeamEventKind::OperationCommitted {
+                operation: TeamOperationId(1),
+                transaction: TransactionId(6),
+            },
+            TeamEventKind::OperationAcknowledged {
+                operation: TeamOperationId(1),
+                committed_transaction: TransactionId(6),
+                acknowledgement_transaction: TransactionId(7),
+            },
         ]
     }
 
@@ -1466,6 +1649,23 @@ mod tests {
             Err(DurableTeamError::UnsupportedTeamEventSchema { .. })
         ));
 
+        let mut historical = valid.clone();
+        historical.schema = TEAM_EVENT_SCHEMA_V1;
+        assert_eq!(
+            decode_event_data(&historical).expect("decode historical Team Event"),
+            TeamEventKind::TaskReady { task: TaskId(1) }
+        );
+        historical.payload = [1_u64.to_le_bytes(), 1_u64.to_le_bytes()].concat();
+        for kind in [18, 19] {
+            historical.kind = kind;
+            assert!(matches!(
+                decode_event_data(&historical),
+                Err(DurableTeamError::CorruptEvent(
+                    "Team Event kind is unavailable in schema one"
+                ))
+            ));
+        }
+
         let mut unknown = valid.clone();
         unknown.kind = 99;
         assert!(matches!(
@@ -1490,6 +1690,99 @@ mod tests {
                 "Team Event has trailing bytes"
             ))
         ));
+    }
+
+    #[test]
+    fn schema_one_team_transactions_remain_replayable() {
+        let ledger_file = FaultLedgerFile::create("schema-one-replay");
+        let mut volatile = TeamRuntime::new(1).expect("create volatile Team");
+        volatile
+            .dispatch(root_command())
+            .expect("build historical root transaction");
+        let expected = volatile.snapshot();
+        let mut encoded = volatile
+            .event_log()
+            .iter()
+            .map(|event| encode_event_data(&event.kind))
+            .collect::<Result<Vec<_>, _>>()
+            .expect("encode historical Team transaction");
+        for event in &mut encoded {
+            event.schema = TEAM_EVENT_SCHEMA_V1;
+        }
+        let (mut ledger, _) = FileLedger::open(ledger_file.path()).expect("create Team Ledger");
+        ledger
+            .append(LedgerHead::default(), &encoded)
+            .expect("append schema-one Team transaction");
+        drop(ledger);
+
+        let recovered = DurableTeamRuntime::open(ledger_file.path(), 1)
+            .expect("replay schema-one Team transaction");
+        assert_eq!(recovered.snapshot(), expected);
+        assert!(recovered.operation_records().is_empty());
+        drop(recovered);
+        ledger_file
+            .cleanup()
+            .expect("cleanup schema-one Team Ledger");
+    }
+
+    #[test]
+    fn operation_journal_replay_rejects_mismatched_and_duplicate_markers() {
+        let mismatched = FaultLedgerFile::create("operation-mismatched-transaction");
+        let (mut ledger, _) = FileLedger::open(mismatched.path()).expect("create raw Team Ledger");
+        ledger
+            .append(
+                LedgerHead::default(),
+                &[encode_event_data(&TeamEventKind::OperationCommitted {
+                    operation: TeamOperationId(1),
+                    transaction: TransactionId(2),
+                })
+                .expect("encode mismatched operation marker")],
+            )
+            .expect("append mismatched operation marker");
+        drop(ledger);
+        assert!(matches!(
+            DurableTeamRuntime::open(mismatched.path(), 1),
+            Err(DurableTeamError::Recovery(
+                RecoveryError::InvalidEvent { .. }
+            ))
+        ));
+        mismatched
+            .cleanup()
+            .expect("cleanup mismatched operation Ledger");
+
+        let duplicate = FaultLedgerFile::create("operation-duplicate-acknowledgement");
+        let operation = TeamOperationId(1);
+        let mut team =
+            DurableTeamRuntime::open(duplicate.path(), 1).expect("create operation Team Ledger");
+        team.dispatch_operation(operation, root_command())
+            .expect("commit operation");
+        team.acknowledge_operation(operation)
+            .expect("acknowledge operation");
+        let head = team.ledger_head();
+        drop(team);
+
+        let (mut ledger, _) = FileLedger::open(duplicate.path()).expect("open raw Team Ledger");
+        ledger
+            .append(
+                head,
+                &[encode_event_data(&TeamEventKind::OperationAcknowledged {
+                    operation,
+                    committed_transaction: TransactionId(1),
+                    acknowledgement_transaction: TransactionId(3),
+                })
+                .expect("encode duplicate acknowledgement")],
+            )
+            .expect("append duplicate acknowledgement");
+        drop(ledger);
+        assert!(matches!(
+            DurableTeamRuntime::open(duplicate.path(), 1),
+            Err(DurableTeamError::Recovery(
+                RecoveryError::InvalidEvent { .. }
+            ))
+        ));
+        duplicate
+            .cleanup()
+            .expect("cleanup duplicate acknowledgement Ledger");
     }
 
     #[test]
@@ -1564,6 +1857,148 @@ mod tests {
             assert_two_transaction_recovery(&replayed);
             drop(replayed);
             ledger.cleanup().expect("cleanup fault Team Ledger");
+        }
+    }
+
+    #[test]
+    fn operation_commit_faults_recover_without_automatic_repetition() {
+        for point in InjectedWriteFault::ALL {
+            let ledger = FaultLedgerFile::create(&format!("operation-{point:?}"));
+            let operation = TeamOperationId(1);
+            let mut team =
+                DurableTeamRuntime::open(ledger.path(), 1).expect("create operation Team Ledger");
+            let before = team.snapshot();
+
+            assert!(matches!(
+                team.dispatch_operation_with_test_io(operation, root_command(), |file, frame| {
+                    inject_write_fault(point, file, frame)
+                },),
+                Err(DurableTeamError::Ledger(LedgerError::DurabilityAmbiguous(
+                    _
+                )))
+            ));
+            assert_eq!(team.snapshot(), before);
+            assert!(team.operation_records().is_empty());
+            assert_eq!(team.ledger_head(), LedgerHead::default());
+            assert!(matches!(
+                team.dispatch_operation(operation, root_command()),
+                Err(DurableTeamError::Ledger(LedgerError::WriterPoisoned))
+            ));
+            drop(team);
+
+            let mut recovered =
+                DurableTeamRuntime::open(ledger.path(), 1).expect("reopen operation Team Ledger");
+            if point.writes_complete_frame() {
+                assert_eq!(recovered.snapshot().agents.len(), 1);
+                assert_eq!(recovered.operation_records().len(), 1);
+                assert_eq!(
+                    recovered.operation_records()[0].status,
+                    TeamOperationStatus::CommittedAwaitingAcknowledgement
+                );
+            } else {
+                assert_eq!(recovered.snapshot(), before);
+                assert!(recovered.operation_records().is_empty());
+                assert_eq!(
+                    recovered.next_operation_id().expect("next operation"),
+                    operation
+                );
+                recovered
+                    .dispatch_operation(operation, root_command())
+                    .expect("explicit retry after known-not-repeated operation");
+            }
+            assert!(matches!(
+                recovered
+                    .acknowledge_operation(operation)
+                    .expect("acknowledge reconciled operation"),
+                TeamOperationAcknowledgeOutcome::Durable(_)
+            ));
+            assert_eq!(
+                recovered.operation_records()[0].status,
+                TeamOperationStatus::Acknowledged
+            );
+            drop(recovered);
+
+            let replayed =
+                DurableTeamRuntime::open(ledger.path(), 1).expect("replay reconciled operation");
+            assert_eq!(replayed.operation_records().len(), 1);
+            assert_eq!(
+                replayed.operation_records()[0].status,
+                TeamOperationStatus::Acknowledged
+            );
+            drop(replayed);
+            ledger.cleanup().expect("cleanup operation Team Ledger");
+        }
+    }
+
+    #[test]
+    fn operation_acknowledgement_faults_remain_explicit_after_reopen() {
+        for point in InjectedWriteFault::ALL {
+            let ledger = FaultLedgerFile::create(&format!("acknowledgement-{point:?}"));
+            let operation = TeamOperationId(1);
+            let mut team = DurableTeamRuntime::open(ledger.path(), 1)
+                .expect("create acknowledgement Team Ledger");
+            team.dispatch_operation(operation, root_command())
+                .expect("commit operation before acknowledgement fault");
+            let before = team.snapshot();
+            let before_head = team.ledger_head();
+
+            assert!(matches!(
+                team.acknowledge_operation_with_test_io(operation, |file, frame| {
+                    inject_write_fault(point, file, frame)
+                }),
+                Err(DurableTeamError::Ledger(LedgerError::DurabilityAmbiguous(
+                    _
+                )))
+            ));
+            assert_eq!(team.snapshot(), before);
+            assert_eq!(team.ledger_head(), before_head);
+            assert_eq!(
+                team.operation_records()[0].status,
+                TeamOperationStatus::CommittedAwaitingAcknowledgement
+            );
+            assert!(matches!(
+                team.acknowledge_operation(operation),
+                Err(DurableTeamError::Ledger(LedgerError::WriterPoisoned))
+            ));
+            drop(team);
+
+            let mut recovered = DurableTeamRuntime::open(ledger.path(), 1)
+                .expect("reopen acknowledgement Team Ledger");
+            if point.writes_complete_frame() {
+                assert_eq!(
+                    recovered.operation_records()[0].status,
+                    TeamOperationStatus::Acknowledged
+                );
+                assert_eq!(
+                    recovered
+                        .acknowledge_operation(operation)
+                        .expect("duplicate recovered acknowledgement"),
+                    TeamOperationAcknowledgeOutcome::AlreadyAcknowledged
+                );
+            } else {
+                assert_eq!(
+                    recovered.operation_records()[0].status,
+                    TeamOperationStatus::CommittedAwaitingAcknowledgement
+                );
+                assert!(matches!(
+                    recovered
+                        .acknowledge_operation(operation)
+                        .expect("retry known-not-repeated acknowledgement"),
+                    TeamOperationAcknowledgeOutcome::Durable(_)
+                ));
+            }
+            drop(recovered);
+
+            let replayed =
+                DurableTeamRuntime::open(ledger.path(), 1).expect("replay acknowledged operation");
+            assert_eq!(
+                replayed.operation_records()[0].status,
+                TeamOperationStatus::Acknowledged
+            );
+            drop(replayed);
+            ledger
+                .cleanup()
+                .expect("cleanup acknowledgement Team Ledger");
         }
     }
 

@@ -345,6 +345,10 @@ fn every_team_transition_survives_durable_replay() {
             TeamEventKind::AgentCancelled { .. } => 14,
             TeamEventKind::TaskBlocked { .. } => 15,
             TeamEventKind::AgentBlocked { .. } => 16,
+            TeamEventKind::OperationCommitted { .. }
+            | TeamEventKind::OperationAcknowledged { .. } => {
+                panic!("standalone Durable Team must not emit Kernel operation events")
+            }
         };
         seen[index] = true;
     }

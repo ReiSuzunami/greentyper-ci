@@ -4,7 +4,7 @@
 
 Implementation proceeds as runnable vertical slices. Each phase must preserve Ledger recovery, authority boundaries, and measured resource behavior; no phase may defer all testing or performance work to the end.
 
-Feature implementation was authorized on 2026-08-09. The first core slice fixes the Agent Team command/event interface, process-local Agent Sessions, and pure orchestration policy early; it does not claim Phase 7 completion. Plain `TeamRuntime` remains volatile. A separate durable Team adapter proves synchronous persistence, and the core Runtime Kernel now owns it, gates root admission, and rebinds the complete non-terminal Session set after recovery. Product driving and acknowledgement remain pending.
+Feature implementation was authorized on 2026-08-09. The first core slice fixes the Agent Team command/event interface, process-local Agent Sessions, and pure orchestration policy early; it does not claim Phase 7 completion. Plain `TeamRuntime` remains volatile. A separate durable Team adapter proves synchronous persistence, and the core Runtime Kernel now owns it, gates root admission, persists operation identity and acknowledgement records in the same Team Ledger, and rebinds the complete non-terminal Session set after recovery. Product Provider/Tool driving and user-visible delivery remain pending.
 
 ## Phase 0: Repository and Measurement Foundation
 
@@ -45,12 +45,17 @@ Blocked propagation, cancellation, Completion Capsules, and terminal states.
 consumable complete non-terminal Session bundle per validated open. It excludes
 terminal Agents and exposes no Agent-ID-to-Session conversion. Root admission
 uses the same typed Kernel dispatch interface; duplicate admission fails without
-mutation. Private fault tests inject write/flush/sync failures at eight frame
-boundaries and terminate authenticated child processes at six representative
+mutation. Private fault tests inject write/flush/sync failures at eight command
+frame boundaries and another eight acknowledgement frame boundaries, then
+terminate authenticated child processes at six representative
 points from before write through sync-before-publish. Recovery accepts only a
 known complete prefix or an already-complete transaction. I/O failure poisons
 the live writer; process termination leaves no writer to continue. Neither path
-retries automatically.
+retries automatically. Kernel commands persist a sequential `TeamOperationId`
+marker in the same transaction as their domain Events. Until an explicit
+acknowledgement transaction is durable, the recovered operation remains pending
+and later Team commands are blocked. Duplicate acknowledgement is idempotent;
+operation IDs remain non-authorizing inspection identities.
 
 The Config Runtime now adds versioned user/project TOML, addressable Provider
 Profile/Model Preset/statusline/Usage Window fields, effective provenance,
@@ -61,9 +66,9 @@ bootstrap projection.
 
 This does not complete Phase 1. Complete schema metadata and generated editor
 surfaces, Provider Templates/catalogs, credential storage, product Team
-Provider/Tool driving, operation identity and acknowledgement reconciliation,
-the exhaustive byte-offset Runtime crash-fault matrix, storage migration, and
-headless FMDev/Target idle resource evidence remain pending. See
+Provider/Tool driving and user-visible receipt delivery, the exhaustive
+byte-offset Runtime/effect crash-fault matrix, storage migration, and headless
+FMDev/Target idle resource evidence remain pending. See
 [Recoverable Single-Agent Runtime](runtime-kernel.md).
 
 Exit criteria:

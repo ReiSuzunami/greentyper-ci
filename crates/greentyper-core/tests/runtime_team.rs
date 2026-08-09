@@ -6,7 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use greentyper_core::agent_team::{
     AgentSession, AgentStatus, Capability, CapabilitySnapshot, CommandOutcome, CompletionCapsule,
     DurableTeamError, MessageRecipient, ResourceBudget, TaskScope, TaskSpec, TeamCommand,
-    TeamError,
+    TeamError, TeamOperationAcknowledgeOutcome, TeamOperationStatus,
 };
 use greentyper_core::ledger::LedgerError;
 use greentyper_core::runtime::{RuntimeError, RuntimeKernel};
@@ -51,12 +51,140 @@ fn root_session(commit: greentyper_core::agent_team::TeamCommit) -> AgentSession
     }
 }
 
+fn dispatch_and_acknowledge(
+    kernel: &mut RuntimeKernel,
+    command: TeamCommand,
+) -> Result<greentyper_core::agent_team::TeamCommit, RuntimeError> {
+    let operation = kernel.dispatch_team(command)?;
+    assert!(matches!(
+        kernel.acknowledge_team_operation(operation.operation)?,
+        TeamOperationAcknowledgeOutcome::Durable(_)
+    ));
+    Ok(operation.commit)
+}
+
 fn session_for_test(sessions: &[AgentSession], agent: AgentSession) -> AgentSession {
     sessions
         .iter()
         .copied()
         .find(|session| session.agent() == agent.agent())
         .expect("Kernel automatically rebound the persisted owner")
+}
+
+#[test]
+fn kernel_journals_operations_and_requires_explicit_ack_reconciliation() {
+    let runtime_path = temp_path("operation-journal", "runtime");
+    let team_path = temp_path("operation-journal", "team");
+    let (mut kernel, initial_recovery) =
+        RuntimeKernel::open_with_team(&runtime_path, &team_path, 1).expect("open Team Kernel");
+    assert!(initial_recovery.into_sessions().is_empty());
+
+    let admission = kernel
+        .dispatch_team(TeamCommand::AdmitRoot {
+            task: root_spec(),
+            budget: root_budget(),
+            capabilities: root_capabilities(),
+        })
+        .expect("commit root operation");
+    assert_eq!(admission.operation.get(), 1);
+    let root = root_session(admission.commit.clone());
+    let pending = kernel.team_snapshot().expect("pending Team operation");
+    assert_eq!(pending.operations.len(), 1);
+    assert_eq!(pending.operations[0].operation, admission.operation);
+    assert_eq!(
+        pending.operations[0].status,
+        TeamOperationStatus::CommittedAwaitingAcknowledgement
+    );
+    assert_eq!(
+        pending.operations[0].transaction,
+        admission.commit.transaction
+    );
+    assert_eq!(
+        pending.operations[0].event_count as usize,
+        admission.commit.events.len()
+    );
+    assert!(matches!(
+        kernel.dispatch_team(TeamCommand::SendMessage {
+            from: root,
+            recipient: MessageRecipient::Team,
+            body: "must reconcile first".into(),
+        }),
+        Err(RuntimeError::TeamOperationReconciliationRequired(operation))
+            if operation == admission.operation
+    ));
+    assert_eq!(kernel.team_snapshot().expect("unchanged Team"), pending);
+    drop(kernel);
+
+    let (mut recovered, recovery) =
+        RuntimeKernel::open_with_team(&runtime_path, &team_path, 1).expect("reopen Team Kernel");
+    assert_eq!(recovery.snapshot(), &pending);
+    let sessions = recovery.into_sessions();
+    let fresh_root = session_for_test(&sessions, root);
+    let acknowledgement = recovered
+        .acknowledge_team_operation(admission.operation)
+        .expect("acknowledge recovered operation");
+    assert!(matches!(
+        acknowledgement,
+        TeamOperationAcknowledgeOutcome::Durable(_)
+    ));
+    assert_eq!(
+        recovered
+            .acknowledge_team_operation(admission.operation)
+            .expect("duplicate acknowledgement is idempotent"),
+        TeamOperationAcknowledgeOutcome::AlreadyAcknowledged
+    );
+    let acknowledged = recovered.team_snapshot().expect("acknowledged operation");
+    assert_eq!(
+        acknowledged.operations[0].status,
+        TeamOperationStatus::Acknowledged
+    );
+    assert!(
+        acknowledged.operations[0]
+            .acknowledgement_transaction
+            .is_some()
+    );
+
+    assert!(matches!(
+        recovered.dispatch_team(TeamCommand::SendMessage {
+            from: root,
+            recipient: MessageRecipient::Team,
+            body: "stale authority".into(),
+        }),
+        Err(RuntimeError::Team(DurableTeamError::Team(
+            TeamError::InvalidAgentSession { agent }
+        ))) if agent == root.agent()
+    ));
+
+    let message = recovered
+        .dispatch_team(TeamCommand::SendMessage {
+            from: fresh_root,
+            recipient: MessageRecipient::Team,
+            body: "operation two".into(),
+        })
+        .expect("commit second operation");
+    assert_eq!(message.operation.get(), 2);
+    assert!(matches!(
+        recovered
+            .acknowledge_team_operation(message.operation)
+            .expect("acknowledge second operation"),
+        TeamOperationAcknowledgeOutcome::Durable(_)
+    ));
+    let final_snapshot = recovered.team_snapshot().expect("final Team snapshot");
+    assert_eq!(final_snapshot.operations.len(), 2);
+    assert!(
+        final_snapshot
+            .operations
+            .iter()
+            .all(|record| record.status == TeamOperationStatus::Acknowledged)
+    );
+    drop(recovered);
+
+    let (final_kernel, final_recovery) =
+        RuntimeKernel::open_with_team(&runtime_path, &team_path, 1).expect("final Team recovery");
+    assert_eq!(final_recovery.snapshot(), &final_snapshot);
+    drop(final_kernel);
+    fs::remove_file(runtime_path).expect("cleanup Runtime Ledger");
+    fs::remove_file(team_path).expect("cleanup Team Ledger");
 }
 
 #[test]
@@ -68,35 +196,41 @@ fn kernel_rebinds_every_nonterminal_owner_without_an_id_conversion_interface() {
     assert!(initial_recovery.into_sessions().is_empty());
 
     let root = root_session(
-        kernel
-            .dispatch_team(TeamCommand::AdmitRoot {
+        dispatch_and_acknowledge(
+            &mut kernel,
+            TeamCommand::AdmitRoot {
                 task: root_spec(),
                 budget: root_budget(),
                 capabilities: root_capabilities(),
-            })
-            .expect("Kernel root admission"),
+            },
+        )
+        .expect("Kernel root admission"),
     );
-    let blocker = kernel
-        .dispatch_team(TeamCommand::Delegate {
+    let blocker = dispatch_and_acknowledge(
+        &mut kernel,
+        TeamCommand::Delegate {
             parent: root,
             task: TaskSpec::new("blocker", TaskScope::from_labels(["src"])),
             budget: ResourceBudget::new(200, 1),
             capabilities: CapabilitySnapshot::from_capabilities([Capability::WorkspaceRead]),
-        })
-        .expect("delegate blocker");
+        },
+    )
+    .expect("delegate blocker");
     let (blocker_task, blocker_session) = match blocker.outcome {
         CommandOutcome::Delegated { task, session, .. } => (task, session),
         other => panic!("unexpected blocker delegation outcome: {other:?}"),
     };
-    let dependent = kernel
-        .dispatch_team(TeamCommand::Delegate {
+    let dependent = dispatch_and_acknowledge(
+        &mut kernel,
+        TeamCommand::Delegate {
             parent: root,
             task: TaskSpec::new("dependent", TaskScope::from_labels(["src"]))
                 .with_dependencies([blocker_task]),
             budget: ResourceBudget::new(200, 1),
             capabilities: CapabilitySnapshot::from_capabilities([Capability::WorkspaceRead]),
-        })
-        .expect("delegate dependent");
+        },
+    )
+    .expect("delegate dependent");
     let dependent_session = match dependent.outcome {
         CommandOutcome::Delegated { session, .. } => session,
         other => panic!("unexpected dependent delegation outcome: {other:?}"),
@@ -122,11 +256,14 @@ fn kernel_rebinds_every_nonterminal_owner_without_an_id_conversion_interface() {
 
     let before_stale_command = recovered.team_snapshot().expect("recovered Team state");
     assert!(matches!(
-        recovered.dispatch_team(TeamCommand::SendMessage {
-            from: root,
-            recipient: MessageRecipient::Team,
-            body: "stale authority".into(),
-        }),
+        dispatch_and_acknowledge(
+            &mut recovered,
+            TeamCommand::SendMessage {
+                from: root,
+                recipient: MessageRecipient::Team,
+                body: "stale authority".into(),
+            },
+        ),
         Err(RuntimeError::Team(DurableTeamError::Team(
             TeamError::InvalidAgentSession { agent }
         ))) if agent == root.agent()
@@ -139,12 +276,14 @@ fn kernel_rebinds_every_nonterminal_owner_without_an_id_conversion_interface() {
     );
 
     let fresh_blocker = session_for_test(&rebound_sessions, blocker_session);
-    recovered
-        .dispatch_team(TeamCommand::Fail {
+    dispatch_and_acknowledge(
+        &mut recovered,
+        TeamCommand::Fail {
             agent: fresh_blocker,
             reason: "deterministic failure".into(),
-        })
-        .expect("fresh rebound session can make a durable transition");
+        },
+    )
+    .expect("fresh rebound session can make a durable transition");
     let blocked = recovered.team_snapshot().expect("blocked Team state");
     assert_eq!(
         blocked
@@ -176,18 +315,22 @@ fn kernel_rebinds_every_nonterminal_owner_without_an_id_conversion_interface() {
     );
     let fresh_root = session_for_test(&rebound_again_sessions, root);
     let fresh_dependent = session_for_test(&rebound_again_sessions, dependent_session);
-    recovered_again
-        .dispatch_team(TeamCommand::Cancel {
+    dispatch_and_acknowledge(
+        &mut recovered_again,
+        TeamCommand::Cancel {
             agent: fresh_dependent,
             reason: "dependency will not recover".into(),
-        })
-        .expect("Kernel can cancel a rebound Blocked owner");
-    recovered_again
-        .dispatch_team(TeamCommand::Complete {
+        },
+    )
+    .expect("Kernel can cancel a rebound Blocked owner");
+    dispatch_and_acknowledge(
+        &mut recovered_again,
+        TeamCommand::Complete {
             agent: fresh_root,
             capsule: CompletionCapsule::new("recovery complete"),
-        })
-        .expect("finish root after children become terminal");
+        },
+    )
+    .expect("finish root after children become terminal");
     let completed = recovered_again
         .team_snapshot()
         .expect("completed Team state");
@@ -230,21 +373,26 @@ fn kernel_owns_root_admission_and_duplicate_rejection() {
         RuntimeKernel::open_with_team(&runtime_path, &team_path, 1).expect("open Team Kernel");
     assert!(initial_recovery.into_sessions().is_empty());
 
-    kernel
-        .dispatch_team(TeamCommand::AdmitRoot {
+    dispatch_and_acknowledge(
+        &mut kernel,
+        TeamCommand::AdmitRoot {
             task: root_spec(),
             budget: root_budget(),
             capabilities: root_capabilities(),
-        })
-        .expect("trusted Kernel admission succeeds");
+        },
+    )
+    .expect("trusted Kernel admission succeeds");
     let admitted = kernel.team_snapshot().expect("Team state after admission");
     assert_eq!(admitted.projection.agents.len(), 1);
     assert!(matches!(
-        kernel.dispatch_team(TeamCommand::AdmitRoot {
-            task: root_spec(),
-            budget: root_budget(),
-            capabilities: root_capabilities(),
-        }),
+        dispatch_and_acknowledge(
+            &mut kernel,
+            TeamCommand::AdmitRoot {
+                task: root_spec(),
+                budget: root_budget(),
+                capabilities: root_capabilities(),
+            },
+        ),
         Err(RuntimeError::Team(DurableTeamError::Team(
             TeamError::RootAlreadyAdmitted
         )))
