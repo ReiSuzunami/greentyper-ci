@@ -1,6 +1,10 @@
 //! Candidate-neutral benchmark orchestration and evidence.
 
 use super::*;
+use std::collections::BTreeMap;
+
+#[cfg(feature = "bench-storage")]
+mod storage;
 
 const HARNESS_FIXTURE_JSON: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -101,28 +105,38 @@ fn validate_benchmark_label(name: &str, value: &str) -> AppResult<()> {
 pub(super) fn run(command: Command) -> AppResult<()> {
     match command {
         Command::List => {
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&serde_json::json!({
-                    "comparisons": [{
-                        "id": "harness",
-                        "version": 1,
-                        "implementations": ["sha256-loop"],
-                        "workloads": [{"id": "sha256-loop", "version": 1}],
-                        "purpose": "benchmark pipeline integrity only"
-                    }]
-                }))?
-            );
+            println!("{}", serde_json::to_string_pretty(&benchmark_catalog())?);
             Ok(())
         }
         Command::Run(options) => run_benchmark(options),
     }
 }
 
+fn benchmark_catalog() -> serde_json::Value {
+    let mut comparisons = vec![serde_json::json!({
+        "id": "harness",
+        "version": 1,
+        "implementations": ["sha256-loop"],
+        "workloads": [{"id": "sha256-loop", "version": 1}],
+        "purpose": "benchmark pipeline integrity only"
+    })];
+    comparisons.extend(candidate_catalog_entries());
+    serde_json::json!({"comparisons": comparisons})
+}
+
+fn candidate_catalog_entries() -> Vec<serde_json::Value> {
+    #[cfg(feature = "bench-storage")]
+    {
+        vec![storage::catalog_entry()]
+    }
+    #[cfg(not(feature = "bench-storage"))]
+    {
+        Vec::new()
+    }
+}
+
 fn run_benchmark(options: Options) -> AppResult<()> {
-    let fixture: HarnessFixture = serde_json::from_str(HARNESS_FIXTURE_JSON)?;
-    validate_fixture(&fixture)?;
-    let mut target = target_for(&options, fixture)?;
+    let mut target = target_for(&options)?;
     let descriptor = target.descriptor();
 
     let cpu_guard = cpu_guard_report();
@@ -130,21 +144,21 @@ fn run_benchmark(options: Options) -> AppResult<()> {
     let executable_sha256 = sha256_file(&std::env::current_exe()?)?;
 
     for _ in 0..options.warmup_runs {
-        black_box(target.run_once()?);
+        let (_, observation) = execute_once(target.as_mut())?;
+        black_box(observation);
     }
 
     let mut samples = Vec::with_capacity(options.runs as usize);
     for run in 1..=options.runs {
-        let started = Instant::now();
-        let observation = target.run_once()?;
-        let operation_elapsed_ns = u64::try_from(started.elapsed().as_nanos())
-            .map_err(|_| cli_error("benchmark duration exceeds u64 nanoseconds"))?;
+        let (operation_elapsed_ns, observation) = execute_once(target.as_mut())?;
         black_box(&observation);
         samples.push(BenchmarkSample {
             run,
             operation_elapsed_ns,
             operation_units: observation.operation_units,
             output_digest: observation.output_digest,
+            timings_ns: observation.timings_ns,
+            gauges: observation.gauges,
         });
     }
 
@@ -155,6 +169,8 @@ fn run_benchmark(options: Options) -> AppResult<()> {
             elapsed_ns: sample.operation_elapsed_ns,
         })
         .collect();
+    let timing_summaries = summarize_timing_samples(&samples)?;
+    let gauge_summaries = summarize_gauge_samples(&samples)?;
     let generated_at_unix_ms =
         u64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis())
             .map_err(|_| cli_error("system time exceeds benchmark evidence representation"))?;
@@ -165,7 +181,7 @@ fn run_benchmark(options: Options) -> AppResult<()> {
         candidate_id: options.candidate_id,
         source_revision: options.source_revision,
         executable_sha256,
-        configuration_sha256: sha256_bytes(HARNESS_FIXTURE_JSON.as_bytes()),
+        configuration_sha256: sha256_bytes(descriptor.fixture_bytes),
         comparison: ComparisonIdentity {
             id: descriptor.comparison_id.into(),
             version: descriptor.comparison_version,
@@ -178,7 +194,7 @@ fn run_benchmark(options: Options) -> AppResult<()> {
         workload: WorkloadIdentity {
             id: descriptor.workload_id.into(),
             version: descriptor.workload_version,
-            fixture_sha256: sha256_bytes(HARNESS_FIXTURE_JSON.as_bytes()),
+            fixture_sha256: sha256_bytes(descriptor.fixture_bytes),
             input_shape: descriptor.input_shape.into(),
             unit: descriptor.unit.into(),
             boundary: descriptor.boundary.into(),
@@ -190,11 +206,101 @@ fn run_benchmark(options: Options) -> AppResult<()> {
         warmup_runs: options.warmup_runs,
         samples,
         summary: summarize(&summary_samples)?,
+        timing_summaries,
+        gauge_summaries,
     };
 
     write_new_json(&options.output, &evidence)?;
     println!("{}", options.output.display());
     Ok(())
+}
+
+fn execute_once(target: &mut dyn BenchmarkTarget) -> AppResult<(u64, BenchmarkObservation)> {
+    target.prepare_run()?;
+    let started = Instant::now();
+    let operation = target.run_once();
+    let elapsed = u64::try_from(started.elapsed().as_nanos())
+        .map_err(|_| cli_error("benchmark duration exceeds u64 nanoseconds"));
+    let cleanup = target.cleanup_run();
+
+    match (operation, elapsed, cleanup) {
+        (Ok(observation), Ok(elapsed), Ok(())) => Ok((elapsed, observation)),
+        (Err(error), _, _) => Err(error),
+        (_, Err(error), _) => Err(error),
+        (_, _, Err(error)) => Err(error),
+    }
+}
+
+fn summarize_timing_samples(
+    samples: &[BenchmarkSample],
+) -> AppResult<BTreeMap<String, SampleSummary>> {
+    let Some(first) = samples.first() else {
+        return Err(cli_error("cannot summarize empty benchmark timings"));
+    };
+    if samples
+        .iter()
+        .any(|sample| !sample.timings_ns.keys().eq(first.timings_ns.keys()))
+    {
+        return Err(cli_error("benchmark timing sets changed between samples"));
+    }
+    let mut summaries = BTreeMap::new();
+    for key in first.timings_ns.keys() {
+        let values: Vec<RawSample> = samples
+            .iter()
+            .map(|sample| RawSample {
+                run: sample.run,
+                elapsed_ns: sample.timings_ns[key],
+            })
+            .collect();
+        summaries.insert(key.clone(), summarize(&values)?);
+    }
+    Ok(summaries)
+}
+
+fn summarize_gauge_samples(
+    samples: &[BenchmarkSample],
+) -> AppResult<BTreeMap<String, GaugeSummary>> {
+    let Some(first) = samples.first() else {
+        return Err(cli_error("cannot summarize empty benchmark gauges"));
+    };
+    if samples
+        .iter()
+        .any(|sample| !sample.gauges.keys().eq(first.gauges.keys()))
+    {
+        return Err(cli_error("benchmark gauge sets changed between samples"));
+    }
+    let mut summaries = BTreeMap::new();
+    for key in first.gauges.keys() {
+        let values: Vec<u64> = samples.iter().map(|sample| sample.gauges[key]).collect();
+        summaries.insert(key.clone(), summarize_gauges(&values)?);
+    }
+    Ok(summaries)
+}
+
+fn summarize_gauges(values: &[u64]) -> AppResult<GaugeSummary> {
+    if values.is_empty() {
+        return Err(cli_error("cannot summarize an empty gauge set"));
+    }
+    let mut ordered = values.to_vec();
+    ordered.sort_unstable();
+    let mean = ordered.iter().map(|value| *value as f64).sum::<f64>() / ordered.len() as f64;
+    let variance = ordered
+        .iter()
+        .map(|value| {
+            let delta = *value as f64 - mean;
+            delta * delta
+        })
+        .sum::<f64>()
+        / ordered.len() as f64;
+    Ok(GaugeSummary {
+        count: ordered.len(),
+        minimum: ordered[0],
+        maximum: ordered[ordered.len() - 1],
+        p50: nearest_rank(&ordered, 50),
+        p95: nearest_rank(&ordered, 95),
+        mean,
+        standard_deviation: variance.sqrt(),
+    })
 }
 
 fn dependency_fingerprint(declared_features: &str) -> String {
@@ -211,7 +317,13 @@ fn dependency_fingerprint(declared_features: &str) -> String {
 
 trait BenchmarkTarget {
     fn descriptor(&self) -> BenchmarkDescriptor;
+    fn prepare_run(&mut self) -> AppResult<()> {
+        Ok(())
+    }
     fn run_once(&mut self) -> AppResult<BenchmarkObservation>;
+    fn cleanup_run(&mut self) -> AppResult<()> {
+        Ok(())
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -227,17 +339,26 @@ struct BenchmarkDescriptor {
     unit: &'static str,
     boundary: &'static str,
     process_mode: &'static str,
+    fixture_bytes: &'static [u8],
 }
 
 #[derive(Debug)]
 struct BenchmarkObservation {
     operation_units: u64,
     output_digest: String,
+    timings_ns: BTreeMap<String, u64>,
+    gauges: BTreeMap<String, u64>,
 }
 
-fn target_for(options: &Options, fixture: HarnessFixture) -> AppResult<Box<dyn BenchmarkTarget>> {
+fn target_for(options: &Options) -> AppResult<Box<dyn BenchmarkTarget>> {
     match (options.comparison.as_str(), options.implementation.as_str()) {
-        ("harness", "sha256-loop") => Ok(Box::new(Sha256LoopTarget { fixture })),
+        ("harness", "sha256-loop") => {
+            let fixture: HarnessFixture = serde_json::from_str(HARNESS_FIXTURE_JSON)?;
+            validate_fixture(&fixture)?;
+            Ok(Box::new(Sha256LoopTarget { fixture }))
+        }
+        #[cfg(feature = "bench-storage")]
+        ("storage", implementation) => storage::target(implementation),
         (comparison, implementation) => Err(cli_error(format!(
             "benchmark implementation {comparison}/{implementation} is not compiled into this runner"
         ))),
@@ -292,6 +413,7 @@ impl BenchmarkTarget for Sha256LoopTarget {
             unit: "bytes hashed",
             boundary: "hash input, encode digest, and verify expected digest",
             process_mode: "in-process",
+            fixture_bytes: HARNESS_FIXTURE_JSON.as_bytes(),
         }
     }
 
@@ -314,6 +436,8 @@ impl BenchmarkTarget for Sha256LoopTarget {
         Ok(BenchmarkObservation {
             operation_units,
             output_digest,
+            timings_ns: BTreeMap::new(),
+            gauges: BTreeMap::new(),
         })
     }
 }
@@ -335,6 +459,19 @@ struct BenchmarkEvidence {
     warmup_runs: u32,
     samples: Vec<BenchmarkSample>,
     summary: SampleSummary,
+    timing_summaries: BTreeMap<String, SampleSummary>,
+    gauge_summaries: BTreeMap<String, GaugeSummary>,
+}
+
+#[derive(Serialize)]
+struct GaugeSummary {
+    count: usize,
+    minimum: u64,
+    maximum: u64,
+    p50: u64,
+    p95: u64,
+    mean: f64,
+    standard_deviation: f64,
 }
 
 #[derive(Serialize)]
@@ -367,6 +504,8 @@ struct BenchmarkSample {
     operation_elapsed_ns: u64,
     operation_units: u64,
     output_digest: String,
+    timings_ns: BTreeMap<String, u64>,
+    gauges: BTreeMap<String, u64>,
 }
 
 #[cfg(test)]
@@ -421,8 +560,6 @@ mod tests {
 
     #[test]
     fn unavailable_technology_candidate_fails_explicitly() {
-        let fixture: HarnessFixture =
-            serde_json::from_str(HARNESS_FIXTURE_JSON).expect("valid fixture JSON");
         let options = Options {
             comparison: "storage".into(),
             implementation: "unknown".into(),
@@ -434,7 +571,7 @@ mod tests {
             expect_baseline: None,
             machine_identifiers: MachineIdentifierPolicy::Full,
         };
-        assert!(target_for(&options, fixture).is_err());
+        assert!(target_for(&options).is_err());
     }
 
     #[test]
@@ -443,5 +580,55 @@ mod tests {
         let changed = dependency_fingerprint("sha2=0.11.0;features=asm");
         assert_eq!(default.len(), 64);
         assert_ne!(default, changed);
+    }
+
+    #[test]
+    fn benchmark_measurements_keep_timing_and_gauge_units_separate() {
+        let samples = vec![
+            BenchmarkSample {
+                run: 1,
+                operation_elapsed_ns: 100,
+                operation_units: 1,
+                output_digest: "a".into(),
+                timings_ns: BTreeMap::from([("append".into(), 70)]),
+                gauges: BTreeMap::from([("storage_bytes".into(), 512)]),
+            },
+            BenchmarkSample {
+                run: 2,
+                operation_elapsed_ns: 120,
+                operation_units: 1,
+                output_digest: "a".into(),
+                timings_ns: BTreeMap::from([("append".into(), 80)]),
+                gauges: BTreeMap::from([("storage_bytes".into(), 768)]),
+            },
+        ];
+        let timings = summarize_timing_samples(&samples).expect("timings");
+        let gauges = summarize_gauge_samples(&samples).expect("gauges");
+        assert_eq!(timings["append"].p50_ns, 70);
+        assert_eq!(gauges["storage_bytes"].p50, 512);
+    }
+
+    #[test]
+    fn benchmark_measurement_keys_cannot_change_between_samples() {
+        let samples = vec![
+            BenchmarkSample {
+                run: 1,
+                operation_elapsed_ns: 100,
+                operation_units: 1,
+                output_digest: "a".into(),
+                timings_ns: BTreeMap::from([("append".into(), 70)]),
+                gauges: BTreeMap::from([("storage_bytes".into(), 512)]),
+            },
+            BenchmarkSample {
+                run: 2,
+                operation_elapsed_ns: 120,
+                operation_units: 1,
+                output_digest: "a".into(),
+                timings_ns: BTreeMap::from([("replay".into(), 80)]),
+                gauges: BTreeMap::new(),
+            },
+        ];
+        assert!(summarize_timing_samples(&samples).is_err());
+        assert!(summarize_gauge_samples(&samples).is_err());
     }
 }

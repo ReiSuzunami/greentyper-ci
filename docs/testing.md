@@ -111,7 +111,7 @@ Results include main process, TUI, per-Agent increment, child processes, and tot
 
 ## CI Matrix
 
-This is the required end-state matrix for a release candidate. The current bootstrap workflow implements formatting, checks, tests, lints, release packaging, the x86-64-v3 guard, an acceptance-harness smoke, and a one-sample benchmark-pipeline smoke; integration, crash, security, migration, and fuzz jobs are added with the slices that make them executable.
+This is the required end-state matrix for a release candidate. The current bootstrap workflow implements formatting, checks, tests, lints, release packaging, the x86-64-v3 guard, an acceptance-harness smoke, a one-sample benchmark-pipeline smoke, and isolated compile/test/smoke coverage for the first storage candidates. Integration, cross-process crash, security, migration, and fuzz jobs are added with the slices that make them executable.
 
 | Environment | Required evidence |
 | --- | --- |
@@ -122,7 +122,7 @@ This is the required end-state matrix for a release candidate. The current boots
 
 Sanitizer, loom-style concurrency exploration, or equivalent tools should run on a supported CI host when they add evidence unavailable on Windows. Platform-specific behavior still requires Windows tests.
 
-Windows CI executes the release-built acceptance binary's x86-64-v3 feature guard, a three-sample acceptance smoke, and a one-sample benchmark-pipeline smoke. FMDev and Target evidence still use at least 30 measured runs where the Performance Contract requires them; CI smoke samples are never treated as performance evidence.
+Windows CI executes the release-built acceptance binary's x86-64-v3 feature guard, a three-sample acceptance smoke, and a one-sample benchmark-pipeline smoke. It separately builds the optional storage-candidate runner and executes one redacted sample for SQLite WAL and append log without placing that binary in the portable product package. FMDev and Target evidence still use at least 30 measured runs where the Performance Contract requires them; CI smoke samples are never treated as performance evidence.
 
 ## Release Gate
 

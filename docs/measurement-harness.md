@@ -30,9 +30,9 @@ The output path must not already exist. This prevents a later run from silently 
 
 Evidence is written to a unique file in the destination directory, flushed and synchronized, then committed to the requested name without replacing an existing file. Public CI passes `--machine-identifiers redacted`; fixed private validation hosts and Target runs retain the full fingerprint.
 
-## Evidence Schema
+## Evidence Schemas
 
-Schema version 1 records:
+Acceptance Evidence schema version 1 records:
 
 - generation time, candidate ID, and source revision;
 - executable and fixture configuration SHA-256 values;
@@ -42,14 +42,18 @@ Schema version 1 records:
 - every measured duration in nanoseconds; and
 - count, minimum, maximum, nearest-rank p50 and p95, arithmetic mean, and population standard deviation.
 
-Schema zero is reserved. Readers accept only the schema versions they explicitly implement. Schema changes add a new version and migration or compatibility tests; they do not reinterpret existing evidence.
+Benchmark Evidence schema version 2 keeps the same candidate, executable, fixture, CPU, and machine binding while adding named `timings_ns` and unit-neutral `gauges` to every raw sample. It derives timing summaries with nanosecond-labelled fields and separate unit-neutral gauge summaries, so storage bytes, write counts, or handle counts are never represented as time. A target may leave both maps empty when it has no meaningful sub-measurements, as `harness/sha256-loop` does.
+
+Benchmark Evidence version 1 remains historical pipeline output and is not reinterpreted as version 2. The current runner only produces evidence; it has no ingestion or migration path. The schema registry explicitly rejects version 1 when asked for the current Benchmark Evidence version. A future reader must name every version it accepts and add compatibility or migration tests.
+
+Schema zero is reserved. Readers accept only the schema versions they explicitly implement; schema changes never reinterpret existing evidence.
 
 ## CI and Release Boundary
 
-Windows CI uses the repository's configured x86-64-v3 target policy, requires the release binary to self-report that baseline, runs its host-feature guard, and packages a redacted three-sample acceptance smoke plus a one-sample benchmark-pipeline smoke. That proves executable wiring and configuration agreement only. FMDev performance evidence uses the fixed host and at least 30 samples. A Target Acceptance ZIP additionally binds the release-candidate package, applies redaction, runs all required named workloads, and remains mandatory for Alpha.
+Windows CI uses the repository's configured x86-64-v3 target policy, requires the release binary to self-report that baseline, runs its host-feature guard, and packages a redacted three-sample acceptance smoke plus a one-sample benchmark-pipeline smoke. A separate feature-built runner executes one redacted smoke sample for each current storage candidate; its evidence is uploaded separately and the candidate binary is not added to the portable product package. These checks prove compilation, executable wiring, and configuration agreement only. FMDev performance evidence uses the fixed host and at least 30 samples. A Target Acceptance ZIP additionally binds the release-candidate package, applies redaction, runs all required named workloads, and remains mandatory for Alpha.
 
 ## Technology Comparison Evidence
 
-`greentyper-acceptance bench` uses a separate Benchmark Evidence schema. It keeps the release candidate, comparison, implementation, and workload as independent identities so the same versioned workload can compare multiple implementations without changing its meaning. Each file records the implementation revision, declared feature set, locked dependency-graph fingerprint, fixture hash, timing boundary, process mode, operation units, correctness digest, every raw duration, and the common host and CPU evidence.
+`greentyper-acceptance bench` uses a separate Benchmark Evidence schema. It keeps the release candidate, comparison, implementation, and workload as independent identities so the same versioned workload can compare multiple implementations without changing its meaning. Each file records the implementation revision, declared feature set, locked dependency-graph fingerprint, fixture hash, timing boundary, process mode, operation units, correctness digest, every raw operation duration, optional named sub-timings and gauges, and the common host and CPU evidence.
 
-`bench list` reports only implementations compiled into the runner. The initial `harness/sha256-loop` entry proves parsing, timing, correctness checks, evidence serialization, and CI packaging. It is not a technology candidate and cannot select storage, terminal, transport, or allocator behavior.
+`bench list` reports only implementations compiled into the runner. The initial `harness/sha256-loop` entry proves parsing, timing, correctness checks, evidence serialization, and CI packaging. The optional `bench-storage` feature adds `storage/sqlite-wal` and `storage/append-log`; neither enters the default product graph. Harness and CI smoke results cannot select storage, terminal, transport, or allocator behavior.
