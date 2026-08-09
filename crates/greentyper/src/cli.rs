@@ -2,7 +2,7 @@ use std::env;
 use std::error::Error;
 use std::fmt;
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 
 use greentyper_core::config::{
@@ -10,14 +10,18 @@ use greentyper_core::config::{
     ConfigScope, config_schema,
 };
 use greentyper_core::model::DeliveryId;
-use greentyper_core::provider::DeterministicProvider;
+use greentyper_core::provider::ProviderError;
 use greentyper_core::runtime::{AcknowledgeOutcome, RecoveryStatus, RuntimeKernel};
 
+use crate::credential_vault::{
+    CredentialVault, CredentialVaultError, MAX_SECRET_BYTES, PlatformCredentialVault,
+    ProviderCredentialScope, SecretValue,
+};
 use crate::local_process::{
     LocalProcessChildMode, LocalProcessError, LocalProcessSmokeOutcome, LocalProcessSmokeScenario,
 };
 use crate::provider_http::{
-    ProviderHttpError, ProviderHttpSmokeOutcome, ProviderHttpSmokeScenario,
+    ConfiguredProvider, ProviderHttpError, ProviderHttpSmokeOutcome, ProviderHttpSmokeScenario,
 };
 
 pub fn run(arguments: impl Iterator<Item = String>) -> Result<(), CliError> {
@@ -25,14 +29,18 @@ pub fn run(arguments: impl Iterator<Item = String>) -> Result<(), CliError> {
         Command::Headless { ledger, input } => {
             let config = open_config_runtime(default_config_paths()?)?;
             let layers = config.config_layers()?.clone();
+            let profile = config.selected_provider_profile()?;
+            let mut provider = ConfiguredProvider::for_new_turn(profile, PlatformCredentialVault)?;
             let mut runtime = open_runtime(&ledger)?;
-            let mut provider = DeterministicProvider::default();
             let output = runtime.execute(&layers, input, &mut provider)?;
             deliver_and_ack(&mut runtime, output)
         }
         Command::Resume { ledger } => {
             let mut runtime = open_runtime(&ledger)?;
-            let mut provider = DeterministicProvider::default();
+            let mut provider = match runtime.pending_provider_epoch() {
+                Some(epoch) => ConfiguredProvider::from_epoch(epoch, PlatformCredentialVault)?,
+                None => ConfiguredProvider::for_new_turn(None, PlatformCredentialVault)?,
+            };
             let output = runtime.resume(&mut provider)?;
             deliver_and_ack(&mut runtime, output)
         }
@@ -51,6 +59,25 @@ pub fn run(arguments: impl Iterator<Item = String>) -> Result<(), CliError> {
             Ok(())
         }
         Command::Config(command) => run_config(command),
+        Command::Credential(command) => {
+            let mut vault = PlatformCredentialVault;
+            let stdin = io::stdin();
+            let outcome = if stdin.is_terminal()
+                && matches!(
+                    &command,
+                    CredentialCommand::Bind { .. } | CredentialCommand::Replace { .. }
+                ) {
+                let secret = rpassword::prompt_password("Provider credential: ")?;
+                execute_credential_with_secret(
+                    &mut vault,
+                    command,
+                    Some(SecretValue::new(secret.into_bytes())?),
+                )?
+            } else {
+                execute_credential_command(&mut vault, command, &mut stdin.lock())?
+            };
+            write_stdout_line(outcome.as_str())
+        }
         Command::LocalProcessChild { mode } => {
             crate::local_process::run_local_process_child(mode).map_err(CliError::Io)
         }
@@ -219,6 +246,7 @@ enum Command {
         delivery: DeliveryId,
     },
     Config(ConfigCommand),
+    Credential(CredentialCommand),
     LocalProcessChild {
         mode: LocalProcessChildMode,
     },
@@ -261,6 +289,64 @@ enum ConfigCommand {
     },
 }
 
+#[derive(Debug, Eq, PartialEq)]
+enum CredentialCommand {
+    Bind {
+        reference: String,
+        profile: String,
+        origin: String,
+    },
+    Replace {
+        reference: String,
+        profile: String,
+        origin: String,
+    },
+    Test {
+        reference: String,
+        profile: String,
+        origin: String,
+    },
+    Forget {
+        reference: String,
+        profile: String,
+        origin: String,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CredentialOutcome {
+    Bound,
+    Replaced,
+    Available,
+    Forgotten,
+    NotFound,
+}
+
+impl CredentialOutcome {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Bound => "bound",
+            Self::Replaced => "replaced",
+            Self::Available => "available",
+            Self::Forgotten => "forgotten",
+            Self::NotFound => "not-found",
+        }
+    }
+}
+
+#[cfg(test)]
+impl Command {
+    fn credential_action_name(&self) -> Option<&'static str> {
+        match self {
+            Self::Credential(CredentialCommand::Bind { .. }) => Some("bind"),
+            Self::Credential(CredentialCommand::Replace { .. }) => Some("replace"),
+            Self::Credential(CredentialCommand::Test { .. }) => Some("test"),
+            Self::Credential(CredentialCommand::Forget { .. }) => Some("forget"),
+            _ => None,
+        }
+    }
+}
+
 fn parse(mut arguments: impl Iterator<Item = String>) -> Result<Command, CliError> {
     let Some(command) = arguments.next() else {
         return Ok(Command::Help);
@@ -271,6 +357,9 @@ fn parse(mut arguments: impl Iterator<Item = String>) -> Result<Command, CliErro
     }
     if command == "config" {
         return parse_config(arguments).map(Command::Config);
+    }
+    if command == "credential" {
+        return parse_credential(arguments).map(Command::Credential);
     }
     if command == "__local-process-child" {
         let mode = LocalProcessChildMode::parse(arguments.next().as_deref())
@@ -346,6 +435,151 @@ fn parse(mut arguments: impl Iterator<Item = String>) -> Result<Command, CliErro
         }
         _ => Err(CliError::Usage("unknown command")),
     }
+}
+
+fn parse_credential(
+    mut arguments: impl Iterator<Item = String>,
+) -> Result<CredentialCommand, CliError> {
+    let action = arguments
+        .next()
+        .ok_or(CliError::Usage("credential requires an action"))?;
+    if !matches!(action.as_str(), "bind" | "replace" | "test" | "forget") {
+        return Err(CliError::Usage("unknown credential action"));
+    }
+    let reference = arguments
+        .next()
+        .filter(|value| !value.is_empty() && !value.starts_with('-'))
+        .ok_or(CliError::Usage("credential bind requires a reference"))?;
+    let mut profile = None;
+    let mut origin = None;
+    while let Some(argument) = arguments.next() {
+        let slot = match argument.as_str() {
+            "--profile" => &mut profile,
+            "--origin" => &mut origin,
+            _ => return Err(CliError::Usage("unknown credential option")),
+        };
+        if slot.is_some() {
+            return Err(CliError::Usage("duplicate credential option"));
+        }
+        *slot = Some(
+            arguments
+                .next()
+                .filter(|value| !value.is_empty() && !value.starts_with('-'))
+                .ok_or(CliError::Usage("credential option is missing its value"))?,
+        );
+    }
+    let profile = profile.ok_or(CliError::Usage("credential operation requires --profile"))?;
+    let origin = origin.ok_or(CliError::Usage("credential operation requires --origin"))?;
+    Ok(match action.as_str() {
+        "bind" => CredentialCommand::Bind {
+            reference,
+            profile,
+            origin,
+        },
+        "replace" => CredentialCommand::Replace {
+            reference,
+            profile,
+            origin,
+        },
+        "test" => CredentialCommand::Test {
+            reference,
+            profile,
+            origin,
+        },
+        "forget" => CredentialCommand::Forget {
+            reference,
+            profile,
+            origin,
+        },
+        _ => unreachable!("credential action was validated"),
+    })
+}
+
+fn execute_credential_command(
+    vault: &mut impl CredentialVault,
+    command: CredentialCommand,
+    secret_input: &mut impl Read,
+) -> Result<CredentialOutcome, CliError> {
+    let secret = if matches!(
+        &command,
+        CredentialCommand::Bind { .. } | CredentialCommand::Replace { .. }
+    ) {
+        Some(read_secret(secret_input)?)
+    } else {
+        None
+    };
+    execute_credential_with_secret(vault, command, secret)
+}
+
+fn execute_credential_with_secret(
+    vault: &mut impl CredentialVault,
+    command: CredentialCommand,
+    secret: Option<SecretValue>,
+) -> Result<CredentialOutcome, CliError> {
+    let (reference, profile, origin) = match &command {
+        CredentialCommand::Bind {
+            reference,
+            profile,
+            origin,
+        }
+        | CredentialCommand::Replace {
+            reference,
+            profile,
+            origin,
+        }
+        | CredentialCommand::Test {
+            reference,
+            profile,
+            origin,
+        }
+        | CredentialCommand::Forget {
+            reference,
+            profile,
+            origin,
+        } => (reference, profile, origin),
+    };
+    let allow_insecure_loopback = reqwest::Url::parse(origin)
+        .is_ok_and(|origin| origin.scheme().eq_ignore_ascii_case("http"));
+    let scope = ProviderCredentialScope::new(profile, reference, origin, allow_insecure_loopback)?;
+    match command {
+        CredentialCommand::Bind { .. } => {
+            vault.bind(&scope, secret.ok_or(CredentialVaultError::InvalidSecret)?)?;
+            Ok(CredentialOutcome::Bound)
+        }
+        CredentialCommand::Replace { .. } => {
+            vault.replace(&scope, secret.ok_or(CredentialVaultError::InvalidSecret)?)?;
+            Ok(CredentialOutcome::Replaced)
+        }
+        CredentialCommand::Test { .. } => match vault.resolve(&scope) {
+            Ok(_) => Ok(CredentialOutcome::Available),
+            Err(CredentialVaultError::NotFound) => Ok(CredentialOutcome::NotFound),
+            Err(error) => Err(error.into()),
+        },
+        CredentialCommand::Forget { .. } => vault
+            .forget(&scope)
+            .map(|forgotten| {
+                if forgotten {
+                    CredentialOutcome::Forgotten
+                } else {
+                    CredentialOutcome::NotFound
+                }
+            })
+            .map_err(Into::into),
+    }
+}
+
+fn read_secret(reader: &mut impl Read) -> Result<SecretValue, CliError> {
+    let limit =
+        u64::try_from(MAX_SECRET_BYTES + 3).map_err(|_| CredentialVaultError::InvalidSecret)?;
+    let mut bytes = Vec::new();
+    reader.take(limit).read_to_end(&mut bytes)?;
+    if bytes.last() == Some(&b'\n') {
+        bytes.pop();
+        if bytes.last() == Some(&b'\r') {
+            bytes.pop();
+        }
+    }
+    SecretValue::new(bytes).map_err(Into::into)
 }
 
 fn parse_local_process_smoke(
@@ -725,7 +959,11 @@ Usage:\n\
   greentyper config get PATH [--user-config PATH] [--project-config PATH]\n\
   greentyper config set PATH VALUE --scope user|project [--dry-run]\n\
   greentyper config reset PATH --scope user|project [--dry-run]\n\
-  greentyper config repair --scope user|project\n";
+  greentyper config repair --scope user|project\n\
+  greentyper credential bind REFERENCE --profile PROFILE --origin URL\n\
+  greentyper credential replace REFERENCE --profile PROFILE --origin URL\n\
+  greentyper credential test REFERENCE --profile PROFILE --origin URL\n\
+  greentyper credential forget REFERENCE --profile PROFILE --origin URL\n";
 
 #[derive(Debug)]
 pub enum CliError {
@@ -736,6 +974,8 @@ pub enum CliError {
     Runtime(greentyper_core::runtime::RuntimeError),
     LocalProcess(LocalProcessError),
     ProviderHttp(ProviderHttpError),
+    Provider(ProviderError),
+    Credential(CredentialVaultError),
 }
 
 impl fmt::Display for CliError {
@@ -756,6 +996,8 @@ impl fmt::Display for CliError {
             Self::Runtime(source) => write!(formatter, "{source}"),
             Self::LocalProcess(source) => write!(formatter, "{source}"),
             Self::ProviderHttp(source) => write!(formatter, "{source}"),
+            Self::Provider(source) => write!(formatter, "{source}"),
+            Self::Credential(source) => write!(formatter, "{source}"),
         }
     }
 }
@@ -769,6 +1011,8 @@ impl Error for CliError {
             Self::Runtime(source) => Some(source),
             Self::LocalProcess(source) => Some(source),
             Self::ProviderHttp(source) => Some(source),
+            Self::Provider(source) => Some(source),
+            Self::Credential(source) => Some(source),
             Self::Usage(_) => None,
         }
     }
@@ -804,9 +1048,21 @@ impl From<ProviderHttpError> for CliError {
     }
 }
 
+impl From<CredentialVaultError> for CliError {
+    fn from(source: CredentialVaultError) -> Self {
+        Self::Credential(source)
+    }
+}
+
+impl From<ProviderError> for CliError {
+    fn from(source: ProviderError) -> Self {
+        Self::Provider(source)
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use std::io;
+    use std::io::{self, Cursor, Read};
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -814,7 +1070,12 @@ mod tests {
     use greentyper_core::provider::DeterministicProvider;
     use greentyper_core::runtime::{RecoveryStatus, RuntimeKernel};
 
-    use super::{Command, ConfigCommand, deliver_and_ack_to, parse};
+    use crate::credential_vault::InMemoryCredentialVault;
+
+    use super::{
+        Command, ConfigCommand, CredentialCommand, CredentialOutcome, deliver_and_ack_to,
+        execute_credential_command, parse,
+    };
 
     static NEXT_TEMP: AtomicU64 = AtomicU64::new(1);
 
@@ -902,6 +1163,118 @@ mod tests {
     }
 
     #[test]
+    fn parser_keeps_provider_credential_material_out_of_arguments() {
+        let parsed = parse(
+            [
+                "credential".to_owned(),
+                "bind".to_owned(),
+                "openai-main".to_owned(),
+                "--profile".to_owned(),
+                "openai-main".to_owned(),
+                "--origin".to_owned(),
+                "https://api.example.com/v1".to_owned(),
+            ]
+            .into_iter(),
+        )
+        .expect("parse credential bind");
+
+        assert!(matches!(
+            parsed,
+            Command::Credential(CredentialCommand::Bind {
+                reference,
+                profile,
+                origin,
+            }) if reference == "openai-main"
+                && profile == "openai-main"
+                && origin == "https://api.example.com/v1"
+        ));
+    }
+
+    #[test]
+    fn parser_supports_replace_test_and_forget_credential_operations() {
+        for (action, expected) in [
+            ("replace", "replace"),
+            ("test", "test"),
+            ("forget", "forget"),
+        ] {
+            let parsed = parse(
+                [
+                    "credential".to_owned(),
+                    action.to_owned(),
+                    "openai-main".to_owned(),
+                    "--profile".to_owned(),
+                    "openai-main".to_owned(),
+                    "--origin".to_owned(),
+                    "https://api.example.com/v1".to_owned(),
+                ]
+                .into_iter(),
+            )
+            .expect("parse credential operation");
+
+            assert_eq!(parsed.credential_action_name(), Some(expected));
+        }
+    }
+
+    #[test]
+    fn credential_operations_bind_replace_test_and_forget_without_readback() {
+        let mut vault = InMemoryCredentialVault::default();
+        let command = |action| match action {
+            "bind" => CredentialCommand::Bind {
+                reference: "openai-main".to_owned(),
+                profile: "openai-main".to_owned(),
+                origin: "https://api.example.com/v1".to_owned(),
+            },
+            "replace" => CredentialCommand::Replace {
+                reference: "openai-main".to_owned(),
+                profile: "openai-main".to_owned(),
+                origin: "https://api.example.com/v1".to_owned(),
+            },
+            "test" => CredentialCommand::Test {
+                reference: "openai-main".to_owned(),
+                profile: "openai-main".to_owned(),
+                origin: "https://api.example.com/v1".to_owned(),
+            },
+            "forget" => CredentialCommand::Forget {
+                reference: "openai-main".to_owned(),
+                profile: "openai-main".to_owned(),
+                origin: "https://api.example.com/v1".to_owned(),
+            },
+            _ => unreachable!(),
+        };
+
+        assert_eq!(
+            execute_credential_command(
+                &mut vault,
+                command("bind"),
+                &mut Cursor::new(b"private-first-token\n")
+            )
+            .unwrap(),
+            CredentialOutcome::Bound
+        );
+        assert_eq!(
+            execute_credential_command(&mut vault, command("test"), &mut PanicReader).unwrap(),
+            CredentialOutcome::Available
+        );
+        assert_eq!(
+            execute_credential_command(
+                &mut vault,
+                command("replace"),
+                &mut Cursor::new(b"private-second-token\n")
+            )
+            .unwrap(),
+            CredentialOutcome::Replaced
+        );
+        assert_eq!(
+            execute_credential_command(&mut vault, command("forget"), &mut PanicReader).unwrap(),
+            CredentialOutcome::Forgotten
+        );
+        assert_eq!(
+            execute_credential_command(&mut vault, command("forget"), &mut PanicReader).unwrap(),
+            CredentialOutcome::NotFound
+        );
+    }
+
+    #[test]
     fn output_write_failure_never_acknowledges_delivery() {
         let path = temp_path();
         let mut runtime = RuntimeKernel::open(&path).expect("open Runtime");
@@ -922,6 +1295,14 @@ mod tests {
     }
 
     struct BrokenWriter;
+
+    struct PanicReader;
+
+    impl Read for PanicReader {
+        fn read(&mut self, _buffer: &mut [u8]) -> io::Result<usize> {
+            panic!("credential operation unexpectedly read secret input")
+        }
+    }
 
     impl io::Write for BrokenWriter {
         fn write(&mut self, _buffer: &[u8]) -> io::Result<usize> {

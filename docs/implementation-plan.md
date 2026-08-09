@@ -4,7 +4,7 @@
 
 Implementation proceeds as runnable vertical slices. Each phase must preserve Ledger recovery, authority boundaries, and measured resource behavior; no phase may defer all testing or performance work to the end.
 
-Feature implementation was authorized on 2026-08-09. The first core slice fixes the Agent Team command/event interface, process-local Agent Sessions, and pure orchestration policy early; it does not claim Phase 7 completion. Plain `TeamRuntime` remains volatile. A separate durable Team adapter proves synchronous persistence, and the core Runtime Kernel now owns it, gates root admission, persists operation identity and acknowledgement records in the same Team Ledger, and rebinds the complete non-terminal Session set after recovery. The first Phase 2 slices persist Tool call identity, Approval Grant binding, prepared-effect state, terminal digests, and explicit ambiguous-effect reconciliation, and add bounded generic SSE framing plus a strict OpenAI Responses streaming decoder. Product Provider/Tool driving and user-visible delivery remain pending.
+Feature implementation was authorized on 2026-08-09. The first core slice fixes the Agent Team command/event interface, process-local Agent Sessions, and pure orchestration policy early; it does not claim Phase 7 completion. Plain `TeamRuntime` remains volatile. A separate durable Team adapter proves synchronous persistence, and the core Runtime Kernel now owns it, gates root admission, persists operation identity and acknowledgement records in the same Team Ledger, and rebinds the complete non-terminal Session set after recovery. The first Phase 2 slices persist Tool call identity, Approval Grant binding, prepared-effect state, terminal digests, and explicit ambiguous-effect reconciliation, and add bounded generic SSE framing plus a strict OpenAI Responses streaming decoder. Configured product Provider driving is now present; product Tool driving and user-visible Tool delivery remain pending.
 
 ## Phase 0: Repository and Measurement Foundation
 
@@ -65,8 +65,8 @@ edits. It is wired into new headless Turn admission through the immutable
 bootstrap projection.
 
 This does not complete Phase 1. Complete schema metadata and generated editor
-surfaces, Provider Templates/catalogs, credential storage, product Team
-Provider/Tool driving and user-visible receipt delivery, the exhaustive
+surfaces, Provider Templates/catalogs, non-Windows credential storage, product
+Team/Tool driving and user-visible receipt delivery, the exhaustive
 byte-offset Runtime/effect crash-fault matrix, storage migration, and headless
 FMDev/Target idle resource evidence remain pending. See
 [Recoverable Single-Agent Runtime](runtime-kernel.md).
@@ -125,21 +125,23 @@ kill-on-close Job Object. The adapter rejects filesystem and network resources;
 it is evidence for one narrow local process Tool, not a general process
 sandbox or public product command.
 
-A second product-private tracer now exercises a concrete Responses HTTP seam
-without claiming production credential routing. Config Runtime resolves and
-freezes its typed loopback Provider Profile and Responses route. The adapter
-disables proxy discovery and redirects, sends a
-bounded canonical request with synthetic authorization, applies a fixed
-deadline, and streams the response through the core decoder into the real
-single-Agent Runtime. Its tests cover fragmented success, canonical replay,
-HTTP failure-body redaction, timeout, and rejection of non-loopback endpoints.
+A configured product adapter now exercises the concrete Responses HTTP seam.
+Config Runtime resolves and freezes its typed Provider Profile, origin,
+Responses route, dialect, pricing decision, and opaque credential reference.
+The adapter resolves a secret from the origin-bound product vault, requires
+HTTPS for remote origins, disables proxy discovery and redirects, sends a
+bounded canonical request, applies a fixed deadline, and streams the response
+through the core decoder into the real single-Agent Runtime. A private loopback
+fixture retains synthetic authorization. Tests cover fragmented success,
+canonical replay, HTTP failure-body redaction, timeout, endpoint/status policy,
+trusted and untrusted TLS, and missing credential failure before network access.
 
-The remaining slices are still policy, protocol, and fault-adapter work: a
-production remote HTTP Provider transport, secure credential-vault/origin
-routing, Provider Template defaults/catalogs, broader canonical Items, multiple Tool calls,
-durable resumable Tool result references, a public Product Tool driver and
-approval/delivery, caller-selected process policy, complete Windows Job
-lifetime/resource evidence, reconnect/retry behavior, and the cross-process
+The remaining slices are still policy, protocol, and fault-adapter work:
+live-provider validation, non-Windows credential backends, configurable proxy
+policy, Provider Template defaults/catalogs, broader canonical Items, multiple
+Tool calls, durable resumable Tool result references, a public Product Tool
+driver and approval/delivery, caller-selected process policy, complete Windows
+Job lifetime/resource evidence, reconnect/retry behavior, and the cross-process
 Tool crash matrix remain pending.
 
 Exit criteria:

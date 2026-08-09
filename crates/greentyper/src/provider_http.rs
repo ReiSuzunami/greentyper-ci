@@ -1,7 +1,7 @@
 use std::error::Error;
 use std::fmt;
 use std::io::{self, Read, Write};
-use std::net::{IpAddr, TcpListener, TcpStream};
+use std::net::{IpAddr, TcpListener};
 use std::path::Path;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -11,13 +11,18 @@ use greentyper_core::config::{
 };
 use greentyper_core::provider::responses::{ResponsesSseDecoder, normalize_responses_events};
 use greentyper_core::provider::{
-    ProviderDialect, ProviderError, ProviderEvent, ProviderPricingSource, ProviderProfileSnapshot,
-    ProviderRequest, ProviderRuntime,
+    DeterministicProvider, ProviderDialect, ProviderEpoch, ProviderError, ProviderEvent,
+    ProviderPricingSource, ProviderProfileSnapshot, ProviderRequest, ProviderRuntime,
 };
 use greentyper_core::runtime::{RuntimeError, RuntimeKernel};
-use reqwest::blocking::Client;
-use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
+use reqwest::blocking::{Client, ClientBuilder};
+use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderValue};
 use reqwest::{StatusCode, Url};
+
+use crate::credential_vault::{
+    CredentialVault, CredentialVaultError, InMemoryCredentialVault, ProviderCredentialScope,
+    SecretValue,
+};
 
 const FIXTURE_PROFILE: &str = "responses-loopback";
 const FIXTURE_MODEL: &str = "fixture-model";
@@ -25,7 +30,9 @@ const FIXTURE_ROUTE: &str = "/v1/responses";
 const FIXTURE_TEMPLATE: &str = "openai-compatible";
 const FIXTURE_CREDENTIAL_REFERENCE: &str = "responses-loopback-synthetic";
 const SYNTHETIC_AUTHORIZATION: &str = "Bearer greentyper-synthetic-provider-token-v1";
+const SYNTHETIC_SECRET: &[u8] = b"greentyper-synthetic-provider-token-v1";
 const HTTP_TIMEOUT: Duration = Duration::from_millis(200);
+const PROVIDER_TIMEOUT: Duration = Duration::from_secs(300);
 const SERVER_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_REQUEST_BYTES: usize = 128 * 1024;
 const MAX_HEADER_BYTES: usize = 32 * 1024;
@@ -34,44 +41,78 @@ const PRIVATE_ERROR_BODY: &[u8] = b"provider-private-error-marker";
 const SUCCESS_SSE: &[u8] =
     include_bytes!("../../../tests/fixtures/provider/responses/v1/http-text.sse");
 
-struct LoopbackResponsesProvider {
+pub(crate) struct ResponsesHttpProvider<V> {
     client: Client,
     endpoint: Url,
     profile: ProviderProfileSnapshot,
+    credential_scope: ProviderCredentialScope,
+    vault: V,
 }
 
-impl fmt::Debug for LoopbackResponsesProvider {
+impl<V> fmt::Debug for ResponsesHttpProvider<V> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("LoopbackResponsesProvider")
-            .field("transport", &"loopback-http")
-            .field("authorization", &"synthetic-redacted")
+            .debug_struct("ResponsesHttpProvider")
+            .field("transport", &"blocking-http-sse")
+            .field("authorization", &"redacted")
             .finish()
     }
 }
 
-impl LoopbackResponsesProvider {
-    fn new(profile: ProviderProfileSnapshot) -> Result<Self, ProviderError> {
-        if profile.profile() != FIXTURE_PROFILE
-            || profile.template() != FIXTURE_TEMPLATE
-            || profile.credential_reference() != Some(FIXTURE_CREDENTIAL_REFERENCE)
-            || !profile.supports(ProviderDialect::Responses)
-            || profile.pricing_source() != Some(ProviderPricingSource::Unknown)
-            || !profile.allow_insecure_loopback()
-        {
+impl<V: CredentialVault> ResponsesHttpProvider<V> {
+    fn new(profile: ProviderProfileSnapshot, vault: V) -> Result<Self, ProviderError> {
+        Self::with_timeout(profile, vault, PROVIDER_TIMEOUT)
+    }
+
+    fn with_timeout(
+        profile: ProviderProfileSnapshot,
+        vault: V,
+        timeout: Duration,
+    ) -> Result<Self, ProviderError> {
+        Self::with_client_builder(profile, vault, timeout, Client::builder())
+    }
+
+    #[cfg(test)]
+    fn with_timeout_and_root(
+        profile: ProviderProfileSnapshot,
+        vault: V,
+        timeout: Duration,
+        root: reqwest::Certificate,
+    ) -> Result<Self, ProviderError> {
+        Self::with_client_builder(
+            profile,
+            vault,
+            timeout,
+            Client::builder().add_root_certificate(root),
+        )
+    }
+
+    fn with_client_builder(
+        profile: ProviderProfileSnapshot,
+        vault: V,
+        timeout: Duration,
+        client: ClientBuilder,
+    ) -> Result<Self, ProviderError> {
+        if profile.template() != FIXTURE_TEMPLATE || !profile.supports(ProviderDialect::Responses) {
             return Err(ProviderError::InvalidConfiguration(
-                "loopback Responses Provider Profile does not match its fixture",
+                "Responses Provider Profile is not OpenAI-compatible",
             ));
         }
         let endpoint = profile.endpoint(ProviderDialect::Responses).ok_or(
-            ProviderError::InvalidConfiguration(
-                "loopback Responses Provider Profile has no endpoint",
-            ),
+            ProviderError::InvalidConfiguration("Responses Provider Profile has no endpoint"),
         )?;
-        let endpoint = validate_loopback_endpoint(&endpoint)?;
-        let client = Client::builder()
+        let endpoint = validate_responses_endpoint(&endpoint, profile.allow_insecure_loopback())?;
+        let credential_scope = ProviderCredentialScope::from_profile(&profile)
+            .map_err(map_credential_configuration_error)?;
+        drop(
+            vault
+                .resolve(&credential_scope)
+                .map_err(map_credential_resolve_error)?,
+        );
+        let client = client
             .no_proxy()
-            .timeout(HTTP_TIMEOUT)
+            .https_only(endpoint.scheme() == "https")
+            .timeout(timeout)
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|_| ProviderError::unavailable("Responses HTTP client setup failed"))?;
@@ -79,24 +120,30 @@ impl LoopbackResponsesProvider {
             client,
             endpoint,
             profile,
+            credential_scope,
+            vault,
         })
     }
 }
 
-impl ProviderRuntime for LoopbackResponsesProvider {
+impl<V: CredentialVault> ProviderRuntime for ResponsesHttpProvider<V> {
     fn profile_snapshot(&self) -> Option<&ProviderProfileSnapshot> {
         Some(&self.profile)
     }
 
     fn run(&mut self, request: &ProviderRequest) -> Result<Vec<ProviderEvent>, ProviderError> {
-        if request.provider.profile() != FIXTURE_PROFILE
-            || request.provider.model() != FIXTURE_MODEL
+        if request.provider.profile() != self.profile.profile()
             || request.provider.profile_snapshot() != Some(&self.profile)
         {
             return Err(ProviderError::InvalidConfiguration(
-                "loopback Responses provider identity does not match its fixture",
+                "Responses provider identity does not match its frozen Profile",
             ));
         }
+        let secret = self
+            .vault
+            .resolve(&self.credential_scope)
+            .map_err(map_credential_resolve_error)?;
+        let authorization = bearer_header(&secret)?;
         let body = serde_json::to_vec(&serde_json::json!({
             "input": request.input,
             "model": request.provider.model(),
@@ -107,15 +154,13 @@ impl ProviderRuntime for LoopbackResponsesProvider {
             .client
             .post(self.endpoint.clone())
             .header(ACCEPT, "text/event-stream")
-            .header(AUTHORIZATION, SYNTHETIC_AUTHORIZATION)
+            .header(AUTHORIZATION, authorization)
             .header(CONTENT_TYPE, "application/json")
             .body(body)
             .send()
             .map_err(|_| ProviderError::unavailable("Responses HTTP request failed"))?;
         if response.status() != StatusCode::OK {
-            return Err(ProviderError::unavailable(
-                "Responses HTTP request returned a non-success status",
-            ));
+            return Err(classify_http_status(response.status()));
         }
         let content_type = response
             .headers()
@@ -152,6 +197,213 @@ impl ProviderRuntime for LoopbackResponsesProvider {
             .map_err(|_| ProviderError::InvalidResponse("Responses HTTP stream ended invalidly"))?;
         normalize_responses_events(&events)
     }
+}
+
+pub(crate) enum ConfiguredProvider<V> {
+    Simulator(DeterministicProvider),
+    Responses(Box<ResponsesHttpProvider<V>>),
+}
+
+impl<V: CredentialVault> ConfiguredProvider<V> {
+    pub(crate) fn for_new_turn(
+        profile: Option<ProviderProfileSnapshot>,
+        vault: V,
+    ) -> Result<Self, ProviderError> {
+        match profile {
+            Some(profile) => ResponsesHttpProvider::new(profile, vault)
+                .map(Box::new)
+                .map(Self::Responses),
+            None => Ok(Self::Simulator(DeterministicProvider::default())),
+        }
+    }
+
+    pub(crate) fn from_epoch(epoch: &ProviderEpoch, vault: V) -> Result<Self, ProviderError> {
+        match (epoch.profile(), epoch.profile_snapshot()) {
+            ("simulator", None) => Ok(Self::Simulator(DeterministicProvider::default())),
+            ("simulator", Some(_)) => Err(ProviderError::InvalidConfiguration(
+                "simulator Provider Epoch cannot carry a Profile snapshot",
+            )),
+            (_, Some(profile)) => ResponsesHttpProvider::new(profile.clone(), vault)
+                .map(Box::new)
+                .map(Self::Responses),
+            (_, None) => Err(ProviderError::InvalidConfiguration(
+                "non-simulator Provider Epoch has no frozen Profile",
+            )),
+        }
+    }
+}
+
+impl<V: CredentialVault> ProviderRuntime for ConfiguredProvider<V> {
+    fn profile_snapshot(&self) -> Option<&ProviderProfileSnapshot> {
+        match self {
+            Self::Simulator(provider) => provider.profile_snapshot(),
+            Self::Responses(provider) => provider.profile_snapshot(),
+        }
+    }
+
+    fn run(&mut self, request: &ProviderRequest) -> Result<Vec<ProviderEvent>, ProviderError> {
+        match self {
+            Self::Simulator(provider) => provider.run(request),
+            Self::Responses(provider) => provider.run(request),
+        }
+    }
+}
+
+struct LoopbackResponsesProvider {
+    inner: ResponsesHttpProvider<InMemoryCredentialVault>,
+}
+
+impl fmt::Debug for LoopbackResponsesProvider {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("LoopbackResponsesProvider")
+            .field("transport", &"loopback-http")
+            .field("authorization", &"synthetic-redacted")
+            .finish()
+    }
+}
+
+impl LoopbackResponsesProvider {
+    fn new(profile: ProviderProfileSnapshot) -> Result<Self, ProviderError> {
+        if profile.profile() != FIXTURE_PROFILE
+            || profile.template() != FIXTURE_TEMPLATE
+            || profile.credential_reference() != Some(FIXTURE_CREDENTIAL_REFERENCE)
+            || profile.pricing_source() != Some(ProviderPricingSource::Unknown)
+            || !profile.allow_insecure_loopback()
+        {
+            return Err(ProviderError::InvalidConfiguration(
+                "loopback Responses Provider Profile does not match its fixture",
+            ));
+        }
+        let endpoint = profile.endpoint(ProviderDialect::Responses).ok_or(
+            ProviderError::InvalidConfiguration(
+                "loopback Responses Provider Profile has no endpoint",
+            ),
+        )?;
+        validate_loopback_endpoint(&endpoint)?;
+        let scope = ProviderCredentialScope::from_profile(&profile)
+            .map_err(map_credential_configuration_error)?;
+        let mut vault = InMemoryCredentialVault::default();
+        vault
+            .bind(
+                &scope,
+                SecretValue::new(SYNTHETIC_SECRET.to_vec())
+                    .map_err(map_credential_configuration_error)?,
+            )
+            .map_err(map_credential_configuration_error)?;
+        Ok(Self {
+            inner: ResponsesHttpProvider::with_timeout(profile, vault, HTTP_TIMEOUT)?,
+        })
+    }
+}
+
+impl ProviderRuntime for LoopbackResponsesProvider {
+    fn profile_snapshot(&self) -> Option<&ProviderProfileSnapshot> {
+        self.inner.profile_snapshot()
+    }
+
+    fn run(&mut self, request: &ProviderRequest) -> Result<Vec<ProviderEvent>, ProviderError> {
+        if request.provider.profile() != FIXTURE_PROFILE
+            || request.provider.model() != FIXTURE_MODEL
+        {
+            return Err(ProviderError::InvalidConfiguration(
+                "loopback Responses provider identity does not match its fixture",
+            ));
+        }
+        self.inner.run(request)
+    }
+}
+
+fn bearer_header(secret: &SecretValue) -> Result<HeaderValue, ProviderError> {
+    let mut bytes = Vec::with_capacity("Bearer ".len() + secret.expose().len());
+    bytes.extend_from_slice(b"Bearer ");
+    bytes.extend_from_slice(secret.expose());
+    let header = HeaderValue::from_bytes(&bytes)
+        .map_err(|_| ProviderError::InvalidConfiguration("Provider credential is invalid"));
+    bytes.fill(0);
+    let mut header = header?;
+    header.set_sensitive(true);
+    Ok(header)
+}
+
+fn map_credential_configuration_error(_error: CredentialVaultError) -> ProviderError {
+    ProviderError::InvalidConfiguration("Provider credential binding is invalid")
+}
+
+fn map_credential_resolve_error(error: CredentialVaultError) -> ProviderError {
+    match error {
+        CredentialVaultError::NotFound => {
+            ProviderError::InvalidConfiguration("Provider credential binding was not found")
+        }
+        CredentialVaultError::Unavailable => {
+            ProviderError::unavailable("Provider credential vault is unavailable")
+        }
+        CredentialVaultError::InvalidScope(_)
+        | CredentialVaultError::InvalidSecret
+        | CredentialVaultError::AlreadyBound => {
+            ProviderError::InvalidConfiguration("Provider credential binding is invalid")
+        }
+    }
+}
+
+fn classify_http_status(status: StatusCode) -> ProviderError {
+    match status {
+        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => {
+            ProviderError::InvalidConfiguration("Provider credential was rejected")
+        }
+        StatusCode::REQUEST_TIMEOUT | StatusCode::TOO_MANY_REQUESTS => {
+            ProviderError::unavailable("Responses HTTP request was temporarily rejected")
+        }
+        status if status.is_server_error() => {
+            ProviderError::unavailable("Responses HTTP service failed")
+        }
+        status if status.is_redirection() => {
+            ProviderError::InvalidResponse("Responses HTTP redirect was rejected")
+        }
+        status if status.is_client_error() => {
+            ProviderError::InvalidRequest("Responses HTTP request was rejected")
+        }
+        _ => ProviderError::InvalidResponse("Responses HTTP status was invalid"),
+    }
+}
+
+fn validate_responses_endpoint(
+    value: &str,
+    allow_insecure_loopback: bool,
+) -> Result<Url, ProviderError> {
+    let endpoint = Url::parse(value).map_err(|_| {
+        ProviderError::InvalidConfiguration("Responses endpoint must be an absolute URL")
+    })?;
+    if !matches!(endpoint.scheme(), "http" | "https")
+        || !endpoint.username().is_empty()
+        || endpoint.password().is_some()
+        || endpoint.query().is_some()
+        || endpoint.fragment().is_some()
+    {
+        return Err(ProviderError::InvalidConfiguration(
+            "Responses endpoint contains unsupported URL components",
+        ));
+    }
+    let host = endpoint
+        .host_str()
+        .ok_or(ProviderError::InvalidConfiguration(
+            "Responses endpoint has no host",
+        ))?;
+    let loopback = host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<IpAddr>()
+            .is_ok_and(|address| address.is_loopback());
+    if endpoint.scheme() == "http" && (!loopback || !allow_insecure_loopback) {
+        return Err(ProviderError::InvalidConfiguration(
+            "plain HTTP requires explicit loopback permission",
+        ));
+    }
+    if !loopback && allow_insecure_loopback {
+        return Err(ProviderError::InvalidConfiguration(
+            "loopback permission is invalid for a remote endpoint",
+        ));
+    }
+    Ok(endpoint)
 }
 
 fn validate_loopback_endpoint(value: &str) -> Result<Url, ProviderError> {
@@ -255,6 +507,14 @@ fn fixture_config_runtime(
     base_url: &str,
     paths: ConfigPaths,
 ) -> Result<ConfigRuntime, ProviderHttpError> {
+    provider_config_runtime(base_url, true, paths)
+}
+
+fn provider_config_runtime(
+    base_url: &str,
+    allow_insecure_loopback: bool,
+    paths: ConfigPaths,
+) -> Result<ConfigRuntime, ProviderHttpError> {
     let base_url = serde_json::to_string(base_url)?;
     let document = ConfigDocument::parse(&format!(
         r#"
@@ -272,7 +532,7 @@ template = "{FIXTURE_TEMPLATE}"
 credential = "{FIXTURE_CREDENTIAL_REFERENCE}"
 base_url = {base_url}
 dialects = ["responses"]
-allow_insecure_loopback = true
+allow_insecure_loopback = {allow_insecure_loopback}
 
 [providers.{FIXTURE_PROFILE}.routes]
 responses = "{FIXTURE_ROUTE}"
@@ -414,7 +674,7 @@ fn serve_fixture(
 }
 
 fn validate_fixture_request(
-    stream: &mut TcpStream,
+    stream: &mut impl Read,
     expected_input: &str,
 ) -> Result<(), ProviderHttpError> {
     let mut bytes = Vec::new();
@@ -540,7 +800,7 @@ fn find_header_end(bytes: &[u8]) -> Option<usize> {
 }
 
 fn write_fixture_response(
-    stream: &mut TcpStream,
+    stream: &mut impl Write,
     status: &str,
     content_type: &str,
     body: &[u8],
@@ -635,7 +895,56 @@ impl From<ConfigRuntimeError> for ProviderHttpError {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
     use super::*;
+    use greentyper_core::config::{ConfigEpoch, ConfigLayers};
+    use greentyper_core::model::{ConfigEpochId, ProviderEpochId, ThreadId, TurnId};
+    use greentyper_core::provider::ProviderEpoch;
+    use rcgen::{CertifiedKey, generate_simple_self_signed};
+    use rustls::pki_types::PrivatePkcs8KeyDer;
+    use rustls::{ServerConfig, ServerConnection, StreamOwned};
+
+    use crate::credential_vault::InMemoryCredentialVault;
+
+    static NEXT_CONFIG: AtomicU64 = AtomicU64::new(1);
+
+    fn test_config_paths(name: &str) -> ConfigPaths {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time after epoch")
+            .as_nanos();
+        let stem = format!(
+            "greentyper-provider-http-{name}-{}-{nonce}-{}",
+            std::process::id(),
+            NEXT_CONFIG.fetch_add(1, Ordering::Relaxed)
+        );
+        ConfigPaths::new(
+            std::env::temp_dir().join(format!("{stem}-user")),
+            std::env::temp_dir().join(format!("{stem}-project")),
+        )
+    }
+
+    fn provider_request(profile: ProviderProfileSnapshot, input: &str) -> ProviderRequest {
+        ProviderRequest {
+            thread: ThreadId::new(1).expect("thread"),
+            turn: TurnId::new(1).expect("turn"),
+            config: ConfigEpoch::freeze(
+                ConfigEpochId::new(1).expect("Config Epoch"),
+                &ConfigLayers::default(),
+            )
+            .expect("Config"),
+            provider: ProviderEpoch::with_profile_snapshot(
+                ProviderEpochId::new(1).expect("Provider Epoch"),
+                FIXTURE_PROFILE,
+                FIXTURE_MODEL,
+                profile,
+            )
+            .expect("Provider Epoch"),
+            input: input.to_owned(),
+        }
+    }
 
     #[test]
     fn fixture_provider_rejects_non_loopback_and_redacts_authorization() {
@@ -648,10 +957,7 @@ mod tests {
         .into_iter()
         .enumerate()
         {
-            let paths = ConfigPaths::new(
-                std::env::temp_dir().join(format!("greentyper-provider-http-unit-{index}-user")),
-                std::env::temp_dir().join(format!("greentyper-provider-http-unit-{index}-project")),
-            );
+            let paths = test_config_paths(&format!("invalid-{index}"));
             let runtime = fixture_config_runtime(base_url, paths).expect("open repairable Config");
             assert!(!runtime.status().ready);
             assert!(runtime.selected_provider_profile().is_err());
@@ -659,10 +965,7 @@ mod tests {
 
         let listener = TcpListener::bind(("127.0.0.1", 0)).expect("loopback listener");
         let base_url = format!("http://{}", listener.local_addr().unwrap());
-        let paths = ConfigPaths::new(
-            std::env::temp_dir().join("greentyper-provider-http-unit-valid-user"),
-            std::env::temp_dir().join("greentyper-provider-http-unit-valid-project"),
-        );
+        let paths = test_config_paths("valid-loopback");
         let runtime = fixture_config_runtime(&base_url, paths).expect("valid fixture Config");
         let profile = runtime
             .selected_provider_profile()
@@ -672,5 +975,190 @@ mod tests {
         let debug = format!("{provider:?}");
         assert!(!debug.contains(SYNTHETIC_AUTHORIZATION));
         assert!(debug.contains("synthetic-redacted"));
+    }
+
+    #[test]
+    fn responses_provider_requires_origin_bound_credential_before_network() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("loopback listener");
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let paths = test_config_paths("missing-credential");
+        let runtime = fixture_config_runtime(&base_url, paths).expect("valid fixture Config");
+        let profile = runtime
+            .selected_provider_profile()
+            .expect("resolve fixture Provider Profile")
+            .expect("custom Provider Profile");
+        assert!(matches!(
+            ResponsesHttpProvider::with_timeout(
+                profile,
+                InMemoryCredentialVault::default(),
+                HTTP_TIMEOUT,
+            ),
+            Err(ProviderError::InvalidConfiguration(
+                "Provider credential binding was not found"
+            ))
+        ));
+    }
+
+    #[test]
+    fn configured_provider_fails_closed_for_non_simulator_epoch_without_snapshot() {
+        let legacy = ProviderEpoch::new(
+            ProviderEpochId::new(1).unwrap(),
+            "legacy-provider",
+            "legacy-model",
+        )
+        .expect("legacy Provider Epoch");
+
+        assert!(matches!(
+            ConfiguredProvider::from_epoch(&legacy, InMemoryCredentialVault::default()),
+            Err(ProviderError::InvalidConfiguration(
+                "non-simulator Provider Epoch has no frozen Profile"
+            ))
+        ));
+    }
+
+    #[test]
+    fn responses_endpoint_and_status_policy_fail_closed() {
+        assert!(
+            validate_responses_endpoint("https://provider.example/v1/responses", false).is_ok()
+        );
+        assert!(validate_responses_endpoint("http://127.0.0.1/v1/responses", true).is_ok());
+        for (endpoint, allow_insecure_loopback) in [
+            ("http://127.0.0.1/v1/responses", false),
+            ("http://198.51.100.1/v1/responses", false),
+            ("http://198.51.100.1/v1/responses", true),
+            ("https://provider.example/v1/responses", true),
+            ("https://user:password@provider.example/v1/responses", false),
+            ("https://provider.example/v1/responses?secret=value", false),
+            ("https://provider.example/v1/responses#fragment", false),
+        ] {
+            assert!(
+                validate_responses_endpoint(endpoint, allow_insecure_loopback).is_err(),
+                "endpoint must be rejected: {endpoint}"
+            );
+        }
+
+        assert!(matches!(
+            classify_http_status(StatusCode::UNAUTHORIZED),
+            ProviderError::InvalidConfiguration("Provider credential was rejected")
+        ));
+        assert!(matches!(
+            classify_http_status(StatusCode::BAD_REQUEST),
+            ProviderError::InvalidRequest("Responses HTTP request was rejected")
+        ));
+        assert!(matches!(
+            classify_http_status(StatusCode::FOUND),
+            ProviderError::InvalidResponse("Responses HTTP redirect was rejected")
+        ));
+        assert!(matches!(
+            classify_http_status(StatusCode::TOO_MANY_REQUESTS),
+            ProviderError::Unavailable { .. }
+        ));
+        assert!(matches!(
+            classify_http_status(StatusCode::SERVICE_UNAVAILABLE),
+            ProviderError::Unavailable { .. }
+        ));
+    }
+
+    #[test]
+    fn responses_provider_rejects_an_untrusted_https_certificate() {
+        let CertifiedKey { cert, signing_key } =
+            generate_simple_self_signed(vec!["localhost".to_owned()]).expect("test certificate");
+        let private_key = PrivatePkcs8KeyDer::from(signing_key.serialize_der());
+        let server_config = ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![cert.der().clone()], private_key.into())
+            .expect("TLS server config");
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("TLS listener");
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("TLS accept");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("TLS read timeout");
+            let connection =
+                ServerConnection::new(std::sync::Arc::new(server_config)).expect("TLS connection");
+            let mut stream = StreamOwned::new(connection, stream);
+            let mut byte = [0_u8; 1];
+            assert!(stream.read(&mut byte).is_err());
+        });
+
+        let base_url = format!("https://localhost:{}", address.port());
+        let runtime =
+            provider_config_runtime(&base_url, false, test_config_paths("untrusted-https"))
+                .expect("valid HTTPS Provider Config");
+        let profile = runtime
+            .selected_provider_profile()
+            .expect("resolve HTTPS Provider Profile")
+            .expect("HTTPS Provider Profile");
+        let scope = ProviderCredentialScope::from_profile(&profile).expect("credential scope");
+        let mut vault = InMemoryCredentialVault::default();
+        vault
+            .bind(&scope, SecretValue::new(SYNTHETIC_SECRET.to_vec()).unwrap())
+            .expect("bind HTTPS credential");
+        let mut provider =
+            ResponsesHttpProvider::with_timeout(profile.clone(), vault, Duration::from_secs(2))
+                .expect("HTTPS Responses provider");
+
+        assert!(matches!(
+            provider.run(&provider_request(profile, "untrusted https")),
+            Err(ProviderError::Unavailable { .. })
+        ));
+        server.join().expect("join TLS server");
+    }
+
+    #[test]
+    fn responses_provider_accepts_verified_https_with_origin_bound_credential() {
+        let CertifiedKey { cert, signing_key } =
+            generate_simple_self_signed(vec!["localhost".to_owned()]).expect("test certificate");
+        let certificate = cert.der().clone();
+        let private_key = PrivatePkcs8KeyDer::from(signing_key.serialize_der());
+        let server_config = ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![certificate.clone()], private_key.into())
+            .expect("TLS server config");
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("TLS listener");
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("TLS accept");
+            let connection =
+                ServerConnection::new(std::sync::Arc::new(server_config)).expect("TLS connection");
+            let mut stream = StreamOwned::new(connection, stream);
+            validate_fixture_request(&mut stream, "verified https").expect("HTTPS request");
+            write_fixture_response(
+                &mut stream,
+                "200 OK",
+                "text/event-stream",
+                SUCCESS_SSE,
+                true,
+            )
+            .expect("HTTPS response");
+        });
+
+        let base_url = format!("https://localhost:{}", address.port());
+        let paths = test_config_paths("verified-https");
+        let runtime =
+            provider_config_runtime(&base_url, false, paths).expect("valid HTTPS Provider Config");
+        let profile = runtime
+            .selected_provider_profile()
+            .expect("resolve HTTPS Provider Profile")
+            .expect("HTTPS Provider Profile");
+        let scope = ProviderCredentialScope::from_profile(&profile).expect("credential scope");
+        let mut vault = InMemoryCredentialVault::default();
+        vault
+            .bind(&scope, SecretValue::new(SYNTHETIC_SECRET.to_vec()).unwrap())
+            .expect("bind HTTPS credential");
+        let root = reqwest::Certificate::from_der(certificate.as_ref()).expect("client root");
+        let mut provider = ResponsesHttpProvider::with_timeout_and_root(
+            profile.clone(),
+            vault,
+            Duration::from_secs(2),
+            root,
+        )
+        .expect("HTTPS Responses provider");
+        let request = provider_request(profile, "verified https");
+        let events = provider.run(&request).expect("verified HTTPS response");
+
+        assert!(matches!(events.last(), Some(ProviderEvent::Completed(_))));
+        server.join().expect("join TLS server");
     }
 }

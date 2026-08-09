@@ -429,6 +429,16 @@ impl RuntimeKernel {
         }
     }
 
+    /// Returns the frozen Provider Epoch for the current non-terminal Turn.
+    ///
+    /// Product composition uses this after recovery to reconstruct the exact
+    /// Provider adapter without consulting mutable configuration.
+    #[must_use]
+    pub fn pending_provider_epoch(&self) -> Option<&ProviderEpoch> {
+        let pending = self.state.pending.as_ref()?;
+        self.state.providers.get(&pending.provider)
+    }
+
     #[must_use]
     pub fn team_snapshot(&self) -> Option<KernelTeamSnapshot> {
         self.team.as_ref().map(KernelTeam::snapshot)

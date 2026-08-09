@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -32,6 +32,34 @@ fn binary() -> Command {
         .env("APPDATA", &config_root)
         .env("XDG_CONFIG_HOME", &config_root);
     command
+}
+
+fn binary_with_config_root(config_root: &Path) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_greentyper"));
+    command
+        .env("HOME", config_root)
+        .env("APPDATA", config_root)
+        .env("XDG_CONFIG_HOME", config_root);
+    command
+}
+
+fn user_config_path(config_root: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        config_root.join("GreenTyper").join("config.toml")
+    }
+    #[cfg(target_os = "macos")]
+    {
+        config_root
+            .join("Library")
+            .join("Application Support")
+            .join("GreenTyper")
+            .join("config.toml")
+    }
+    #[cfg(all(not(windows), not(target_os = "macos")))]
+    {
+        config_root.join("greentyper").join("config.toml")
+    }
 }
 
 #[test]
@@ -123,6 +151,57 @@ fn resume_command_continues_a_durably_admitted_turn() {
     assert!(resumed.status.success(), "{resumed:?}");
     assert_eq!(resumed.stdout, b"simulated: continue\n");
     fs::remove_file(path).expect("cleanup Runtime ledger");
+}
+
+#[test]
+fn headless_uses_configured_provider_and_fails_closed_without_credential() {
+    let ledger = temp_path("configured-provider");
+    let config_root = temp_path("configured-provider-config");
+    let config_path = user_config_path(&config_root);
+    fs::create_dir_all(config_path.parent().unwrap()).expect("create config parent");
+    fs::write(
+        &config_path,
+        r#"schema_version = 1
+
+[provider]
+profile = "edge"
+model = "fixture-model"
+
+[providers.edge]
+template = "openai-compatible"
+credential = "edge-credential"
+base_url = "https://provider.invalid/v1"
+dialects = ["responses"]
+
+[providers.edge.routes]
+responses = "/responses"
+
+[providers.edge.pricing]
+source = "unknown"
+"#,
+    )
+    .expect("write Provider config");
+
+    let output = binary_with_config_root(&config_root)
+        .args(["headless", "--ledger"])
+        .arg(&ledger)
+        .args(["--input", "must not reach simulator"])
+        .output()
+        .expect("run configured headless command");
+    assert!(!output.status.success(), "{output:?}");
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Provider credential binding was not found")
+            || stderr.contains("provider unavailable"),
+        "{output:?}"
+    );
+    assert!(
+        !ledger.exists(),
+        "missing credentials must fail before durable Turn admission"
+    );
+
+    fs::remove_dir_all(config_root).expect("cleanup config root");
 }
 
 struct PanicProvider;

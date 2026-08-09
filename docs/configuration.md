@@ -50,8 +50,10 @@ last-valid repair state. The headless Runtime freezes the bootstrap projection
 new Turn. The schema registry currently exposes identity, type, writable
 scopes, application timing, credential-reference status, and editor identity;
 default/constraint/normalization/migration metadata, TUI and App Server
-surfaces, Provider Templates/catalogs, and the credential store remain Phase 1
-or later work.
+surfaces, and Provider Templates/catalogs remain Phase 1 or later work. The
+product now provides origin-bound credential bind, replace, test, and forget
+operations backed by Windows Credential Manager; non-Windows access fails
+closed until another platform backend is implemented.
 
 | Config Object | Type and constraint | Application timing |
 | --- | --- | --- |
@@ -100,6 +102,12 @@ Config Drafts, and accept `--dry-run` to return the normalized diff without
 committing. `--user-config` and `--project-config` select explicit absolute
 paths for tests and controlled automation; normal execution uses the platform
 user path and `.greentyper/config.toml` in the current project.
+
+The product CLI also exposes `credential bind`, `replace`, `test`, and `forget`
+for one lowercase secure-store reference, Provider Profile, and Provider Origin.
+Secret values never appear in command arguments or output: an interactive bind
+or replace uses a no-echo prompt, while controlled automation may provide one
+bounded value on standard input. Existing values are never returned.
 
 The App Server exposes the same Config Runtime operations, independent of its eventual wire encoding:
 
@@ -258,6 +266,6 @@ A Cost Estimate records its Price Schedule version and currency. Historical valu
 
 ## Credentials
 
-Credential values live in Windows Credential Manager or DPAPI-protected storage, never TOML, the Event Ledger, checkpoints, diagnostics, command history, or exported configuration. The Config Center can bind, replace, test, and forget a credential but cannot reveal its existing value.
+Credential values live in Windows Credential Manager or DPAPI-protected storage, never TOML, the Event Ledger, checkpoints, diagnostics, command history, or exported configuration. The current product backend uses the logged-in user's Windows Credential Manager set with local-machine persistence across that user's logon sessions. Product CLI operations can bind, replace, test, and forget a credential but cannot reveal its existing value. Other platforms currently fail closed.
 
 Credential scope includes Provider Profile or MCP identity and Provider Origin. Delegation does not propagate credentials implicitly.

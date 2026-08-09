@@ -152,6 +152,12 @@ fn provider_profile_snapshot_survives_recovery_and_rejects_mismatched_resume() {
 
     let (_, mismatched) = provider_profile_fixture("/different-responses");
     let mut runtime = RuntimeKernel::open(&path).expect("recover frozen Provider profile");
+    assert_eq!(
+        runtime
+            .pending_provider_epoch()
+            .and_then(|epoch| epoch.profile_snapshot()),
+        Some(&snapshot)
+    );
     let mut wrong = SnapshotProvider::new(mismatched);
     assert!(matches!(
         runtime.resume(&mut wrong),

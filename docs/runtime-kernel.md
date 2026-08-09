@@ -13,9 +13,10 @@ Agent Team execution path. The core Kernel owns the durable Team and Tool
 adapters, gates root admission, rebinds non-terminal Sessions, and reconciles
 prepared Tool effects. A fixture Provider driver can now normalize one OpenAI
 Responses function call, cross Tool Runtime approval and effect durability,
-continue the Provider once, and prepare canonical output. The product CLI does
-not consume that seam and the deterministic simulator is not a provider wire
-adapter. The
+continue the Provider once, and prepare canonical output. The product CLI now
+drives configured Responses profiles through the provider-neutral seam and
+retains the deterministic simulator for the unconfigured default; it still
+does not expose the Tool approval/continuation path. The
 provisional checksummed file Ledger is not yet the recorded SQLite-versus-
 append-log technology choice.
 
@@ -235,15 +236,19 @@ greentyper config get PATH
 greentyper config set PATH VALUE --scope user|project [--dry-run]
 greentyper config reset PATH --scope user|project [--dry-run]
 greentyper config repair --scope user|project
+greentyper credential bind REFERENCE --profile PROFILE --origin URL
+greentyper credential replace REFERENCE --profile PROFILE --origin URL
+greentyper credential test REFERENCE --profile PROFILE --origin URL
+greentyper credential forget REFERENCE --profile PROFILE --origin URL
 ```
 
 Without `--ledger`, the product uses `%LOCALAPPDATA%\GreenTyper` on Windows,
 `~/Library/Application Support/GreenTyper` on macOS, and the XDG state location
-on other Unix systems. The headless simulator output is synthetic and bounded.
-Headless stdout is the raw canonical UTF-8 text sink, not a terminal-safe or
-JSON framing layer. Future untrusted Provider output needs an explicit framing
-or presentation policy before this interface becomes a public automation
-protocol.
+on other Unix systems. Without a configured Provider Profile, headless uses the
+synthetic bounded simulator. Headless stdout is the raw canonical UTF-8 text
+sink, not a terminal-safe or JSON framing layer. Untrusted configured Provider
+output still needs an explicit framing or presentation policy before this
+interface becomes a public automation protocol.
 
 ## Still Pending
 
@@ -254,14 +259,14 @@ protocol.
   root gate, and one consumable complete non-terminal Session bundle per
   validated open without an ID-to-session conversion.
 - Complete Config Schema default/constraint/normalization/migration metadata,
-  TUI/App Server editors, Provider Templates/catalogs, and credential storage.
-- Production remote Provider transport, secure credential lookup and
-  origin-bound secret routing, TLS/proxy policy, reconnect policy, multiple or
-  parallel Tool calls, resumable result references, broader canonical Items,
-  and the unimplemented Provider event kinds. The bounded SSE, first OpenAI
-  Responses decoder, neutral normalizer, typed frozen Provider Profile metadata,
-  one-Tool fixture Kernel path, and a private Config-driven loopback HTTP Runtime
-  tracer are present.
+  TUI/App Server editors, and Provider Templates/catalogs.
+- Live-provider validation, non-Windows credential backends, configurable proxy
+  policy, broader TLS platform evidence, reconnect policy, multiple or parallel
+  Tool calls, resumable result references, broader canonical Items, and the
+  unimplemented Provider event kinds. The bounded SSE, first OpenAI Responses
+  decoder, neutral normalizer, typed frozen Provider Profile metadata,
+  origin-bound Windows credential lookup, configured HTTPS adapter, and
+  one-Tool fixture Kernel path are present.
 - Broader Tool adapters and sandboxing: the private fixed `local.echo` tracer,
   Unix process-group termination, and Windows Job wrapper are present;
   caller-selected process policy, complete Windows lifetime/resource evidence,

@@ -78,33 +78,35 @@ cargo run -p greentyper -- config get provider.model
 The core Agent Team policy, Config Runtime, recoverable single-Agent Runtime,
 and first Tool Runtime policy slice compile and run through interface-level and
 cross-process headless tests. Config currently includes versioned TOML, drafts,
-provenance, atomic replacement, and repair, but not the eventual TUI/App Server
-editors, catalogs, or credential store. Tool call identity, argument hashing,
-approval binding, independent authority checks, and ambiguous-effect
-reconciliation are durable core policy. The product now has a private
-`local.echo` process tracer: it launches only a fixed same-binary child after
-the durable effect boundary, clears ambient environment and working-directory
-state, bounds I/O and time, terminates a Unix process group, and assigns the
-Windows child to a constrained Job Object before execution. It rejects
-filesystem and network resources and is not a general process sandbox,
-network Tool, or MCP adapter. The product also has a private loopback Responses
-HTTP tracer with a real no-proxy, no-redirect client, bounded streaming decode,
-a fixed deadline, synthetic authorization, and fixed request validation. Its
-Config Runtime resolves a typed Provider Profile snapshot and freezes the
-normalized loopback origin, Responses route, dialect, pricing decision, and
-opaque synthetic credential reference into the Provider Epoch. It is not a
-remote Provider or real credential-routing path. The core has bounded generic
-SSE framing and a strict OpenAI Responses dialect decoder for text, function
-calls, terminal states, and optional usage. A core fixture path normalizes one
-Responses function call,
-crosses durable Tool approval/effect policy, continues the Provider once, and
-prepares canonical output without repeating successful or ambiguous effects.
-The public product path still uses the deterministic simulator: no production
-remote Provider transport, credential-vault routing, user-facing Tool approval/delivery
-path, or retry path exists yet. The `local.echo` and loopback Provider tracers
-are exercised through internal harnesses rather than public commands. The file
-Ledger remains provisional. Real Provider and Tool adapters, Workspace, TUI,
-and App Server work remains. The acceptance runner can emit bound raw evidence,
+provenance, atomic replacement, repair, and typed Provider Profile snapshots,
+but not the eventual TUI/App Server editors or catalogs. The product CLI can
+bind, replace, test, and forget origin-bound credential references without
+putting secret material in arguments, Config, or Ledgers. Windows stores values
+in the current user's Credential Manager; other platforms currently fail
+closed. Tool call identity, argument hashing, approval binding, independent
+authority checks, and ambiguous-effect reconciliation are durable core policy.
+The product has a private `local.echo` process tracer: it launches only a fixed
+same-binary child after the durable effect boundary, clears ambient environment
+and working-directory state, bounds I/O and time, terminates a Unix process
+group, and assigns the Windows child to a constrained Job Object before
+execution. It rejects filesystem and network resources and is not a general
+process sandbox, network Tool, or MCP adapter.
+
+Configured OpenAI-compatible Responses profiles now run through a no-proxy,
+no-redirect HTTPS client, origin-bound credential lookup, bounded streaming
+decode, and a fixed deadline. Config Runtime freezes the normalized origin,
+Responses route, dialect, pricing decision, and opaque credential reference in
+the Provider Epoch; `resume` reconstructs the adapter from that snapshot. A
+private loopback fixture retains synthetic authorization for deterministic
+transport tests. The core also normalizes one Responses function call, crosses
+durable Tool approval/effect policy, continues the Provider once, and prepares
+canonical output without repeating successful or ambiguous effects. Headless
+execution keeps the deterministic simulator when no custom profile is selected.
+Live-provider validation, configurable proxy policy, reconnect/retry,
+user-facing Tool approval/delivery, broader Provider and Tool adapters,
+Workspace, TUI, and App Server work remain. The `local.echo` and loopback
+Provider tracers remain internal harnesses. The file Ledger remains
+provisional. The acceptance runner can emit bound raw evidence,
 but is not yet a full Target Acceptance Run. Follow the
 [implementation plan](docs/implementation-plan.md).
 

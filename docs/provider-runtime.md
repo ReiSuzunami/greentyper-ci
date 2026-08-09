@@ -14,15 +14,17 @@ They are not Runtime authority or durable state. A separate normalizer reduces
 the supported terminal stream to provider-neutral text deltas, one canonical
 function call, and one optional Usage Record. The Runtime Kernel can drive that
 neutral interface through Tool Runtime approval and one Tool continuation. The
-product has a private loopback-only HTTP tracer that sends one real Responses
-request through a no-proxy, no-redirect blocking client, streams the response
-through this decoder, and drives the single-Agent Runtime. The public CLI still
-uses the deterministic simulator. The private tracer resolves a selected
-Provider Profile through Config Runtime and freezes its normalized loopback
-origin, Responses route, dialect, pricing source, and opaque synthetic
-credential reference into the Provider Epoch. No production remote endpoint,
-credential-vault lookup, retry policy, or product delivery is wired to this
-decoder yet.
+product has a configured Responses HTTP adapter that sends one request through
+a no-proxy, no-redirect blocking client, streams the response through this
+decoder, and drives the single-Agent Runtime. Config Runtime resolves the
+selected Provider Profile and freezes its normalized origin, Responses route,
+dialect, pricing source, and opaque credential reference in the Provider Epoch.
+Before each request, the adapter resolves secret material from an origin-bound
+product vault; remote origins require HTTPS. The headless CLI uses this adapter
+for configured profiles and retains the deterministic simulator only when no
+custom profile is selected. Windows Credential Manager is the current platform
+backend; non-Windows product credential access fails closed. Retry, reconnect,
+live-provider validation, and product Tool delivery remain separate work.
 
 ## Interface
 
@@ -140,32 +142,36 @@ replays all three Ledgers. Companion tests cover stale Sessions, ambiguous Tool
 effects, non-UTF-8 Tool output, and process death after durable Tool success
 without effect repetition.
 
-Product integration tests exercise the private HTTP tracer against an actual
-loopback TCP server. Config Runtime resolves the fixture profile and the adapter
-uses its frozen Responses endpoint; the server validates that route, model,
-input, streaming flag, and synthetic Authorization header, then fragments a
-bounded SSE response across network writes. Tests prove canonical Runtime
-output and replay, fixed classification for HTTP 503 and request timeout, and
-exclusion of the upstream error body from stderr and the Runtime Ledger. The
-adapter rejects non-loopback URLs, disables redirects and proxies, and exists
-only as transport evidence; it is not a credential or live-Provider path.
+Product integration tests exercise the adapter against an actual loopback TCP
+server. Config Runtime resolves the fixture profile and the adapter uses its
+frozen Responses endpoint; the server validates that route, model, input,
+streaming flag, and synthetic Authorization header, then fragments a bounded
+SSE response across network writes. Tests prove canonical Runtime output and
+replay, fixed classification for HTTP 503 and request timeout, and exclusion of
+the upstream error body from stderr and the Runtime Ledger. Module tests drive
+a locally generated HTTPS certificate through an explicitly trusted test root,
+reject the same certificate under default trust, verify endpoint and status
+classification, require an origin-bound credential before network access, and
+redact Authorization. The fixture remains synthetic and does not constitute a
+live-provider test.
 
 The event shapes are checked against the official
 [OpenAI Responses streaming event reference](https://developers.openai.com/api/reference/resources/responses/streaming-events/).
 
 ## Still Pending
 
-- A production remote HTTP/SSE transport, secure credential lookup and
-  origin-bound secret routing, Provider Template defaults/catalogs, TLS/proxy
-  policy, reconnect classification, and retry policy. The current concrete
-  transport is loopback-only, uses frozen fixture Profile metadata, and sends a
-  fixed synthetic credential rather than resolving secret material.
+- Live-provider validation, Provider Template defaults/catalogs, configurable
+  proxy policy, broader TLS platform evidence, reconnect classification, and
+  retry policy. The current adapter disables proxy discovery and redirects and
+  classifies one complete request; it does not reconnect or retry partial
+  streams.
 - Broader normalization into the eventual provider-neutral canonical Item
   model, including reasoning, refusal, annotations, and hosted Tools.
 - Reasoning, refusal, annotation, hosted-tool, and other Responses event kinds
   not listed above.
 - Multiple Tool calls, parallel calls, persisted resumable Provider
   continuation data, and durable storage of a redacted Tool result reference.
-- Product presentation and acknowledgement, raw diagnostic artifact policy,
-  fuzzing, reconnect fixtures, live credential-gated tests, and cross-process
-  crash coverage around Provider delivery boundaries.
+- Product Tool presentation and acknowledgement, non-Windows credential
+  backends, raw diagnostic artifact policy, fuzzing, reconnect fixtures, live
+  credential-gated tests, and cross-process crash coverage around Provider
+  delivery boundaries.

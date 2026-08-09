@@ -24,8 +24,8 @@ The only library package. It contains the canonical model, Config Runtime,
 provisional file Ledger, deterministic Provider seam, bounded generic SSE and
 OpenAI Responses dialect decoding, recoverable single-Agent Runtime Kernel,
 Agent Team Runtime, and durable Tool Runtime policy. Later slices add Workspace
-Coordinator, Context Engine, and concrete Provider/Tool integration behind
-narrow interfaces.
+Coordinator and Context Engine; concrete Provider and Tool integration stays
+behind the narrow core interfaces and is owned by the product package.
 
 Provider simulators, in-memory stores, and other test adapters live beside the interfaces they exercise. Internal helpers are not promoted into packages merely to make them independently visible.
 
@@ -33,7 +33,7 @@ The core must build and run pure tests on macOS ARM. Platform-specific I/O enter
 
 ### `greentyper`
 
-The shipped product executable. It owns composition, TUI, CLI, App Server, and concrete production adapters. Audited Windows wrappers for terminal, process, credential, and transport facilities remain private to this package unless a second real caller proves a smaller shared package is needed.
+The shipped product executable. It owns composition, TUI, CLI, App Server, and concrete production adapters. Its current private adapters include configured Responses HTTP/SSE, origin-bound Windows Credential Manager access, and the fixed `local.echo` process tracer. Audited Windows wrappers for terminal, process, credential, and transport facilities remain private to this package unless a second real caller proves a smaller shared package is needed.
 
 Presentation translates user intent into core interfaces. It does not reimplement runtime, configuration, usage, or authority policy.
 

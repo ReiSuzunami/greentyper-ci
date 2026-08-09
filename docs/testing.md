@@ -91,12 +91,13 @@ reason exclusion from the Tool Ledger and Debug output, and explicit ambiguous-
 effect reconciliation. Fault injection proves that a prepared-effect append
 failure invokes no executor,
 while an outcome append failure after one invocation poisons the writer and
-reopens in a reconciliation-required state. The private loopback tracer now
-binds typed, frozen Provider Profile and route metadata. Production remote
-Provider transport, secure credential-vault/origin binding, broader canonical Runtime Items,
-reasoning/refusal/annotation and other unimplemented
-Responses event kinds, reconnect/retry fixtures, MCP adapters, receipt delivery
-to a user-visible sink, the cross-process Tool byte-offset matrix, and final
+reopens in a reconciliation-required state. The configured Responses adapter
+now binds typed, frozen Provider Profile and route metadata to origin-scoped
+credential lookup. Live-provider validation, non-Windows credential backends,
+configurable proxy policy, broader TLS platform evidence, broader canonical
+Runtime Items, reasoning/refusal/annotation and other unimplemented Responses
+event kinds, reconnect/retry fixtures, MCP adapters, receipt delivery to a
+user-visible Tool sink, the cross-process Tool byte-offset matrix, and final
 reconciliation presentation remain pending.
 Migration/backup remains in the candidate storage harness rather than these
 provisional product adapters.
@@ -123,14 +124,18 @@ events, decode the historical schema-2 Provider Epoch shape separately, and
 round-trip schema-3 Provider Profile snapshots while rejecting fingerprint
 tampering.
 
-Product integration tests also run a concrete loopback Responses HTTP tracer.
-They resolve and freeze the fixture Provider Profile through Config Runtime,
-then validate its POST route, model, input, streaming flag, and synthetic
-Authorization header; stream a fragmented SSE fixture through the core decoder
-and Runtime; replay the canonical assistant item; classify HTTP 503 and request
-timeout without exposing an upstream private marker; and reject non-loopback
-endpoints. This does not cover remote TLS, real credentials, proxy
-authentication, reconnect/retry, live Providers, or product delivery.
+Product integration tests also run the configured Responses adapter against a
+concrete loopback HTTP tracer. They resolve and freeze the fixture Provider
+Profile through Config Runtime, then validate its POST route, model, input,
+streaming flag, and synthetic Authorization header; stream a fragmented SSE
+fixture through the core decoder and Runtime; replay the canonical assistant
+item; classify HTTP 503 and request timeout without exposing an upstream
+private marker; and reject unsafe endpoints. Module tests verify a locally
+trusted HTTPS root, reject an untrusted certificate, enforce origin-bound
+credential lookup before network access, and cover status/endpoint policy.
+Windows-only tests exercise Credential Manager bind, replace, resolve, and
+forget. This does not cover live credentials, proxy authentication,
+reconnect/retry, live Providers, or product Tool delivery.
 
 ### Crash and Recovery Tests
 
