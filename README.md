@@ -6,7 +6,7 @@ GreenTyper is a Windows-first coding-agent runtime written in Rust. It is design
 
 GreenTyper is an independent product with selected Codex-compatible protocol and Agent semantics. It is not a Codex CLI clone, a command-compatible replacement, or a wrapper around another agent process.
 
-> Status: feature implementation is active. The repository now contains deterministic Agent Team policy, a recoverable single-Agent headless spine, and a core Tool Runtime seam with durable call identity, approval binding, prepared-effect ordering, and explicit reconciliation. It is not yet a complete coding-agent product.
+> Status: feature implementation is active. The repository now contains deterministic Agent Team policy, a recoverable single-Agent headless spine, a bounded OpenAI Responses SSE decoder, and a core Tool Runtime seam with durable call identity, approval binding, prepared-effect ordering, and explicit reconciliation. It is not yet a complete coding-agent product.
 
 > Repository topology: [`ReiSuzunami/greentyper`](https://github.com/ReiSuzunami/greentyper) is the private canonical repository. [`ReiSuzunami/greentyper-ci`](https://github.com/ReiSuzunami/greentyper-ci) is a temporary public, non-authoritative mirror used only for hosted CI and build artifacts. See the [repository policy](docs/repository-policy.md).
 
@@ -40,6 +40,7 @@ Initial design budgets include a headless idle Private Bytes limit of 25 MB, a s
 - [Implementation plan](docs/implementation-plan.md)
 - [Agent orchestration](docs/agent-orchestration.md)
 - [Recoverable single-Agent Runtime](docs/runtime-kernel.md)
+- [Provider Runtime](docs/provider-runtime.md)
 - [Tool Runtime](docs/tool-runtime.md)
 - [Measurement harness](docs/measurement-harness.md)
 - [Technology benchmarks](docs/technology-benchmarks.md)
@@ -81,10 +82,14 @@ provenance, atomic replacement, and repair, but not the eventual TUI/App Server
 editors, catalogs, or credential store. Tool call identity, argument hashing,
 approval binding, independent authority checks, and ambiguous-effect
 reconciliation are durable core policy; no real process, network, or MCP Tool
-adapter exists yet. The current Provider is a deterministic simulator and the
-file Ledger is provisional. Real Provider, Tool adapters, Workspace, TUI, and
-App Server work remains. The acceptance runner can emit bound raw evidence, but
-is not yet a full Target Acceptance Run. Follow the [implementation plan](docs/implementation-plan.md).
+adapter exists yet. The core also has bounded generic SSE framing and a strict
+OpenAI Responses dialect decoder for text, function calls, terminal states, and
+optional usage. The Runtime Kernel still uses a deterministic Provider
+simulator: no real network transport, credential routing, canonical Runtime or
+Tool mapping, or retry path consumes the decoder yet. The file Ledger remains
+provisional. Real Provider and Tool adapters, Workspace, TUI, and App Server
+work remains. The acceptance runner can emit bound raw evidence, but is not yet
+a full Target Acceptance Run. Follow the [implementation plan](docs/implementation-plan.md).
 
 ## License
 

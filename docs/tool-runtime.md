@@ -109,8 +109,9 @@ and raw-resource exclusion, ambiguous blocking, explicit reconciliation,
 pre-effect durability failure with zero executor calls, and post-effect outcome
 failure with exactly one executor call.
 
-Still pending: Responses SSE/tool-call assembly, a real local-process executor,
-Windows Job Object lifetime and resource enforcement, filesystem/network/MCP
-adapters, credential-vault integration, product approval and result delivery,
-cross-process byte-offset termination around every effect boundary, fuzzing,
-and production storage migration.
+Still pending: mapping the implemented Responses dialect function-call facts
+into Tool requests through a concrete Provider driver, a real local-process
+executor, Windows Job Object lifetime and resource enforcement,
+filesystem/network/MCP adapters, credential-vault integration, product
+approval and result delivery, cross-process byte-offset termination around
+every effect boundary, fuzzing, and production storage migration.

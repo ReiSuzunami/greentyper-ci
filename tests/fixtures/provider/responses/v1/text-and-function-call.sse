@@ -1,0 +1,46 @@
+event: response.created
+data: {"type":"response.created","sequence_number":1,"response":{"id":"resp_fixture_1","object":"response","status":"in_progress","output":[],"usage":null},"future_field":"ignored"}
+
+event: response.in_progress
+data: {"type":"response.in_progress","sequence_number":2,"response":{"id":"resp_fixture_1","status":"in_progress"}}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","sequence_number":3,"output_index":0,"item":{"id":"msg_fixture_1","type":"message","status":"in_progress","role":"assistant","content":[]}}
+
+event: response.content_part.added
+data: {"type":"response.content_part.added","sequence_number":4,"item_id":"msg_fixture_1","output_index":0,"content_index":0,"part":{"type":"output_text","text":"","annotations":[],"logprobs":[]}}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","sequence_number":5,"item_id":"msg_fixture_1","output_index":0,"content_index":0,"delta":"Hello "}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","sequence_number":6,"item_id":"msg_fixture_1","output_index":0,"content_index":0,"delta":"\u4e2d"}
+
+event: response.output_text.done
+data: {"type":"response.output_text.done","sequence_number":7,"item_id":"msg_fixture_1","output_index":0,"content_index":0,"text":"Hello \u4e2d"}
+
+event: response.content_part.done
+data: {"type":"response.content_part.done","sequence_number":8,"item_id":"msg_fixture_1","output_index":0,"content_index":0,"part":{"type":"output_text","text":"Hello \u4e2d","annotations":[],"logprobs":[]}}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","sequence_number":9,"output_index":0,"item":{"id":"msg_fixture_1","type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":"Hello \u4e2d","annotations":[],"logprobs":[]}]}}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","sequence_number":10,"output_index":1,"item":{"id":"fc_fixture_1","type":"function_call","status":"in_progress","call_id":"call_fixture_1","name":"weather","arguments":""}}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","sequence_number":11,"item_id":"fc_fixture_1","output_index":1,"delta":"{\"unit\":\"c\",\"city\":\"\\u9999"}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","sequence_number":12,"item_id":"fc_fixture_1","output_index":1,"delta":"\\u6e2f\"}"}
+
+event: response.function_call_arguments.done
+data: {"type":"response.function_call_arguments.done","sequence_number":13,"item_id":"fc_fixture_1","output_index":1,"name":"weather","arguments":"{\"unit\":\"c\",\"city\":\"\\u9999\\u6e2f\"}"}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","sequence_number":14,"output_index":1,"item":{"id":"fc_fixture_1","type":"function_call","status":"completed","call_id":"call_fixture_1","name":"weather","arguments":"{\"unit\":\"c\",\"city\":\"\\u9999\\u6e2f\"}"}}
+
+event: response.completed
+data: {"type":"response.completed","sequence_number":15,"response":{"id":"resp_fixture_1","object":"response","status":"completed","service_tier":"default","output":[],"usage":{"input_tokens":11,"input_tokens_details":{"cached_tokens":3,"cache_write_tokens":1},"output_tokens":7,"output_tokens_details":{"reasoning_tokens":2},"total_tokens":18}}}
+
+: fixture end

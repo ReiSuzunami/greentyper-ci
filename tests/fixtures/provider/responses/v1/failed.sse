@@ -1,0 +1,7 @@
+event: response.created
+data: {"type":"response.created","sequence_number":1,"response":{"id":"resp_failed_1","status":"in_progress"}}
+
+event: response.failed
+data: {"type":"response.failed","sequence_number":4,"response":{"id":"resp_failed_1","status":"failed","error":{"code":"server_error","message":"synthetic fixture failure"},"usage":null}}
+
+: fixture end

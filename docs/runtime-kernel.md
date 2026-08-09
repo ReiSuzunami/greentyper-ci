@@ -12,7 +12,9 @@ This slice is deliberately smaller than the full Provider Runtime and product
 Agent Team execution path. The core Kernel can own the durable Team and Tool
 adapters, gate root admission, rebind non-terminal Sessions, and reconcile
 prepared Tool effects, but the CLI and Provider/Tool drivers do not yet consume
-that seam. The deterministic simulator is not a provider wire adapter. The
+that seam. The deterministic simulator is not a provider wire adapter. Core
+now contains bounded SSE framing and an OpenAI Responses dialect decoder, but
+the Kernel does not consume those dialect facts yet. The
 provisional checksummed file Ledger is not yet the recorded SQLite-versus-
 append-log technology choice.
 
@@ -208,8 +210,10 @@ protocol.
   validated open without an ID-to-session conversion.
 - Complete Config Schema default/constraint/normalization/migration metadata,
   TUI/App Server editors, Provider Templates/catalogs, and credential storage.
-- Real provider dialects, transport, reconnect policy, credentials, and usage
-  normalization.
+- Concrete Provider transport and Kernel integration, credential/origin
+  binding, reconnect policy, normalization into canonical Runtime Items and
+  complete Usage Records, and the unimplemented Provider event kinds. The
+  bounded SSE and first OpenAI Responses dialect decoder are present in core.
 - Concrete Tool adapters and sandboxing: local process launch, Windows Job
   Objects, filesystem/network enforcement, MCP, product approval UX, and
   credential resolution. Core call identity, Approval Grant binding, prepared-

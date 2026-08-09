@@ -1,5 +1,6 @@
 use super::*;
 use futures_util::StreamExt;
+use greentyper_core::provider::sse::{SseEvent, SseLimits, SseParser};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::io::{self, Read, Write};
@@ -22,6 +23,13 @@ const MAX_SSE_LINE_BYTES: usize = 8 * 1024;
 const SERVER_POLL_INTERVAL: Duration = Duration::from_millis(2);
 const CONNECTION_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const CLIENT_DEADLINE: Duration = Duration::from_secs(2);
+
+fn transport_sse_parser() -> SseParser {
+    SseParser::new(
+        SseLimits::new(MAX_SSE_BYTES, MAX_SSE_LINE_BYTES)
+            .expect("transport benchmark SSE limits are valid"),
+    )
+}
 
 pub(super) fn catalog_entry() -> serde_json::Value {
     let mut implementations = Vec::new();
@@ -81,12 +89,6 @@ struct TransportFixture {
     expected_digest: String,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
-struct SseEvent {
-    event: String,
-    data: String,
-}
-
 #[derive(Clone)]
 struct ServerScenario {
     success_fragments: Vec<Vec<u8>>,
@@ -103,18 +105,9 @@ impl ServerScenario {
 fn validate_fixture(fixture: &TransportFixture) -> AppResult<ServerScenario> {
     SchemaKind::DeterministicFixture.require_current(fixture.schema_version)?;
     let expected_events = vec![
-        SseEvent {
-            event: "message".into(),
-            data: "alpha".into(),
-        },
-        SseEvent {
-            event: "delta".into(),
-            data: "中 euro €\nline two".into(),
-        },
-        SseEvent {
-            event: "done".into(),
-            data: "[DONE]".into(),
-        },
+        SseEvent::new("message", "alpha"),
+        SseEvent::new("delta", "中 euro €\nline two"),
+        SseEvent::new("done", "[DONE]"),
     ];
     if fixture.comparison_id != "transport"
         || fixture.workload_id != "loopback-sse"
@@ -147,7 +140,7 @@ fn validate_fixture(fixture: &TransportFixture) -> AppResult<ServerScenario> {
         .try_into()
         .map_err(|_| cli_error("transport cancel fixture must contain two fragments"))?;
 
-    let mut parser = SseParser::default();
+    let mut parser = transport_sse_parser();
     for fragment in &success_fragments {
         parser.push(fragment)?;
     }
@@ -158,7 +151,7 @@ fn validate_fixture(fixture: &TransportFixture) -> AppResult<ServerScenario> {
         ));
     }
 
-    let mut cancel_parser = SseParser::default();
+    let mut cancel_parser = transport_sse_parser();
     cancel_parser.push(&cancel_fragments[0])?;
     if cancel_parser.events() != fixture.expected_events.get(..1).unwrap_or_default() {
         return Err(cli_error(
@@ -407,114 +400,23 @@ fn canonical_result_digest(
         canonical.push_str(label);
         canonical.push('=');
         for event in events {
-            canonical.push_str(&event.event);
+            canonical.push_str(event.event());
             canonical.push(':');
-            canonical.push_str(&event.data);
+            canonical.push_str(event.data());
             canonical.push(';');
         }
     }
     canonical.push_str("|http=503|timeout=1|cancel=");
     for event in &result.cancelled_events {
-        canonical.push_str(&event.event);
+        canonical.push_str(event.event());
         canonical.push(':');
-        canonical.push_str(&event.data);
+        canonical.push_str(event.data());
         canonical.push(';');
     }
     canonical.push_str(&format!(
         "|origin_requests={origin_requests}|proxy_requests={proxy_requests}|credential_leak_bytes=0"
     ));
     sha256_bytes(canonical.as_bytes())
-}
-
-#[derive(Default)]
-struct SseParser {
-    buffer: Vec<u8>,
-    event_type: Option<String>,
-    data_lines: Vec<String>,
-    events: Vec<SseEvent>,
-    total_bytes: usize,
-}
-
-impl SseParser {
-    fn push(&mut self, chunk: &[u8]) -> AppResult<()> {
-        self.push_inner(chunk, false).map(|_| ())
-    }
-
-    fn push_until_first_event(&mut self, chunk: &[u8]) -> AppResult<bool> {
-        self.push_inner(chunk, true)
-    }
-
-    fn push_inner(&mut self, chunk: &[u8], stop_after_first_event: bool) -> AppResult<bool> {
-        self.total_bytes = self
-            .total_bytes
-            .checked_add(chunk.len())
-            .ok_or_else(|| cli_error("SSE byte count overflow"))?;
-        if self.total_bytes > MAX_SSE_BYTES {
-            return Err(cli_error("SSE response exceeds the benchmark byte limit"));
-        }
-        self.buffer.extend_from_slice(chunk);
-        while let Some(newline) = self.buffer.iter().position(|byte| *byte == b'\n') {
-            if newline > MAX_SSE_LINE_BYTES {
-                return Err(cli_error("SSE line exceeds the benchmark byte limit"));
-            }
-            let mut line = self.buffer.drain(..=newline).collect::<Vec<_>>();
-            line.pop();
-            if line.last() == Some(&b'\r') {
-                line.pop();
-            }
-            self.process_line(&line)?;
-            if stop_after_first_event && !self.events.is_empty() {
-                return Ok(true);
-            }
-        }
-        if self.buffer.len() > MAX_SSE_LINE_BYTES {
-            return Err(cli_error("SSE line exceeds the benchmark byte limit"));
-        }
-        Ok(false)
-    }
-
-    fn process_line(&mut self, line: &[u8]) -> AppResult<()> {
-        if line.is_empty() {
-            self.dispatch();
-            return Ok(());
-        }
-        if line[0] == b':' {
-            return Ok(());
-        }
-        let line = std::str::from_utf8(line)
-            .map_err(|_| cli_error("SSE line is not valid UTF-8 after framing"))?;
-        let (field, value) = line.split_once(':').unwrap_or((line, ""));
-        let value = value.strip_prefix(' ').unwrap_or(value);
-        match field {
-            "event" => self.event_type = Some(value.into()),
-            "data" => self.data_lines.push(value.into()),
-            _ => {}
-        }
-        Ok(())
-    }
-
-    fn dispatch(&mut self) {
-        if !self.data_lines.is_empty() {
-            self.events.push(SseEvent {
-                event: self.event_type.take().unwrap_or_else(|| "message".into()),
-                data: self.data_lines.join("\n"),
-            });
-        } else {
-            self.event_type = None;
-        }
-        self.data_lines.clear();
-    }
-
-    fn events(&self) -> &[SseEvent] {
-        &self.events
-    }
-
-    fn finish(self) -> AppResult<Vec<SseEvent>> {
-        if !self.buffer.is_empty() || self.event_type.is_some() || !self.data_lines.is_empty() {
-            return Err(cli_error("SSE response ended with an incomplete event"));
-        }
-        Ok(self.events)
-    }
 }
 
 struct StreamRead {
@@ -688,7 +590,7 @@ impl CandidateAdapter for ReqwestAdapter {
         }
         let stream = response.bytes_stream();
         futures_util::pin_mut!(stream);
-        let mut parser = SseParser::default();
+        let mut parser = transport_sse_parser();
         let mut chunks = 0_u64;
         let mut body_bytes = 0_u64;
         while let Some(chunk) = stream.next().await {
@@ -757,7 +659,7 @@ impl CandidateAdapter for ReqwestAdapter {
         }
         let stream = response.bytes_stream();
         futures_util::pin_mut!(stream);
-        let mut parser = SseParser::default();
+        let mut parser = transport_sse_parser();
         let mut chunks = 0_u64;
         let mut body_bytes = 0_u64;
         while let Some(chunk) = stream.next().await {
@@ -834,7 +736,7 @@ impl CandidateAdapter for WinHttpWrestAdapter {
         }
         let stream = response.bytes_stream();
         futures_util::pin_mut!(stream);
-        let mut parser = SseParser::default();
+        let mut parser = transport_sse_parser();
         let mut chunks = 0_u64;
         let mut body_bytes = 0_u64;
         while let Some(chunk) = stream.next().await {
@@ -903,7 +805,7 @@ impl CandidateAdapter for WinHttpWrestAdapter {
         }
         let stream = response.bytes_stream();
         futures_util::pin_mut!(stream);
-        let mut parser = SseParser::default();
+        let mut parser = transport_sse_parser();
         let mut chunks = 0_u64;
         let mut body_bytes = 0_u64;
         while let Some(chunk) = stream.next().await {
@@ -1335,7 +1237,7 @@ mod tests {
         let fixture: TransportFixture =
             serde_json::from_str(TRANSPORT_FIXTURE_JSON).expect("transport fixture");
         let scenario = validate_fixture(&fixture).expect("valid transport fixture");
-        let mut parser = SseParser::default();
+        let mut parser = transport_sse_parser();
         for fragment in &scenario.success_fragments {
             parser.push(fragment).expect("incremental SSE parse");
         }
@@ -1377,30 +1279,24 @@ mod tests {
 
     #[test]
     fn malformed_or_unbounded_sse_fails_closed() {
-        let mut parser = SseParser::default();
+        let mut parser = transport_sse_parser();
         assert!(parser.push(&vec![b'a'; MAX_SSE_LINE_BYTES + 1]).is_err());
-        let mut parser = SseParser::default();
+        let mut parser = transport_sse_parser();
         assert!(parser.push(b"data: \xff\n\n").is_err());
-        let mut parser = SseParser::default();
+        let mut parser = transport_sse_parser();
         parser.push(b"data: incomplete").expect("bounded fragment");
         assert!(parser.finish().is_err());
     }
 
     #[test]
     fn cancellation_stops_at_the_first_event_inside_a_coalesced_chunk() {
-        let mut parser = SseParser::default();
+        let mut parser = transport_sse_parser();
         assert!(
             parser
                 .push_until_first_event(b"event: first\ndata: one\n\nevent: second\ndata: two\n\n")
                 .expect("bounded SSE")
         );
-        assert_eq!(
-            parser.events(),
-            &[SseEvent {
-                event: "first".into(),
-                data: "one".into(),
-            }]
-        );
+        assert_eq!(parser.events(), &[SseEvent::new("first", "one")]);
     }
 
     #[test]

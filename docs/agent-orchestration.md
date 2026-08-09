@@ -102,7 +102,7 @@ Provider output, Tool effects, approvals, Workspace Leases, Read Sets, merge out
 
 ## Next Slices
 
-1. Add Responses tool-call parsing and a concrete local-process adapter over the implemented Tool identity, prepared-effect, and reconciliation contract; keep Windows Job Object enforcement fail closed.
+1. Connect the implemented Responses text/function-call decoder to a concrete Provider transport and map function calls through the Tool Runtime; add a concrete local-process adapter over the implemented Tool identity, prepared-effect, and reconciliation contract, with Windows Job Object enforcement failing closed.
 2. Connect the Kernel-owned Team operation journal and Tool outcome to product driving and user-visible acknowledgement only after the concrete Provider/Tool effect path exists.
 3. Add Workspace Coordinator facts, then exclusive Workspace Lease and Read Set adapters when the first writable Task lands.
 4. Extend byte-offset process termination from the Team Ledger transaction seam to every product Provider/Tool delivery and acknowledgement boundary.

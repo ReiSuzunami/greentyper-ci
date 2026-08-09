@@ -54,7 +54,15 @@ canonical ID and Item bounds;
 Ledger append/sync/replay, single-writer exclusion, expected-Head conflict,
 torn-tail read-only inspection and writer repair, checksum/length/schema
 tampering, and symlink rejection; deterministic Provider success and malformed
-output; Runtime admission resume, prepared-output reconciliation, idempotent
+output; bounded generic SSE framing for LF, CRLF, lone CR, fragmented UTF-8,
+comments, multiline data, byte and per-event data-line limits, poisoning, and
+incomplete streams; a
+strict OpenAI Responses event subset with streamed text and function-call
+assembly, complete/failed/incomplete/error terminals, optional cache/reasoning
+usage and service tier, unknown-field tolerance, transition and sequence
+rejection, event/output/argument byte and nesting bounds, and redacted Debug
+output; Runtime
+admission resume, prepared-output reconciliation, idempotent
 acknowledgement, and blocked replay; and cross-process headless CLI output,
 status, resume, and reconcile behavior. The standalone durable Agent Team
 adapter additionally covers synchronous receipt-before-publish ordering,
@@ -83,11 +91,14 @@ reason exclusion from the Tool Ledger and Debug output, and explicit ambiguous-
 effect reconciliation. Fault injection proves that a prepared-effect append
 failure invokes no executor,
 while an outcome append failure after one invocation poisons the writer and
-reopens in a reconciliation-required state. Product Provider tool-call parsing,
-concrete process, Job Object, and MCP adapters, receipt delivery to a user-
-visible sink, the cross-process Tool byte-offset matrix, and final
-reconciliation presentation remain pending. Migration/backup remains in the
-candidate storage harness rather than these provisional product adapters.
+reopens in a reconciliation-required state. Concrete Provider transport,
+credential/profile binding, mapping dialect facts into canonical Runtime Items
+and Tool requests, reasoning/refusal/annotation and other unimplemented
+Responses event kinds, reconnect/retry fixtures, concrete process, Job Object,
+and MCP adapters, receipt delivery to a user-visible sink, the cross-process
+Tool byte-offset matrix, and final reconciliation presentation remain pending.
+Migration/backup remains in the candidate storage harness rather than these
+provisional product adapters.
 
 ### Crash and Recovery Tests
 
@@ -143,8 +154,11 @@ suite supports success, slow streams, malformed events, disconnects, resumable
 and non-resumable partial output, reordered tool fragments, missing usage,
 unknown usage fields, and retryable/fatal errors. The current Phase 1
 simulator implements deterministic bounded success; module tests inject
-malformed completion and process interruption after admission. The remaining
-scenarios land with reconnect, tools, and usage normalization.
+malformed completion and process interruption after admission. A separate
+first OpenAI Responses decoder now has redacted fixtures for text, function
+calls, optional usage, failed, incomplete, and error terminals, but it is not
+wired into the simulator or Kernel. The remaining scenarios land with concrete
+transport, reconnect, tools, and full usage normalization.
 
 Live provider tests are opt-in and credential-gated. They verify current integration for OpenAI, DeepSeek, and OpenCode Go but do not run on untrusted pull requests and do not gate local performance. Model-catalog refresh work records the source URL and observation date.
 

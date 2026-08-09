@@ -21,10 +21,11 @@ greentyper/
 ### `greentyper-core`
 
 The only library package. It contains the canonical model, Config Runtime,
-provisional file Ledger, deterministic Provider seam, recoverable single-Agent
-Runtime Kernel, Agent Team Runtime, and durable Tool Runtime policy. Later
-slices add Workspace Coordinator, Context Engine, and concrete Provider/Tool
-integration behind narrow interfaces.
+provisional file Ledger, deterministic Provider seam, bounded generic SSE and
+OpenAI Responses dialect decoding, recoverable single-Agent Runtime Kernel,
+Agent Team Runtime, and durable Tool Runtime policy. Later slices add Workspace
+Coordinator, Context Engine, and concrete Provider/Tool integration behind
+narrow interfaces.
 
 Provider simulators, in-memory stores, and other test adapters live beside the interfaces they exercise. Internal helpers are not promoted into packages merely to make them independently visible.
 

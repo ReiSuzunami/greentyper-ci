@@ -4,7 +4,7 @@
 
 Implementation proceeds as runnable vertical slices. Each phase must preserve Ledger recovery, authority boundaries, and measured resource behavior; no phase may defer all testing or performance work to the end.
 
-Feature implementation was authorized on 2026-08-09. The first core slice fixes the Agent Team command/event interface, process-local Agent Sessions, and pure orchestration policy early; it does not claim Phase 7 completion. Plain `TeamRuntime` remains volatile. A separate durable Team adapter proves synchronous persistence, and the core Runtime Kernel now owns it, gates root admission, persists operation identity and acknowledgement records in the same Team Ledger, and rebinds the complete non-terminal Session set after recovery. The first Phase 2 core slice also persists Tool call identity, Approval Grant binding, prepared-effect state, terminal digests, and explicit ambiguous-effect reconciliation. Product Provider/Tool driving and user-visible delivery remain pending.
+Feature implementation was authorized on 2026-08-09. The first core slice fixes the Agent Team command/event interface, process-local Agent Sessions, and pure orchestration policy early; it does not claim Phase 7 completion. Plain `TeamRuntime` remains volatile. A separate durable Team adapter proves synchronous persistence, and the core Runtime Kernel now owns it, gates root admission, persists operation identity and acknowledgement records in the same Team Ledger, and rebinds the complete non-terminal Session set after recovery. The first Phase 2 slices persist Tool call identity, Approval Grant binding, prepared-effect state, terminal digests, and explicit ambiguous-effect reconciliation, and add bounded generic SSE framing plus a strict OpenAI Responses streaming decoder. Product Provider/Tool driving and user-visible delivery remain pending.
 
 ## Phase 0: Repository and Measurement Foundation
 
@@ -94,10 +94,23 @@ until explicit reconciliation. Tests prove restart deduplication, identity
 conflict rejection, stale-session rejection, expiry denial, raw-argument and
 external-reason exclusion, pre-effect durability failure with zero executor
 calls, and post-effect outcome failure requiring reopen and explicit
-reconciliation. This
-is policy and fault-adapter evidence only: Responses SSE, a concrete local-
-process executor, Windows Job Objects, product approval/delivery, credentials,
-usage normalization, and the cross-process Tool crash matrix remain pending.
+reconciliation.
+
+The first Provider dialect slice is also implemented. A reusable bounded SSE
+framer handles LF, CRLF, lone CR, fragmented UTF-8, comments, multiline data,
+and explicit byte limits. The OpenAI Responses decoder validates a documented
+event subset, assembles streamed text and function arguments, preserves
+optional cache/reasoning usage and service tier, rejects invalid state
+transitions, and redacts Debug output. Its output remains dialect-scoped data,
+not Runtime state or Tool authority. Redacted fixture tests cover success,
+failure, incomplete, and error terminals.
+
+These slices are policy, protocol, and fault-adapter evidence only: a concrete
+HTTP Provider transport, credential/profile routing, normalization into
+provider-neutral Runtime Items and Usage Records, mapping function calls
+through Tool Runtime, a concrete local-process executor, Windows Job Objects,
+product approval/delivery, reconnect/retry behavior, and the cross-process Tool
+crash matrix remain pending.
 
 Exit criteria:
 

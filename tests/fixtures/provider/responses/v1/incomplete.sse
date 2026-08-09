@@ -1,0 +1,7 @@
+event: response.created
+data: {"type":"response.created","sequence_number":8,"response":{"id":"resp_incomplete_1","status":"in_progress"}}
+
+event: response.incomplete
+data: {"type":"response.incomplete","sequence_number":12,"response":{"id":"resp_incomplete_1","status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"usage":null}}
+
+: fixture end

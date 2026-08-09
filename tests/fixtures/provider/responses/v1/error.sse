@@ -1,0 +1,4 @@
+event: error
+data: {"type":"error","sequence_number":1,"code":null,"message":"synthetic fixture error","param":null,"future_field":"ignored"}
+
+: fixture end
