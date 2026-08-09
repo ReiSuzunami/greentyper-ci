@@ -251,9 +251,12 @@ A selection applies to the current Agent on its next Turn by default. The user m
 ## Statusline
 
 The target statusline is event-driven and adaptive. The current
-terminal-neutral projection exposes recovery, provider/model, usage, Agent,
-blocker, Config, and unknown Context Pressure facts, but no terminal renderer or
-width-degradation policy. The target has four presets:
+terminal-neutral projection exposes recovery, provider/model, usage,
+active-agent count, blocker, Config, and unknown Context Pressure facts. Its compact row now applies
+a deterministic priority and Unicode-safe truncation at 40, 80, and 160 columns,
+and adds a detail row from 120 columns. This is a terminal-neutral layout
+contract, not an ANSI/VT renderer or live resize/input loop. The target has four
+presets:
 
 - `minimal`: model, Context Pressure, blocker/approval
 - `balanced`: current Agent/Task, Git, model/effort/tier, context, Thread cost, cache
@@ -277,7 +280,10 @@ Core segments include mode, Agent, Task, Git, model, reasoning effort, service t
 
 `primary_usage_window` is optional, but a supplied value must identify a window in the same resolved configuration. Removing a referenced window and clearing or replacing the reference must happen in one Config Draft. Validation never silently falls back to a different window; with no configured reference, the segment is hidden.
 
-Normal segments consume cached runtime state and update on Events. Clock and process-resource segments are opt-in and use scheduled low-frequency updates. v1 does not execute arbitrary shell commands from the statusline.
+Normal segments consume cached runtime state and update on Events. Clock and
+process-resource segments are opt-in and may use scheduled low-frequency updates
+only under a measured Performance Contract exception. v1 does not execute
+arbitrary shell commands from the statusline.
 
 Context display distinguishes projected next-request occupancy from last provider-reported input and marks estimates with `~`. It includes reserved output tokens and soft/hard Compaction thresholds. Cache display uses read and write ratios where reported; unsupported values display as unknown rather than zero.
 

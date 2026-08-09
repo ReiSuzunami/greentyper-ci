@@ -31,6 +31,22 @@ fn presentation_smoke_emits_a_read_only_terminal_neutral_snapshot() {
     assert_eq!(snapshot["statusline"]["active_agents"]["state"], "unknown");
     assert_eq!(snapshot["statusline"]["blocker_count"]["state"], "unknown");
     assert_eq!(snapshot["blockers"], serde_json::json!([]));
+    assert_eq!(snapshot["layouts"].as_array().map(Vec::len), Some(3));
+    assert_eq!(snapshot["layouts"][0]["viewport"]["width"], 40);
+    assert_eq!(snapshot["layouts"][1]["viewport"]["width"], 80);
+    assert_eq!(snapshot["layouts"][2]["viewport"]["width"], 160);
+    assert_eq!(
+        snapshot["layouts"][0]["body"][1]["text"],
+        "> /config provider url"
+    );
+    assert_eq!(
+        snapshot["layouts"][0]["statusline"]["rows"][0]["text"],
+        "ready | blockers ? | model deterministi…"
+    );
+    assert_eq!(
+        snapshot["layouts"][2]["statusline"]["rows"][1]["text"],
+        "thread ? | items 0 | tail 0B"
+    );
 }
 
 #[test]

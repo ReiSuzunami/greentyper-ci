@@ -185,12 +185,19 @@ routes expose binding status but refuse generic value mutation. Pure and
 subprocess tests cover `/con`, `/config pro url`, focused Profile editing,
 root/nested command separation, schema-route completeness, invalid-value
 recovery, revision races, credential non-read-back, unknown facts, blocker
-visibility, and a read-only smoke path. No terminal backend, rendered dialog, or
-App Server surface is claimed by these slices.
+visibility, and a read-only smoke path. A terminal-neutral interaction controller
+now routes the Slash Panel into existing-object Config Center sections, focused
+revision-bound editors, the configured-preset selector, Stats, and Agent views.
+It refuses to discard dirty drafts implicitly and retains the editor after
+validation or revision-conflict failure. Its deterministic row layout freezes
+Unicode-safe text fitting, prioritized compact status segments, a wide detail
+row, and exact 40x12, 80x24, and 160x50 snapshots. No ANSI/VT backend, keyboard
+event loop, rendered terminal dialog, ConPTY integration, or App Server surface
+is claimed by these slices.
 
-This does not complete Phase 3. VT/ConPTY rendering and input, interactive
-command navigation and rendered schema editors, Provider wizard, catalog-backed
-Recent/Compatible model views, statusline width degradation, Context Pressure,
+This does not complete Phase 3. VT/ConPTY rendering and input, the keyboard event
+loop and terminal-backed schema editors, new Config Object creation/deletion,
+Provider wizard, catalog-backed Recent/Compatible model views, Context Pressure,
 Price Schedules/cost calculation, richer observed Provider metadata, and the
 P0/P1/P2/P6 performance evidence remain pending.
 Large-history statistics pagination and summary-only rendering also remain
@@ -200,7 +207,7 @@ Exit criteria:
 
 - Every Config Object has an interactive editor route.
 - `/config pro url` reaches a focused validated gateway editor.
-- Narrow and wide terminal golden tests pass.
+- Narrow and wide terminal-backend golden tests pass; terminal-neutral row goldens already pass.
 - Context, cost, cache, effort, tier, rolling, and workday values preserve exact/estimated/unknown states.
 - TUI input-ready, idle memory, and idle CPU budgets pass on FMDev.
 

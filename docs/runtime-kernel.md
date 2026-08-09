@@ -276,11 +276,13 @@ unknown until a versioned Price Schedule is implemented.
 - Complete Config Schema default/constraint/normalization/migration metadata,
   rendered TUI/App Server editors, and Provider Templates/catalogs. The
   terminal-neutral schema route, field view, revision-bound editor session,
-  dry-run validation, and atomic commit path are present.
-- TUI/statusline Usage presentation, Price Schedules and separated provider
+  dry-run validation, atomic commit path, interaction controller, and
+  deterministic viewport-row projection are present.
+- Terminal-backed TUI/statusline Usage presentation, Price Schedules and separated provider
   charge/pay-as-you-go/subscription values, richer observed model/effort/tier
   metadata, and FMDev P6 measurements. The durable attempts, cached rollups,
-  pinned Usage Windows, and headless `stats` projection are present.
+  pinned Usage Windows, headless `stats` projection, and terminal-neutral
+  width-degradation contract are present.
 - Live-provider validation, non-Windows credential backends, configurable proxy
   policy, broader TLS platform evidence, reconnect policy, multiple or parallel
   Tool calls, resumable result references, broader canonical Items, and the

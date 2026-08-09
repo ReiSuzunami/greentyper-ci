@@ -215,10 +215,17 @@ and a pure in-memory subprocess smoke with no filesystem path input. Config
 editor tests route `/config pro url` to one concrete Profile field, exercise
 staged preview/reset/commit, retain an invalid draft for correction, reject
 generic credential mutation and read-back, and prove a stale revision cannot
-overwrite the winning commit. These tests do not constitute a rendered TUI or
-ConPTY terminal claim.
+overwrite the winning commit. Controller tests cover Config Center and focused
+editor navigation, explicit dirty-draft discard, credential-safe screens, and
+failure-preserving commits. Terminal-neutral golden tests freeze exact 40x12,
+80x24, and 160x50 status rows, deterministic hidden-segment order, layout height,
+and grapheme-safe CJK/emoji/combining-mark text fitting. The subprocess smoke
+emits the same three layouts without accepting a filesystem path. These tests do
+not constitute an ANSI/VT backend, live terminal input, or ConPTY terminal claim.
 
-Golden terminal tests cover root Slash Panel size, hierarchical Command Path completion, scoped fuzzy matching, Config Center navigation, narrow-width statusline degradation, expanded status details, model selector states, approval/blocker visibility, and text-fit constraints.
+Remaining terminal-backend goldens cover real resize and stale-cell clearing,
+hierarchical input events, rendered Config dialogs, model selector states,
+approval/blocker visibility, styles, and final cell geometry.
 
 Tests assert that `/config pro url` resolves to the focused Provider editor without registering a flat root command. Every Config Object must have a generic or purpose-built editor route. Credential fields must never support read-back.
 

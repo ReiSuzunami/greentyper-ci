@@ -1,18 +1,23 @@
 //! Terminal-neutral product presentation model.
 
+use std::borrow::Cow;
 use std::error::Error;
 use std::fmt;
 
 use greentyper_core::agent_team::{TaskStatus, TeamOperationStatus};
 use greentyper_core::config::{
-    CommandMatchKind, CommandQueryError, CommandTarget, ConfigErrorCategory, ConfigRuntimeStatus,
-    ConfigScope, ModelPresetView, match_command_paths,
+    CommandMatchKind, CommandQueryError, CommandTarget, ConfigCommit, ConfigEditorError,
+    ConfigEditorSession, ConfigEditorView, ConfigErrorCategory, ConfigFieldContents,
+    ConfigObjectKind, ConfigObjectRef, ConfigRuntime, ConfigRuntimeError, ConfigRuntimeStatus,
+    ConfigScope, ConfigSection, ConfigValue, ModelPresetView, match_command_paths,
 };
 use greentyper_core::ledger::LedgerHead;
 use greentyper_core::runtime::{KernelTeamSnapshot, RecoveryStatus, RuntimeSnapshot};
 use greentyper_core::tool_runtime::{ToolCallStatus, ToolSnapshot};
 use greentyper_core::usage::{RuntimeUsageSnapshot, UsageQuantity, UsageRollup};
 use serde::Serialize;
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 const MAX_SLASH_RESULTS: usize = 12;
 const MAX_MODEL_QUERY_BYTES: usize = 256;
@@ -336,7 +341,799 @@ impl TuiViewModel {
     }
 }
 
-pub(crate) fn build_smoke_view(query: &str) -> Result<TuiViewModel, PresentationSmokeError> {
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub(crate) struct Viewport {
+    width: u16,
+    height: u16,
+}
+
+impl Viewport {
+    pub(crate) fn new(width: u16, height: u16) -> Result<Self, ViewportError> {
+        if width == 0 {
+            return Err(ViewportError::ZeroWidth);
+        }
+        if height == 0 {
+            return Err(ViewportError::ZeroHeight);
+        }
+        Ok(Self { width, height })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ViewportError {
+    ZeroWidth,
+    ZeroHeight,
+}
+
+impl fmt::Display for ViewportError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::ZeroWidth => "viewport width must be positive",
+            Self::ZeroHeight => "viewport height must be positive",
+        })
+    }
+}
+
+impl Error for ViewportError {}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PresentationState {
+    SlashPanel,
+    ConfigCenter { section: Option<ConfigSection> },
+    ConfigEditor,
+    ModelSelector,
+    Stats,
+    AgentCenter,
+}
+
+struct ActiveConfigEditor {
+    object: Option<ConfigObjectRef>,
+    session: ConfigEditorSession,
+    view: ConfigEditorView,
+    dirty: bool,
+    validated: bool,
+}
+
+pub(crate) struct PresentationController {
+    state: PresentationState,
+    slash_query: String,
+    model_query: String,
+    selected: usize,
+    editor: Option<ActiveConfigEditor>,
+}
+
+impl Default for PresentationController {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// Mutation commands are contract-tested before a terminal adapter owns the event loop.
+#[allow(dead_code)]
+impl PresentationController {
+    pub(crate) fn new() -> Self {
+        Self {
+            state: PresentationState::SlashPanel,
+            slash_query: "/".to_owned(),
+            model_query: String::new(),
+            selected: 0,
+            editor: None,
+        }
+    }
+
+    pub(crate) fn set_slash_query(
+        &mut self,
+        query: &str,
+    ) -> Result<(), PresentationControllerError> {
+        self.require_discardable_editor()?;
+        let panel = SlashPanelView::build(query, 0)?;
+        self.slash_query = panel.query;
+        self.selected = panel.selected.unwrap_or(0);
+        self.state = PresentationState::SlashPanel;
+        self.editor = None;
+        Ok(())
+    }
+
+    pub(crate) fn move_selection(
+        &mut self,
+        offset: isize,
+    ) -> Result<(), PresentationControllerError> {
+        if self.state != PresentationState::SlashPanel {
+            return Err(PresentationControllerError::NotSlashPanel);
+        }
+        let panel = SlashPanelView::build(&self.slash_query, self.selected)?;
+        if panel.entries.is_empty() {
+            self.selected = 0;
+            return Ok(());
+        }
+        self.selected = self
+            .selected
+            .saturating_add_signed(offset)
+            .min(panel.entries.len() - 1);
+        Ok(())
+    }
+
+    pub(crate) fn set_model_query(&mut self, query: &str) -> Result<(), PresentationError> {
+        ModelSelectorView::build(&[], query)?;
+        self.model_query = query.to_owned();
+        Ok(())
+    }
+
+    pub(crate) fn activate(
+        &mut self,
+        runtime: &mut ConfigRuntime,
+        scope: ConfigScope,
+        object: Option<&ConfigObjectRef>,
+    ) -> Result<(), PresentationControllerError> {
+        if self.state != PresentationState::SlashPanel {
+            return Err(PresentationControllerError::NotSlashPanel);
+        }
+        let panel = SlashPanelView::build(&self.slash_query, self.selected)?;
+        let target = panel
+            .entries
+            .get(self.selected)
+            .ok_or(PresentationControllerError::NoCommandSelection)?
+            .target;
+        match target {
+            CommandTarget::ConfigCenter => {
+                self.state = PresentationState::ConfigCenter { section: None };
+            }
+            CommandTarget::ConfigSection { section } => {
+                self.state = PresentationState::ConfigCenter {
+                    section: Some(section),
+                };
+            }
+            CommandTarget::ConfigEditor { .. } => {
+                let session = ConfigEditorSession::open_from_query(
+                    runtime,
+                    scope,
+                    &self.slash_query,
+                    self.selected,
+                    object,
+                )?;
+                let view = session.preview(runtime)?;
+                self.editor = Some(ActiveConfigEditor {
+                    object: object.cloned(),
+                    session,
+                    view,
+                    dirty: false,
+                    validated: true,
+                });
+                self.state = PresentationState::ConfigEditor;
+            }
+            CommandTarget::ModelSelector => {
+                self.state = PresentationState::ModelSelector;
+            }
+            CommandTarget::Stats => {
+                self.state = PresentationState::Stats;
+            }
+            CommandTarget::AgentCenter => {
+                self.state = PresentationState::AgentCenter;
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn back(&mut self) -> Result<(), PresentationControllerError> {
+        self.require_discardable_editor()?;
+        self.editor = None;
+        self.state = PresentationState::SlashPanel;
+        Ok(())
+    }
+
+    pub(crate) fn discard_config(&mut self) -> Result<(), PresentationControllerError> {
+        if self.state != PresentationState::ConfigEditor {
+            return Err(PresentationControllerError::NotConfigEditor);
+        }
+        self.editor = None;
+        self.state = PresentationState::SlashPanel;
+        Ok(())
+    }
+
+    pub(crate) fn stage_config(
+        &mut self,
+        runtime: &ConfigRuntime,
+        raw: &str,
+    ) -> Result<(), PresentationControllerError> {
+        let editor = self.active_editor_mut()?;
+        editor.session.stage_raw(raw)?;
+        editor.view.field = editor.session.field(runtime)?;
+        editor.view.changes.clear();
+        editor.dirty = true;
+        editor.validated = false;
+        Ok(())
+    }
+
+    pub(crate) fn reset_config(
+        &mut self,
+        runtime: &ConfigRuntime,
+    ) -> Result<(), PresentationControllerError> {
+        let editor = self.active_editor_mut()?;
+        editor.session.reset()?;
+        editor.view.field = editor.session.field(runtime)?;
+        editor.view.changes.clear();
+        editor.dirty = true;
+        editor.validated = false;
+        Ok(())
+    }
+
+    pub(crate) fn preview_config(
+        &mut self,
+        runtime: &mut ConfigRuntime,
+    ) -> Result<ConfigEditorView, PresentationControllerError> {
+        let preview = self.active_editor()?.session.preview(runtime)?;
+        let editor = self.active_editor_mut()?;
+        editor.dirty = !preview.changes.is_empty();
+        editor.validated = true;
+        editor.view = preview.clone();
+        Ok(preview)
+    }
+
+    pub(crate) fn commit_config(
+        &mut self,
+        runtime: &mut ConfigRuntime,
+    ) -> Result<ConfigCommit, PresentationControllerError> {
+        let commit = self.active_editor()?.session.try_commit(runtime)?;
+        self.editor = None;
+        self.state = PresentationState::SlashPanel;
+        Ok(commit)
+    }
+
+    pub(crate) fn screen(
+        &self,
+        runtime: Option<&ConfigRuntime>,
+    ) -> Result<PresentationScreenView, PresentationControllerError> {
+        match self.state {
+            PresentationState::SlashPanel => Ok(PresentationScreenView::SlashPanel(
+                SlashPanelView::build(&self.slash_query, self.selected)?,
+            )),
+            PresentationState::ConfigCenter { section } => {
+                let mut objects = runtime
+                    .ok_or(PresentationControllerError::ConfigRuntimeRequired)?
+                    .addressable_objects()?;
+                if let Some(section) = section {
+                    objects.retain(|object| object_section(object.kind()) == section);
+                }
+                Ok(PresentationScreenView::ConfigCenter { section, objects })
+            }
+            PresentationState::ConfigEditor => {
+                let editor = self.active_editor()?;
+                Ok(PresentationScreenView::ConfigEditor {
+                    object: editor.object.clone(),
+                    editor: editor.view.clone(),
+                    dirty: editor.dirty,
+                    validated: editor.validated,
+                })
+            }
+            PresentationState::ModelSelector => Ok(PresentationScreenView::ModelSelector {
+                query: self.model_query.clone(),
+            }),
+            PresentationState::Stats => Ok(PresentationScreenView::Stats),
+            PresentationState::AgentCenter => Ok(PresentationScreenView::AgentCenter),
+        }
+    }
+
+    pub(crate) fn layout(
+        &self,
+        runtime: Option<&ConfigRuntime>,
+        view: &TuiViewModel,
+        viewport: Viewport,
+    ) -> Result<PresentationLayoutView, PresentationControllerError> {
+        let screen = self.screen(runtime)?;
+        let statusline =
+            StatuslineLayoutView::build(&view.statusline, viewport.width, viewport.height);
+        let body_capacity = usize::from(viewport.height).saturating_sub(statusline.rows.len());
+        let mut body = screen_rows(&screen, view);
+        body.truncate(body_capacity);
+        for row in &mut body {
+            row.text = fit_text(&row.text, usize::from(viewport.width));
+        }
+        Ok(PresentationLayoutView {
+            viewport,
+            screen,
+            body,
+            statusline,
+        })
+    }
+
+    fn active_editor(&self) -> Result<&ActiveConfigEditor, PresentationControllerError> {
+        if self.state != PresentationState::ConfigEditor {
+            return Err(PresentationControllerError::NotConfigEditor);
+        }
+        self.editor
+            .as_ref()
+            .ok_or(PresentationControllerError::NotConfigEditor)
+    }
+
+    fn active_editor_mut(
+        &mut self,
+    ) -> Result<&mut ActiveConfigEditor, PresentationControllerError> {
+        if self.state != PresentationState::ConfigEditor {
+            return Err(PresentationControllerError::NotConfigEditor);
+        }
+        self.editor
+            .as_mut()
+            .ok_or(PresentationControllerError::NotConfigEditor)
+    }
+
+    fn require_discardable_editor(&self) -> Result<(), PresentationControllerError> {
+        if self.editor.as_ref().is_some_and(|editor| editor.dirty) {
+            Err(PresentationControllerError::UnsavedConfigDraft)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(tag = "screen", rename_all = "snake_case")]
+pub(crate) enum PresentationScreenView {
+    SlashPanel(SlashPanelView),
+    ConfigCenter {
+        section: Option<ConfigSection>,
+        objects: Vec<ConfigObjectRef>,
+    },
+    ConfigEditor {
+        object: Option<ConfigObjectRef>,
+        editor: ConfigEditorView,
+        dirty: bool,
+        validated: bool,
+    },
+    ModelSelector {
+        query: String,
+    },
+    Stats,
+    AgentCenter,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub(crate) struct LayoutRowView {
+    text: String,
+    selected: bool,
+}
+
+impl LayoutRowView {
+    fn new(text: impl Into<String>, selected: bool) -> Self {
+        Self {
+            text: text.into(),
+            selected,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum StatusSegmentKind {
+    Recovery,
+    Blockers,
+    Model,
+    Context,
+    Usage,
+    Agents,
+    Provider,
+    Config,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub(crate) struct StatuslineLayoutView {
+    rows: Vec<LayoutRowView>,
+    hidden: Vec<StatusSegmentKind>,
+}
+
+impl StatuslineLayoutView {
+    fn build(status: &StatuslineView, width: u16, height: u16) -> Self {
+        let segments = status_segments(status);
+        let (compact, hidden) = pack_status_segments(&segments, usize::from(width));
+        let mut rows = vec![LayoutRowView::new(compact, false)];
+        if width >= 120 && height >= 2 {
+            let detail = format!(
+                "thread {} | items {} | tail {}B",
+                status
+                    .thread
+                    .map_or_else(|| "?".to_owned(), |thread| thread.to_string()),
+                status.item_count,
+                status.recovered_tail_bytes
+            );
+            rows.push(LayoutRowView::new(
+                fit_text(&detail, usize::from(width)),
+                false,
+            ));
+        }
+        Self { rows, hidden }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub(crate) struct PresentationLayoutView {
+    viewport: Viewport,
+    screen: PresentationScreenView,
+    body: Vec<LayoutRowView>,
+    statusline: StatuslineLayoutView,
+}
+
+struct StatusSegment {
+    kind: StatusSegmentKind,
+    text: String,
+    preferred_width: usize,
+}
+
+fn status_segments(status: &StatuslineView) -> Vec<StatusSegment> {
+    vec![
+        StatusSegment {
+            kind: StatusSegmentKind::Recovery,
+            text: recovery_label(&status.recovery),
+            preferred_width: 24,
+        },
+        StatusSegment {
+            kind: StatusSegmentKind::Blockers,
+            text: availability_count("blockers", &status.blocker_count),
+            preferred_width: 14,
+        },
+        StatusSegment {
+            kind: StatusSegmentKind::Model,
+            text: availability_text("model", &status.model),
+            preferred_width: 30,
+        },
+        StatusSegment {
+            kind: StatusSegmentKind::Context,
+            text: match status.context_pressure_percent {
+                Availability::Known(percent) => format!("ctx {percent}%"),
+                Availability::Unknown => "ctx ?".to_owned(),
+            },
+            preferred_width: 10,
+        },
+        StatusSegment {
+            kind: StatusSegmentKind::Usage,
+            text: usage_label(&status.one_hour_usage),
+            preferred_width: 18,
+        },
+        StatusSegment {
+            kind: StatusSegmentKind::Agents,
+            text: availability_count("agents", &status.active_agents),
+            preferred_width: 12,
+        },
+        StatusSegment {
+            kind: StatusSegmentKind::Provider,
+            text: availability_text("provider", &status.provider_profile),
+            preferred_width: 26,
+        },
+        StatusSegment {
+            kind: StatusSegmentKind::Config,
+            text: if status.config_ready {
+                "config ok".to_owned()
+            } else {
+                "config repair".to_owned()
+            },
+            preferred_width: 14,
+        },
+    ]
+}
+
+fn pack_status_segments(
+    segments: &[StatusSegment],
+    width: usize,
+) -> (String, Vec<StatusSegmentKind>) {
+    let mut row = String::new();
+    let mut hidden = Vec::new();
+    for (index, segment) in segments.iter().enumerate() {
+        let separator = usize::from(!row.is_empty()) * 3;
+        let used = display_width(&row);
+        let available = width.saturating_sub(used + separator);
+        if available == 0 {
+            hidden.extend(segments[index..].iter().map(|segment| segment.kind));
+            break;
+        }
+        let preferred = fit_text(&segment.text, segment.preferred_width.min(available));
+        if !row.is_empty() {
+            row.push_str(" | ");
+        }
+        row.push_str(&preferred);
+        if display_width(&segment.text) > available {
+            hidden.extend(segments[index + 1..].iter().map(|segment| segment.kind));
+            break;
+        }
+    }
+    (row, hidden)
+}
+
+fn recovery_label(recovery: &RecoveryBadge) -> String {
+    match recovery {
+        RecoveryBadge::Ready => "ready".to_owned(),
+        RecoveryBadge::ResumeRequired { turn } => format!("resume t{turn}"),
+        RecoveryBadge::ReconciliationRequired { turn, delivery } => {
+            format!("reconcile t{turn}/d{delivery}")
+        }
+        RecoveryBadge::Blocked { turn, .. } => format!("blocked t{turn}"),
+    }
+}
+
+fn availability_text(label: &str, value: &Availability<String>) -> String {
+    match value {
+        Availability::Known(value) => format!("{label} {value}"),
+        Availability::Unknown => format!("{label} ?"),
+    }
+}
+
+fn availability_count(label: &str, value: &Availability<usize>) -> String {
+    match value {
+        Availability::Known(value) => format!("{label} {value}"),
+        Availability::Unknown => format!("{label} ?"),
+    }
+}
+
+fn usage_label(usage: &Availability<UsageSummaryView>) -> String {
+    let Availability::Known(usage) = usage else {
+        return "1h ?".to_owned();
+    };
+    match (
+        usage.total_tokens.exact,
+        usage.total_tokens.estimated,
+        usage.total_tokens.unknown_records,
+    ) {
+        (Some(exact), Some(estimated), _) => format!("1h {exact}+~{estimated}t"),
+        (Some(exact), None, _) => format!("1h {exact}t"),
+        (None, Some(estimated), _) => format!("1h ~{estimated}t"),
+        (None, None, 0) => "1h 0t".to_owned(),
+        (None, None, _) => "1h ?".to_owned(),
+    }
+}
+
+fn screen_rows(screen: &PresentationScreenView, view: &TuiViewModel) -> Vec<LayoutRowView> {
+    match screen {
+        PresentationScreenView::SlashPanel(panel) => {
+            let mut rows = vec![LayoutRowView::new("Commands", false)];
+            rows.extend(panel.entries.iter().enumerate().map(|(index, entry)| {
+                let selected = panel.selected == Some(index);
+                LayoutRowView::new(
+                    format!("{} {}", if selected { '>' } else { ' ' }, entry.canonical),
+                    selected,
+                )
+            }));
+            rows
+        }
+        PresentationScreenView::ConfigCenter { section, objects } => {
+            let title = section.map_or_else(
+                || "Config".to_owned(),
+                |section| format!("Config / {}", config_section_label(section)),
+            );
+            let mut rows = vec![LayoutRowView::new(title, false)];
+            rows.extend(objects.iter().map(|object| {
+                LayoutRowView::new(
+                    format!("{} {}", config_object_label(object.kind()), object.id()),
+                    false,
+                )
+            }));
+            rows
+        }
+        PresentationScreenView::ConfigEditor {
+            editor,
+            dirty,
+            validated,
+            ..
+        } => {
+            let mut rows = vec![LayoutRowView::new(
+                format!("Config / {}", editor.field.path),
+                false,
+            )];
+            match &editor.field.contents {
+                ConfigFieldContents::Value {
+                    effective, target, ..
+                } => {
+                    rows.push(LayoutRowView::new(
+                        format!("effective {}", config_value_label(effective.as_ref())),
+                        false,
+                    ));
+                    rows.push(LayoutRowView::new(
+                        format!("target {}", config_value_label(target.as_ref())),
+                        false,
+                    ));
+                }
+                ConfigFieldContents::CredentialBinding {
+                    effective_bound,
+                    target_bound,
+                    ..
+                } => {
+                    rows.push(LayoutRowView::new(
+                        format!(
+                            "credential {}",
+                            if *effective_bound { "bound" } else { "missing" }
+                        ),
+                        false,
+                    ));
+                    rows.push(LayoutRowView::new(
+                        format!("target {}", if *target_bound { "bound" } else { "missing" }),
+                        false,
+                    ));
+                }
+            }
+            rows.push(LayoutRowView::new(
+                match (*dirty, *validated) {
+                    (false, _) => "draft clean",
+                    (true, true) => "draft validated",
+                    (true, false) => "draft pending",
+                },
+                false,
+            ));
+            rows
+        }
+        PresentationScreenView::ModelSelector { .. } => {
+            let mut rows = vec![LayoutRowView::new("Models", false)];
+            rows.extend(view.models.all.iter().enumerate().map(|(index, entry)| {
+                LayoutRowView::new(
+                    format!(
+                        "{} {} / {} / {}",
+                        if index == 0 { '>' } else { ' ' },
+                        entry.preset.id,
+                        entry.preset.provider,
+                        entry.preset.model
+                    ),
+                    index == 0,
+                )
+            }));
+            rows
+        }
+        PresentationScreenView::Stats => vec![LayoutRowView::new("Stats", false)],
+        PresentationScreenView::AgentCenter => vec![LayoutRowView::new("Agents", false)],
+    }
+}
+
+fn config_value_label(value: Option<&ConfigValue>) -> String {
+    match value {
+        Some(ConfigValue::String(value)) => value.clone(),
+        Some(ConfigValue::PositiveInteger(value)) => value.to_string(),
+        Some(ConfigValue::Boolean(value)) => value.to_string(),
+        Some(ConfigValue::StringList(value)) => value.join(", "),
+        None => "inherited".to_owned(),
+    }
+}
+
+fn config_section_label(section: ConfigSection) -> &'static str {
+    match section {
+        ConfigSection::Provider => "provider",
+        ConfigSection::Model => "model",
+        ConfigSection::Statusline => "statusline",
+        ConfigSection::StatsWindow => "stats-window",
+        ConfigSection::Agent => "agent",
+        ConfigSection::Skills => "skills",
+        ConfigSection::Mcp => "mcp",
+        ConfigSection::Security => "security",
+    }
+}
+
+fn config_object_label(kind: ConfigObjectKind) -> &'static str {
+    match kind {
+        ConfigObjectKind::ProviderProfile => "provider",
+        ConfigObjectKind::ModelPreset => "model",
+        ConfigObjectKind::UsageWindow => "stats-window",
+    }
+}
+
+fn object_section(kind: ConfigObjectKind) -> ConfigSection {
+    match kind {
+        ConfigObjectKind::ProviderProfile => ConfigSection::Provider,
+        ConfigObjectKind::ModelPreset => ConfigSection::Model,
+        ConfigObjectKind::UsageWindow => ConfigSection::StatsWindow,
+    }
+}
+
+pub(crate) fn display_width(text: &str) -> usize {
+    UnicodeWidthStr::width(sanitize_controls(text).as_ref())
+}
+
+pub(crate) fn fit_text(text: &str, max_width: usize) -> String {
+    let text = sanitize_controls(text);
+    if UnicodeWidthStr::width(text.as_ref()) <= max_width {
+        return text.into_owned();
+    }
+    if max_width == 0 {
+        return String::new();
+    }
+    if max_width == 1 {
+        return "…".to_owned();
+    }
+    let content_width = max_width - 1;
+    let mut fitted = String::new();
+    for grapheme in UnicodeSegmentation::graphemes(text.as_ref(), true) {
+        if display_width(&fitted) + display_width(grapheme) > content_width {
+            break;
+        }
+        fitted.push_str(grapheme);
+    }
+    let fitted = fitted.trim_end();
+    format!("{fitted}…")
+}
+
+fn sanitize_controls(text: &str) -> Cow<'_, str> {
+    if !text.chars().any(char::is_control) {
+        return Cow::Borrowed(text);
+    }
+    Cow::Owned(
+        text.chars()
+            .map(|character| {
+                if character.is_control() {
+                    '?'
+                } else {
+                    character
+                }
+            })
+            .collect(),
+    )
+}
+
+#[derive(Debug)]
+pub(crate) enum PresentationControllerError {
+    Command(CommandQueryError),
+    ConfigEditor(ConfigEditorError),
+    Config(ConfigRuntimeError),
+    NoCommandSelection,
+    NotSlashPanel,
+    NotConfigEditor,
+    ConfigRuntimeRequired,
+    UnsavedConfigDraft,
+}
+
+impl fmt::Display for PresentationControllerError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Command(source) => write!(formatter, "{source}"),
+            Self::ConfigEditor(source) => write!(formatter, "{source}"),
+            Self::Config(source) => write!(formatter, "{source}"),
+            Self::NoCommandSelection => formatter.write_str("no command is selected"),
+            Self::NotSlashPanel => formatter.write_str("command requires the Slash Panel"),
+            Self::NotConfigEditor => formatter.write_str("command requires a Config editor"),
+            Self::ConfigRuntimeRequired => {
+                formatter.write_str("Config Center requires the Config Runtime")
+            }
+            Self::UnsavedConfigDraft => {
+                formatter.write_str("Config draft must be committed or discarded")
+            }
+        }
+    }
+}
+
+impl Error for PresentationControllerError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Command(source) => Some(source),
+            Self::ConfigEditor(source) => Some(source),
+            Self::Config(source) => Some(source),
+            Self::NoCommandSelection
+            | Self::NotSlashPanel
+            | Self::NotConfigEditor
+            | Self::ConfigRuntimeRequired
+            | Self::UnsavedConfigDraft => None,
+        }
+    }
+}
+
+impl From<CommandQueryError> for PresentationControllerError {
+    fn from(source: CommandQueryError) -> Self {
+        Self::Command(source)
+    }
+}
+
+impl From<ConfigEditorError> for PresentationControllerError {
+    fn from(source: ConfigEditorError) -> Self {
+        Self::ConfigEditor(source)
+    }
+}
+
+impl From<ConfigRuntimeError> for PresentationControllerError {
+    fn from(source: ConfigRuntimeError) -> Self {
+        Self::Config(source)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub(crate) struct PresentationSmokeView {
+    #[serde(flatten)]
+    view: TuiViewModel,
+    layouts: Vec<PresentationLayoutView>,
+}
+
+pub(crate) fn build_smoke_view(
+    query: &str,
+) -> Result<PresentationSmokeView, PresentationSmokeError> {
     let runtime = RuntimeSnapshot {
         head: LedgerHead::default(),
         thread: None,
@@ -348,7 +1145,7 @@ pub(crate) fn build_smoke_view(query: &str) -> Result<TuiViewModel, Presentation
         ready: true,
         issues: Vec::new(),
     };
-    TuiViewModel::build(
+    let view = TuiViewModel::build(
         query,
         "",
         0,
@@ -363,8 +1160,17 @@ pub(crate) fn build_smoke_view(query: &str) -> Result<TuiViewModel, Presentation
             context_pressure_percent: None,
             model_presets: &[],
         },
-    )
-    .map_err(Into::into)
+    )?;
+    let mut controller = PresentationController::new();
+    controller.set_slash_query(query)?;
+    let layouts = [(40, 12), (80, 24), (160, 50)]
+        .into_iter()
+        .map(|(width, height)| -> Result<_, PresentationSmokeError> {
+            let viewport = Viewport::new(width, height)?;
+            Ok(controller.layout(None, &view, viewport)?)
+        })
+        .collect::<Result<Vec<_>, PresentationSmokeError>>()?;
+    Ok(PresentationSmokeView { view, layouts })
 }
 
 fn availability(value: Option<&str>) -> Availability<String> {
@@ -498,12 +1304,16 @@ impl From<CommandQueryError> for PresentationError {
 #[derive(Debug)]
 pub(crate) enum PresentationSmokeError {
     Presentation(PresentationError),
+    Controller(PresentationControllerError),
+    Viewport(ViewportError),
 }
 
 impl fmt::Display for PresentationSmokeError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Presentation(source) => write!(formatter, "{source}"),
+            Self::Controller(source) => write!(formatter, "{source}"),
+            Self::Viewport(source) => write!(formatter, "{source}"),
         }
     }
 }
@@ -512,6 +1322,8 @@ impl Error for PresentationSmokeError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Presentation(source) => Some(source),
+            Self::Controller(source) => Some(source),
+            Self::Viewport(source) => Some(source),
         }
     }
 }
@@ -519,6 +1331,18 @@ impl Error for PresentationSmokeError {
 impl From<PresentationError> for PresentationSmokeError {
     fn from(source: PresentationError) -> Self {
         Self::Presentation(source)
+    }
+}
+
+impl From<PresentationControllerError> for PresentationSmokeError {
+    fn from(source: PresentationControllerError) -> Self {
+        Self::Controller(source)
+    }
+}
+
+impl From<ViewportError> for PresentationSmokeError {
+    fn from(source: ViewportError) -> Self {
+        Self::Viewport(source)
     }
 }
 
@@ -535,9 +1359,9 @@ mod tests {
     };
     use greentyper_core::config::{
         CommandMatchKind, CommandTarget, ConfigDocument, ConfigEditorError, ConfigEditorSession,
-        ConfigErrorCategory, ConfigFieldContents, ConfigObjectKind, ConfigObjectRef, ConfigPaths,
-        ConfigRepairIssue, ConfigRuntime, ConfigRuntimeError, ConfigRuntimeStatus, ConfigScope,
-        ConfigValue, ModelPresetView,
+        ConfigEditorView, ConfigErrorCategory, ConfigFieldContents, ConfigFieldView,
+        ConfigObjectKind, ConfigObjectRef, ConfigPaths, ConfigRepairIssue, ConfigRuntime,
+        ConfigRuntimeError, ConfigRuntimeStatus, ConfigScope, ConfigValue, ModelPresetView,
     };
     use greentyper_core::ledger::LedgerHead;
     use greentyper_core::model::{DeliveryId, ThreadId, TurnId};
@@ -545,7 +1369,9 @@ mod tests {
     use greentyper_core::runtime::{KernelTeamSnapshot, RecoveryStatus, RuntimeSnapshot};
 
     use super::{
-        Availability, BlockerView, PresentationSources, RecoveryBadge, SlashPanelView, TuiViewModel,
+        Availability, BlockerView, PresentationController, PresentationControllerError,
+        PresentationScreenView, PresentationSources, RecoveryBadge, SlashPanelView, TuiViewModel,
+        Viewport, display_width, fit_text,
     };
 
     static NEXT_TEMP: AtomicU64 = AtomicU64::new(1);
@@ -816,28 +1642,36 @@ source = "unknown"
             Some(&object),
         )
         .expect("open winner editor");
-        let mut loser = ConfigEditorSession::open_from_query(
-            &loser_runtime,
-            ConfigScope::Project,
-            "/config provider url",
-            0,
-            Some(&object),
-        )
-        .expect("open loser editor");
+        let mut loser = PresentationController::new();
+        loser
+            .set_slash_query("/config provider url")
+            .expect("set loser editor route");
+        loser
+            .activate(&mut loser_runtime, ConfigScope::Project, Some(&object))
+            .expect("open loser editor");
         winner
             .stage_raw("https://winner.example.com/v1")
             .expect("stage winner");
         loser
-            .stage_raw("https://loser.example.com/v1")
+            .stage_config(&loser_runtime, "https://loser.example.com/v1")
             .expect("stage loser");
         winner.commit(&mut winner_runtime).expect("commit winner");
 
         assert!(matches!(
-            loser.commit(&mut loser_runtime),
-            Err(ConfigEditorError::Config(
-                ConfigRuntimeError::RevisionConflict { .. }
+            loser.commit_config(&mut loser_runtime),
+            Err(PresentationControllerError::ConfigEditor(
+                ConfigEditorError::Config(ConfigRuntimeError::RevisionConflict { .. })
             ))
         ));
+        assert!(matches!(
+            loser
+                .screen(Some(&loser_runtime))
+                .expect("stale editor remains visible"),
+            PresentationScreenView::ConfigEditor { dirty: true, .. }
+        ));
+        loser
+            .stage_config(&loser_runtime, "https://still-live.example.com/v1")
+            .expect("stale editor session remains live after conflict");
         loser_runtime.reload().expect("reload winner state");
         assert_eq!(
             loser_runtime
@@ -1046,5 +1880,282 @@ source = "unknown"
         assert_eq!(selector.recent, Availability::Unknown);
         assert_eq!(selector.compatible, Availability::Unknown);
         assert_eq!(selector.all[0].compatibility, Availability::Unknown);
+    }
+
+    #[test]
+    fn controller_navigates_config_and_keeps_a_failed_draft_live() {
+        let temp = TempTree::new("controller-config");
+        let mut runtime = temp.open_provider_runtime();
+        let object = ConfigObjectRef::new(ConfigObjectKind::ProviderProfile, "edge");
+        let mut controller = PresentationController::new();
+
+        controller
+            .set_slash_query("/config")
+            .expect("set Config Center query");
+        controller
+            .activate(&mut runtime, ConfigScope::Project, None)
+            .expect("open Config Center");
+        assert!(matches!(
+            controller
+                .screen(Some(&runtime))
+                .expect("Config Center screen"),
+            PresentationScreenView::ConfigCenter { section: None, ref objects }
+                if objects == std::slice::from_ref(&object)
+        ));
+
+        controller.back().expect("return to Slash Panel");
+        controller
+            .set_slash_query("/config pro url")
+            .expect("set focused editor query");
+        controller
+            .activate(&mut runtime, ConfigScope::Project, Some(&object))
+            .expect("open provider URL editor");
+        controller
+            .stage_config(&runtime, "http://provider.invalid/v1")
+            .expect("stage typed but invalid URL");
+        assert!(matches!(
+            controller
+                .screen(Some(&runtime))
+                .expect("staged editor screen"),
+            PresentationScreenView::ConfigEditor {
+                dirty: true,
+                validated: false,
+                editor: ConfigEditorView {
+                    field: ConfigFieldView {
+                        contents: ConfigFieldContents::Value {
+                            target: Some(ConfigValue::String(ref target)),
+                            ..
+                        },
+                        ..
+                    },
+                    ..
+                },
+                ..
+            } if target == "http://provider.invalid/v1"
+        ));
+        assert!(matches!(
+            controller.preview_config(&mut runtime),
+            Err(PresentationControllerError::ConfigEditor(
+                ConfigEditorError::Config(ConfigRuntimeError::InvalidValue { ref path, .. })
+            )) if path == "providers.edge.base_url"
+        ));
+        assert!(matches!(
+            controller.back(),
+            Err(PresentationControllerError::UnsavedConfigDraft)
+        ));
+        assert!(matches!(
+            controller
+                .screen(Some(&runtime))
+                .expect("editor remains visible"),
+            PresentationScreenView::ConfigEditor { dirty: true, .. }
+        ));
+
+        controller
+            .stage_config(&runtime, "https://controller.example.com/v1")
+            .expect("correct staged URL");
+        let preview = controller
+            .preview_config(&mut runtime)
+            .expect("preview corrected URL");
+        assert_eq!(preview.changes.len(), 1);
+        controller
+            .reset_config(&runtime)
+            .expect("reset staged URL through controller");
+        assert!(matches!(
+            controller
+                .screen(Some(&runtime))
+                .expect("reset editor screen"),
+            PresentationScreenView::ConfigEditor {
+                dirty: true,
+                validated: false,
+                editor: ConfigEditorView {
+                    ref changes,
+                    field: ConfigFieldView {
+                        contents: ConfigFieldContents::Value { target: None, .. },
+                        ..
+                    },
+                    ..
+                },
+                ..
+            } if changes.is_empty()
+        ));
+        controller
+            .stage_config(&runtime, "https://controller.example.com/v1")
+            .expect("restage corrected URL");
+        controller
+            .preview_config(&mut runtime)
+            .expect("preview restaged URL");
+        let commit = controller
+            .commit_config(&mut runtime)
+            .expect("commit corrected URL");
+        assert!(commit.written);
+        assert!(matches!(
+            controller
+                .screen(Some(&runtime))
+                .expect("post-commit screen"),
+            PresentationScreenView::SlashPanel(_)
+        ));
+    }
+
+    #[test]
+    fn controller_keeps_credential_fields_status_only() {
+        let temp = TempTree::new("controller-credential");
+        let mut runtime = temp.open_provider_runtime();
+        let object = ConfigObjectRef::new(ConfigObjectKind::ProviderProfile, "edge");
+        let mut controller = PresentationController::new();
+        controller
+            .set_slash_query("/config provider credential")
+            .expect("set credential route");
+        controller
+            .activate(&mut runtime, ConfigScope::Project, Some(&object))
+            .expect("open credential status");
+
+        let encoded = serde_json::to_string(
+            &controller
+                .screen(Some(&runtime))
+                .expect("credential status screen"),
+        )
+        .expect("serialize credential status screen");
+        assert!(!encoded.contains("synthetic-edge-credential-reference"));
+        assert!(encoded.contains("credential_binding"));
+        assert!(matches!(
+            controller.stage_config(&runtime, "synthetic-replacement-reference"),
+            Err(PresentationControllerError::ConfigEditor(
+                ConfigEditorError::CredentialOperationRequired
+            ))
+        ));
+        assert!(matches!(
+            controller.commit_config(&mut runtime),
+            Err(PresentationControllerError::ConfigEditor(
+                ConfigEditorError::CredentialOperationRequired
+            ))
+        ));
+    }
+
+    #[test]
+    fn terminal_neutral_layout_is_deterministic_and_fits_three_viewports() {
+        let temp = TempTree::new("layout-runtime");
+        let config_runtime = ConfigRuntime::open(temp.paths(), ConfigDocument::empty())
+            .expect("open layout Config Runtime");
+        let runtime = runtime(RecoveryStatus::Ready);
+        let config = ConfigRuntimeStatus {
+            ready: true,
+            issues: Vec::new(),
+        };
+        let view = TuiViewModel::build(
+            "/",
+            "",
+            0,
+            PresentationSources {
+                runtime: &runtime,
+                usage: None,
+                team: None,
+                tools: None,
+                config: &config,
+                provider_profile: Some("fixture-provider"),
+                model: Some("deterministic-v1"),
+                context_pressure_percent: None,
+                model_presets: &[],
+            },
+        )
+        .expect("view model");
+        let controller = PresentationController::new();
+
+        let mut layouts = Vec::new();
+        for (width, height) in [(40, 12), (80, 24), (160, 50)] {
+            let viewport = Viewport::new(width, height).expect("valid viewport");
+            let layout = controller
+                .layout(Some(&config_runtime), &view, viewport)
+                .expect("terminal-neutral layout");
+            assert_eq!(layout.viewport, viewport);
+            assert!(
+                layout
+                    .body
+                    .iter()
+                    .chain(layout.statusline.rows.iter())
+                    .all(|row| display_width(&row.text) <= usize::from(width))
+            );
+            assert!(layout.body.len() + layout.statusline.rows.len() <= usize::from(height));
+            assert_eq!(
+                serde_json::to_string(&layout).expect("serialize layout"),
+                serde_json::to_string(
+                    &controller
+                        .layout(Some(&config_runtime), &view, viewport)
+                        .expect("repeat layout")
+                )
+                .expect("serialize repeated layout")
+            );
+            layouts.push(layout);
+        }
+
+        assert_eq!(layouts[0].body[0].text, "Commands");
+        assert_eq!(layouts[0].body[1].text, "> /config");
+        assert_eq!(layouts[0].statusline.rows.len(), 1);
+        assert_eq!(
+            layouts[0].statusline.rows[0].text,
+            "ready | blockers ? | model deterministi…"
+        );
+        assert_eq!(
+            layouts[0].statusline.hidden,
+            vec![
+                super::StatusSegmentKind::Context,
+                super::StatusSegmentKind::Usage,
+                super::StatusSegmentKind::Agents,
+                super::StatusSegmentKind::Provider,
+                super::StatusSegmentKind::Config,
+            ]
+        );
+        assert_eq!(
+            layouts[1].statusline.rows[0].text,
+            "ready | blockers ? | model deterministic-v1 | ctx ? | 1h ? | agents ? | provide…"
+        );
+        assert_eq!(
+            layouts[1].statusline.hidden,
+            vec![super::StatusSegmentKind::Config]
+        );
+        assert_eq!(layouts[2].statusline.rows.len(), 2);
+        assert_eq!(
+            layouts[2].statusline.rows[0].text,
+            "ready | blockers ? | model deterministic-v1 | ctx ? | 1h ? | agents ? | provider fixture-provider | config ok"
+        );
+        assert_eq!(
+            layouts[2].statusline.rows[1].text,
+            "thread 7 | items 0 | tail 0B"
+        );
+        assert!(layouts[2].statusline.hidden.is_empty());
+
+        let one_row = controller
+            .layout(
+                Some(&config_runtime),
+                &view,
+                Viewport::new(160, 1).expect("one-row viewport"),
+            )
+            .expect("one-row layout");
+        assert!(one_row.body.is_empty());
+        assert_eq!(one_row.statusline.rows.len(), 1);
+
+        let one_cell = controller
+            .layout(
+                Some(&config_runtime),
+                &view,
+                Viewport::new(1, 1).expect("one-cell viewport"),
+            )
+            .expect("one-cell layout");
+        assert_eq!(one_cell.statusline.rows[0].text, "…");
+        assert_eq!(display_width(&one_cell.statusline.rows[0].text), 1);
+    }
+
+    #[test]
+    fn text_fit_preserves_unicode_clusters_and_never_exceeds_width() {
+        assert_eq!(display_width("A双B"), 4);
+        assert_eq!(fit_text("A双B", 3), "A…");
+        assert_eq!(fit_text("Cafe\u{301} noir", 6), "Cafe\u{301}…");
+        assert_eq!(fit_text("go 👩‍💻 now", 7), "go 👩‍💻…");
+        assert_eq!(fit_text("safe\u{1b}[31m\n", 32), "safe?[31m?");
+        for width in 0..12 {
+            let fitted = fit_text("双语 👩‍💻 Cafe\u{301}", width);
+            assert!(display_width(&fitted) <= width);
+            assert!(std::str::from_utf8(fitted.as_bytes()).is_ok());
+            assert!(!fitted.chars().any(char::is_control));
+        }
     }
 }

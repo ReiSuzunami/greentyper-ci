@@ -96,9 +96,26 @@ impl ConfigEditorSession {
         })
     }
 
+    pub fn field(&self, runtime: &ConfigRuntime) -> Result<ConfigFieldView, ConfigEditorError> {
+        runtime
+            .inspect_draft_field(&self.draft, &self.field_path)
+            .map_err(Into::into)
+    }
+
     pub fn commit(self, runtime: &mut ConfigRuntime) -> Result<ConfigCommit, ConfigEditorError> {
         self.require_value_editor()?;
         runtime.commit(self.draft, false).map_err(Into::into)
+    }
+
+    /// Attempts the commit without consuming this session when validation or CAS fails.
+    pub fn try_commit(
+        &self,
+        runtime: &mut ConfigRuntime,
+    ) -> Result<ConfigCommit, ConfigEditorError> {
+        self.require_value_editor()?;
+        runtime
+            .commit(self.draft.clone(), false)
+            .map_err(Into::into)
     }
 
     fn require_value_editor(&self) -> Result<(), ConfigEditorError> {
