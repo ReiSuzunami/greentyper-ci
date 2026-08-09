@@ -3,11 +3,11 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use greentyper_core::config::ConfigLayers;
+use greentyper_core::config::{ConfigDocument, ConfigLayers, ConfigPaths, ConfigRuntime};
 use greentyper_core::ledger::{EventData, FileLedger, LedgerHead};
 use greentyper_core::provider::{
-    DeterministicProvider, ProviderError, ProviderEvent, ProviderRequest, ProviderRuntime,
-    UsageRecord,
+    DeterministicProvider, ProviderError, ProviderEvent, ProviderProfileSnapshot, ProviderRequest,
+    ProviderRuntime, UsageRecord,
 };
 use greentyper_core::runtime::{AcknowledgeOutcome, RecoveryStatus, RuntimeError, RuntimeKernel};
 
@@ -125,6 +125,94 @@ fn crash_after_admission_requires_explicit_resume() {
 }
 
 #[test]
+fn provider_profile_snapshot_survives_recovery_and_rejects_mismatched_resume() {
+    const CREDENTIAL_MATERIAL: &str = "credential-material-must-never-enter-ledger";
+    let path = temp_path("provider-profile-recovery");
+    let (layers, snapshot) = provider_profile_fixture("/responses");
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut runtime = RuntimeKernel::open(&path).expect("open Runtime");
+        let mut provider = SnapshotPanicProvider {
+            snapshot: snapshot.clone(),
+        };
+        let _ = runtime.execute(&layers, "resume frozen profile", &mut provider);
+    }));
+    assert!(result.is_err());
+
+    let bytes = fs::read(&path).expect("read Runtime Ledger");
+    assert!(
+        bytes
+            .windows("edge-credential".len())
+            .any(|window| { window == "edge-credential".as_bytes() })
+    );
+    assert!(
+        !bytes
+            .windows(CREDENTIAL_MATERIAL.len())
+            .any(|window| { window == CREDENTIAL_MATERIAL.as_bytes() })
+    );
+
+    let (_, mismatched) = provider_profile_fixture("/different-responses");
+    let mut runtime = RuntimeKernel::open(&path).expect("recover frozen Provider profile");
+    let mut wrong = SnapshotProvider::new(mismatched);
+    assert!(matches!(
+        runtime.resume(&mut wrong),
+        Err(RuntimeError::Provider(ProviderError::InvalidConfiguration(
+            _
+        )))
+    ));
+    assert_eq!(wrong.calls, 0);
+    assert!(matches!(
+        runtime.snapshot().status,
+        RecoveryStatus::ResumeRequired { .. }
+    ));
+
+    let mut matching = SnapshotProvider::new(snapshot.clone());
+    let output = runtime
+        .resume(&mut matching)
+        .expect("resume matching frozen Provider profile");
+    assert_eq!(matching.calls, 1);
+    assert_eq!(matching.seen.as_ref(), Some(&snapshot));
+    runtime
+        .acknowledge(output.delivery())
+        .expect("acknowledge frozen Provider output");
+    drop(runtime);
+
+    let recovered = RuntimeKernel::open(&path).expect("replay frozen Provider profile");
+    assert_eq!(recovered.snapshot().status, RecoveryStatus::Ready);
+    drop(recovered);
+    fs::remove_file(path).expect("cleanup Runtime ledger");
+}
+
+#[test]
+fn non_simulator_without_a_profile_snapshot_is_rejected_before_admission() {
+    let path = temp_path("provider-profile-required");
+    let mut runtime = RuntimeKernel::open(&path).expect("open Runtime");
+    let layers = ConfigLayers {
+        cli: greentyper_core::config::ConfigLayer {
+            provider_profile: Some("edge".to_owned()),
+            provider_model: Some("fixture-model".to_owned()),
+            ..greentyper_core::config::ConfigLayer::default()
+        },
+        ..ConfigLayers::default()
+    };
+    let mut provider = NoSnapshotProvider { calls: 0 };
+    assert!(matches!(
+        runtime.execute(&layers, "must not run", &mut provider),
+        Err(RuntimeError::Provider(ProviderError::InvalidConfiguration(
+            _
+        )))
+    ));
+    assert_eq!(provider.calls, 0);
+    assert_eq!(runtime.snapshot().status, RecoveryStatus::Ready);
+    assert!(runtime.snapshot().items.is_empty());
+    drop(runtime);
+
+    let inspected = RuntimeKernel::inspect(&path).expect("inspect empty Runtime Ledger");
+    assert_eq!(inspected.status, RecoveryStatus::Ready);
+    assert!(inspected.items.is_empty());
+    fs::remove_file(path).expect("cleanup Runtime ledger");
+}
+
+#[test]
 fn malformed_provider_output_is_durably_blocked() {
     let path = temp_path("blocked");
     let mut runtime = RuntimeKernel::open(&path).expect("open Runtime");
@@ -187,7 +275,7 @@ fn unsupported_runtime_event_schema_fails_closed() {
         .append(
             LedgerHead::default(),
             &[EventData {
-                schema: 3,
+                schema: 4,
                 kind: 1,
                 payload: 1_u64.to_le_bytes().to_vec(),
             }],
@@ -197,15 +285,15 @@ fn unsupported_runtime_event_schema_fails_closed() {
     assert!(matches!(
         RuntimeKernel::open(&path),
         Err(RuntimeError::UnsupportedRuntimeEventSchema {
-            supported: 2,
-            actual: 3
+            supported: 3,
+            actual: 4
         })
     ));
     fs::remove_file(path).expect("cleanup Runtime ledger");
 }
 
 #[test]
-fn schema_one_runtime_turn_replays_and_can_continue_with_schema_two() {
+fn schema_one_runtime_turn_replays_and_can_continue_with_schema_three() {
     let path = temp_path("schema-one-replay");
     let layers = ConfigLayers::default();
     let config = greentyper_core::config::ConfigEpoch::freeze(
@@ -409,5 +497,107 @@ impl ProviderRuntime for UnavailableProvider {
         Err(ProviderError::unavailable(
             "https://provider.test/?token=private-token",
         ))
+    }
+}
+
+fn provider_profile_fixture(route: &str) -> (ConfigLayers, ProviderProfileSnapshot) {
+    let root = temp_path("provider-profile-config");
+    let config = ConfigDocument::parse(&format!(
+        r#"
+schema_version = 1
+
+[provider]
+profile = "edge"
+model = "fixture-model"
+
+[providers.edge]
+template = "openai-compatible"
+credential = "edge-credential"
+base_url = "https://gateway.example.com/v1"
+dialects = ["responses"]
+
+[providers.edge.routes]
+responses = "{route}"
+
+[providers.edge.pricing]
+source = "unknown"
+"#
+    ))
+    .expect("parse Provider profile fixture");
+    let runtime = ConfigRuntime::open(
+        ConfigPaths::new(
+            root.with_extension("user.toml"),
+            root.with_extension("project.toml"),
+        ),
+        config,
+    )
+    .expect("resolve Provider profile fixture");
+    let layers = runtime
+        .config_layers()
+        .expect("resolved Config layers")
+        .clone();
+    let snapshot = runtime
+        .selected_provider_profile()
+        .expect("resolve selected Provider profile")
+        .expect("custom Provider profile");
+    (layers, snapshot)
+}
+
+struct SnapshotPanicProvider {
+    snapshot: ProviderProfileSnapshot,
+}
+
+struct NoSnapshotProvider {
+    calls: usize,
+}
+
+impl ProviderRuntime for NoSnapshotProvider {
+    fn run(&mut self, _request: &ProviderRequest) -> Result<Vec<ProviderEvent>, ProviderError> {
+        self.calls += 1;
+        Ok(vec![
+            ProviderEvent::TextDelta("must not execute".to_owned()),
+            ProviderEvent::Completed(UsageRecord::default()),
+        ])
+    }
+}
+
+impl ProviderRuntime for SnapshotPanicProvider {
+    fn profile_snapshot(&self) -> Option<&ProviderProfileSnapshot> {
+        Some(&self.snapshot)
+    }
+
+    fn run(&mut self, _request: &ProviderRequest) -> Result<Vec<ProviderEvent>, ProviderError> {
+        panic!("injected crash after frozen Provider admission")
+    }
+}
+
+struct SnapshotProvider {
+    snapshot: ProviderProfileSnapshot,
+    seen: Option<ProviderProfileSnapshot>,
+    calls: usize,
+}
+
+impl SnapshotProvider {
+    fn new(snapshot: ProviderProfileSnapshot) -> Self {
+        Self {
+            snapshot,
+            seen: None,
+            calls: 0,
+        }
+    }
+}
+
+impl ProviderRuntime for SnapshotProvider {
+    fn profile_snapshot(&self) -> Option<&ProviderProfileSnapshot> {
+        Some(&self.snapshot)
+    }
+
+    fn run(&mut self, request: &ProviderRequest) -> Result<Vec<ProviderEvent>, ProviderError> {
+        self.calls += 1;
+        self.seen = request.provider.profile_snapshot().cloned();
+        Ok(vec![
+            ProviderEvent::TextDelta("frozen profile output".to_owned()),
+            ProviderEvent::Completed(UsageRecord::default()),
+        ])
     }
 }

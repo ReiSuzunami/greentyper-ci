@@ -149,6 +149,13 @@ mode = "manual"
 source = "unknown"
 ```
 
+The selected non-simulator `provider.profile` must name an effective Provider
+Profile. At Turn admission, Config Runtime resolves that profile into an owned,
+typed snapshot. Provider Runtime freezes the template identity, opaque
+credential reference, normalized origin/routes, dialects, pricing source, and
+loopback decision into the Provider Epoch; later Config edits affect only a new
+Provider Epoch.
+
 URL composition is intentionally not RFC relative-reference resolution. The runtime removes trailing slashes from `base_url`, normalizes each route to exactly one leading slash, and concatenates them: the example resolves `responses` to `https://gateway.example.com/v1/responses`. Routes may contain only a path; absolute URLs, authority components, dot segments, query strings, and fragments are rejected. A base URL may contain an origin path such as `/v1`, but no user info, query, or fragment.
 
 Provider Template defaults are suggestions, not locked endpoints. Provider Origin changes have these effects:

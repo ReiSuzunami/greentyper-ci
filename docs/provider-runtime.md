@@ -17,8 +17,11 @@ neutral interface through Tool Runtime approval and one Tool continuation. The
 product has a private loopback-only HTTP tracer that sends one real Responses
 request through a no-proxy, no-redirect blocking client, streams the response
 through this decoder, and drives the single-Agent Runtime. The public CLI still
-uses the deterministic simulator. No remote endpoint, credential lookup,
-Provider Profile routing, retry policy, or product delivery is wired to this
+uses the deterministic simulator. The private tracer resolves a selected
+Provider Profile through Config Runtime and freezes its normalized loopback
+origin, Responses route, dialect, pricing source, and opaque synthetic
+credential reference into the Provider Epoch. No production remote endpoint,
+credential-vault lookup, retry policy, or product delivery is wired to this
 decoder yet.
 
 ## Interface
@@ -138,7 +141,8 @@ effects, non-UTF-8 Tool output, and process death after durable Tool success
 without effect repetition.
 
 Product integration tests exercise the private HTTP tracer against an actual
-loopback TCP server. The server validates the fixed Responses route, model,
+loopback TCP server. Config Runtime resolves the fixture profile and the adapter
+uses its frozen Responses endpoint; the server validates that route, model,
 input, streaming flag, and synthetic Authorization header, then fragments a
 bounded SSE response across network writes. Tests prove canonical Runtime
 output and replay, fixed classification for HTTP 503 and request timeout, and
@@ -151,10 +155,11 @@ The event shapes are checked against the official
 
 ## Still Pending
 
-- A production remote HTTP/SSE transport, credential and origin binding,
-  frozen Provider Profile routes, TLS/proxy policy, reconnect classification,
-  and retry policy. The current concrete transport is loopback-only and uses a
-  fixed synthetic credential.
+- A production remote HTTP/SSE transport, secure credential lookup and
+  origin-bound secret routing, Provider Template defaults/catalogs, TLS/proxy
+  policy, reconnect classification, and retry policy. The current concrete
+  transport is loopback-only, uses frozen fixture Profile metadata, and sends a
+  fixed synthetic credential rather than resolving secret material.
 - Broader normalization into the eventual provider-neutral canonical Item
   model, including reasoning, refusal, annotations, and hosted Tools.
 - Reasoning, refusal, annotation, hosted-tool, and other Responses event kinds

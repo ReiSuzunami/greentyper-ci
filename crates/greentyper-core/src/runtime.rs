@@ -22,7 +22,8 @@ use crate::model::{
     ThreadId, TurnId,
 };
 use crate::provider::{
-    MAX_SERVICE_TIER_BYTES, ProviderEpoch, ProviderError, ProviderEvent, ProviderRequest,
+    MAX_PROVIDER_ID_BYTES, MAX_SERVICE_TIER_BYTES, ProviderDialect, ProviderEpoch, ProviderError,
+    ProviderEvent, ProviderPricingSource, ProviderProfileSnapshot, ProviderRequest,
     ProviderRuntime, ProviderToolCall, ProviderToolOutput, UsageRecord,
 };
 use crate::schema::SchemaKind;
@@ -516,7 +517,7 @@ impl RuntimeKernel {
         input: impl Into<String>,
         provider: &mut impl ProviderRuntime,
     ) -> Result<PreparedOutput, RuntimeError> {
-        self.admit_turn(layers, input.into())?;
+        self.admit_turn(layers, input.into(), provider.profile_snapshot().cloned())?;
         self.drive_pending(provider)
     }
 
@@ -537,7 +538,7 @@ impl RuntimeKernel {
         ResolveResources: FnOnce(&ProviderToolCall) -> Result<ToolResources, RuntimeError>,
     {
         self.require_provider_session(session)?;
-        self.admit_turn(layers, input.into())?;
+        self.admit_turn(layers, input.into(), provider.profile_snapshot().cloned())?;
         self.drive_provider_turn(session, provider, map_resources)
     }
 
@@ -577,6 +578,7 @@ impl RuntimeKernel {
             mut leading_deltas,
             mut usage_records,
         } = *approval;
+        require_provider_snapshot(provider, &provider_request.provider)?;
         let turn = provider_request.turn;
         let outcome = self.resolve_tool_call(request, decision, executor)?;
         let output = match outcome {
@@ -716,7 +718,12 @@ impl RuntimeKernel {
         Ok(())
     }
 
-    fn admit_turn(&mut self, layers: &ConfigLayers, input: String) -> Result<(), RuntimeError> {
+    fn admit_turn(
+        &mut self,
+        layers: &ConfigLayers,
+        input: String,
+        provider_snapshot: Option<ProviderProfileSnapshot>,
+    ) -> Result<(), RuntimeError> {
         self.require_ready()?;
         self.require_no_tool_reconciliation()?;
         validate_input(&input)?;
@@ -731,11 +738,17 @@ impl RuntimeKernel {
         let provider_id =
             ProviderEpochId::new(self.state.next_provider).map_err(RuntimeError::Model)?;
         let config = ConfigEpoch::freeze(config_id, layers).map_err(RuntimeError::Config)?;
-        let provider_epoch = ProviderEpoch::new(
-            provider_id,
-            config.resolved().provider_profile().value().clone(),
-            config.resolved().provider_model().value().clone(),
-        )
+        let profile = config.resolved().provider_profile().value().clone();
+        let model = config.resolved().provider_model().value().clone();
+        let provider_epoch = match provider_snapshot {
+            Some(snapshot) => {
+                ProviderEpoch::with_profile_snapshot(provider_id, profile, model, snapshot)
+            }
+            None if profile == "simulator" => ProviderEpoch::new(provider_id, profile, model),
+            None => Err(ProviderError::InvalidConfiguration(
+                "non-simulator provider requires a frozen Provider Profile snapshot",
+            )),
+        }
         .map_err(RuntimeError::Provider)?;
 
         let mut admission = Vec::new();
@@ -746,7 +759,7 @@ impl RuntimeKernel {
             epoch: config.clone(),
         });
         admission.push(RuntimeEvent::ProviderFrozen {
-            epoch: provider_epoch,
+            epoch: Box::new(provider_epoch),
         });
         admission.push(RuntimeEvent::TurnAdmitted {
             thread,
@@ -765,6 +778,7 @@ impl RuntimeKernel {
         provider: &mut impl ProviderRuntime,
     ) -> Result<PreparedOutput, RuntimeError> {
         let (pending, config, request) = self.pending_provider_context()?;
+        require_provider_snapshot(provider, &request.provider)?;
         let provider_events = match provider.run(&request) {
             Ok(events) => events,
             Err(source) => {
@@ -803,6 +817,7 @@ impl RuntimeKernel {
         ResolveResources: FnOnce(&ProviderToolCall) -> Result<ToolResources, RuntimeError>,
     {
         let (pending, config, request) = self.pending_provider_context()?;
+        require_provider_snapshot(provider, &request.provider)?;
         let provider_events = match provider.run(&request) {
             Ok(events) => events,
             Err(source) => {
@@ -1155,6 +1170,19 @@ fn validate_provider_events(
     })
 }
 
+fn require_provider_snapshot(
+    provider: &impl ProviderRuntime,
+    epoch: &ProviderEpoch,
+) -> Result<(), RuntimeError> {
+    if provider.profile_snapshot() == epoch.profile_snapshot() {
+        Ok(())
+    } else {
+        Err(RuntimeError::Provider(ProviderError::InvalidConfiguration(
+            "Provider Runtime does not match the frozen Provider Profile snapshot",
+        )))
+    }
+}
+
 fn provider_tool_identity(turn: TurnId, call_id: &str) -> String {
     let digest = Sha256::digest(call_id.as_bytes());
     let mut identity = format!("provider-turn-{}-", turn.get());
@@ -1193,7 +1221,7 @@ enum RuntimeEvent {
         epoch: ConfigEpoch,
     },
     ProviderFrozen {
-        epoch: ProviderEpoch,
+        epoch: Box<ProviderEpoch>,
     },
     TurnAdmitted {
         thread: ThreadId,
@@ -1245,9 +1273,7 @@ impl RuntimeEvent {
                 2
             }
             Self::ProviderFrozen { epoch } => {
-                payload.u64(epoch.id().get());
-                payload.string(epoch.profile())?;
-                payload.string(epoch.model())?;
+                encode_provider_epoch(&mut payload, epoch)?;
                 3
             }
             Self::TurnAdmitted {
@@ -1320,7 +1346,7 @@ impl RuntimeEvent {
     }
 
     fn decode(event: &StoredEvent) -> Result<Self, RuntimeError> {
-        if event.data.schema != 1 && event.data.schema != RUNTIME_EVENT_SCHEMA {
+        if !matches!(event.data.schema, 1 | 2 | RUNTIME_EVENT_SCHEMA) {
             return Err(RuntimeError::UnsupportedRuntimeEventSchema {
                 supported: RUNTIME_EVENT_SCHEMA,
                 actual: event.data.schema,
@@ -1335,12 +1361,7 @@ impl RuntimeEvent {
                 epoch: decode_config_epoch(&mut payload)?,
             },
             3 => Self::ProviderFrozen {
-                epoch: ProviderEpoch::new(
-                    ProviderEpochId::new(payload.u64()?).map_err(RuntimeError::Model)?,
-                    payload.string(MAX_BLOCK_REASON_BYTES)?,
-                    payload.string(MAX_BLOCK_REASON_BYTES)?,
-                )
-                .map_err(RuntimeError::Provider)?,
+                epoch: Box::new(decode_provider_epoch(&mut payload, event.data.schema)?),
             },
             4 => Self::TurnAdmitted {
                 thread: ThreadId::new(payload.u64()?).map_err(RuntimeError::Model)?,
@@ -1516,7 +1537,7 @@ impl RuntimeState {
             }
             RuntimeEvent::ProviderFrozen { epoch } => {
                 let id = epoch.id();
-                if self.providers.insert(id, epoch).is_some() {
+                if self.providers.insert(id, *epoch).is_some() {
                     return Err(RuntimeError::CorruptState("duplicate Provider Epoch"));
                 }
                 observe_id(&mut self.next_provider, id.get())?;
@@ -1862,6 +1883,218 @@ fn decode_optional_u64(decoder: &mut Decoder<'_>) -> Result<Option<u64>, Runtime
     }
 }
 
+fn encode_provider_epoch(encoder: &mut Encoder, epoch: &ProviderEpoch) -> Result<(), RuntimeError> {
+    encoder.u64(epoch.id().get());
+    encoder.u64(epoch.fingerprint());
+    encoder.string(epoch.profile())?;
+    encoder.string(epoch.model())?;
+    match epoch.profile_snapshot() {
+        None => encoder.u8(0),
+        Some(snapshot) => {
+            encoder.u8(1);
+            encode_provider_profile_snapshot(encoder, snapshot)?;
+        }
+    }
+    Ok(())
+}
+
+fn decode_provider_epoch(
+    decoder: &mut Decoder<'_>,
+    schema: u16,
+) -> Result<ProviderEpoch, RuntimeError> {
+    let id = ProviderEpochId::new(decoder.u64()?).map_err(RuntimeError::Model)?;
+    if schema < 3 {
+        return ProviderEpoch::new(
+            id,
+            decoder.string(MAX_PROVIDER_ID_BYTES)?,
+            decoder.string(MAX_PROVIDER_ID_BYTES)?,
+        )
+        .map_err(RuntimeError::Provider);
+    }
+    let fingerprint = decoder.u64()?;
+    let profile = decoder.string(MAX_PROVIDER_ID_BYTES)?;
+    let model = decoder.string(MAX_PROVIDER_ID_BYTES)?;
+    let epoch = match decoder.u8()? {
+        0 => ProviderEpoch::new(id, profile, model),
+        1 => {
+            let snapshot = decode_provider_profile_snapshot(decoder, &profile)?;
+            ProviderEpoch::with_profile_snapshot(id, profile, model, snapshot)
+        }
+        _ => {
+            return Err(RuntimeError::CorruptEvent(
+                "invalid Provider Profile snapshot tag",
+            ));
+        }
+    }
+    .map_err(RuntimeError::Provider)?;
+    if epoch.fingerprint() != fingerprint {
+        return Err(RuntimeError::CorruptEvent(
+            "Provider Epoch fingerprint mismatch",
+        ));
+    }
+    Ok(epoch)
+}
+
+fn encode_provider_profile_snapshot(
+    encoder: &mut Encoder,
+    snapshot: &ProviderProfileSnapshot,
+) -> Result<(), RuntimeError> {
+    encoder.u64(snapshot.fingerprint());
+    encoder.string(snapshot.template())?;
+    encode_optional_string(encoder, snapshot.credential_reference())?;
+    encode_optional_string(encoder, snapshot.base_url())?;
+    encode_optional_string(encoder, snapshot.route(ProviderDialect::Responses))?;
+    encode_optional_string(encoder, snapshot.route(ProviderDialect::ChatCompletions))?;
+    encode_optional_string(encoder, snapshot.route(ProviderDialect::Messages))?;
+    encode_optional_string(encoder, snapshot.models_route())?;
+    encoder
+        .u32(u32::try_from(snapshot.dialects().len()).map_err(|_| RuntimeError::IntegerOverflow)?);
+    for dialect in snapshot.dialects() {
+        encoder.u8(provider_dialect_tag(dialect));
+    }
+    encoder.u8(match snapshot.pricing_source() {
+        None => 0,
+        Some(ProviderPricingSource::Unknown) => 1,
+        Some(ProviderPricingSource::Template) => 2,
+        Some(ProviderPricingSource::Manual) => 3,
+        Some(ProviderPricingSource::ProviderReported) => 4,
+    });
+    encoder.u8(u8::from(snapshot.allow_insecure_loopback()));
+    Ok(())
+}
+
+fn decode_provider_profile_snapshot(
+    decoder: &mut Decoder<'_>,
+    profile: &str,
+) -> Result<ProviderProfileSnapshot, RuntimeError> {
+    let fingerprint = decoder.u64()?;
+    let template = decoder.string(MAX_PROVIDER_ID_BYTES)?;
+    let credential_reference = decode_optional_string(decoder, MAX_PROVIDER_ID_BYTES)?;
+    let base_url = decode_optional_string(decoder, MAX_PROVIDER_ID_BYTES)?;
+    let responses_route = decode_optional_string(decoder, MAX_PROVIDER_ID_BYTES)?;
+    let chat_completions_route = decode_optional_string(decoder, MAX_PROVIDER_ID_BYTES)?;
+    let messages_route = decode_optional_string(decoder, MAX_PROVIDER_ID_BYTES)?;
+    let models_route = decode_optional_string(decoder, MAX_PROVIDER_ID_BYTES)?;
+    let dialect_count = decoder.u32()? as usize;
+    if dialect_count == 0 || dialect_count > 3 {
+        return Err(RuntimeError::CorruptEvent(
+            "Provider Profile dialect count is invalid",
+        ));
+    }
+    let mut dialects = Vec::with_capacity(dialect_count);
+    for _ in 0..dialect_count {
+        let dialect = decode_provider_dialect(decoder.u8()?)?;
+        if dialects.contains(&dialect) {
+            return Err(RuntimeError::CorruptEvent(
+                "Provider Profile contains a duplicate dialect",
+            ));
+        }
+        dialects.push(dialect);
+    }
+    let pricing_source = match decoder.u8()? {
+        0 => None,
+        1 => Some(ProviderPricingSource::Unknown),
+        2 => Some(ProviderPricingSource::Template),
+        3 => Some(ProviderPricingSource::Manual),
+        4 => Some(ProviderPricingSource::ProviderReported),
+        _ => {
+            return Err(RuntimeError::CorruptEvent(
+                "invalid Provider pricing source tag",
+            ));
+        }
+    };
+    let allow_insecure_loopback = match decoder.u8()? {
+        0 => false,
+        1 => true,
+        _ => {
+            return Err(RuntimeError::CorruptEvent(
+                "invalid Provider loopback permission tag",
+            ));
+        }
+    };
+    let raw_base_url = base_url.clone();
+    let raw_routes = [
+        responses_route.clone(),
+        chat_completions_route.clone(),
+        messages_route.clone(),
+        models_route.clone(),
+    ];
+    let snapshot = ProviderProfileSnapshot::from_parts(
+        profile,
+        template,
+        credential_reference,
+        base_url,
+        responses_route,
+        chat_completions_route,
+        messages_route,
+        models_route,
+        dialects,
+        pricing_source,
+        allow_insecure_loopback,
+    )
+    .map_err(RuntimeError::Provider)?;
+    let canonical_routes = [
+        snapshot
+            .route(ProviderDialect::Responses)
+            .map(str::to_owned),
+        snapshot
+            .route(ProviderDialect::ChatCompletions)
+            .map(str::to_owned),
+        snapshot.route(ProviderDialect::Messages).map(str::to_owned),
+        snapshot.models_route().map(str::to_owned),
+    ];
+    if snapshot.base_url().map(str::to_owned) != raw_base_url || canonical_routes != raw_routes {
+        return Err(RuntimeError::CorruptEvent(
+            "Provider Profile snapshot is not canonical",
+        ));
+    }
+    if snapshot.fingerprint() != fingerprint {
+        return Err(RuntimeError::CorruptEvent(
+            "Provider Profile fingerprint mismatch",
+        ));
+    }
+    Ok(snapshot)
+}
+
+fn encode_optional_string(encoder: &mut Encoder, value: Option<&str>) -> Result<(), RuntimeError> {
+    match value {
+        None => encoder.u8(0),
+        Some(value) => {
+            encoder.u8(1);
+            encoder.string(value)?;
+        }
+    }
+    Ok(())
+}
+
+fn decode_optional_string(
+    decoder: &mut Decoder<'_>,
+    max_bytes: usize,
+) -> Result<Option<String>, RuntimeError> {
+    match decoder.u8()? {
+        0 => Ok(None),
+        1 => decoder.string(max_bytes).map(Some),
+        _ => Err(RuntimeError::CorruptEvent("invalid optional string tag")),
+    }
+}
+
+const fn provider_dialect_tag(dialect: ProviderDialect) -> u8 {
+    match dialect {
+        ProviderDialect::Responses => 1,
+        ProviderDialect::ChatCompletions => 2,
+        ProviderDialect::Messages => 3,
+    }
+}
+
+fn decode_provider_dialect(tag: u8) -> Result<ProviderDialect, RuntimeError> {
+    match tag {
+        1 => Ok(ProviderDialect::Responses),
+        2 => Ok(ProviderDialect::ChatCompletions),
+        3 => Ok(ProviderDialect::Messages),
+        _ => Err(RuntimeError::CorruptEvent("invalid Provider dialect tag")),
+    }
+}
+
 fn encode_config_epoch(encoder: &mut Encoder, epoch: &ConfigEpoch) -> Result<(), RuntimeError> {
     encoder.u64(epoch.id().get());
     encoder.u64(epoch.fingerprint());
@@ -2131,6 +2364,98 @@ impl Error for RuntimeError {
 mod tests {
     use super::*;
 
+    fn stored_runtime_event(data: EventData) -> StoredEvent {
+        StoredEvent {
+            sequence: 1,
+            transaction: 1,
+            index_in_transaction: 0,
+            events_in_transaction: 1,
+            data,
+        }
+    }
+
+    fn profile_snapshot() -> ProviderProfileSnapshot {
+        ProviderProfileSnapshot::from_parts(
+            "edge",
+            "openai-compatible",
+            Some("edge-credential".to_owned()),
+            Some("https://gateway.example.com/v1".to_owned()),
+            Some("/responses".to_owned()),
+            Some("/chat/completions".to_owned()),
+            None,
+            Some("/models".to_owned()),
+            [ProviderDialect::Responses, ProviderDialect::ChatCompletions],
+            Some(ProviderPricingSource::Unknown),
+            false,
+        )
+        .expect("valid Provider Profile snapshot")
+    }
+
+    #[test]
+    fn schema_two_provider_epoch_remains_replayable() {
+        let mut payload = Encoder::default();
+        payload.u64(1);
+        payload.string("simulator").expect("profile");
+        payload.string("deterministic-v1").expect("model");
+        let decoded = RuntimeEvent::decode(&stored_runtime_event(EventData {
+            schema: 2,
+            kind: 3,
+            payload: payload.finish(),
+        }))
+        .expect("decode schema-two Provider Epoch");
+        let RuntimeEvent::ProviderFrozen { epoch } = decoded else {
+            panic!("decoded the wrong Runtime Event")
+        };
+        assert_eq!(epoch.profile(), "simulator");
+        assert_eq!(epoch.model(), "deterministic-v1");
+        assert_eq!(epoch.profile_snapshot(), None);
+    }
+
+    #[test]
+    fn schema_three_provider_epoch_round_trips_and_rejects_fingerprint_tampering() {
+        let epoch = ProviderEpoch::with_profile_snapshot(
+            ProviderEpochId::new(1).expect("Provider Epoch id"),
+            "edge",
+            "fixture-model",
+            profile_snapshot(),
+        )
+        .expect("freeze Provider Epoch");
+        let encoded = RuntimeEvent::ProviderFrozen {
+            epoch: Box::new(epoch.clone()),
+        }
+        .encode()
+        .expect("encode Provider Epoch");
+        assert_eq!(encoded.schema, 3);
+        assert_eq!(
+            RuntimeEvent::decode(&stored_runtime_event(encoded.clone()))
+                .expect("decode Provider Epoch"),
+            RuntimeEvent::ProviderFrozen {
+                epoch: Box::new(epoch)
+            }
+        );
+
+        let mut epoch_tamper = encoded.clone();
+        epoch_tamper.payload[8] ^= 1;
+        assert!(matches!(
+            RuntimeEvent::decode(&stored_runtime_event(epoch_tamper)),
+            Err(RuntimeError::CorruptEvent(
+                "Provider Epoch fingerprint mismatch"
+            ))
+        ));
+
+        let mut snapshot_tamper = encoded;
+        let profile_length = "edge".len();
+        let model_length = "fixture-model".len();
+        let snapshot_fingerprint = 8 + 8 + 4 + profile_length + 4 + model_length + 1;
+        snapshot_tamper.payload[snapshot_fingerprint] ^= 1;
+        assert!(matches!(
+            RuntimeEvent::decode(&stored_runtime_event(snapshot_tamper)),
+            Err(RuntimeError::CorruptEvent(
+                "Provider Profile fingerprint mismatch"
+            ))
+        ));
+    }
+
     #[test]
     fn prepared_output_rechecks_the_frozen_config_limit() {
         let thread = ThreadId::new(1).expect("Thread id");
@@ -2158,7 +2483,9 @@ mod tests {
         for event in [
             RuntimeEvent::ThreadCreated { thread },
             RuntimeEvent::ConfigFrozen { epoch: config },
-            RuntimeEvent::ProviderFrozen { epoch: provider },
+            RuntimeEvent::ProviderFrozen {
+                epoch: Box::new(provider),
+            },
             RuntimeEvent::TurnAdmitted {
                 thread,
                 turn,

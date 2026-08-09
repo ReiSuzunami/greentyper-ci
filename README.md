@@ -89,15 +89,18 @@ Windows child to a constrained Job Object before execution. It rejects
 filesystem and network resources and is not a general process sandbox,
 network Tool, or MCP adapter. The product also has a private loopback Responses
 HTTP tracer with a real no-proxy, no-redirect client, bounded streaming decode,
-a fixed deadline, synthetic authorization, and fixed request validation. It is
-not a remote Provider or credential-routing path. The core has bounded generic
+a fixed deadline, synthetic authorization, and fixed request validation. Its
+Config Runtime resolves a typed Provider Profile snapshot and freezes the
+normalized loopback origin, Responses route, dialect, pricing decision, and
+opaque synthetic credential reference into the Provider Epoch. It is not a
+remote Provider or real credential-routing path. The core has bounded generic
 SSE framing and a strict OpenAI Responses dialect decoder for text, function
 calls, terminal states, and optional usage. A core fixture path normalizes one
 Responses function call,
 crosses durable Tool approval/effect policy, continues the Provider once, and
 prepares canonical output without repeating successful or ambiguous effects.
-The public product path still uses the deterministic simulator: no remote
-Provider transport, credential routing, user-facing Tool approval/delivery
+The public product path still uses the deterministic simulator: no production
+remote Provider transport, credential-vault routing, user-facing Tool approval/delivery
 path, or retry path exists yet. The `local.echo` and loopback Provider tracers
 are exercised through internal harnesses rather than public commands. The file
 Ledger remains provisional. Real Provider and Tool adapters, Workspace, TUI,

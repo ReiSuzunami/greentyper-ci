@@ -3,8 +3,12 @@
 pub mod responses;
 pub mod sse;
 
+use std::collections::BTreeSet;
 use std::error::Error;
 use std::fmt;
+
+use serde::{Deserialize, Serialize};
+use url::{Host, Url};
 
 use crate::config::ConfigEpoch;
 use crate::model::{ProviderEpochId, ThreadId, TurnId};
@@ -15,11 +19,209 @@ pub const MAX_PROVIDER_TOOL_ARGUMENT_BYTES: usize = 64 * 1024;
 pub const MAX_PROVIDER_TOOL_OUTPUT_BYTES: usize = 256 * 1024;
 pub const MAX_SERVICE_TIER_BYTES: usize = 64;
 
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderDialect {
+    Responses,
+    ChatCompletions,
+    Messages,
+}
+
+impl ProviderDialect {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Responses => "responses",
+            Self::ChatCompletions => "chat_completions",
+            Self::Messages => "messages",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderPricingSource {
+    Unknown,
+    Template,
+    Manual,
+    ProviderReported,
+}
+
+impl ProviderPricingSource {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Unknown => "unknown",
+            Self::Template => "template",
+            Self::Manual => "manual",
+            Self::ProviderReported => "provider_reported",
+        }
+    }
+}
+
+#[derive(Clone, Eq, PartialEq)]
+pub struct ProviderProfileSnapshot {
+    profile: String,
+    template: String,
+    credential_reference: Option<String>,
+    base_url: Option<String>,
+    responses_route: Option<String>,
+    chat_completions_route: Option<String>,
+    messages_route: Option<String>,
+    models_route: Option<String>,
+    dialects: BTreeSet<ProviderDialect>,
+    pricing_source: Option<ProviderPricingSource>,
+    allow_insecure_loopback: bool,
+    fingerprint: u64,
+}
+
+impl ProviderProfileSnapshot {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn from_parts(
+        profile: impl Into<String>,
+        template: impl Into<String>,
+        credential_reference: Option<String>,
+        base_url: Option<String>,
+        responses_route: Option<String>,
+        chat_completions_route: Option<String>,
+        messages_route: Option<String>,
+        models_route: Option<String>,
+        dialects: impl IntoIterator<Item = ProviderDialect>,
+        pricing_source: Option<ProviderPricingSource>,
+        allow_insecure_loopback: bool,
+    ) -> Result<Self, ProviderError> {
+        let profile = profile.into();
+        let template = template.into();
+        validate_provider_id("provider profile", &profile)?;
+        validate_snapshot_value("provider template", &template)?;
+        if let Some(reference) = credential_reference.as_deref() {
+            validate_snapshot_value("provider credential reference", reference)?;
+        }
+        let base_url = base_url
+            .as_deref()
+            .map(|value| normalize_provider_origin(value, allow_insecure_loopback))
+            .transpose()?;
+        if base_url.is_none() && allow_insecure_loopback {
+            return Err(ProviderError::InvalidConfiguration(
+                "insecure loopback requires a provider origin",
+            ));
+        }
+        let responses_route = normalize_optional_route(responses_route)?;
+        let chat_completions_route = normalize_optional_route(chat_completions_route)?;
+        let messages_route = normalize_optional_route(messages_route)?;
+        let models_route = normalize_optional_route(models_route)?;
+        let dialects = dialects.into_iter().collect::<BTreeSet<_>>();
+        if dialects.is_empty() {
+            return Err(ProviderError::InvalidConfiguration(
+                "provider dialect set cannot be empty",
+            ));
+        }
+        let mut snapshot = Self {
+            profile,
+            template,
+            credential_reference,
+            base_url,
+            responses_route,
+            chat_completions_route,
+            messages_route,
+            models_route,
+            dialects,
+            pricing_source,
+            allow_insecure_loopback,
+            fingerprint: 0,
+        };
+        snapshot.fingerprint = fingerprint_profile_snapshot(&snapshot);
+        Ok(snapshot)
+    }
+
+    #[must_use]
+    pub fn profile(&self) -> &str {
+        &self.profile
+    }
+
+    #[must_use]
+    pub fn template(&self) -> &str {
+        &self.template
+    }
+
+    #[must_use]
+    pub fn credential_reference(&self) -> Option<&str> {
+        self.credential_reference.as_deref()
+    }
+
+    #[must_use]
+    pub fn base_url(&self) -> Option<&str> {
+        self.base_url.as_deref()
+    }
+
+    #[must_use]
+    pub fn route(&self, dialect: ProviderDialect) -> Option<&str> {
+        match dialect {
+            ProviderDialect::Responses => self.responses_route.as_deref(),
+            ProviderDialect::ChatCompletions => self.chat_completions_route.as_deref(),
+            ProviderDialect::Messages => self.messages_route.as_deref(),
+        }
+    }
+
+    #[must_use]
+    pub fn models_route(&self) -> Option<&str> {
+        self.models_route.as_deref()
+    }
+
+    #[must_use]
+    pub fn endpoint(&self, dialect: ProviderDialect) -> Option<String> {
+        Some(format!("{}{}", self.base_url()?, self.route(dialect)?))
+    }
+
+    #[must_use]
+    pub fn supports(&self, dialect: ProviderDialect) -> bool {
+        self.dialects.contains(&dialect)
+    }
+
+    pub fn dialects(&self) -> impl ExactSizeIterator<Item = ProviderDialect> + '_ {
+        self.dialects.iter().copied()
+    }
+
+    #[must_use]
+    pub const fn pricing_source(&self) -> Option<ProviderPricingSource> {
+        self.pricing_source
+    }
+
+    #[must_use]
+    pub const fn allow_insecure_loopback(&self) -> bool {
+        self.allow_insecure_loopback
+    }
+
+    #[must_use]
+    pub const fn fingerprint(&self) -> u64 {
+        self.fingerprint
+    }
+}
+
+impl fmt::Debug for ProviderProfileSnapshot {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProviderProfileSnapshot")
+            .field("profile", &self.profile)
+            .field("template", &self.template)
+            .field("dialect_count", &self.dialects.len())
+            .field(
+                "has_credential_reference",
+                &self.credential_reference.is_some(),
+            )
+            .field("has_custom_origin", &self.base_url.is_some())
+            .field("fingerprint", &self.fingerprint)
+            .finish()
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProviderEpoch {
     id: ProviderEpochId,
     profile: String,
     model: String,
+    profile_snapshot: Option<ProviderProfileSnapshot>,
+    fingerprint: u64,
 }
 
 impl ProviderEpoch {
@@ -32,7 +234,39 @@ impl ProviderEpoch {
         let model = model.into();
         validate_provider_id("provider profile", &profile)?;
         validate_provider_id("provider model", &model)?;
-        Ok(Self { id, profile, model })
+        let fingerprint = fingerprint_provider_epoch(&profile, &model, None);
+        Ok(Self {
+            id,
+            profile,
+            model,
+            profile_snapshot: None,
+            fingerprint,
+        })
+    }
+
+    pub fn with_profile_snapshot(
+        id: ProviderEpochId,
+        profile: impl Into<String>,
+        model: impl Into<String>,
+        profile_snapshot: ProviderProfileSnapshot,
+    ) -> Result<Self, ProviderError> {
+        let profile = profile.into();
+        let model = model.into();
+        validate_provider_id("provider profile", &profile)?;
+        validate_provider_id("provider model", &model)?;
+        if profile_snapshot.profile() != profile {
+            return Err(ProviderError::InvalidConfiguration(
+                "Provider Profile snapshot identity mismatch",
+            ));
+        }
+        let fingerprint = fingerprint_provider_epoch(&profile, &model, Some(&profile_snapshot));
+        Ok(Self {
+            id,
+            profile,
+            model,
+            profile_snapshot: Some(profile_snapshot),
+            fingerprint,
+        })
     }
 
     #[must_use]
@@ -48,6 +282,16 @@ impl ProviderEpoch {
     #[must_use]
     pub fn model(&self) -> &str {
         &self.model
+    }
+
+    #[must_use]
+    pub const fn profile_snapshot(&self) -> Option<&ProviderProfileSnapshot> {
+        self.profile_snapshot.as_ref()
+    }
+
+    #[must_use]
+    pub const fn fingerprint(&self) -> u64 {
+        self.fingerprint
     }
 }
 
@@ -273,6 +517,10 @@ impl fmt::Debug for ProviderEvent {
 }
 
 pub trait ProviderRuntime {
+    fn profile_snapshot(&self) -> Option<&ProviderProfileSnapshot> {
+        None
+    }
+
     fn run(&mut self, request: &ProviderRequest) -> Result<Vec<ProviderEvent>, ProviderError>;
 
     fn continue_after_tool(
@@ -373,12 +621,181 @@ fn validate_provider_id(field: &'static str, value: &str) -> Result<(), Provider
             "provider identifiers cannot have surrounding whitespace",
         ));
     }
-    if value.len() > MAX_PROVIDER_ID_BYTES {
+    if value.len() > MAX_PROVIDER_ID_BYTES || value.chars().any(char::is_control) {
         return Err(ProviderError::InvalidConfiguration(
             "provider identifier is too long",
         ));
     }
     Ok(())
+}
+
+fn validate_snapshot_value(field: &'static str, value: &str) -> Result<(), ProviderError> {
+    if value.trim().is_empty()
+        || value.trim() != value
+        || value.len() > MAX_PROVIDER_ID_BYTES
+        || value.chars().any(char::is_control)
+    {
+        return Err(ProviderError::InvalidConfiguration(field));
+    }
+    Ok(())
+}
+
+fn normalize_provider_origin(
+    value: &str,
+    allow_insecure_loopback: bool,
+) -> Result<String, ProviderError> {
+    validate_snapshot_value("provider origin", value)?;
+    let url = Url::parse(value).map_err(|_| {
+        ProviderError::InvalidConfiguration("provider origin must be an absolute HTTP(S) URL")
+    })?;
+    if !matches!(url.scheme(), "http" | "https")
+        || url.host().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(ProviderError::InvalidConfiguration(
+            "provider origin contains unsupported URL components",
+        ));
+    }
+    let loopback = match url.host() {
+        Some(Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
+        Some(Host::Ipv4(address)) => address.is_loopback(),
+        Some(Host::Ipv6(address)) => address.is_loopback(),
+        None => false,
+    };
+    if url.scheme() == "http" && (!loopback || !allow_insecure_loopback) {
+        return Err(ProviderError::InvalidConfiguration(
+            "plain HTTP requires explicit loopback permission",
+        ));
+    }
+    if !loopback && allow_insecure_loopback {
+        return Err(ProviderError::InvalidConfiguration(
+            "loopback permission is invalid for a remote provider origin",
+        ));
+    }
+    Ok(value.trim_end_matches('/').to_owned())
+}
+
+fn normalize_optional_route(route: Option<String>) -> Result<Option<String>, ProviderError> {
+    route
+        .map(|route| normalize_provider_route(&route))
+        .transpose()
+}
+
+fn normalize_provider_route(route: &str) -> Result<String, ProviderError> {
+    validate_snapshot_value("provider route", route)?;
+    if route.contains('?')
+        || route.contains('#')
+        || route.contains("://")
+        || route.contains('\\')
+        || route
+            .split('/')
+            .any(|segment| matches!(segment, "." | ".."))
+    {
+        return Err(ProviderError::InvalidConfiguration(
+            "provider route contains unsupported components",
+        ));
+    }
+    let trimmed = route.trim_start_matches('/');
+    if trimmed.is_empty() {
+        return Err(ProviderError::InvalidConfiguration(
+            "provider route cannot be the origin root",
+        ));
+    }
+    Ok(format!("/{trimmed}"))
+}
+
+fn fingerprint_profile_snapshot(snapshot: &ProviderProfileSnapshot) -> u64 {
+    let mut hash = Fingerprint::new(1);
+    hash.string(&snapshot.profile);
+    hash.string(&snapshot.template);
+    hash.optional_string(snapshot.credential_reference.as_deref());
+    hash.optional_string(snapshot.base_url.as_deref());
+    hash.optional_string(snapshot.responses_route.as_deref());
+    hash.optional_string(snapshot.chat_completions_route.as_deref());
+    hash.optional_string(snapshot.messages_route.as_deref());
+    hash.optional_string(snapshot.models_route.as_deref());
+    hash.usize(snapshot.dialects.len());
+    for dialect in &snapshot.dialects {
+        hash.byte(match dialect {
+            ProviderDialect::Responses => 1,
+            ProviderDialect::ChatCompletions => 2,
+            ProviderDialect::Messages => 3,
+        });
+    }
+    hash.byte(match snapshot.pricing_source {
+        None => 0,
+        Some(ProviderPricingSource::Unknown) => 1,
+        Some(ProviderPricingSource::Template) => 2,
+        Some(ProviderPricingSource::Manual) => 3,
+        Some(ProviderPricingSource::ProviderReported) => 4,
+    });
+    hash.byte(u8::from(snapshot.allow_insecure_loopback));
+    hash.finish()
+}
+
+fn fingerprint_provider_epoch(
+    profile: &str,
+    model: &str,
+    snapshot: Option<&ProviderProfileSnapshot>,
+) -> u64 {
+    let mut hash = Fingerprint::new(1);
+    hash.string(profile);
+    hash.string(model);
+    match snapshot {
+        None => hash.byte(0),
+        Some(snapshot) => {
+            hash.byte(1);
+            hash.bytes(&snapshot.fingerprint().to_le_bytes());
+        }
+    }
+    hash.finish()
+}
+
+struct Fingerprint(u64);
+
+impl Fingerprint {
+    fn new(schema: u8) -> Self {
+        let mut hash = Self(0xcbf2_9ce4_8422_2325_u64);
+        hash.byte(schema);
+        hash
+    }
+
+    fn byte(&mut self, value: u8) {
+        self.bytes(&[value]);
+    }
+
+    fn usize(&mut self, value: usize) {
+        self.bytes(&(value as u64).to_le_bytes());
+    }
+
+    fn string(&mut self, value: &str) {
+        self.bytes(&(value.len() as u64).to_le_bytes());
+        self.bytes(value.as_bytes());
+    }
+
+    fn optional_string(&mut self, value: Option<&str>) {
+        match value {
+            None => self.byte(0),
+            Some(value) => {
+                self.byte(1);
+                self.string(value);
+            }
+        }
+    }
+
+    fn bytes(&mut self, bytes: &[u8]) {
+        for byte in bytes {
+            self.0 ^= u64::from(*byte);
+            self.0 = self.0.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+
+    const fn finish(self) -> u64 {
+        self.0
+    }
 }
 
 fn validate_provider_text(

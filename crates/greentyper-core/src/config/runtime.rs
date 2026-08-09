@@ -13,6 +13,7 @@ use sha2::{Digest, Sha256};
 use url::{Host, Url};
 
 use super::{ConfigLayer, ConfigLayers};
+use crate::provider::{ProviderDialect, ProviderPricingSource, ProviderProfileSnapshot};
 use crate::schema::SchemaKind;
 
 pub const CONFIG_FILE_SCHEMA_VERSION: u16 = SchemaKind::ConfigFile.current().get();
@@ -637,21 +638,13 @@ impl CatalogLayer {
 #[serde(default, deny_unknown_fields)]
 struct PricingLayer {
     #[serde(skip_serializing_if = "Option::is_none")]
-    source: Option<PricingSource>,
+    source: Option<ProviderPricingSource>,
 }
 
 impl PricingLayer {
     fn is_empty(&self) -> bool {
         self.source.is_none()
     }
-}
-
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
-enum ProviderDialect {
-    Responses,
-    ChatCompletions,
-    Messages,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
@@ -661,15 +654,6 @@ enum CatalogMode {
     Discovery,
     TemplateAndDiscovery,
     Manual,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
-enum PricingSource {
-    Unknown,
-    Template,
-    Manual,
-    ProviderReported,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
@@ -873,6 +857,52 @@ impl ConfigRuntime {
             .as_ref()
             .map(|resolved| &resolved.layers)
             .ok_or_else(|| ConfigRuntimeError::RepairRequired(self.status().issues))
+    }
+
+    pub fn selected_provider_profile(
+        &self,
+    ) -> Result<Option<ProviderProfileSnapshot>, ConfigRuntimeError> {
+        let resolved = self
+            .last_valid
+            .as_ref()
+            .ok_or_else(|| ConfigRuntimeError::RepairRequired(self.status().issues))?;
+        let profile = resolved
+            .layers
+            .resolve()
+            .map_err(|source| invalid("provider.profile", source.to_string()))?
+            .provider_profile()
+            .value()
+            .clone();
+        if profile == "simulator" {
+            return Ok(None);
+        }
+        let definition = resolved.document.providers.get(&profile).ok_or_else(|| {
+            invalid(
+                "provider.profile",
+                "selected provider profile does not exist",
+            )
+        })?;
+        let template = definition.template.clone().ok_or_else(|| {
+            invalid(
+                format!("providers.{profile}.template"),
+                "provider profile requires a template",
+            )
+        })?;
+        ProviderProfileSnapshot::from_parts(
+            profile,
+            template,
+            definition.credential.clone(),
+            definition.base_url.clone(),
+            definition.routes.responses.clone(),
+            definition.routes.chat_completions.clone(),
+            definition.routes.messages.clone(),
+            definition.routes.models.clone(),
+            definition.dialects.clone().unwrap_or_default(),
+            definition.pricing.source,
+            definition.allow_insecure_loopback.unwrap_or(false),
+        )
+        .map(Some)
+        .map_err(|source| invalid("provider.profile", source.to_string()))
     }
 
     pub fn begin_draft(&self, scope: ConfigScope) -> Result<ConfigDraft, ConfigRuntimeError> {
@@ -1522,16 +1552,6 @@ impl Error for ConfigRuntimeError {
     }
 }
 
-impl ProviderDialect {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::Responses => "responses",
-            Self::ChatCompletions => "chat_completions",
-            Self::Messages => "messages",
-        }
-    }
-}
-
 impl CatalogMode {
     const fn as_str(self) -> &'static str {
         match self {
@@ -1539,17 +1559,6 @@ impl CatalogMode {
             Self::Discovery => "discovery",
             Self::TemplateAndDiscovery => "template_and_discovery",
             Self::Manual => "manual",
-        }
-    }
-}
-
-impl PricingSource {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::Unknown => "unknown",
-            Self::Template => "template",
-            Self::Manual => "manual",
-            Self::ProviderReported => "provider_reported",
         }
     }
 }
@@ -1608,12 +1617,15 @@ fn parse_catalog_mode(path: &str, value: &str) -> Result<CatalogMode, ConfigRunt
     }
 }
 
-fn parse_pricing_source(path: &str, value: &str) -> Result<PricingSource, ConfigRuntimeError> {
+fn parse_pricing_source(
+    path: &str,
+    value: &str,
+) -> Result<ProviderPricingSource, ConfigRuntimeError> {
     match value {
-        "unknown" => Ok(PricingSource::Unknown),
-        "template" => Ok(PricingSource::Template),
-        "manual" => Ok(PricingSource::Manual),
-        "provider_reported" => Ok(PricingSource::ProviderReported),
+        "unknown" => Ok(ProviderPricingSource::Unknown),
+        "template" => Ok(ProviderPricingSource::Template),
+        "manual" => Ok(ProviderPricingSource::Manual),
+        "provider_reported" => Ok(ProviderPricingSource::ProviderReported),
         _ => Err(invalid(path, "unknown pricing source")),
     }
 }
@@ -1835,6 +1847,7 @@ fn normalize_route(path: &str, route: &str) -> Result<String, ConfigRuntimeError
     if route.contains('?')
         || route.contains('#')
         || route.contains("://")
+        || route.contains('\\')
         || route
             .split('/')
             .any(|segment| matches!(segment, "." | ".."))
@@ -1862,6 +1875,16 @@ fn validate_effective(document: &ConfigDocument) -> Result<(), ConfigRuntimeErro
     bootstrap
         .resolve()
         .map_err(|source| invalid("<effective>", source.to_string()))?;
+
+    if let Some(profile) = &document.provider.profile
+        && profile != "simulator"
+        && !document.providers.contains_key(profile)
+    {
+        return Err(invalid(
+            "provider.profile",
+            "selected provider profile does not exist",
+        ));
+    }
 
     for (id, profile) in &document.providers {
         let prefix = format!("providers.{id}");

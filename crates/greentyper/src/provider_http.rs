@@ -6,9 +6,14 @@ use std::path::Path;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use greentyper_core::config::{ConfigLayer, ConfigLayers, DEFAULT_MAX_OUTPUT_BYTES};
+use greentyper_core::config::{
+    ConfigDocument, ConfigPaths, ConfigRuntime, ConfigRuntimeError, DEFAULT_MAX_OUTPUT_BYTES,
+};
 use greentyper_core::provider::responses::{ResponsesSseDecoder, normalize_responses_events};
-use greentyper_core::provider::{ProviderError, ProviderEvent, ProviderRequest, ProviderRuntime};
+use greentyper_core::provider::{
+    ProviderDialect, ProviderError, ProviderEvent, ProviderPricingSource, ProviderProfileSnapshot,
+    ProviderRequest, ProviderRuntime,
+};
 use greentyper_core::runtime::{RuntimeError, RuntimeKernel};
 use reqwest::blocking::Client;
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
@@ -17,6 +22,8 @@ use reqwest::{StatusCode, Url};
 const FIXTURE_PROFILE: &str = "responses-loopback";
 const FIXTURE_MODEL: &str = "fixture-model";
 const FIXTURE_ROUTE: &str = "/v1/responses";
+const FIXTURE_TEMPLATE: &str = "openai-compatible";
+const FIXTURE_CREDENTIAL_REFERENCE: &str = "responses-loopback-synthetic";
 const SYNTHETIC_AUTHORIZATION: &str = "Bearer greentyper-synthetic-provider-token-v1";
 const HTTP_TIMEOUT: Duration = Duration::from_millis(200);
 const SERVER_TIMEOUT: Duration = Duration::from_secs(2);
@@ -30,6 +37,7 @@ const SUCCESS_SSE: &[u8] =
 struct LoopbackResponsesProvider {
     client: Client,
     endpoint: Url,
+    profile: ProviderProfileSnapshot,
 }
 
 impl fmt::Debug for LoopbackResponsesProvider {
@@ -43,22 +51,47 @@ impl fmt::Debug for LoopbackResponsesProvider {
 }
 
 impl LoopbackResponsesProvider {
-    fn new(endpoint: &str) -> Result<Self, ProviderError> {
-        let endpoint = validate_loopback_endpoint(endpoint)?;
+    fn new(profile: ProviderProfileSnapshot) -> Result<Self, ProviderError> {
+        if profile.profile() != FIXTURE_PROFILE
+            || profile.template() != FIXTURE_TEMPLATE
+            || profile.credential_reference() != Some(FIXTURE_CREDENTIAL_REFERENCE)
+            || !profile.supports(ProviderDialect::Responses)
+            || profile.pricing_source() != Some(ProviderPricingSource::Unknown)
+            || !profile.allow_insecure_loopback()
+        {
+            return Err(ProviderError::InvalidConfiguration(
+                "loopback Responses Provider Profile does not match its fixture",
+            ));
+        }
+        let endpoint = profile.endpoint(ProviderDialect::Responses).ok_or(
+            ProviderError::InvalidConfiguration(
+                "loopback Responses Provider Profile has no endpoint",
+            ),
+        )?;
+        let endpoint = validate_loopback_endpoint(&endpoint)?;
         let client = Client::builder()
             .no_proxy()
             .timeout(HTTP_TIMEOUT)
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|_| ProviderError::unavailable("Responses HTTP client setup failed"))?;
-        Ok(Self { client, endpoint })
+        Ok(Self {
+            client,
+            endpoint,
+            profile,
+        })
     }
 }
 
 impl ProviderRuntime for LoopbackResponsesProvider {
+    fn profile_snapshot(&self) -> Option<&ProviderProfileSnapshot> {
+        Some(&self.profile)
+    }
+
     fn run(&mut self, request: &ProviderRequest) -> Result<Vec<ProviderEvent>, ProviderError> {
         if request.provider.profile() != FIXTURE_PROFILE
             || request.provider.model() != FIXTURE_MODEL
+            || request.provider.profile_snapshot() != Some(&self.profile)
         {
             return Err(ProviderError::InvalidConfiguration(
                 "loopback Responses provider identity does not match its fixture",
@@ -185,15 +218,20 @@ pub(crate) fn run_smoke(
     validate_smoke_ledger(ledger)?;
     let mut runtime = RuntimeKernel::open(ledger)?;
     let fixture = FixtureServer::spawn(scenario, input.to_owned())?;
-    let mut provider = LoopbackResponsesProvider::new(fixture.endpoint())?;
-    let layers = ConfigLayers {
-        cli: ConfigLayer {
-            provider_profile: Some(FIXTURE_PROFILE.to_owned()),
-            provider_model: Some(FIXTURE_MODEL.to_owned()),
-            max_output_bytes: Some(DEFAULT_MAX_OUTPUT_BYTES),
-        },
-        ..ConfigLayers::default()
-    };
+    let config = fixture_config_runtime(
+        fixture.base_url(),
+        ConfigPaths::new(
+            ledger.with_extension("provider-http-user.toml"),
+            ledger.with_extension("provider-http-project.toml"),
+        ),
+    )?;
+    let layers = config.config_layers()?.clone();
+    let profile = config
+        .selected_provider_profile()?
+        .ok_or(ProviderHttpError::Harness(
+            "Provider HTTP fixture profile was not frozen",
+        ))?;
+    let mut provider = LoopbackResponsesProvider::new(profile)?;
 
     let result = match runtime.execute(&layers, input.to_owned(), &mut provider) {
         Ok(output) => {
@@ -211,6 +249,39 @@ pub(crate) fn run_smoke(
     };
     fixture.finish()?;
     result
+}
+
+fn fixture_config_runtime(
+    base_url: &str,
+    paths: ConfigPaths,
+) -> Result<ConfigRuntime, ProviderHttpError> {
+    let base_url = serde_json::to_string(base_url)?;
+    let document = ConfigDocument::parse(&format!(
+        r#"
+schema_version = 1
+
+[provider]
+profile = "{FIXTURE_PROFILE}"
+model = "{FIXTURE_MODEL}"
+
+[runtime]
+max_output_bytes = {DEFAULT_MAX_OUTPUT_BYTES}
+
+[providers.{FIXTURE_PROFILE}]
+template = "{FIXTURE_TEMPLATE}"
+credential = "{FIXTURE_CREDENTIAL_REFERENCE}"
+base_url = {base_url}
+dialects = ["responses"]
+allow_insecure_loopback = true
+
+[providers.{FIXTURE_PROFILE}.routes]
+responses = "{FIXTURE_ROUTE}"
+
+[providers.{FIXTURE_PROFILE}.pricing]
+source = "unknown"
+"#,
+    ))?;
+    ConfigRuntime::open(paths, document).map_err(ProviderHttpError::from)
 }
 
 fn validate_smoke_ledger(path: &Path) -> Result<(), ProviderHttpError> {
@@ -244,7 +315,7 @@ fn validate_smoke_ledger(path: &Path) -> Result<(), ProviderHttpError> {
 }
 
 struct FixtureServer {
-    endpoint: String,
+    base_url: String,
     handle: Option<JoinHandle<Result<(), ProviderHttpError>>>,
 }
 
@@ -258,13 +329,13 @@ impl FixtureServer {
         let address = listener.local_addr()?;
         let handle = thread::spawn(move || serve_fixture(listener, scenario, &expected_input));
         Ok(Self {
-            endpoint: format!("http://{address}{FIXTURE_ROUTE}"),
+            base_url: format!("http://{address}"),
             handle: Some(handle),
         })
     }
 
-    fn endpoint(&self) -> &str {
-        &self.endpoint
+    fn base_url(&self) -> &str {
+        &self.base_url
     }
 
     fn finish(mut self) -> Result<(), ProviderHttpError> {
@@ -498,6 +569,7 @@ pub(crate) enum ProviderHttpError {
     Json(serde_json::Error),
     Provider(ProviderError),
     Runtime(RuntimeError),
+    Config(ConfigRuntimeError),
     Harness(&'static str),
     FixtureThreadPanicked,
 }
@@ -509,6 +581,7 @@ impl fmt::Display for ProviderHttpError {
             Self::Json(_) => formatter.write_str("Provider HTTP fixture JSON was invalid"),
             Self::Provider(source) => write!(formatter, "{source}"),
             Self::Runtime(source) => write!(formatter, "{source}"),
+            Self::Config(source) => write!(formatter, "{source}"),
             Self::Harness(reason) => write!(formatter, "Provider HTTP fixture failed: {reason}"),
             Self::FixtureThreadPanicked => {
                 formatter.write_str("Provider HTTP fixture thread panicked")
@@ -524,6 +597,7 @@ impl Error for ProviderHttpError {
             Self::Json(source) => Some(source),
             Self::Provider(source) => Some(source),
             Self::Runtime(source) => Some(source),
+            Self::Config(source) => Some(source),
             Self::Harness(_) | Self::FixtureThreadPanicked => None,
         }
     }
@@ -553,27 +627,48 @@ impl From<RuntimeError> for ProviderHttpError {
     }
 }
 
+impl From<ConfigRuntimeError> for ProviderHttpError {
+    fn from(source: ConfigRuntimeError) -> Self {
+        Self::Config(source)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn fixture_provider_rejects_non_loopback_and_redacts_authorization() {
-        for endpoint in [
-            "https://provider.invalid/v1/responses",
-            "http://198.51.100.1/v1/responses",
-            "http://user:password@127.0.0.1/v1/responses",
-            "http://127.0.0.1/v1/responses?private=query",
-        ] {
-            assert!(matches!(
-                LoopbackResponsesProvider::new(endpoint),
-                Err(ProviderError::InvalidConfiguration(_))
-            ));
+        for (index, base_url) in [
+            "https://provider.invalid",
+            "http://198.51.100.1",
+            "http://user:password@127.0.0.1",
+            "http://127.0.0.1?private=query",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let paths = ConfigPaths::new(
+                std::env::temp_dir().join(format!("greentyper-provider-http-unit-{index}-user")),
+                std::env::temp_dir().join(format!("greentyper-provider-http-unit-{index}-project")),
+            );
+            let runtime = fixture_config_runtime(base_url, paths).expect("open repairable Config");
+            assert!(!runtime.status().ready);
+            assert!(runtime.selected_provider_profile().is_err());
         }
 
         let listener = TcpListener::bind(("127.0.0.1", 0)).expect("loopback listener");
-        let endpoint = format!("http://{}{FIXTURE_ROUTE}", listener.local_addr().unwrap());
-        let provider = LoopbackResponsesProvider::new(&endpoint).expect("loopback Provider");
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let paths = ConfigPaths::new(
+            std::env::temp_dir().join("greentyper-provider-http-unit-valid-user"),
+            std::env::temp_dir().join("greentyper-provider-http-unit-valid-project"),
+        );
+        let runtime = fixture_config_runtime(&base_url, paths).expect("valid fixture Config");
+        let profile = runtime
+            .selected_provider_profile()
+            .expect("resolve fixture Provider Profile")
+            .expect("custom Provider Profile");
+        let provider = LoopbackResponsesProvider::new(profile).expect("loopback Provider");
         let debug = format!("{provider:?}");
         assert!(!debug.contains(SYNTHETIC_AUTHORIZATION));
         assert!(debug.contains("synthetic-redacted"));

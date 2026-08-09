@@ -43,7 +43,8 @@ impl SchemaKind {
             | Self::DeterministicFixture
             | Self::LedgerFormat
             | Self::ToolEvent => SchemaVersion(1),
-            Self::RuntimeEvent | Self::TeamEvent => SchemaVersion(2),
+            Self::RuntimeEvent => SchemaVersion(3),
+            Self::TeamEvent => SchemaVersion(2),
             Self::BenchmarkEvidence => SchemaVersion(2),
         }
     }

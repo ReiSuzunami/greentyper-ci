@@ -8,6 +8,7 @@ use greentyper_core::config::{
     ConfigRuntimeError, ConfigScope, ConfigValue, ConfigValueKind, config_schema,
     parse_config_value,
 };
+use greentyper_core::provider::{ProviderDialect, ProviderPricingSource};
 
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(1);
 
@@ -102,6 +103,13 @@ fn schema_and_parser_are_versioned_typed_and_secret_safe() {
         ConfigDocument::parse("schema_version = 1\nunknown = true\n"),
         Err(ConfigRuntimeError::Parse { .. })
     ));
+    assert!(matches!(
+        ConfigDocument::parse(
+            "schema_version = 1\n[providers.edge]\ntemplate = \"openai\"\n[providers.edge.routes]\nresponses = 'v1\\responses'\n"
+        ),
+        Err(ConfigRuntimeError::InvalidValue { path, .. })
+            if path == "providers.edge.routes.responses"
+    ));
 
     let document = ConfigDocument::parse(
         r#"
@@ -146,8 +154,10 @@ source = "unknown"
 fn precedence_provenance_and_dry_run_are_deterministic() {
     let temp = TempTree::new("precedence");
     let paths = temp.paths();
-    let cli = ConfigDocument::parse("schema_version = 1\n[provider]\nprofile = \"cli-profile\"\n")
-        .expect("CLI config");
+    let cli = ConfigDocument::parse(
+        "schema_version = 1\n[provider]\nprofile = \"cli-profile\"\n[providers.cli-profile]\ntemplate = \"fixture\"\n",
+    )
+    .expect("CLI config");
     let mut runtime = ConfigRuntime::open(paths.clone(), cli).expect("open config runtime");
 
     let initial = runtime
@@ -493,6 +503,86 @@ fn provider_origin_validation_reports_the_exact_profile_path() {
         runtime.commit(draft, true),
         Err(ConfigRuntimeError::InvalidValue { path, .. })
             if path == "providers.edge.allow_insecure_loopback"
+    ));
+}
+
+#[test]
+fn selected_provider_profile_is_typed_immutable_and_debug_redacted() {
+    let temp = TempTree::new("provider-snapshot");
+    let config = ConfigDocument::parse(
+        r#"
+schema_version = 1
+
+[provider]
+profile = "edge"
+model = "fixture-model"
+
+[providers.edge]
+template = "openai-compatible"
+credential = "edge-credential"
+base_url = "https://gateway.example.com/v1/"
+dialects = ["responses", "chat_completions"]
+
+[providers.edge.routes]
+responses = "responses"
+chat_completions = "/chat/completions"
+
+[providers.edge.pricing]
+source = "unknown"
+"#,
+    )
+    .expect("parse selected Provider profile");
+    let runtime = ConfigRuntime::open(temp.paths(), config).expect("resolve selected profile");
+    let snapshot = runtime
+        .selected_provider_profile()
+        .expect("resolve Provider snapshot")
+        .expect("non-simulator snapshot");
+
+    assert_eq!(snapshot.profile(), "edge");
+    assert_eq!(snapshot.template(), "openai-compatible");
+    assert_eq!(snapshot.credential_reference(), Some("edge-credential"));
+    assert_eq!(snapshot.base_url(), Some("https://gateway.example.com/v1"));
+    assert_eq!(
+        snapshot.route(ProviderDialect::Responses),
+        Some("/responses")
+    );
+    assert_eq!(
+        snapshot.endpoint(ProviderDialect::Responses).as_deref(),
+        Some("https://gateway.example.com/v1/responses")
+    );
+    assert!(snapshot.supports(ProviderDialect::ChatCompletions));
+    assert_eq!(
+        snapshot.pricing_source(),
+        Some(ProviderPricingSource::Unknown)
+    );
+    assert!(!snapshot.allow_insecure_loopback());
+
+    let debug = format!("{snapshot:?}");
+    assert!(!debug.contains("edge-credential"));
+    assert!(!debug.contains("gateway.example.com"));
+
+    let simulator = ConfigRuntime::open(temp.paths(), ConfigDocument::empty())
+        .expect("resolve built-in simulator");
+    assert_eq!(
+        simulator
+            .selected_provider_profile()
+            .expect("resolve simulator profile"),
+        None
+    );
+}
+
+#[test]
+fn selected_non_simulator_profile_must_exist() {
+    let temp = TempTree::new("missing-selected-provider");
+    let config = ConfigDocument::parse(
+        "schema_version = 1\n[provider]\nprofile = \"missing\"\nmodel = \"fixture-model\"\n",
+    )
+    .expect("parse missing selected profile");
+    let runtime = ConfigRuntime::open(temp.paths(), config).expect("open repairable Config");
+    assert!(!runtime.status().ready);
+    assert!(matches!(
+        runtime.selected_provider_profile(),
+        Err(ConfigRuntimeError::RepairRequired(_))
     ));
 }
 

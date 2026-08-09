@@ -154,9 +154,10 @@ descriptors while Tool Runtime remains the authority gate. Approval and
 `EffectPrepared` are durable before the injected executor runs. A successful
 UTF-8 result may then enter one Provider continuation. The final
 `OutputPrepared` transaction stores the combined canonical text and one or two
-bounded Usage Records. Runtime Event schema 2 carries those optional token
-classes and service tier; historical schema-1 Runtime transactions replay and
-can be followed by schema-2 transactions.
+bounded Usage Records. Runtime Event schema 3 carries those optional token
+classes and service tier plus the frozen Provider Profile snapshot. Historical
+schema-1 and schema-2 Runtime transactions replay and can be followed by
+schema-3 transactions.
 
 This tracer bullet intentionally stores only the Tool result digest. If the
 process dies after durable Tool success and before Provider continuation, the
@@ -210,7 +211,15 @@ Model Preset, statusline, and Usage Window fields. Layers resolve in
 `built-in < user < project < CLI` order. Effective values retain provenance,
 reject invalid values, and the Runtime projection freezes into a read-only
 `ConfigEpoch` with a deterministic fingerprint that binds schema, value, and
-source. `ProviderEpoch` separately freezes the selected profile and model.
+source. `ProviderEpoch` separately freezes the selected profile and model. For
+every non-simulator Provider it also freezes a typed Provider Profile snapshot:
+template identity, opaque credential reference, normalized custom origin and
+routes, supported dialects, pricing source, and insecure-loopback decision.
+The snapshot and Provider Epoch have deterministic fingerprints; recovery
+revalidates canonical URL/route data and requires the active Provider Runtime
+to present the exact frozen snapshot before any request or Tool continuation.
+Schema-1 and schema-2 Provider Epochs remain readable without this newer
+snapshot.
 Invalid external edits retain the running process's last valid projection;
 startup without one enters repair instead of silently dropping a layer.
 
@@ -246,12 +255,13 @@ protocol.
   validated open without an ID-to-session conversion.
 - Complete Config Schema default/constraint/normalization/migration metadata,
   TUI/App Server editors, Provider Templates/catalogs, and credential storage.
-- Production remote Provider transport, credential/origin binding, frozen
-  Provider route metadata, TLS/proxy policy, reconnect policy, multiple or
+- Production remote Provider transport, secure credential lookup and
+  origin-bound secret routing, TLS/proxy policy, reconnect policy, multiple or
   parallel Tool calls, resumable result references, broader canonical Items,
   and the unimplemented Provider event kinds. The bounded SSE, first OpenAI
-  Responses decoder, neutral normalizer, one-Tool fixture Kernel path, and a
-  private loopback HTTP Runtime tracer are present.
+  Responses decoder, neutral normalizer, typed frozen Provider Profile metadata,
+  one-Tool fixture Kernel path, and a private Config-driven loopback HTTP Runtime
+  tracer are present.
 - Broader Tool adapters and sandboxing: the private fixed `local.echo` tracer,
   Unix process-group termination, and Windows Job wrapper are present;
   caller-selected process policy, complete Windows lifetime/resource evidence,

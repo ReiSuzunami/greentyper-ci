@@ -112,8 +112,9 @@ existing durable Tool approval/effect state machine, feeds one successful UTF-8
 result into a Provider continuation, and durably prepares combined canonical
 output. Recovery tests prove stale Sessions cannot invoke the Provider,
 ambiguous effects cannot continue, and process death after a durable Tool
-success blocks rather than repeating the effect. Runtime Event schema 2 stores
-the expanded optional Usage Records while replaying historical schema 1.
+success blocks rather than repeating the effect. Runtime Event schema 3 stores
+the expanded optional Usage Records and frozen Provider Profile snapshot while
+replaying historical schema 1 and schema 2.
 
 A product-private `local.echo` tracer now exercises the concrete process seam.
 It launches a fixed same-binary child without a shell, clears inherited
@@ -125,16 +126,17 @@ it is evidence for one narrow local process Tool, not a general process
 sandbox or public product command.
 
 A second product-private tracer now exercises a concrete Responses HTTP seam
-without claiming production credential routing. It accepts only the fixed
-loopback Responses route, disables proxy discovery and redirects, sends a
+without claiming production credential routing. Config Runtime resolves and
+freezes its typed loopback Provider Profile and Responses route. The adapter
+disables proxy discovery and redirects, sends a
 bounded canonical request with synthetic authorization, applies a fixed
 deadline, and streams the response through the core decoder into the real
 single-Agent Runtime. Its tests cover fragmented success, canonical replay,
 HTTP failure-body redaction, timeout, and rejection of non-loopback endpoints.
 
 The remaining slices are still policy, protocol, and fault-adapter work: a
-production remote HTTP Provider transport, credential/profile routing and
-frozen endpoint metadata, broader canonical Items, multiple Tool calls,
+production remote HTTP Provider transport, secure credential-vault/origin
+routing, Provider Template defaults/catalogs, broader canonical Items, multiple Tool calls,
 durable resumable Tool result references, a public Product Tool driver and
 approval/delivery, caller-selected process policy, complete Windows Job
 lifetime/resource evidence, reconnect/retry behavior, and the cross-process
