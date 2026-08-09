@@ -467,7 +467,7 @@ fn compiled_cpu_baseline() -> &'static str {
         )) {
             return "x86-64-v3";
         }
-        return "x86-64";
+        "x86-64"
     }
     #[cfg(target_arch = "aarch64")]
     {
