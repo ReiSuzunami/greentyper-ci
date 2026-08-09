@@ -1299,17 +1299,26 @@ mod tests {
         token: &str,
         point: ProcessCrashPoint,
     ) -> io::Result<()> {
-        let child = Command::new(env::current_exe()?)
+        let temp_root = run_dir
+            .parent()
+            .ok_or_else(|| io::Error::other("Team crash run directory has no temp root"))?;
+        let mut command = Command::new(env::current_exe()?);
+        // Keep the child environment secret-free while preserving the exact
+        // platform temp namespace validated before it writes the test Ledger.
+        command
             .arg("--exact")
             .arg(CRASH_CHILD_TEST)
             .arg("--test-threads=1")
             .env_clear()
+            .env("TMPDIR", temp_root)
+            .env("TMP", temp_root)
+            .env("TEMP", temp_root)
             .env(CRASH_CHILD_ENV, run_dir)
             .env(CRASH_CASE_ENV, point.as_str())
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()?;
+            .stderr(Stdio::inherit());
+        let child = command.spawn()?;
         let mut child = CrashChildGuard::new(child);
         let pid = child.id();
         let deadline = Instant::now() + READY_TIMEOUT;
