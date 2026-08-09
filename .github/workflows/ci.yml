@@ -63,11 +63,23 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Build release binaries
         run: cargo build --workspace --release --locked
+      - name: Verify CPU baseline and acceptance harness
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          target/release/greentyper-acceptance.exe verify-cpu --expect-baseline x86-64-v3
+          target/release/greentyper-acceptance.exe run `
+            --candidate-id "ci-$env:GITHUB_SHA" `
+            --source-revision "$env:GITHUB_SHA" `
+            --output dist/acceptance-smoke.json `
+            --runs 3 `
+            --warmup-runs 1 `
+            --expect-baseline x86-64-v3 `
+            --machine-identifiers redacted
       - name: Package portable build
         id: package
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force dist | Out-Null
           Copy-Item target/release/greentyper.exe dist/
           Copy-Item target/release/greentyper-acceptance.exe dist/
           Copy-Item README.md, LICENSE dist/

@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "workload_id": "agent-team-smoke",
+  "workload_version": 1,
+  "max_active_agents": 1,
+  "root_title": "run deterministic acceptance fixture",
+  "scope_labels": ["fixture", "workspace-read"],
+  "message": "deterministic fixture checkpoint",
+  "completion_outcome": "fixture completed",
+  "expected_revision": 10,
+  "expected_tasks": 1,
+  "expected_agents": 1,
+  "expected_messages": 1
+}

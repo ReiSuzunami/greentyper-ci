@@ -91,6 +91,8 @@ Render context occupancy, Thread cost, cache read/write ratios, reasoning effort
 
 Network-provider latency is reported separately from local processing. Deterministic fixtures are the regression gate; live provider smoke tests establish integration health, not local performance.
 
+The initial `agent-team-smoke` fixture measures a small in-process policy transaction solely to prove the versioned evidence pipeline, candidate binding, CPU guard, raw samples, and summary calculation. It is not the P3 workload and cannot approve a technology choice or satisfy a numeric release gate.
+
 ## Acceptance Package
 
 The Target Machine uses a signed, portable, no-admin executable that completes in about 10 to 15 minutes and produces one ZIP. It fingerprints the machine, runs the named workloads, records raw and summarized measurements, redacts local paths, and includes no prompt content, source code, tool output, or credentials.

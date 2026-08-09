@@ -50,7 +50,7 @@ No dependency points from `greentyper-core` into either binary. Shared code move
 
 1. Add a core module with its first runnable vertical slice, not as an empty directory.
 2. Test behavior through the owning module's interface. Keep dense pure-algorithm tests close to their implementation.
-3. Put redacted provider, Ledger, crash, configuration, terminal, and Memory fixtures under `tests/fixtures/` when the Phase 0 harness lands.
+3. Put redacted provider, Ledger, crash, configuration, terminal, and Memory fixtures under `tests/fixtures/`; the versioned acceptance fixture establishes this layout.
 4. Put benchmark targets beside the package whose interface they measure. Cross-process Target workloads belong to the acceptance package.
 5. Add `fuzz/`, `packaging/`, and automation directories only with their first executable target.
 6. Create another package only when it establishes a real compile, safety, or delivery seam with at least two justified callers or adapters.

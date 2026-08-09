@@ -111,6 +111,8 @@ Results include main process, TUI, per-Agent increment, child processes, and tot
 
 ## CI Matrix
 
+This is the required end-state matrix for a release candidate. The current bootstrap workflow implements formatting, checks, tests, lints, release packaging, the x86-64-v3 guard, and an acceptance-harness smoke; integration, crash, security, migration, and fuzz jobs are added with the slices that make them executable.
+
 | Environment | Required evidence |
 | --- | --- |
 | Windows 11 x64 | Build, unit/property/golden tests, integration, crash recovery, fuzz smoke, packaging, x86-64-v3 build-flag and startup feature-guard verification |
@@ -119,6 +121,8 @@ Results include main process, TUI, per-Agent increment, child processes, and tot
 | Linux x64 | Build and pure core tests where supported; not a v1 product gate |
 
 Sanitizer, loom-style concurrency exploration, or equivalent tools should run on a supported CI host when they add evidence unavailable on Windows. Platform-specific behavior still requires Windows tests.
+
+Windows CI executes the release-built acceptance binary's x86-64-v3 feature guard and a three-sample harness smoke. FMDev and Target evidence still use at least 30 measured runs where the Performance Contract requires them; CI smoke samples are never treated as performance evidence.
 
 ## Release Gate
 

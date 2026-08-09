@@ -10,6 +10,8 @@ Feature implementation was authorized on 2026-08-09. The first core slice fixes 
 
 Create the Cargo workspace, Windows-first build profiles, formatting/lint policy, GitHub CI, schema/version conventions, deterministic fixture harness, benchmark harness, and portable packaging skeleton.
 
+Current implementation includes the workspace, CI, schema convention, one embedded deterministic Agent Team fixture, versioned raw-sample evidence, an x86-64-v3 runtime guard, and a portable ZIP skeleton. The fixture is a harness integrity check; the four technology comparisons and complete workload measurements below remain required before Phase 0 exits.
+
 Benchmark WinHTTP versus a cross-platform HTTP stack, direct VT versus a TUI library, SQLite WAL versus a custom append log, and allocator options using minimal representative workloads.
 
 Exit criteria:

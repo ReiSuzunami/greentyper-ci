@@ -1,3 +1,7 @@
 //! GreenTyper Target Machine acceptance entry point.
 
-fn main() {}
+mod harness;
+
+fn main() -> std::process::ExitCode {
+    harness::run(std::env::args().skip(1))
+}
