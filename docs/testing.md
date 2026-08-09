@@ -55,7 +55,13 @@ torn-tail read-only inspection and writer repair, checksum/length/schema
 tampering, and symlink rejection; deterministic Provider success and malformed
 output; Runtime admission resume, prepared-output reconciliation, idempotent
 acknowledgement, and blocked replay; and cross-process headless CLI output,
-status, resume, and reconcile behavior. Migration/backup remains in the
+status, resume, and reconcile behavior. The standalone durable Agent Team
+adapter additionally covers synchronous receipt-before-publish ordering,
+planning failure atomicity, exclusive writer ownership, every Team Event kind
+through a complete lifecycle and restart, old-session rejection, torn-tail
+complete-prefix recovery, and checksum/schema/kind failure. Runtime Kernel Team
+ownership/rebind, byte-offset process crash injection, and ambiguous Team
+durability reconciliation remain pending. Migration/backup remains in the
 candidate storage harness rather than this provisional product adapter.
 
 ### Crash and Recovery Tests

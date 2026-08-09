@@ -4,7 +4,7 @@
 
 Implementation proceeds as runnable vertical slices. Each phase must preserve Ledger recovery, authority boundaries, and measured resource behavior; no phase may defer all testing or performance work to the end.
 
-Feature implementation was authorized on 2026-08-09. The first core slice fixes the Agent Team command/event interface, process-local Agent Sessions, and pure orchestration policy early; it does not claim Phase 7 completion. Its volatile in-memory Ledger must be replaced by the Phase 1 Ledger Store before any product-facing acknowledgement.
+Feature implementation was authorized on 2026-08-09. The first core slice fixes the Agent Team command/event interface, process-local Agent Sessions, and pure orchestration policy early; it does not claim Phase 7 completion. Plain `TeamRuntime` remains volatile. A separate durable Team adapter now proves synchronous persistence, but trusted Runtime Kernel ownership/rebind is still required before any product-facing Team acknowledgement.
 
 ## Phase 0: Repository and Measurement Foundation
 
@@ -35,6 +35,13 @@ tests prove admission recovery, prepared-but-unacknowledged output blocking,
 idempotent acknowledgement, malformed Provider blocking, corruption failure,
 unsupported format failure, torn-tail reporting/repair, and writer exclusion.
 
+The Agent Team now also has a standalone `DurableTeamRuntime` adapter with a
+dedicated Ledger, versioned bounded encoding for all Team Event kinds,
+synchronous checksum-bound receipts, exclusive writer ownership, complete-
+prefix recovery, stale-session rejection, and fail-closed checksum/schema/state
+replay. End-to-end tests persist and recover Delegation, messaging, failure and
+Blocked propagation, cancellation, Completion Capsules, and terminal states.
+
 The Config Runtime now adds versioned user/project TOML, addressable Provider
 Profile/Model Preset/statusline/Usage Window fields, effective provenance,
 typed single-operation drafts, dry-run, revision conflict detection, atomic
@@ -44,9 +51,10 @@ bootstrap projection.
 
 This does not complete Phase 1. Complete schema metadata and generated editor
 surfaces, Provider Templates/catalogs, credential storage, Agent
-Team-to-persistent-Ledger integration, the exhaustive byte-offset Runtime
-crash/fault matrix, and headless FMDev/Target idle resource evidence remain
-pending. See [Recoverable Single-Agent Runtime](runtime-kernel.md).
+Team ownership and trusted session rebind in the Runtime Kernel, the exhaustive
+byte-offset Runtime/Team crash-fault matrix, storage migration, and headless
+FMDev/Target idle resource evidence remain pending. See
+[Recoverable Single-Agent Runtime](runtime-kernel.md).
 
 Exit criteria:
 

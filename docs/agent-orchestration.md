@@ -4,7 +4,7 @@
 
 Agent orchestration lives in one deep `Agent Team Runtime` module inside `greentyper-core`. Callers submit intent through `TeamRuntime::dispatch`; they do not activate Agents, resolve dependencies, reserve child budgets, order events, or wake Dormant Agents themselves.
 
-The first runnable slice is intentionally synchronous and process-local. It proves canonical policy and deterministic recovery without choosing an async runtime, storage engine, Provider transport, Tool executor, or Git adapter.
+The policy interface remains synchronous and process-local. It proves canonical policy and deterministic recovery without choosing an async runtime, Provider transport, Tool executor, or Git adapter. A separate provisional `DurableTeamRuntime` now plugs the same transactions into the Phase 1 file Ledger.
 
 ## Interface
 
@@ -14,15 +14,19 @@ let commit = team.dispatch(command)?; // Agent commands carry an AgentSession
 let view = team.snapshot();
 let events = team.event_log();
 let recovered = TeamRuntime::recover(max_active_agents, events.iter().cloned())?;
+
+let mut durable = DurableTeamRuntime::open(team_ledger_path, max_active_agents)?;
+let commit = durable.dispatch(command)?; // CommitDurability::Synchronous
 ```
 
-- `dispatch` validates one typed `TeamCommand`, constructs one atomic event transaction, appends it, and only then replaces the Runtime Fold.
+- `TeamRuntime::dispatch` validates one typed `TeamCommand`, constructs one atomic in-memory event transaction, appends it, and only then replaces the Runtime Fold.
+- `DurableTeamRuntime::dispatch` prepares the same validated transaction, checks the locked Ledger Head, synchronously appends it, receives a checksum-bound receipt, and only then publishes the Runtime Fold. Planning, encoding, Head, or append failure leaves the projection and identifiers unchanged; ambiguous durability poisons the writer and requires reopen rather than blind retry.
 - `AgentSession` is process-local execution authority issued by this Runtime. Canonical Agent IDs remain inspectable but cannot authorize commands, old sessions fail after recovery, and the public Team interface intentionally exposes no ID-to-session rebind. The later Runtime Kernel recovery seam must rebind non-terminal owners without accepting model- or user-selected IDs.
 - `snapshot` returns an immutable, deterministic projection ordered by canonical identifiers.
-- `event_log` exposes the current in-memory canonical events for tests and the future Ledger seam.
+- `event_log` exposes the current canonical events for tests and projection inspection.
 - `recover` accepts only contiguous, complete transactions and rebuilds the same projection or fails closed.
 
-The current `TeamCommit` is marked `CommitDurability::Volatile`. Its in-memory append proves ordering but is not a crash-safe Durability Boundary and must not drive a user-visible acknowledgement. Phase 1 now has a synchronously durable Ledger and single-Agent Runtime Kernel, but the Team Runtime is not yet plugged into that seam; Team commands therefore remain non-product orchestration evidence.
+Plain `TeamRuntime` commits remain `CommitDurability::Volatile` and cannot drive a user-visible acknowledgement. `DurableTeamRuntime` returns `CommitDurability::Synchronous` only after the dedicated Team Ledger has flushed a complete checksummed transaction. This adapter is still standalone core evidence: the product Runtime Kernel does not yet admit or resume Teams, and reopening deliberately invalidates every process-local `AgentSession`. Until the trusted Kernel rebind seam exists, a recovered non-empty Team can be inspected but cannot resume Agent commands through caller-selected IDs.
 
 ## Command Flow
 
@@ -73,15 +77,16 @@ Provider output, tool effects, approvals, Workspace Leases, Read Sets, merge out
 ## Dependency Strategy
 
 - Canonical Task, Agent, budget, capability, Event, and fold logic is in-process and uses only the Rust standard library.
-- The in-memory Event Ledger is a volatile test implementation, not a persistence contract.
-- A persistent Ledger Store becomes a real internal seam when both volatile tests and the selected production store exist.
+- The in-memory Event Ledger remains the volatile policy-test implementation.
+- `DurableTeamRuntime` is an external adapter over the provisional Phase 1 file Ledger. It uses a dedicated Team Ledger, a versioned bounded codec for all 17 Team Event kinds, exclusive writer ownership, synchronous receipts, complete-prefix replay, and fail-closed schema/checksum/state validation.
+- The adapter is not the final storage choice or migration contract; candidate selection and the Runtime Kernel ownership seam remain separate decisions.
 - Provider Runtime, Tool Runtime, and Workspace Coordinator retain separate interfaces because their retry, authority, and effect-ordering rules differ.
 - The product and acceptance binaries continue to depend inward on `greentyper-core`; the core never depends on them.
 
 ## Next Slices
 
-1. Plug `TeamRuntime` transactions into the implemented Phase 1 Ledger Store with synchronous durability receipts.
-2. Let trusted Runtime Kernel admission create and rebind the root Agent without exposing an ID-to-session authority seam.
+1. Let trusted Runtime Kernel admission own `DurableTeamRuntime`, create the root Agent, and rebind non-terminal owners after recovery without exposing an ID-to-session authority seam.
+2. Add byte-offset/cross-process crash injection around Team append and receipt boundaries, including ambiguous durability reconciliation.
 3. Add Workspace Coordinator facts, then exclusive Workspace Lease and Read Set adapters when the first writable Task lands.
 4. Add Tool and Provider effect preparation/outcome records only after their own idempotency and recovery contracts exist.
 5. Exercise Performance Contract workload P3 with two Active Agents on the Target Machine and four on FMDev; measure Dormant increment rather than assuming it.

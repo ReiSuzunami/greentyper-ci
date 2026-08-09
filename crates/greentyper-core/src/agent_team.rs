@@ -1,9 +1,13 @@
 //! Deterministic Agent Team orchestration policy.
 //!
-//! [`TeamRuntime`] is the module's interface. Commands become atomic event
-//! transactions before their resulting state is visible. This first vertical
-//! slice keeps the Event Ledger in memory; persistence remains an internal
-//! adapter decision when the Ledger Store lands.
+//! [`TeamRuntime`] is the process-local policy interface. Commands become
+//! atomic event transactions before their resulting state is visible.
+//! [`DurableTeamRuntime`] adds the file Ledger adapter without exposing storage
+//! mechanics through the policy interface.
+
+mod persistence;
+
+pub use persistence::{DurableTeamError, DurableTeamRuntime};
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
@@ -490,8 +494,18 @@ pub struct TeamCommit {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TeamDurabilityReceipt {
+    pub transaction: TransactionId,
+    pub first_sequence: EventSeq,
+    pub last_sequence: EventSeq,
+    pub event_count: u32,
+    pub transaction_crc32c: u32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CommitDurability {
     Volatile,
+    Synchronous(TeamDurabilityReceipt),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -808,6 +822,11 @@ impl TeamRuntime {
     }
 
     pub fn dispatch(&mut self, command: TeamCommand) -> Result<TeamCommit, TeamError> {
+        let prepared = self.prepare(command)?;
+        Ok(self.publish(prepared, CommitDurability::Volatile))
+    }
+
+    fn prepare(&self, command: TeamCommand) -> Result<PreparedTeamTransaction, TeamError> {
         let (events, outcome) = match command {
             TeamCommand::AdmitRoot {
                 task,
@@ -845,7 +864,7 @@ impl TeamRuntime {
             }
         };
 
-        self.commit(events, outcome)
+        self.prepare_transaction(events, outcome)
     }
 
     #[must_use]
@@ -1261,11 +1280,11 @@ impl TeamRuntime {
         ))
     }
 
-    fn commit(
-        &mut self,
+    fn prepare_transaction(
+        &self,
         base_events: Vec<TeamEventKind>,
         outcome: CommandOutcome,
-    ) -> Result<TeamCommit, TeamError> {
+    ) -> Result<PreparedTeamTransaction, TeamError> {
         let transaction = self.fresh_transaction_id()?;
         let mut candidate = self.state.clone();
         let mut event_kinds = Vec::with_capacity(base_events.len() + 8);
@@ -1306,9 +1325,36 @@ impl TeamRuntime {
         let next_message =
             next_identifier(candidate.messages.iter().map(|message| message.id.get()))?;
 
-        // Append precedes projection so ordering matches the future persistent
-        // seam. This in-memory append is volatile and cannot authorize a
-        // user-visible acknowledgement.
+        Ok(PreparedTeamTransaction {
+            candidate,
+            transaction,
+            revision: EventSeq(last_sequence),
+            events,
+            outcome,
+            next_transaction,
+            next_task,
+            next_agent,
+            next_message,
+        })
+    }
+
+    fn publish(
+        &mut self,
+        prepared: PreparedTeamTransaction,
+        durability: CommitDurability,
+    ) -> TeamCommit {
+        let PreparedTeamTransaction {
+            candidate,
+            transaction,
+            revision,
+            events,
+            outcome,
+            next_transaction,
+            next_task,
+            next_agent,
+            next_message,
+        } = prepared;
+
         self.event_log.extend(events.iter().cloned());
         self.state = candidate;
         self.next_transaction = next_transaction;
@@ -1316,13 +1362,13 @@ impl TeamRuntime {
         self.next_agent = next_agent;
         self.next_message = next_message;
 
-        Ok(TeamCommit {
+        TeamCommit {
             transaction,
-            revision: EventSeq(last_sequence),
-            durability: CommitDurability::Volatile,
+            revision,
+            durability,
             events,
             outcome,
-        })
+        }
     }
 
     fn validate_task_spec(&self, mut task: TaskSpec) -> Result<TaskSpec, TeamError> {
@@ -1440,6 +1486,18 @@ impl TeamRuntime {
             next_identifier(self.state.messages.iter().map(|message| message.id.get()))?;
         Ok(())
     }
+}
+
+struct PreparedTeamTransaction {
+    candidate: TeamState,
+    transaction: TransactionId,
+    revision: EventSeq,
+    events: Vec<TeamEvent>,
+    outcome: CommandOutcome,
+    next_transaction: u64,
+    next_task: u64,
+    next_agent: u64,
+    next_message: u64,
 }
 
 #[derive(Clone, Debug, Default)]

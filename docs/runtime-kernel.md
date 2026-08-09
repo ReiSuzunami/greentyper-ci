@@ -128,7 +128,10 @@ protocol.
 
 ## Still Pending
 
-- Persisting `Agent Team Runtime` transactions through this Ledger seam.
+- Owning the standalone durable Agent Team adapter from the Runtime Kernel,
+  including trusted root admission and non-terminal session rebind after
+  recovery. The adapter already persists Team transactions synchronously, but
+  it intentionally exposes no caller-selected ID-to-session conversion.
 - Complete Config Schema default/constraint/normalization/migration metadata,
   TUI/App Server editors, Provider Templates/catalogs, and credential storage.
 - Real provider dialects, transport, reconnect policy, credentials, and usage
