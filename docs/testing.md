@@ -63,10 +63,17 @@ complete-prefix recovery, and checksum/schema/kind failure. Runtime Kernel
 integration tests cover dedicated writer ownership, Kernel-owned root admission
 and duplicate rejection, per-open complete non-terminal Session rebind after replay,
 Active/Dormant/Blocked recovery, terminal exclusion, stale-session rejection,
-and the absence of an ID-to-session conversion. Byte-offset process crash
-injection and ambiguous Team durability reconciliation remain pending.
-Migration/backup remains in the candidate storage harness rather than this
-provisional product adapter.
+and the absence of an ID-to-session conversion. A private Team Ledger crash
+harness additionally covers eight write/flush/sync error points and six
+authenticated child-process termination points from before the frame write
+through a synced frame before Fold publication. I/O errors poison the live
+writer; process termination leaves no writer to continue. Both paths forbid
+blind retry and require reopen, yielding either a complete prefix known not to
+contain the command or a complete transaction whose missing caller
+acknowledgement is treated as ambiguous-blocked. Product-level Team operation
+identity, acknowledgement journaling, and its reconciliation surface remain
+pending. Migration/backup remains in the candidate storage harness rather than
+this provisional product adapter.
 
 ### Crash and Recovery Tests
 

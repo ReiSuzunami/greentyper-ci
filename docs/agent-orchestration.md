@@ -99,7 +99,7 @@ Provider output, tool effects, approvals, Workspace Leases, Read Sets, merge out
 
 ## Next Slices
 
-1. Add byte-offset/cross-process crash injection around Team append and receipt boundaries, including ambiguous durability reconciliation.
+1. Persist a Kernel-owned Team operation identity and acknowledgement journal so the product can surface the already-proven complete-frame/no-frame crash outcomes through an explicit reconciliation protocol. The private core harness already kills authenticated child processes before write, inside the frame, after flush, and after sync-before-publish; it never auto-retries.
 2. Add Workspace Coordinator facts, then exclusive Workspace Lease and Read Set adapters when the first writable Task lands.
 3. Add Tool and Provider effect preparation/outcome records only after their own idempotency and recovery contracts exist.
 4. Connect the Kernel-owned Team seam to product driving and user-visible acknowledgement only after those effect contracts exist.

@@ -10,7 +10,7 @@ Feature implementation was authorized on 2026-08-09. The first core slice fixes 
 
 Create the Cargo workspace, Windows-first build profiles, formatting/lint policy, GitHub CI, schema/version conventions, deterministic fixture harness, benchmark harness, and portable packaging skeleton.
 
-Current implementation includes the workspace, CI, schema convention, one embedded deterministic Agent Team fixture, versioned acceptance and benchmark evidence, an x86-64-v3 runtime guard, a portable ZIP skeleton, an isolated seven-workload SQLite WAL versus checksummed append-log matrix, an isolated direct VT versus Ratatui/Crossterm render matrix, an isolated HTTP loopback SSE matrix for Reqwest/Rustls and native WinHTTP through Wrest, and three separately built system/Mimalloc/Snmalloc allocator runners. The storage matrix covers critical sync/replay, max-event and deterministic 250ms-expiry streaming batches, one-winner CAS, backup/restore, in-process old-or-new migration recovery, and critical cross-process termination/restart with known-not-repeated or ambiguous-blocked outcomes. The terminal matrix verifies 27 ANSI-replayed frames, live resize, clearing stale content, styles, Unicode width, and zero-byte model-equality no-ops across three viewport sizes. The transport matrix verifies seven cold/warm, error, timeout, cancellation, explicit-proxy, and custom-origin cases with split UTF-8/line framing and credential non-leakage. The allocator matrix currently proves compile-time global-allocator isolation and identical deterministic allocation-pressure results; it does not yet prove the named P0-P6 resource workloads. Phase 0 still requires storage cross-process CAS/migration, SQLite VFS fault injection, fuzzing, all Runtime durability boundaries, terminal Windows/ConPTY and resource evidence, transport HTTPS/TLS/proxy-auth/Windows runtime/resource evidence, allocator cold-start/idle/streaming/Agent/context-pressure resource evidence, complete same-commit 30-run FMDev comparisons, and recorded technology choices.
+Current implementation includes the workspace, CI, schema convention, one embedded deterministic Agent Team fixture, versioned acceptance and benchmark evidence, an x86-64-v3 runtime guard, a portable ZIP skeleton, an isolated seven-workload SQLite WAL versus checksummed append-log matrix, an isolated direct VT versus Ratatui/Crossterm render matrix, an isolated HTTP loopback SSE matrix for Reqwest/Rustls and native WinHTTP through Wrest, and three separately built system/Mimalloc/Snmalloc allocator runners. The storage matrix covers critical sync/replay, max-event and deterministic 250ms-expiry streaming batches, one-winner in-process CAS, backup/restore, in-process old-or-new migration recovery, and critical cross-process termination/restart with known-not-repeated or ambiguous-blocked outcomes. The terminal matrix verifies 27 ANSI-replayed frames, live resize, clearing stale content, styles, Unicode width, and zero-byte model-equality no-ops across three viewport sizes. The transport matrix verifies seven cold/warm, error, timeout, cancellation, explicit-proxy, and custom-origin cases with split UTF-8/line framing and credential non-leakage. The allocator matrix currently proves compile-time global-allocator isolation and identical deterministic allocation-pressure results; it does not yet prove the named P0-P6 resource workloads. Phase 0 still requires cross-process versions of storage CAS and migration, SQLite VFS fault injection, fuzzing, all Runtime durability boundaries, terminal Windows/ConPTY and resource evidence, transport HTTPS/TLS/proxy-auth/Windows runtime/resource evidence, allocator cold-start/idle/streaming/Agent/context-pressure resource evidence, complete same-commit 30-run FMDev comparisons, and recorded technology choices.
 
 Benchmark WinHTTP versus a cross-platform HTTP stack, direct VT versus a TUI library, SQLite WAL versus a custom append log, and allocator options using minimal representative workloads.
 
@@ -45,7 +45,12 @@ Blocked propagation, cancellation, Completion Capsules, and terminal states.
 consumable complete non-terminal Session bundle per validated open. It excludes
 terminal Agents and exposes no Agent-ID-to-Session conversion. Root admission
 uses the same typed Kernel dispatch interface; duplicate admission fails without
-mutation.
+mutation. Private fault tests inject write/flush/sync failures at eight frame
+boundaries and terminate authenticated child processes at six representative
+points from before write through sync-before-publish. Recovery accepts only a
+known complete prefix or an already-complete transaction. I/O failure poisons
+the live writer; process termination leaves no writer to continue. Neither path
+retries automatically.
 
 The Config Runtime now adds versioned user/project TOML, addressable Provider
 Profile/Model Preset/statusline/Usage Window fields, effective provenance,
@@ -56,9 +61,9 @@ bootstrap projection.
 
 This does not complete Phase 1. Complete schema metadata and generated editor
 surfaces, Provider Templates/catalogs, credential storage, product Team
-Provider/Tool driving and acknowledgement, the exhaustive byte-offset
-Runtime/Team crash-fault matrix, storage migration, and headless FMDev/Target
-idle resource evidence remain pending. See
+Provider/Tool driving, operation identity and acknowledgement reconciliation,
+the exhaustive byte-offset Runtime crash-fault matrix, storage migration, and
+headless FMDev/Target idle resource evidence remain pending. See
 [Recoverable Single-Agent Runtime](runtime-kernel.md).
 
 Exit criteria:

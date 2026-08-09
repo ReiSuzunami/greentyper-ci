@@ -163,6 +163,18 @@ impl FileLedger {
         expected: LedgerHead,
         events: &[EventData],
     ) -> Result<DurabilityReceipt, LedgerError> {
+        self.append_with_io(expected, events, write_frame_synchronously)
+    }
+
+    fn append_with_io<F>(
+        &mut self,
+        expected: LedgerHead,
+        events: &[EventData],
+        write_frame: F,
+    ) -> Result<DurabilityReceipt, LedgerError>
+    where
+        F: FnOnce(&mut File, &[u8]) -> io::Result<()>,
+    {
         if self.poisoned {
             return Err(LedgerError::WriterPoisoned);
         }
@@ -201,12 +213,7 @@ impl FileLedger {
             .ok_or(LedgerError::IntegerOverflow)?;
         let (frame, stored, receipt) = encode_transaction(transaction, first_sequence, events)?;
 
-        let write_result = (|| -> io::Result<()> {
-            self.file.seek(SeekFrom::End(0))?;
-            self.file.write_all(&frame)?;
-            self.file.flush()?;
-            self.file.sync_data()
-        })();
+        let write_result = write_frame(&mut self.file, &frame);
         if let Err(source) = write_result {
             self.poisoned = true;
             return Err(LedgerError::DurabilityAmbiguous(source));
@@ -220,6 +227,26 @@ impl FileLedger {
         self.payload_bytes = payload_bytes;
         Ok(receipt)
     }
+
+    #[cfg(test)]
+    pub(crate) fn append_with_test_io<F>(
+        &mut self,
+        expected: LedgerHead,
+        events: &[EventData],
+        write_frame: F,
+    ) -> Result<DurabilityReceipt, LedgerError>
+    where
+        F: FnOnce(&mut File, &[u8]) -> io::Result<()>,
+    {
+        self.append_with_io(expected, events, write_frame)
+    }
+}
+
+fn write_frame_synchronously(file: &mut File, frame: &[u8]) -> io::Result<()> {
+    file.seek(SeekFrom::End(0))?;
+    file.write_all(frame)?;
+    file.flush()?;
+    file.sync_data()
 }
 
 fn configure_no_follow(options: &mut OpenOptions) {

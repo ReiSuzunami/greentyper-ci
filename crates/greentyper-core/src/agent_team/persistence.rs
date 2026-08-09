@@ -84,6 +84,21 @@ impl DurableTeamRuntime {
     }
 
     pub fn dispatch(&mut self, command: TeamCommand) -> Result<TeamCommit, DurableTeamError> {
+        self.dispatch_with(command, FileLedger::append)
+    }
+
+    fn dispatch_with<F>(
+        &mut self,
+        command: TeamCommand,
+        append: F,
+    ) -> Result<TeamCommit, DurableTeamError>
+    where
+        F: FnOnce(
+            &mut FileLedger,
+            LedgerHead,
+            &[EventData],
+        ) -> Result<DurabilityReceipt, LedgerError>,
+    {
         let prepared = self
             .runtime
             .prepare(command)
@@ -101,12 +116,24 @@ impl DurableTeamRuntime {
             .iter()
             .map(|event| encode_event_data(&event.kind))
             .collect::<Result<Vec<_>, _>>()?;
-        let receipt = self
-            .ledger
-            .append(team_head, &encoded)
-            .map_err(DurableTeamError::Ledger)?;
+        let receipt =
+            append(&mut self.ledger, team_head, &encoded).map_err(DurableTeamError::Ledger)?;
         let durability = CommitDurability::Synchronous(team_receipt(receipt));
         Ok(self.runtime.publish(prepared, durability))
+    }
+
+    #[cfg(test)]
+    fn dispatch_with_test_io<F>(
+        &mut self,
+        command: TeamCommand,
+        write_frame: F,
+    ) -> Result<TeamCommit, DurableTeamError>
+    where
+        F: FnOnce(&mut std::fs::File, &[u8]) -> std::io::Result<()>,
+    {
+        self.dispatch_with(command, |ledger, head, events| {
+            ledger.append_with_test_io(head, events, write_frame)
+        })
     }
 }
 
@@ -705,7 +732,617 @@ impl Error for DurableTeamError {
 
 #[cfg(test)]
 mod tests {
+    use std::env;
+    use std::ffi::OsString;
+    use std::fs::{self, File, OpenOptions};
+    use std::io::{self, Seek, SeekFrom, Write};
+    use std::path::{Path, PathBuf};
+    use std::process::{Child, Command, ExitStatus, Stdio};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::thread;
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+    use sha2::{Digest, Sha256};
+
     use super::*;
+
+    const CRASH_CHILD_ENV: &str = "GREENTYPER_TEAM_CRASH_CHILD_DIR";
+    const CRASH_CASE_ENV: &str = "GREENTYPER_TEAM_CRASH_CASE";
+    const CRASH_CHILD_TEST: &str = "agent_team::persistence::tests::team_crash_child_entrypoint";
+    const SUPERVISOR_FILE: &str = "supervisor";
+    const READY_FILE: &str = "crash-ready";
+    const READY_PENDING_FILE: &str = "crash-ready.pending";
+    const TEAM_LEDGER_FILE: &str = "team.ledger";
+    const READY_TIMEOUT: Duration = Duration::from_secs(10);
+    const CHILD_TIMEOUT: Duration = Duration::from_secs(30);
+    const POLL_INTERVAL: Duration = Duration::from_millis(5);
+    const MAX_READY_BYTES: u64 = 256;
+
+    static NEXT_TEST_PATH: AtomicU64 = AtomicU64::new(1);
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum InjectedWriteFault {
+        BeforeWrite,
+        AfterByteOne,
+        AfterLengthHeader,
+        MiddleFrame,
+        BeforeCommit,
+        AfterFullWrite,
+        AfterFlush,
+        AfterSync,
+    }
+
+    impl InjectedWriteFault {
+        const ALL: [Self; 8] = [
+            Self::BeforeWrite,
+            Self::AfterByteOne,
+            Self::AfterLengthHeader,
+            Self::MiddleFrame,
+            Self::BeforeCommit,
+            Self::AfterFullWrite,
+            Self::AfterFlush,
+            Self::AfterSync,
+        ];
+
+        const fn writes_complete_frame(self) -> bool {
+            matches!(
+                self,
+                Self::AfterFullWrite | Self::AfterFlush | Self::AfterSync
+            )
+        }
+
+        const fn writes_any_bytes(self) -> bool {
+            !matches!(self, Self::BeforeWrite)
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum ProcessCrashPoint {
+        BeforeWrite,
+        AfterLengthHeader,
+        MiddleFrame,
+        BeforeCommit,
+        AfterFlush,
+        AfterSync,
+    }
+
+    impl ProcessCrashPoint {
+        const ALL: [Self; 6] = [
+            Self::BeforeWrite,
+            Self::AfterLengthHeader,
+            Self::MiddleFrame,
+            Self::BeforeCommit,
+            Self::AfterFlush,
+            Self::AfterSync,
+        ];
+
+        const fn as_str(self) -> &'static str {
+            match self {
+                Self::BeforeWrite => "before-write",
+                Self::AfterLengthHeader => "after-length-header",
+                Self::MiddleFrame => "middle-frame",
+                Self::BeforeCommit => "before-commit",
+                Self::AfterFlush => "after-flush",
+                Self::AfterSync => "after-sync",
+            }
+        }
+
+        fn parse(value: &str) -> Result<Self, &'static str> {
+            match value {
+                "before-write" => Ok(Self::BeforeWrite),
+                "after-length-header" => Ok(Self::AfterLengthHeader),
+                "middle-frame" => Ok(Self::MiddleFrame),
+                "before-commit" => Ok(Self::BeforeCommit),
+                "after-flush" => Ok(Self::AfterFlush),
+                "after-sync" => Ok(Self::AfterSync),
+                _ => Err("unknown Team crash point"),
+            }
+        }
+
+        const fn writes_complete_frame(self) -> bool {
+            matches!(self, Self::AfterFlush | Self::AfterSync)
+        }
+
+        const fn writes_any_bytes(self) -> bool {
+            !matches!(self, Self::BeforeWrite)
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum CrashRecovery {
+        KnownNotRepeated,
+        AmbiguousBlocked,
+    }
+
+    fn root_command() -> TeamCommand {
+        TeamCommand::AdmitRoot {
+            task: TaskSpec::new(
+                "coordinate crash recovery",
+                TaskScope::from_labels(["repo", "src", "tests"]),
+            ),
+            budget: ResourceBudget::new(1_000, 8),
+            capabilities: CapabilitySnapshot::from_capabilities([
+                Capability::WorkspaceRead,
+                Capability::WorkspaceWrite,
+                Capability::Process,
+            ]),
+        }
+    }
+
+    fn root_session(commit: TeamCommit) -> AgentSession {
+        match commit.outcome {
+            CommandOutcome::RootAdmitted { session, .. } => session,
+            other => panic!("unexpected root admission outcome: {other:?}"),
+        }
+    }
+
+    fn admit_root(team: &mut DurableTeamRuntime) -> AgentSession {
+        root_session(
+            team.dispatch(root_command())
+                .expect("persist crash-test root"),
+        )
+    }
+
+    fn delegate_command(parent: AgentSession) -> TeamCommand {
+        TeamCommand::Delegate {
+            parent,
+            task: TaskSpec::new(
+                "survive a storage crash",
+                TaskScope::from_labels(["src", "tests"]),
+            ),
+            budget: ResourceBudget::new(200, 2),
+            capabilities: CapabilitySnapshot::from_capabilities([
+                Capability::WorkspaceRead,
+                Capability::Process,
+            ]),
+        }
+    }
+
+    fn rebound_session(team: &DurableTeamRuntime, agent: AgentId) -> AgentSession {
+        team.trusted_rebind_nonterminal_sessions()
+            .into_iter()
+            .find(|session| session.agent() == agent)
+            .expect("rebind persisted non-terminal owner")
+    }
+
+    fn assert_two_transaction_recovery(team: &DurableTeamRuntime) {
+        assert_eq!(team.ledger_head().transaction, 2);
+        let snapshot = team.snapshot();
+        assert_eq!(snapshot.tasks.len(), 2);
+        assert_eq!(snapshot.agents.len(), 2);
+        assert_ne!(snapshot.tasks[0].id, snapshot.tasks[1].id);
+        assert_ne!(snapshot.agents[0].id, snapshot.agents[1].id);
+
+        let events = team.event_log();
+        assert!(events.iter().any(|event| event.transaction.get() == 1));
+        assert!(events.iter().any(|event| event.transaction.get() == 2));
+        for (index, event) in events.iter().enumerate() {
+            assert_eq!(event.sequence.get(), index as u64 + 1);
+        }
+    }
+
+    fn injected_io_error() -> io::Error {
+        io::Error::other("injected Team Ledger write fault")
+    }
+
+    fn write_prefix(file: &mut File, frame: &[u8], bytes: usize) -> io::Result<()> {
+        file.seek(SeekFrom::End(0))?;
+        file.write_all(
+            frame
+                .get(..bytes)
+                .ok_or_else(|| io::Error::other("invalid injected write offset"))?,
+        )?;
+        file.flush()
+    }
+
+    fn inject_write_fault(
+        point: InjectedWriteFault,
+        file: &mut File,
+        frame: &[u8],
+    ) -> io::Result<()> {
+        match point {
+            InjectedWriteFault::BeforeWrite => {
+                file.seek(SeekFrom::End(0))?;
+            }
+            InjectedWriteFault::AfterByteOne => write_prefix(file, frame, 1)?,
+            InjectedWriteFault::AfterLengthHeader => write_prefix(file, frame, 12)?,
+            InjectedWriteFault::MiddleFrame => write_prefix(file, frame, frame.len() / 2)?,
+            InjectedWriteFault::BeforeCommit => {
+                write_prefix(file, frame, frame.len().saturating_sub(1))?;
+            }
+            InjectedWriteFault::AfterFullWrite => {
+                file.seek(SeekFrom::End(0))?;
+                file.write_all(frame)?;
+            }
+            InjectedWriteFault::AfterFlush => {
+                file.seek(SeekFrom::End(0))?;
+                file.write_all(frame)?;
+                file.flush()?;
+            }
+            InjectedWriteFault::AfterSync => {
+                file.seek(SeekFrom::End(0))?;
+                file.write_all(frame)?;
+                file.flush()?;
+                file.sync_data()?;
+            }
+        }
+        Err(injected_io_error())
+    }
+
+    fn temp_ledger_path(name: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time after epoch")
+            .as_nanos();
+        env::temp_dir().join(format!(
+            "greentyper-team-fault-{name}-{}-{nonce}-{}",
+            std::process::id(),
+            NEXT_TEST_PATH.fetch_add(1, Ordering::Relaxed)
+        ))
+    }
+
+    struct FaultLedgerFile {
+        path: Option<PathBuf>,
+    }
+
+    impl FaultLedgerFile {
+        fn create(name: &str) -> Self {
+            Self {
+                path: Some(temp_ledger_path(name)),
+            }
+        }
+
+        fn path(&self) -> &Path {
+            self.path.as_deref().expect("fault Ledger path exists")
+        }
+
+        fn cleanup(mut self) -> io::Result<()> {
+            let path = self.path.take().expect("fault Ledger path exists");
+            fs::remove_file(path)
+        }
+    }
+
+    impl Drop for FaultLedgerFile {
+        fn drop(&mut self) {
+            if let Some(path) = self.path.take() {
+                let _ = fs::remove_file(path);
+            }
+        }
+    }
+
+    fn create_private_file(path: &Path) -> io::Result<File> {
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+
+            options.mode(0o600);
+        }
+        options.open(path)
+    }
+
+    fn create_private_run_dir(point: ProcessCrashPoint) -> io::Result<PathBuf> {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(io::Error::other)?
+            .as_nanos();
+        let path = env::temp_dir().join(format!(
+            "greentyper-team-crash-{}-{}-{nonce}-{}",
+            point.as_str(),
+            std::process::id(),
+            NEXT_TEST_PATH.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&path)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o700))?;
+        }
+        path.canonicalize()
+    }
+
+    struct CrashRunDirectory {
+        path: Option<PathBuf>,
+    }
+
+    impl CrashRunDirectory {
+        fn create(point: ProcessCrashPoint) -> io::Result<Self> {
+            Ok(Self {
+                path: Some(create_private_run_dir(point)?),
+            })
+        }
+
+        fn path(&self) -> &Path {
+            self.path.as_deref().expect("crash run directory exists")
+        }
+
+        fn cleanup(mut self) -> io::Result<()> {
+            let path = self.path.take().expect("crash run directory exists");
+            fs::remove_dir_all(path)
+        }
+    }
+
+    impl Drop for CrashRunDirectory {
+        fn drop(&mut self) {
+            if let Some(path) = self.path.take() {
+                let _ = fs::remove_dir_all(path);
+            }
+        }
+    }
+
+    fn supervisor_token(run_dir: &Path, point: ProcessCrashPoint) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(b"greentyper-team-crash-v1");
+        hasher.update(std::process::id().to_le_bytes());
+        hasher.update(NEXT_TEST_PATH.fetch_add(1, Ordering::Relaxed).to_le_bytes());
+        hasher.update(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("time after epoch")
+                .as_nanos()
+                .to_le_bytes(),
+        );
+        hasher.update(run_dir.as_os_str().to_string_lossy().as_bytes());
+        hasher.update(point.as_str().as_bytes());
+        let mut token = String::with_capacity(64);
+        for byte in hasher.finalize() {
+            std::fmt::Write::write_fmt(&mut token, format_args!("{byte:02x}"))
+                .expect("writing to a String cannot fail");
+        }
+        token
+    }
+
+    fn write_supervisor(run_dir: &Path, token: &str) -> io::Result<()> {
+        let mut file = create_private_file(&run_dir.join(SUPERVISOR_FILE))?;
+        file.write_all(token.as_bytes())?;
+        file.flush()?;
+        file.sync_all()
+    }
+
+    fn valid_token(token: &str) -> bool {
+        token.len() == 64
+            && token
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    }
+
+    fn validate_child_directory(run_dir: &Path) -> io::Result<String> {
+        let metadata = fs::symlink_metadata(run_dir)?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(io::Error::other("Team crash run directory is not real"));
+        }
+        if run_dir.canonicalize()? != run_dir {
+            return Err(io::Error::other(
+                "Team crash run directory is not canonical",
+            ));
+        }
+        let temp_root = env::temp_dir().canonicalize()?;
+        if run_dir.parent() != Some(temp_root.as_path()) {
+            return Err(io::Error::other(
+                "Team crash run directory is outside the temp namespace",
+            ));
+        }
+        let name = run_dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| io::Error::other("Team crash run directory name is invalid"))?;
+        if !name.starts_with("greentyper-team-crash-") {
+            return Err(io::Error::other(
+                "Team crash run directory is outside the benchmark namespace",
+            ));
+        }
+        let mut entries = fs::read_dir(run_dir)?
+            .map(|entry| entry.map(|entry| entry.file_name()))
+            .collect::<Result<Vec<OsString>, _>>()?;
+        entries.sort();
+        if entries != [OsString::from(SUPERVISOR_FILE)] {
+            return Err(io::Error::other("Team crash run directory is not fresh"));
+        }
+        let supervisor_path = run_dir.join(SUPERVISOR_FILE);
+        let supervisor_metadata = fs::symlink_metadata(&supervisor_path)?;
+        if supervisor_metadata.file_type().is_symlink() || !supervisor_metadata.is_file() {
+            return Err(io::Error::other("Team crash supervisor is not a file"));
+        }
+        let token = fs::read_to_string(supervisor_path)?;
+        if !valid_token(&token) {
+            return Err(io::Error::other("Team crash supervisor token is invalid"));
+        }
+        Ok(token)
+    }
+
+    #[cfg(unix)]
+    fn sync_directory(path: &Path) -> io::Result<()> {
+        File::open(path)?.sync_all()
+    }
+
+    #[cfg(not(unix))]
+    fn sync_directory(_path: &Path) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn ready_contents(token: &str, point: ProcessCrashPoint, pid: u32) -> String {
+        format!(
+            "greentyper-team-crash-v1\n{token}\n{pid}\n{}\n",
+            point.as_str()
+        )
+    }
+
+    fn signal_ready_and_wait(
+        run_dir: &Path,
+        token: &str,
+        point: ProcessCrashPoint,
+    ) -> io::Result<()> {
+        let pending_path = run_dir.join(READY_PENDING_FILE);
+        let ready_path = run_dir.join(READY_FILE);
+        let mut marker = create_private_file(&pending_path)?;
+        marker.write_all(ready_contents(token, point, std::process::id()).as_bytes())?;
+        marker.flush()?;
+        marker.sync_all()?;
+        drop(marker);
+        fs::rename(&pending_path, &ready_path)?;
+        sync_directory(run_dir)?;
+
+        let deadline = Instant::now() + CHILD_TIMEOUT;
+        while Instant::now() < deadline {
+            thread::sleep(POLL_INTERVAL);
+        }
+        Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "Team crash child was not terminated by its supervisor",
+        ))
+    }
+
+    fn crash_write_and_wait(
+        run_dir: &Path,
+        token: &str,
+        point: ProcessCrashPoint,
+        file: &mut File,
+        frame: &[u8],
+    ) -> io::Result<()> {
+        file.seek(SeekFrom::End(0))?;
+        match point {
+            ProcessCrashPoint::BeforeWrite => {}
+            ProcessCrashPoint::AfterLengthHeader => {
+                file.write_all(&frame[..12])?;
+                file.flush()?;
+            }
+            ProcessCrashPoint::MiddleFrame => {
+                file.write_all(&frame[..frame.len() / 2])?;
+                file.flush()?;
+            }
+            ProcessCrashPoint::BeforeCommit => {
+                file.write_all(&frame[..frame.len().saturating_sub(1)])?;
+                file.flush()?;
+            }
+            ProcessCrashPoint::AfterFlush => {
+                file.write_all(frame)?;
+                file.flush()?;
+            }
+            ProcessCrashPoint::AfterSync => {
+                file.write_all(frame)?;
+                file.flush()?;
+                file.sync_data()?;
+            }
+        }
+        signal_ready_and_wait(run_dir, token, point)
+    }
+
+    fn validate_ready_marker(
+        run_dir: &Path,
+        token: &str,
+        point: ProcessCrashPoint,
+        pid: u32,
+    ) -> io::Result<()> {
+        let path = run_dir.join(READY_FILE);
+        let metadata = fs::symlink_metadata(&path)?;
+        if metadata.file_type().is_symlink()
+            || !metadata.is_file()
+            || metadata.len() > MAX_READY_BYTES
+        {
+            return Err(io::Error::other("Team crash ready marker is invalid"));
+        }
+        let actual = fs::read_to_string(path)?;
+        let expected = ready_contents(token, point, pid);
+        if actual != expected {
+            return Err(io::Error::other(
+                "Team crash ready marker did not authenticate",
+            ));
+        }
+        Ok(())
+    }
+
+    struct CrashChildGuard {
+        child: Option<Child>,
+    }
+
+    impl CrashChildGuard {
+        fn new(child: Child) -> Self {
+            Self { child: Some(child) }
+        }
+
+        fn id(&self) -> u32 {
+            self.child.as_ref().expect("child is present").id()
+        }
+
+        fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
+            self.child.as_mut().expect("child is present").try_wait()
+        }
+
+        fn terminate_and_wait(&mut self) -> io::Result<ExitStatus> {
+            let mut child = self.child.take().expect("child is present");
+            if let Some(status) = child.try_wait()? {
+                return Ok(status);
+            }
+            if let Err(kill_error) = child.kill() {
+                if let Some(status) = child.try_wait()? {
+                    return Ok(status);
+                }
+                return Err(kill_error);
+            }
+            child.wait()
+        }
+    }
+
+    impl Drop for CrashChildGuard {
+        fn drop(&mut self) {
+            if let Some(mut child) = self.child.take() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+    }
+
+    fn spawn_and_kill_child(
+        run_dir: &Path,
+        token: &str,
+        point: ProcessCrashPoint,
+    ) -> io::Result<()> {
+        let child = Command::new(env::current_exe()?)
+            .arg("--exact")
+            .arg(CRASH_CHILD_TEST)
+            .arg("--test-threads=1")
+            .env_clear()
+            .env(CRASH_CHILD_ENV, run_dir)
+            .env(CRASH_CASE_ENV, point.as_str())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()?;
+        let mut child = CrashChildGuard::new(child);
+        let pid = child.id();
+        let deadline = Instant::now() + READY_TIMEOUT;
+        loop {
+            match fs::symlink_metadata(run_dir.join(READY_FILE)) {
+                Ok(_) => {
+                    validate_ready_marker(run_dir, token, point, pid)?;
+                    let status = child.terminate_and_wait()?;
+                    if status.success() {
+                        return Err(io::Error::other(
+                            "Team crash child exited successfully before termination",
+                        ));
+                    }
+                    return Ok(());
+                }
+                Err(source) if source.kind() == io::ErrorKind::NotFound => {}
+                Err(source) => return Err(source),
+            }
+            if let Some(status) = child.try_wait()? {
+                return Err(io::Error::other(format!(
+                    "Team crash child exited before readiness: {status}"
+                )));
+            }
+            if Instant::now() >= deadline {
+                let _ = child.terminate_and_wait();
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "Team crash child readiness timed out",
+                ));
+            }
+            thread::sleep(POLL_INTERVAL);
+        }
+    }
 
     fn event_kinds() -> Vec<TeamEventKind> {
         let task = TaskId(2);
@@ -844,5 +1481,170 @@ mod tests {
                 "Team Event has trailing bytes"
             ))
         ));
+    }
+
+    #[test]
+    fn write_faults_poison_the_writer_and_require_reopen_reconciliation() {
+        for point in InjectedWriteFault::ALL {
+            let ledger = FaultLedgerFile::create(&format!("{point:?}"));
+            let mut team =
+                DurableTeamRuntime::open(ledger.path(), 1).expect("create fault Team Ledger");
+            let root = admit_root(&mut team);
+            let before = team.snapshot();
+            let before_events = team.event_log().to_vec();
+            let before_head = team.ledger_head();
+
+            assert!(matches!(
+                team.dispatch_with_test_io(delegate_command(root), |file, frame| {
+                    inject_write_fault(point, file, frame)
+                }),
+                Err(DurableTeamError::Ledger(LedgerError::DurabilityAmbiguous(
+                    _
+                )))
+            ));
+            assert_eq!(team.snapshot(), before);
+            assert_eq!(team.event_log(), before_events);
+            assert_eq!(team.ledger_head(), before_head);
+            assert!(matches!(
+                team.dispatch(delegate_command(root)),
+                Err(DurableTeamError::Ledger(LedgerError::WriterPoisoned))
+            ));
+            drop(team);
+
+            let mut recovered = DurableTeamRuntime::open(ledger.path(), 1)
+                .expect("reopen after ambiguous durability");
+            let recovery = if point.writes_complete_frame() {
+                assert_two_transaction_recovery(&recovered);
+                assert_eq!(recovered.recovered_tail_bytes(), 0);
+                CrashRecovery::AmbiguousBlocked
+            } else {
+                assert_eq!(recovered.ledger_head(), before_head);
+                assert_eq!(recovered.snapshot(), before);
+                assert_eq!(recovered.event_log(), before_events);
+                if point.writes_any_bytes() {
+                    assert!(recovered.recovered_tail_bytes() > 0);
+                } else {
+                    assert_eq!(recovered.recovered_tail_bytes(), 0);
+                }
+                CrashRecovery::KnownNotRepeated
+            };
+
+            match recovery {
+                CrashRecovery::KnownNotRepeated => {
+                    let recovered_root = rebound_session(&recovered, root.agent());
+                    recovered
+                        .dispatch(delegate_command(recovered_root))
+                        .expect("explicit retry after known-not-repeated recovery");
+                }
+                CrashRecovery::AmbiguousBlocked => {
+                    assert_two_transaction_recovery(&recovered);
+                }
+            }
+            assert_two_transaction_recovery(&recovered);
+            let expected_snapshot = recovered.snapshot();
+            let expected_events = recovered.event_log().to_vec();
+            let expected_head = recovered.ledger_head();
+            drop(recovered);
+
+            let replayed = DurableTeamRuntime::open(ledger.path(), 1)
+                .expect("replay reconciled Team Ledger a second time");
+            assert_eq!(replayed.snapshot(), expected_snapshot);
+            assert_eq!(replayed.event_log(), expected_events);
+            assert_eq!(replayed.ledger_head(), expected_head);
+            assert_eq!(replayed.recovered_tail_bytes(), 0);
+            assert_two_transaction_recovery(&replayed);
+            drop(replayed);
+            ledger.cleanup().expect("cleanup fault Team Ledger");
+        }
+    }
+
+    #[test]
+    fn team_crash_child_entrypoint() {
+        let Some(run_dir) = env::var_os(CRASH_CHILD_ENV) else {
+            return;
+        };
+        let run_dir = PathBuf::from(run_dir);
+        let point = ProcessCrashPoint::parse(
+            &env::var(CRASH_CASE_ENV).expect("Team crash child case is present"),
+        )
+        .expect("Team crash child case is supported");
+        let token = validate_child_directory(&run_dir).expect("validate Team crash directory");
+        let ledger_path = run_dir.join(TEAM_LEDGER_FILE);
+        let mut team =
+            DurableTeamRuntime::open(&ledger_path, 1).expect("open Team crash child Ledger");
+        let root = admit_root(&mut team);
+        let signal_dir = run_dir.clone();
+        let signal_token = token.clone();
+        let result = team.dispatch_with_test_io(delegate_command(root), move |file, frame| {
+            crash_write_and_wait(&signal_dir, &signal_token, point, file, frame)
+        });
+        panic!("Team crash child escaped supervisor termination: {result:?}");
+    }
+
+    #[test]
+    fn process_termination_recovers_known_not_repeated_or_ambiguous_blocked() {
+        for point in ProcessCrashPoint::ALL {
+            let run =
+                CrashRunDirectory::create(point).expect("create private Team crash run directory");
+            let run_dir = run.path();
+            let token = supervisor_token(run_dir, point);
+            assert!(valid_token(&token));
+            write_supervisor(run_dir, &token).expect("write Team crash supervisor");
+
+            spawn_and_kill_child(run_dir, &token, point)
+                .expect("terminate Team child at authenticated crash boundary");
+            fs::remove_file(run_dir.join(SUPERVISOR_FILE))
+                .expect("remove Team crash supervisor after child exit");
+            fs::remove_file(run_dir.join(READY_FILE))
+                .expect("remove authenticated Team crash marker");
+            sync_directory(run_dir).expect("sync Team crash marker cleanup");
+
+            let ledger_path = run_dir.join(TEAM_LEDGER_FILE);
+            let mut recovered = DurableTeamRuntime::open(&ledger_path, 1)
+                .expect("reopen Team Ledger after child termination");
+            let recovery = if point.writes_complete_frame() {
+                assert_two_transaction_recovery(&recovered);
+                assert_eq!(recovered.recovered_tail_bytes(), 0);
+                CrashRecovery::AmbiguousBlocked
+            } else {
+                assert_eq!(recovered.ledger_head().transaction, 1);
+                assert_eq!(recovered.snapshot().tasks.len(), 1);
+                assert_eq!(recovered.snapshot().agents.len(), 1);
+                if point.writes_any_bytes() {
+                    assert!(recovered.recovered_tail_bytes() > 0);
+                } else {
+                    assert_eq!(recovered.recovered_tail_bytes(), 0);
+                }
+                CrashRecovery::KnownNotRepeated
+            };
+
+            match recovery {
+                CrashRecovery::KnownNotRepeated => {
+                    let root_agent = recovered.snapshot().agents[0].id;
+                    let recovered_root = rebound_session(&recovered, root_agent);
+                    recovered
+                        .dispatch(delegate_command(recovered_root))
+                        .expect("operator may explicitly retry a known-not-repeated command");
+                }
+                CrashRecovery::AmbiguousBlocked => {
+                    assert_two_transaction_recovery(&recovered);
+                }
+            }
+            assert_two_transaction_recovery(&recovered);
+            let expected_snapshot = recovered.snapshot();
+            let expected_events = recovered.event_log().to_vec();
+            let expected_head = recovered.ledger_head();
+            drop(recovered);
+
+            let replayed = DurableTeamRuntime::open(&ledger_path, 1)
+                .expect("replay reconciled child-terminated Team Ledger");
+            assert_eq!(replayed.snapshot(), expected_snapshot);
+            assert_eq!(replayed.event_log(), expected_events);
+            assert_eq!(replayed.ledger_head(), expected_head);
+            assert_eq!(replayed.recovered_tail_bytes(), 0);
+            assert_two_transaction_recovery(&replayed);
+            drop(replayed);
+            run.cleanup().expect("cleanup completed Team crash run");
+        }
     }
 }

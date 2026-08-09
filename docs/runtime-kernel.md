@@ -84,7 +84,13 @@ holds both dedicated writers, validates the Team replay, and returns one
 Terminal Agents are omitted; old Sessions remain invalid. The same typed Kernel
 dispatch interface admits the single root and rejects duplicates without
 mutation. This is core authority/recovery evidence, not yet a product scheduling
-or output protocol.
+or output protocol. Private core tests inject errors at write, flush, and sync
+boundaries and kill authenticated child processes before write, inside the
+frame, after flush, and after sync-before-publish. An I/O error poisons the live
+writer; process termination leaves no writer to continue. Both require reopen,
+which yields either a known complete prefix or a complete transaction whose
+caller acknowledgement remains ambiguous. No case automatically repeats the
+command.
 
 ## Ledger Adapter
 
@@ -163,6 +169,7 @@ protocol.
 - Real provider dialects, transport, reconnect policy, credentials, and usage
   normalization.
 - Tool effects, Approval Grants, workspaces, checkpoints, and migrations.
-- Byte-offset process termination around every Runtime durability boundary,
-  fuzzing, and SQLite VFS fault injection.
+- Kernel-persisted Team operation identity and acknowledgement reconciliation;
+  byte-offset process termination around every remaining Runtime durability
+  boundary; fuzzing; and SQLite VFS fault injection.
 - Headless idle CPU and memory evidence on FMDev and the Target Machine.
