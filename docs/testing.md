@@ -91,8 +91,9 @@ reason exclusion from the Tool Ledger and Debug output, and explicit ambiguous-
 effect reconciliation. Fault injection proves that a prepared-effect append
 failure invokes no executor,
 while an outcome append failure after one invocation poisons the writer and
-reopens in a reconciliation-required state. Concrete Provider transport,
-credential/profile binding, broader canonical Runtime Items,
+reopens in a reconciliation-required state. Production remote Provider
+transport, credential/profile binding and frozen route metadata, broader
+canonical Runtime Items,
 reasoning/refusal/annotation and other unimplemented
 Responses event kinds, reconnect/retry fixtures, MCP adapters, receipt delivery
 to a user-visible sink, the cross-process Tool byte-offset matrix, and final
@@ -119,6 +120,14 @@ ambiguous effects never reach continuation, non-UTF-8 Tool output is blocked,
 and process death after a durable Tool success cannot repeat the effect. A
 mixed-schema Runtime test replays a complete schema-1 Turn, appends schema-2
 Usage Records, and replays the combined Ledger.
+
+Product integration tests also run a concrete loopback Responses HTTP tracer.
+They validate the fixed POST route, model, input, streaming flag, and synthetic
+Authorization header; stream a fragmented SSE fixture through the core decoder
+and Runtime; replay the canonical assistant item; classify HTTP 503 and request
+timeout without exposing an upstream private marker; and reject non-loopback
+endpoints. This does not cover remote TLS, real credentials, proxy
+authentication, reconnect/retry, live Providers, or product delivery.
 
 ### Crash and Recovery Tests
 

@@ -2,6 +2,7 @@
 
 mod cli;
 mod local_process;
+mod provider_http;
 
 use std::process::ExitCode;
 

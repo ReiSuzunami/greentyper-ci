@@ -16,6 +16,9 @@ use greentyper_core::runtime::{AcknowledgeOutcome, RecoveryStatus, RuntimeKernel
 use crate::local_process::{
     LocalProcessChildMode, LocalProcessError, LocalProcessSmokeOutcome, LocalProcessSmokeScenario,
 };
+use crate::provider_http::{
+    ProviderHttpError, ProviderHttpSmokeOutcome, ProviderHttpSmokeScenario,
+};
 
 pub fn run(arguments: impl Iterator<Item = String>) -> Result<(), CliError> {
     match parse(arguments)? {
@@ -74,6 +77,17 @@ pub fn run(arguments: impl Iterator<Item = String>) -> Result<(), CliError> {
                 LocalProcessSmokeOutcome::ReconciliationRequiredExisting => {
                     write_stdout_line("reconciliation-required-existing")?;
                 }
+            }
+            Ok(())
+        }
+        Command::ProviderHttpSmoke {
+            ledger,
+            scenario,
+            input,
+        } => {
+            match crate::provider_http::run_smoke(&ledger, scenario, &input)? {
+                ProviderHttpSmokeOutcome::Succeeded(output) => write_stdout_line(&output)?,
+                ProviderHttpSmokeOutcome::Unavailable => write_stdout_line("provider-unavailable")?,
             }
             Ok(())
         }
@@ -213,6 +227,11 @@ enum Command {
         scenario: LocalProcessSmokeScenario,
         message: String,
     },
+    ProviderHttpSmoke {
+        ledger: PathBuf,
+        scenario: ProviderHttpSmokeScenario,
+        input: String,
+    },
     Help,
 }
 
@@ -265,6 +284,9 @@ fn parse(mut arguments: impl Iterator<Item = String>) -> Result<Command, CliErro
     }
     if command == "__local-process-smoke" {
         return parse_local_process_smoke(arguments);
+    }
+    if command == "__provider-http-smoke" {
+        return parse_provider_http_smoke(arguments);
     }
     let mut ledger = None;
     let mut input = None;
@@ -363,6 +385,46 @@ fn parse_local_process_smoke(
         run_dir,
         scenario,
         message: message.ok_or(CliError::Usage("local-process smoke requires --message"))?,
+    })
+}
+
+fn parse_provider_http_smoke(
+    mut arguments: impl Iterator<Item = String>,
+) -> Result<Command, CliError> {
+    let mut ledger = None;
+    let mut scenario = None;
+    let mut input = None;
+    while let Some(argument) = arguments.next() {
+        let slot = match argument.as_str() {
+            "--ledger" => &mut ledger,
+            "--scenario" => &mut scenario,
+            "--input" => &mut input,
+            _ => return Err(CliError::Usage("unknown Provider HTTP smoke option")),
+        };
+        if slot.is_some() {
+            return Err(CliError::Usage("duplicate Provider HTTP smoke option"));
+        }
+        *slot = Some(arguments.next().ok_or(CliError::Usage(
+            "Provider HTTP smoke option is missing its value",
+        ))?);
+    }
+    let ledger =
+        PathBuf::from(ledger.ok_or(CliError::Usage("Provider HTTP smoke requires --ledger"))?);
+    if !ledger.is_absolute() {
+        return Err(CliError::Usage(
+            "Provider HTTP smoke Ledger path must be absolute",
+        ));
+    }
+    let scenario = ProviderHttpSmokeScenario::parse(
+        scenario
+            .as_deref()
+            .ok_or(CliError::Usage("Provider HTTP smoke requires --scenario"))?,
+    )
+    .ok_or(CliError::Usage("unsupported Provider HTTP smoke scenario"))?;
+    Ok(Command::ProviderHttpSmoke {
+        ledger,
+        scenario,
+        input: input.ok_or(CliError::Usage("Provider HTTP smoke requires --input"))?,
     })
 }
 
@@ -673,6 +735,7 @@ pub enum CliError {
     Config(ConfigRuntimeError),
     Runtime(greentyper_core::runtime::RuntimeError),
     LocalProcess(LocalProcessError),
+    ProviderHttp(ProviderHttpError),
 }
 
 impl fmt::Display for CliError {
@@ -692,6 +755,7 @@ impl fmt::Display for CliError {
             }
             Self::Runtime(source) => write!(formatter, "{source}"),
             Self::LocalProcess(source) => write!(formatter, "{source}"),
+            Self::ProviderHttp(source) => write!(formatter, "{source}"),
         }
     }
 }
@@ -704,6 +768,7 @@ impl Error for CliError {
             Self::Config(source) => Some(source),
             Self::Runtime(source) => Some(source),
             Self::LocalProcess(source) => Some(source),
+            Self::ProviderHttp(source) => Some(source),
             Self::Usage(_) => None,
         }
     }
@@ -730,6 +795,12 @@ impl From<greentyper_core::runtime::RuntimeError> for CliError {
 impl From<LocalProcessError> for CliError {
     fn from(source: LocalProcessError) -> Self {
         Self::LocalProcess(source)
+    }
+}
+
+impl From<ProviderHttpError> for CliError {
+    fn from(source: ProviderHttpError) -> Self {
+        Self::ProviderHttp(source)
     }
 }
 

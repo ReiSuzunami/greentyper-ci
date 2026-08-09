@@ -124,12 +124,21 @@ kill-on-close Job Object. The adapter rejects filesystem and network resources;
 it is evidence for one narrow local process Tool, not a general process
 sandbox or public product command.
 
+A second product-private tracer now exercises a concrete Responses HTTP seam
+without claiming production credential routing. It accepts only the fixed
+loopback Responses route, disables proxy discovery and redirects, sends a
+bounded canonical request with synthetic authorization, applies a fixed
+deadline, and streams the response through the core decoder into the real
+single-Agent Runtime. Its tests cover fragmented success, canonical replay,
+HTTP failure-body redaction, timeout, and rejection of non-loopback endpoints.
+
 The remaining slices are still policy, protocol, and fault-adapter work: a
-concrete HTTP Provider transport, credential/profile routing, broader canonical
-Items, multiple Tool calls, durable resumable Tool result references, a
-public Product Tool driver and approval/delivery, caller-selected process
-policy, complete Windows Job lifetime/resource evidence, reconnect/retry
-behavior, and the cross-process Tool crash matrix remain pending.
+production remote HTTP Provider transport, credential/profile routing and
+frozen endpoint metadata, broader canonical Items, multiple Tool calls,
+durable resumable Tool result references, a public Product Tool driver and
+approval/delivery, caller-selected process policy, complete Windows Job
+lifetime/resource evidence, reconnect/retry behavior, and the cross-process
+Tool crash matrix remain pending.
 
 Exit criteria:
 

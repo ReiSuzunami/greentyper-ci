@@ -102,7 +102,7 @@ Provider output, Tool effects, approvals, Workspace Leases, Read Sets, merge out
 
 ## Next Slices
 
-1. Connect the implemented Responses text/function-call decoder to a concrete Provider transport and map function calls through the Tool Runtime; extend the private fixed `local.echo` tracer into a public product Tool path only after caller-selected process policy and complete Windows Job evidence can fail closed.
+1. Promote the private loopback Responses transport into a production remote Provider path with frozen profile routes, origin-bound credentials, TLS/proxy policy, and explicit retry classification; extend the private fixed `local.echo` tracer into a public product Tool path only after caller-selected process policy and complete Windows Job evidence can fail closed.
 2. Connect the Kernel-owned Team operation journal and Tool outcome to product driving and user-visible acknowledgement only after the concrete Provider/Tool effect path exists.
 3. Add Workspace Coordinator facts, then exclusive Workspace Lease and Read Set adapters when the first writable Task lands.
 4. Extend byte-offset process termination from the Team Ledger transaction seam to every product Provider/Tool delivery and acknowledgement boundary.

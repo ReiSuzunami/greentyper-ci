@@ -13,10 +13,13 @@ The Responses facts retain OpenAI response, item, output, and content indices.
 They are not Runtime authority or durable state. A separate normalizer reduces
 the supported terminal stream to provider-neutral text deltas, one canonical
 function call, and one optional Usage Record. The Runtime Kernel can drive that
-neutral interface through Tool Runtime approval and one Tool continuation, but
-the product CLI still uses the deterministic simulator. No HTTP client,
-credential lookup, Provider Profile routing, retry policy, or product delivery
-is wired to this decoder yet.
+neutral interface through Tool Runtime approval and one Tool continuation. The
+product has a private loopback-only HTTP tracer that sends one real Responses
+request through a no-proxy, no-redirect blocking client, streams the response
+through this decoder, and drives the single-Agent Runtime. The public CLI still
+uses the deterministic simulator. No remote endpoint, credential lookup,
+Provider Profile routing, retry policy, or product delivery is wired to this
+decoder yet.
 
 ## Interface
 
@@ -134,13 +137,24 @@ replays all three Ledgers. Companion tests cover stale Sessions, ambiguous Tool
 effects, non-UTF-8 Tool output, and process death after durable Tool success
 without effect repetition.
 
+Product integration tests exercise the private HTTP tracer against an actual
+loopback TCP server. The server validates the fixed Responses route, model,
+input, streaming flag, and synthetic Authorization header, then fragments a
+bounded SSE response across network writes. Tests prove canonical Runtime
+output and replay, fixed classification for HTTP 503 and request timeout, and
+exclusion of the upstream error body from stderr and the Runtime Ledger. The
+adapter rejects non-loopback URLs, disables redirects and proxies, and exists
+only as transport evidence; it is not a credential or live-Provider path.
+
 The event shapes are checked against the official
 [OpenAI Responses streaming event reference](https://developers.openai.com/api/reference/resources/responses/streaming-events/).
 
 ## Still Pending
 
-- A concrete HTTP/SSE transport, credential and origin binding, Provider
-  Profiles, reconnect classification, and retry policy.
+- A production remote HTTP/SSE transport, credential and origin binding,
+  frozen Provider Profile routes, TLS/proxy policy, reconnect classification,
+  and retry policy. The current concrete transport is loopback-only and uses a
+  fixed synthetic credential.
 - Broader normalization into the eventual provider-neutral canonical Item
   model, including reasoning, refusal, annotations, and hosted Tools.
 - Reasoning, refusal, annotation, hosted-tool, and other Responses event kinds

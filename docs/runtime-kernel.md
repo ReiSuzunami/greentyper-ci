@@ -246,11 +246,12 @@ protocol.
   validated open without an ID-to-session conversion.
 - Complete Config Schema default/constraint/normalization/migration metadata,
   TUI/App Server editors, Provider Templates/catalogs, and credential storage.
-- Concrete Provider transport, credential/origin binding, reconnect policy,
-  multiple or parallel Tool calls, resumable result references, broader
-  canonical Items, and the unimplemented Provider event kinds. The bounded SSE,
-  first OpenAI Responses decoder, neutral normalizer, and one-Tool fixture
-  Kernel path are present in core.
+- Production remote Provider transport, credential/origin binding, frozen
+  Provider route metadata, TLS/proxy policy, reconnect policy, multiple or
+  parallel Tool calls, resumable result references, broader canonical Items,
+  and the unimplemented Provider event kinds. The bounded SSE, first OpenAI
+  Responses decoder, neutral normalizer, one-Tool fixture Kernel path, and a
+  private loopback HTTP Runtime tracer are present.
 - Broader Tool adapters and sandboxing: the private fixed `local.echo` tracer,
   Unix process-group termination, and Windows Job wrapper are present;
   caller-selected process policy, complete Windows lifetime/resource evidence,
