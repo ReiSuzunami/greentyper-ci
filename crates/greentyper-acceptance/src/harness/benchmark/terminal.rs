@@ -1,6 +1,7 @@
 use super::*;
-use ratatui::backend::CrosstermBackend;
-use ratatui::layout::Rect;
+use ratatui::backend::{Backend, ClearType, CrosstermBackend, WindowSize};
+use ratatui::buffer::Cell as RatatuiCell;
+use ratatui::layout::{Position, Rect, Size};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::{Terminal, TerminalOptions, Viewport};
 use serde::Deserialize;
@@ -690,7 +691,77 @@ impl Write for CaptureWriter {
     }
 }
 
-type CapturedTerminal = Terminal<CrosstermBackend<BufWriter<CaptureWriter>>>;
+struct FixedSizeBackend<B> {
+    inner: B,
+    size: Size,
+}
+
+impl<B> FixedSizeBackend<B> {
+    const fn new(inner: B, size: Size) -> Self {
+        Self { inner, size }
+    }
+
+    fn set_size(&mut self, size: Size) {
+        self.size = size;
+    }
+}
+
+impl<B: Backend> Backend for FixedSizeBackend<B> {
+    type Error = B::Error;
+
+    fn draw<'a, I>(&mut self, content: I) -> Result<(), Self::Error>
+    where
+        I: Iterator<Item = (u16, u16, &'a RatatuiCell)>,
+    {
+        self.inner.draw(content)
+    }
+
+    fn append_lines(&mut self, n: u16) -> Result<(), Self::Error> {
+        self.inner.append_lines(n)
+    }
+
+    fn hide_cursor(&mut self) -> Result<(), Self::Error> {
+        self.inner.hide_cursor()
+    }
+
+    fn show_cursor(&mut self) -> Result<(), Self::Error> {
+        self.inner.show_cursor()
+    }
+
+    fn get_cursor_position(&mut self) -> Result<Position, Self::Error> {
+        self.inner.get_cursor_position()
+    }
+
+    fn set_cursor_position<P: Into<Position>>(&mut self, position: P) -> Result<(), Self::Error> {
+        self.inner.set_cursor_position(position)
+    }
+
+    fn clear(&mut self) -> Result<(), Self::Error> {
+        self.inner.clear()
+    }
+
+    fn clear_region(&mut self, clear_type: ClearType) -> Result<(), Self::Error> {
+        self.inner.clear_region(clear_type)
+    }
+
+    fn size(&self) -> Result<Size, Self::Error> {
+        Ok(self.size)
+    }
+
+    fn window_size(&mut self) -> Result<WindowSize, Self::Error> {
+        Ok(WindowSize {
+            columns_rows: self.size,
+            pixels: Size::new(0, 0),
+        })
+    }
+
+    fn flush(&mut self) -> Result<(), Self::Error> {
+        self.inner.flush()
+    }
+}
+
+type CapturedBackend = FixedSizeBackend<CrosstermBackend<BufWriter<CaptureWriter>>>;
+type CapturedTerminal = Terminal<CapturedBackend>;
 
 struct RatatuiRenderer {
     terminal: CapturedTerminal,
@@ -735,7 +806,8 @@ impl RatatuiRenderer {
         let color_output_guard = ColorOutputGuard::force_enabled();
         let capture = CaptureWriter::default();
         let writer = BufWriter::with_capacity(16 * 1024, capture.clone());
-        let backend = CrosstermBackend::new(writer);
+        let backend =
+            FixedSizeBackend::new(CrosstermBackend::new(writer), Size::new(width, height));
         let terminal = Terminal::with_options(
             backend,
             TerminalOptions {
@@ -753,6 +825,9 @@ impl RatatuiRenderer {
     fn resize(&mut self, width: u16, height: u16) -> AppResult<Emission> {
         self.capture.reset();
         let started = Instant::now();
+        self.terminal
+            .backend_mut()
+            .set_size(Size::new(width, height));
         self.terminal.resize(Rect::new(0, 0, width, height))?;
         self.terminal.backend_mut().flush()?;
         let elapsed_ns = elapsed_ns(started)?;
@@ -1026,5 +1101,26 @@ mod tests {
             );
         }
         crossterm::style::force_color_output(original_enabled);
+    }
+
+    #[test]
+    fn fixed_size_backend_never_queries_the_host_terminal_size() {
+        let configured = Size::new(123, 45);
+        let mut backend =
+            FixedSizeBackend::new(CrosstermBackend::new(Vec::<u8>::new()), configured);
+        assert_eq!(backend.size().expect("synthetic terminal size"), configured);
+        assert_eq!(
+            backend
+                .window_size()
+                .expect("synthetic terminal window size"),
+            WindowSize {
+                columns_rows: configured,
+                pixels: Size::new(0, 0),
+            }
+        );
+
+        let mut renderer = RatatuiRenderer::new(40, 12).expect("fixed viewport renderer");
+        renderer.resize(80, 24).expect("first fixed resize");
+        renderer.resize(160, 50).expect("second fixed resize");
     }
 }
