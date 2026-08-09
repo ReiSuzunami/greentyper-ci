@@ -195,7 +195,7 @@ fn default_ledger_path() -> Result<PathBuf, CliError> {
     #[cfg(windows)]
     {
         let root = required_absolute_env_path("LOCALAPPDATA")?;
-        return Ok(root.join("GreenTyper").join("runtime.ledger"));
+        Ok(root.join("GreenTyper").join("runtime.ledger"))
     }
     #[cfg(target_os = "macos")]
     {
