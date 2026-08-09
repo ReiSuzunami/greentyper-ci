@@ -4,7 +4,7 @@
 
 Implementation proceeds as runnable vertical slices. Each phase must preserve Ledger recovery, authority boundaries, and measured resource behavior; no phase may defer all testing or performance work to the end.
 
-The repository remains scaffold-only until explicit feature implementation authorization.
+Feature implementation was authorized on 2026-08-09. The first core slice fixes the Agent Team command/event interface, process-local Agent Sessions, and pure orchestration policy early; it does not claim Phase 7 completion. Its volatile in-memory Ledger must be replaced by the Phase 1 Ledger Store before any product-facing acknowledgement.
 
 ## Phase 0: Repository and Measurement Foundation
 

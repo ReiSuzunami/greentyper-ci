@@ -6,7 +6,7 @@ GreenTyper is a Windows-first coding-agent runtime written in Rust. It is design
 
 GreenTyper is an independent product with selected Codex-compatible protocol and Agent semantics. It is not a Codex CLI clone, a command-compatible replacement, or a wrapper around another agent process.
 
-> Status: repository scaffolded, feature implementation not started. The repository contains the agreed domain model, architecture decisions, contracts, code layout, and implementation plan.
+> Status: feature implementation started. The first runnable core slice implements deterministic Agent Team orchestration policy; no complete product workflow exists yet.
 
 > Repository topology: [`ReiSuzunami/greentyper`](https://github.com/ReiSuzunami/greentyper) is the private canonical repository. [`ReiSuzunami/greentyper-ci`](https://github.com/ReiSuzunami/greentyper-ci) is a temporary public, non-authoritative mirror used only for hosted CI and build artifacts. See the [repository policy](docs/repository-policy.md).
 
@@ -38,6 +38,7 @@ Initial design budgets include a headless idle Private Bytes limit of 25 MB, a s
 - [Configuration and command surface](docs/configuration.md)
 - [Testing strategy](docs/testing.md)
 - [Implementation plan](docs/implementation-plan.md)
+- [Agent orchestration](docs/agent-orchestration.md)
 - [Repository policy](docs/repository-policy.md)
 - [Architecture Decision Records](docs/adr/README.md)
 
@@ -63,7 +64,7 @@ cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-The scaffold compiles but intentionally has no product behavior yet. See the [implementation plan](docs/implementation-plan.md) before adding feature modules.
+The core Agent Team policy slice compiles and runs through interface-level tests. Presentation, persistent storage, Provider, Tool, and Workspace behavior remain unimplemented; follow the [implementation plan](docs/implementation-plan.md).
 
 ## License
 

@@ -14,7 +14,7 @@ Cover canonical identifiers and state transitions, configuration merging, contex
 
 Property tests must include:
 
-- Event replay is deterministic for any valid prefix.
+- Event replay is deterministic for any valid complete-transaction prefix and fails closed on sequence, transaction, framing, or transition tampering.
 - Config resolution is deterministic and respects built-in < user < project < CLI precedence.
 - Delegation never creates a capability outside the parent snapshot.
 - One writable worktree never has two simultaneous Workspace Leases.
@@ -38,7 +38,7 @@ Each deep module is tested through its Interface:
 - Ledger Store: append, sync boundaries, replay, migration, backup, compare-and-swap, and corrupt-tail handling
 - Provider Runtime: capability freeze, dialect/transport fallback, epoch changes, retry classification, and usage normalization
 - Tool Runtime: approvals, idempotency, ambiguous outcomes, sandbox policy, and MCP isolation
-- Agent Team Runtime: Task ownership, Delegation, messaging, failure propagation, and Completion Capsules
+- Agent Team Runtime: Task ownership, Runtime-issued Agent Sessions, Delegation, messaging, Blocked resolution, failure propagation, Completion Capsules, and transaction recovery
 - Workspace Coordinator: leases, worktree allocation, Read Set revalidation, merge, and conflict reporting
 - Context Engine: pressure thresholds, artifact offload, folds, checkpoints, rebase, memory retrieval, and stale-result rejection
 - Config Runtime: schema coverage, drafts, effective provenance, atomic writes, and application timing
@@ -69,6 +69,7 @@ Required scenarios include:
 - Child processes remain inside Job Object lifetime and resource policy.
 - MCP outputs and discovery metadata cannot create instructions, endpoints, approvals, or capabilities.
 - Delegated Agents cannot access parent-only credentials, worktrees, tools, or Approval Grants.
+- Agent IDs alone cannot authorize commands; Agent Sessions cannot cross Team Runtime or recovery boundaries.
 - Diagnostic Bundle redaction is tested with adversarial paths, headers, tokens, and tool output.
 
 ### Fuzzing

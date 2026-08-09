@@ -17,10 +17,12 @@ This contract turns low-resource operation into a release condition. Numbers are
 ### Validation Host
 
 - Name: FMDev
-- Windows 11 x64 virtual machine
-- AMD EPYC 4584PX, four assigned vCPUs
-- 8 GB RAM
+- QEMU virtual machine running Windows Server 2025 Standard, version 10.0.26100
+- AMD EPYC 4584PX exposed as four virtual sockets, four assigned cores, and four logical processors
+- 8 GB RAM and PowerShell 5.1
 - Freely configurable for repeatable correctness and relative performance runs
+
+This fingerprint was read directly from FMDev on 2026-08-09. A changed VM shape starts a new baseline series rather than silently extending the old one.
 
 FMDev is the continuous regression host, not proof of absolute Target Machine performance. GitHub-hosted Windows runners cover correctness. The macOS ARM development machine covers build and core correctness only.
 
