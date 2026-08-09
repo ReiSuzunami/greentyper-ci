@@ -26,6 +26,7 @@ use crate::local_process::{
     LOCAL_ECHO_TOOL, LocalProcessChildMode, LocalProcessError, LocalProcessExecutor,
     LocalProcessSmokeOutcome, LocalProcessSmokeScenario,
 };
+use crate::presentation::PresentationSmokeError;
 use crate::product_driver::{
     ProductDriver, ProductDriverError, ProductInteraction, ProductToolDecision,
     has_product_driver_state,
@@ -156,6 +157,10 @@ pub fn run(arguments: impl Iterator<Item = String>) -> Result<(), CliError> {
                 ProviderHttpSmokeOutcome::Unavailable => write_stdout_line("provider-unavailable")?,
             }
             Ok(())
+        }
+        Command::PresentationSmoke { query } => {
+            let view = crate::presentation::build_smoke_view(&query)?;
+            write_json(&view)
         }
         Command::Help => {
             print!("{USAGE}");
@@ -436,6 +441,9 @@ enum Command {
         scenario: ProviderHttpSmokeScenario,
         input: String,
     },
+    PresentationSmoke {
+        query: String,
+    },
     Help,
 }
 
@@ -552,6 +560,9 @@ fn parse(mut arguments: impl Iterator<Item = String>) -> Result<Command, CliErro
     }
     if command == "__provider-http-smoke" {
         return parse_provider_http_smoke(arguments);
+    }
+    if command == "__presentation-smoke" {
+        return parse_presentation_smoke(arguments);
     }
     let mut ledger = None;
     let mut input = None;
@@ -868,6 +879,27 @@ fn parse_provider_http_smoke(
         ledger,
         scenario,
         input: input.ok_or(CliError::Usage("Provider HTTP smoke requires --input"))?,
+    })
+}
+
+fn parse_presentation_smoke(
+    mut arguments: impl Iterator<Item = String>,
+) -> Result<Command, CliError> {
+    let mut query = None;
+    while let Some(argument) = arguments.next() {
+        let slot = match argument.as_str() {
+            "--query" => &mut query,
+            _ => return Err(CliError::Usage("unknown presentation smoke option")),
+        };
+        if slot.is_some() {
+            return Err(CliError::Usage("duplicate presentation smoke option"));
+        }
+        *slot = Some(arguments.next().ok_or(CliError::Usage(
+            "presentation smoke option is missing its value",
+        ))?);
+    }
+    Ok(Command::PresentationSmoke {
+        query: query.ok_or(CliError::Usage("presentation smoke requires --query"))?,
     })
 }
 
@@ -1188,6 +1220,7 @@ pub enum CliError {
     Provider(ProviderError),
     Credential(CredentialVaultError),
     ProductDriver(ProductDriverError),
+    Presentation(PresentationSmokeError),
 }
 
 impl fmt::Display for CliError {
@@ -1212,6 +1245,7 @@ impl fmt::Display for CliError {
             Self::Provider(source) => write!(formatter, "{source}"),
             Self::Credential(source) => write!(formatter, "{source}"),
             Self::ProductDriver(source) => write!(formatter, "{source}"),
+            Self::Presentation(source) => write!(formatter, "{source}"),
         }
     }
 }
@@ -1228,6 +1262,7 @@ impl Error for CliError {
             Self::Provider(source) => Some(source),
             Self::Credential(source) => Some(source),
             Self::ProductDriver(source) => Some(source),
+            Self::Presentation(source) => Some(source),
             Self::UsageRuntime(source) => Some(source),
             Self::Usage(_) => None,
         }
@@ -1285,6 +1320,12 @@ impl From<ProductDriverError> for CliError {
 impl From<UsageError> for CliError {
     fn from(source: UsageError) -> Self {
         Self::UsageRuntime(source)
+    }
+}
+
+impl From<PresentationSmokeError> for CliError {
+    fn from(source: PresentationSmokeError) -> Self {
+        Self::Presentation(source)
     }
 }
 

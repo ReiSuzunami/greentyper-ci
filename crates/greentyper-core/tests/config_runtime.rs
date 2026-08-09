@@ -4,9 +4,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use greentyper_core::config::{
-    ConfigApplicationTiming, ConfigDocument, ConfigErrorCategory, ConfigPaths, ConfigRuntime,
-    ConfigRuntimeError, ConfigScope, ConfigValue, ConfigValueKind, config_schema,
-    parse_config_value,
+    ConfigApplicationTiming, ConfigDocument, ConfigErrorCategory, ConfigFieldContents,
+    ConfigObjectKind, ConfigObjectRef, ConfigPaths, ConfigRuntime, ConfigRuntimeError, ConfigScope,
+    ConfigValue, ConfigValueKind, config_schema, parse_config_value,
 };
 use greentyper_core::provider::{ProviderDialect, ProviderPricingSource};
 
@@ -148,6 +148,115 @@ source = "unknown"
         Err(ConfigRuntimeError::InvalidValue { path, .. })
             if path == "providers.edge.credential"
     ));
+}
+
+#[test]
+fn config_center_views_are_schema_driven_provenanced_and_secret_safe() {
+    let temp = TempTree::new("center-views");
+    let paths = temp.paths();
+    write(
+        paths.project(),
+        r#"
+schema_version = 1
+
+[providers.edge]
+template = "openai-compatible"
+credential = "edge-credential"
+base_url = "https://gateway.example.com/v1"
+dialects = ["responses"]
+
+[providers.edge.routes]
+responses = "/responses"
+
+[providers.edge.pricing]
+source = "unknown"
+
+[model_presets.fast]
+provider = "edge"
+model = "fixture-model"
+dialect = "responses"
+
+[[stats.windows]]
+id = "work"
+start = "09:00"
+end = "17:00"
+days = ["mon", "tue", "wed", "thu", "fri"]
+timezone = "Asia/Hong_Kong"
+"#,
+    );
+    let runtime =
+        ConfigRuntime::open(paths, ConfigDocument::empty()).expect("open Config Center fixture");
+
+    assert_eq!(
+        runtime.addressable_objects().expect("addressable objects"),
+        vec![
+            ConfigObjectRef::new(ConfigObjectKind::ProviderProfile, "edge"),
+            ConfigObjectRef::new(ConfigObjectKind::ModelPreset, "fast"),
+            ConfigObjectRef::new(ConfigObjectKind::UsageWindow, "work"),
+        ]
+    );
+
+    let base_url = runtime
+        .inspect_field(ConfigScope::User, "providers.edge.base_url")
+        .expect("inspect inherited base URL");
+    assert_eq!(base_url.path_pattern, "providers.<id>.base_url");
+    assert_eq!(base_url.command_path, "/config provider url");
+    assert_eq!(base_url.target_scope, ConfigScope::User);
+    assert_eq!(
+        base_url.contents,
+        ConfigFieldContents::Value {
+            effective: Some(value_string("https://gateway.example.com/v1")),
+            source: Some(ConfigScope::Project),
+            target: None,
+        }
+    );
+
+    let credential = runtime
+        .inspect_field(ConfigScope::Project, "providers.edge.credential")
+        .expect("inspect credential binding");
+    assert_eq!(
+        credential.contents,
+        ConfigFieldContents::CredentialBinding {
+            effective_bound: true,
+            source: Some(ConfigScope::Project),
+            target_bound: true,
+        }
+    );
+    let encoded = serde_json::to_string(&credential).expect("serialize credential view");
+    assert!(!encoded.contains("edge-credential"));
+
+    let provider_fields = runtime
+        .object_fields(ConfigScope::User, ConfigObjectKind::ProviderProfile, "edge")
+        .expect("provider fields");
+    assert_eq!(
+        provider_fields.len(),
+        config_schema()
+            .iter()
+            .filter(|entry| entry.path_pattern.starts_with("providers.<id>."))
+            .count()
+    );
+    assert!(
+        provider_fields
+            .iter()
+            .all(|field| field.path.starts_with("providers.edge."))
+    );
+    assert!(matches!(
+        runtime.object_fields(
+            ConfigScope::User,
+            ConfigObjectKind::ProviderProfile,
+            "missing"
+        ),
+        Err(ConfigRuntimeError::UnknownObject(path)) if path == "providers.missing"
+    ));
+
+    let presets = runtime.model_presets().expect("resolved model presets");
+    assert_eq!(presets.len(), 1);
+    assert_eq!(presets[0].id, "fast");
+    assert_eq!(presets[0].provider, "edge");
+    assert_eq!(presets[0].model, "fixture-model");
+    assert_eq!(presets[0].dialect, ProviderDialect::Responses);
+    assert!(!presets[0].favorite);
+    assert!(presets[0].fallback.is_empty());
 }
 
 #[test]

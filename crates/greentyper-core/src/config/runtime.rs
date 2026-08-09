@@ -71,6 +71,7 @@ pub enum ConfigValueKind {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub struct ConfigSchemaEntry {
     pub path_pattern: &'static str,
+    pub command_path: &'static str,
     pub value_kind: ConfigValueKind,
     pub scopes: &'static [ConfigScope],
     pub timing: ConfigApplicationTiming,
@@ -89,6 +90,7 @@ const FILE_SCOPES: &[ConfigScope] = &[ConfigScope::User, ConfigScope::Project];
 const CONFIG_SCHEMA: &[ConfigSchemaEntry] = &[
     schema_entry(
         "provider.profile",
+        "/config provider selected",
         ConfigValueKind::String,
         ALL_SCOPES,
         ConfigApplicationTiming::NextProviderEpoch,
@@ -97,6 +99,7 @@ const CONFIG_SCHEMA: &[ConfigSchemaEntry] = &[
     ),
     schema_entry(
         "provider.model",
+        "/config model selected",
         ConfigValueKind::String,
         ALL_SCOPES,
         ConfigApplicationTiming::NextProviderEpoch,
@@ -105,6 +108,7 @@ const CONFIG_SCHEMA: &[ConfigSchemaEntry] = &[
     ),
     schema_entry(
         "runtime.max_output_bytes",
+        "/config runtime max-output",
         ConfigValueKind::PositiveInteger,
         ALL_SCOPES,
         ConfigApplicationTiming::NextTurn,
@@ -113,6 +117,7 @@ const CONFIG_SCHEMA: &[ConfigSchemaEntry] = &[
     ),
     schema_entry(
         "providers.<id>.template",
+        "/config provider template",
         ConfigValueKind::String,
         FILE_SCOPES,
         ConfigApplicationTiming::NextProviderEpoch,
@@ -121,6 +126,7 @@ const CONFIG_SCHEMA: &[ConfigSchemaEntry] = &[
     ),
     schema_entry(
         "providers.<id>.credential",
+        "/config provider credential",
         ConfigValueKind::String,
         FILE_SCOPES,
         ConfigApplicationTiming::NextProviderEpoch,
@@ -129,6 +135,7 @@ const CONFIG_SCHEMA: &[ConfigSchemaEntry] = &[
     ),
     schema_entry(
         "providers.<id>.base_url",
+        "/config provider url",
         ConfigValueKind::String,
         FILE_SCOPES,
         ConfigApplicationTiming::NextProviderEpoch,
@@ -137,6 +144,7 @@ const CONFIG_SCHEMA: &[ConfigSchemaEntry] = &[
     ),
     schema_entry(
         "providers.<id>.routes.responses",
+        "/config provider route responses",
         ConfigValueKind::String,
         FILE_SCOPES,
         ConfigApplicationTiming::NextProviderEpoch,
@@ -145,6 +153,7 @@ const CONFIG_SCHEMA: &[ConfigSchemaEntry] = &[
     ),
     schema_entry(
         "providers.<id>.routes.chat_completions",
+        "/config provider route chat-completions",
         ConfigValueKind::String,
         FILE_SCOPES,
         ConfigApplicationTiming::NextProviderEpoch,
@@ -153,6 +162,7 @@ const CONFIG_SCHEMA: &[ConfigSchemaEntry] = &[
     ),
     schema_entry(
         "providers.<id>.routes.messages",
+        "/config provider route messages",
         ConfigValueKind::String,
         FILE_SCOPES,
         ConfigApplicationTiming::NextProviderEpoch,
@@ -161,6 +171,7 @@ const CONFIG_SCHEMA: &[ConfigSchemaEntry] = &[
     ),
     schema_entry(
         "providers.<id>.routes.models",
+        "/config provider route models",
         ConfigValueKind::String,
         FILE_SCOPES,
         ConfigApplicationTiming::NextProviderEpoch,
@@ -169,6 +180,7 @@ const CONFIG_SCHEMA: &[ConfigSchemaEntry] = &[
     ),
     schema_entry(
         "providers.<id>.dialects",
+        "/config provider dialects",
         ConfigValueKind::StringList,
         FILE_SCOPES,
         ConfigApplicationTiming::NextProviderEpoch,
@@ -177,6 +189,7 @@ const CONFIG_SCHEMA: &[ConfigSchemaEntry] = &[
     ),
     schema_entry(
         "providers.<id>.catalog.mode",
+        "/config provider catalog",
         ConfigValueKind::String,
         FILE_SCOPES,
         ConfigApplicationTiming::NextProviderEpoch,
@@ -185,6 +198,7 @@ const CONFIG_SCHEMA: &[ConfigSchemaEntry] = &[
     ),
     schema_entry(
         "providers.<id>.pricing.source",
+        "/config provider pricing",
         ConfigValueKind::String,
         FILE_SCOPES,
         ConfigApplicationTiming::NextProviderEpoch,
@@ -193,6 +207,7 @@ const CONFIG_SCHEMA: &[ConfigSchemaEntry] = &[
     ),
     schema_entry(
         "providers.<id>.allow_insecure_loopback",
+        "/config provider insecure-loopback",
         ConfigValueKind::Boolean,
         FILE_SCOPES,
         ConfigApplicationTiming::NextProviderEpoch,
@@ -201,6 +216,7 @@ const CONFIG_SCHEMA: &[ConfigSchemaEntry] = &[
     ),
     schema_entry(
         "model_presets.<id>.provider",
+        "/config model provider",
         ConfigValueKind::String,
         FILE_SCOPES,
         ConfigApplicationTiming::NextTurnAndProviderEpoch,
@@ -209,6 +225,7 @@ const CONFIG_SCHEMA: &[ConfigSchemaEntry] = &[
     ),
     schema_entry(
         "model_presets.<id>.model",
+        "/config model model",
         ConfigValueKind::String,
         FILE_SCOPES,
         ConfigApplicationTiming::NextTurnAndProviderEpoch,
@@ -217,6 +234,7 @@ const CONFIG_SCHEMA: &[ConfigSchemaEntry] = &[
     ),
     schema_entry(
         "model_presets.<id>.dialect",
+        "/config model dialect",
         ConfigValueKind::String,
         FILE_SCOPES,
         ConfigApplicationTiming::NextTurnAndProviderEpoch,
@@ -225,6 +243,7 @@ const CONFIG_SCHEMA: &[ConfigSchemaEntry] = &[
     ),
     schema_entry(
         "model_presets.<id>.reasoning_effort",
+        "/config model reasoning",
         ConfigValueKind::String,
         FILE_SCOPES,
         ConfigApplicationTiming::NextTurn,
@@ -233,6 +252,7 @@ const CONFIG_SCHEMA: &[ConfigSchemaEntry] = &[
     ),
     schema_entry(
         "model_presets.<id>.service_tier",
+        "/config model service-tier",
         ConfigValueKind::String,
         FILE_SCOPES,
         ConfigApplicationTiming::NextTurn,
@@ -241,6 +261,7 @@ const CONFIG_SCHEMA: &[ConfigSchemaEntry] = &[
     ),
     schema_entry(
         "model_presets.<id>.max_output_tokens",
+        "/config model max-output",
         ConfigValueKind::PositiveInteger,
         FILE_SCOPES,
         ConfigApplicationTiming::NextTurn,
@@ -249,6 +270,7 @@ const CONFIG_SCHEMA: &[ConfigSchemaEntry] = &[
     ),
     schema_entry(
         "model_presets.<id>.context_mode",
+        "/config model context",
         ConfigValueKind::String,
         FILE_SCOPES,
         ConfigApplicationTiming::NextTurn,
@@ -257,6 +279,7 @@ const CONFIG_SCHEMA: &[ConfigSchemaEntry] = &[
     ),
     schema_entry(
         "model_presets.<id>.favorite",
+        "/config model favorite",
         ConfigValueKind::Boolean,
         FILE_SCOPES,
         ConfigApplicationTiming::NextConfigEpoch,
@@ -265,6 +288,7 @@ const CONFIG_SCHEMA: &[ConfigSchemaEntry] = &[
     ),
     schema_entry(
         "model_presets.<id>.fallback",
+        "/config model fallback",
         ConfigValueKind::StringList,
         FILE_SCOPES,
         ConfigApplicationTiming::NextTurn,
@@ -273,6 +297,7 @@ const CONFIG_SCHEMA: &[ConfigSchemaEntry] = &[
     ),
     schema_entry(
         "ui.statusline.preset",
+        "/config statusline preset",
         ConfigValueKind::String,
         FILE_SCOPES,
         ConfigApplicationTiming::Immediate,
@@ -281,6 +306,7 @@ const CONFIG_SCHEMA: &[ConfigSchemaEntry] = &[
     ),
     schema_entry(
         "ui.statusline.expand",
+        "/config statusline expansion",
         ConfigValueKind::String,
         FILE_SCOPES,
         ConfigApplicationTiming::Immediate,
@@ -289,6 +315,7 @@ const CONFIG_SCHEMA: &[ConfigSchemaEntry] = &[
     ),
     schema_entry(
         "ui.statusline.primary_usage_window",
+        "/config statusline usage-window",
         ConfigValueKind::String,
         FILE_SCOPES,
         ConfigApplicationTiming::Immediate,
@@ -297,6 +324,7 @@ const CONFIG_SCHEMA: &[ConfigSchemaEntry] = &[
     ),
     schema_entry(
         "ui.statusline.custom.left",
+        "/config statusline left",
         ConfigValueKind::StringList,
         FILE_SCOPES,
         ConfigApplicationTiming::Immediate,
@@ -305,6 +333,7 @@ const CONFIG_SCHEMA: &[ConfigSchemaEntry] = &[
     ),
     schema_entry(
         "ui.statusline.custom.right",
+        "/config statusline right",
         ConfigValueKind::StringList,
         FILE_SCOPES,
         ConfigApplicationTiming::Immediate,
@@ -313,6 +342,7 @@ const CONFIG_SCHEMA: &[ConfigSchemaEntry] = &[
     ),
     schema_entry(
         "stats.windows.<id>.start",
+        "/config stats-window start",
         ConfigValueKind::String,
         FILE_SCOPES,
         ConfigApplicationTiming::NextConfigEpoch,
@@ -321,6 +351,7 @@ const CONFIG_SCHEMA: &[ConfigSchemaEntry] = &[
     ),
     schema_entry(
         "stats.windows.<id>.end",
+        "/config stats-window end",
         ConfigValueKind::String,
         FILE_SCOPES,
         ConfigApplicationTiming::NextConfigEpoch,
@@ -329,6 +360,7 @@ const CONFIG_SCHEMA: &[ConfigSchemaEntry] = &[
     ),
     schema_entry(
         "stats.windows.<id>.days",
+        "/config stats-window days",
         ConfigValueKind::StringList,
         FILE_SCOPES,
         ConfigApplicationTiming::NextConfigEpoch,
@@ -337,6 +369,7 @@ const CONFIG_SCHEMA: &[ConfigSchemaEntry] = &[
     ),
     schema_entry(
         "stats.windows.<id>.timezone",
+        "/config stats-window timezone",
         ConfigValueKind::String,
         FILE_SCOPES,
         ConfigApplicationTiming::NextConfigEpoch,
@@ -347,6 +380,7 @@ const CONFIG_SCHEMA: &[ConfigSchemaEntry] = &[
 
 const fn schema_entry(
     path_pattern: &'static str,
+    command_path: &'static str,
     value_kind: ConfigValueKind,
     scopes: &'static [ConfigScope],
     timing: ConfigApplicationTiming,
@@ -355,6 +389,7 @@ const fn schema_entry(
 ) -> ConfigSchemaEntry {
     ConfigSchemaEntry {
         path_pattern,
+        command_path,
         value_kind,
         scopes,
         timing,
@@ -393,6 +428,91 @@ pub struct EffectiveConfigEntry {
     pub path: String,
     pub value: ConfigValue,
     pub source: ConfigScope,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigObjectKind {
+    ProviderProfile,
+    ModelPreset,
+    UsageWindow,
+}
+
+impl ConfigObjectKind {
+    const fn path_prefix(self) -> &'static str {
+        match self {
+            Self::ProviderProfile => "providers.<id>.",
+            Self::ModelPreset => "model_presets.<id>.",
+            Self::UsageWindow => "stats.windows.<id>.",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+pub struct ConfigObjectRef {
+    kind: ConfigObjectKind,
+    id: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct ModelPresetView {
+    pub id: String,
+    pub provider: String,
+    pub model: String,
+    pub dialect: ProviderDialect,
+    pub reasoning_effort: Option<String>,
+    pub service_tier: Option<String>,
+    pub max_output_tokens: Option<u32>,
+    pub context_mode: Option<String>,
+    pub favorite: bool,
+    pub fallback: Vec<String>,
+}
+
+impl ConfigObjectRef {
+    #[must_use]
+    pub fn new(kind: ConfigObjectKind, id: impl Into<String>) -> Self {
+        Self {
+            kind,
+            id: id.into(),
+        }
+    }
+
+    #[must_use]
+    pub const fn kind(&self) -> ConfigObjectKind {
+        self.kind
+    }
+
+    #[must_use]
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ConfigFieldContents {
+    Value {
+        effective: Option<ConfigValue>,
+        source: Option<ConfigScope>,
+        target: Option<ConfigValue>,
+    },
+    CredentialBinding {
+        effective_bound: bool,
+        source: Option<ConfigScope>,
+        target_bound: bool,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct ConfigFieldView {
+    pub path: String,
+    pub path_pattern: &'static str,
+    pub command_path: &'static str,
+    pub value_kind: ConfigValueKind,
+    pub target_scope: ConfigScope,
+    pub timing: ConfigApplicationTiming,
+    pub editor: &'static str,
+    pub contents: ConfigFieldContents,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -852,11 +972,156 @@ impl ConfigRuntime {
             .find(|entry| entry.path == path))
     }
 
+    pub fn addressable_objects(&self) -> Result<Vec<ConfigObjectRef>, ConfigRuntimeError> {
+        let resolved = self
+            .last_valid
+            .as_ref()
+            .ok_or_else(|| ConfigRuntimeError::RepairRequired(self.status().issues))?;
+        let mut objects = resolved
+            .document
+            .providers
+            .keys()
+            .map(|id| ConfigObjectRef::new(ConfigObjectKind::ProviderProfile, id.clone()))
+            .chain(
+                resolved
+                    .document
+                    .model_presets
+                    .keys()
+                    .map(|id| ConfigObjectRef::new(ConfigObjectKind::ModelPreset, id.clone())),
+            )
+            .collect::<Vec<_>>();
+        if let Some(windows) = &resolved.document.stats.windows {
+            objects.extend(
+                windows
+                    .iter()
+                    .map(|window| ConfigObjectRef::new(ConfigObjectKind::UsageWindow, &window.id)),
+            );
+        }
+        objects.sort();
+        Ok(objects)
+    }
+
+    pub fn model_presets(&self) -> Result<Vec<ModelPresetView>, ConfigRuntimeError> {
+        let resolved = self
+            .last_valid
+            .as_ref()
+            .ok_or_else(|| ConfigRuntimeError::RepairRequired(self.status().issues))?;
+        resolved
+            .document
+            .model_presets
+            .iter()
+            .map(|(id, preset)| {
+                let provider = preset.provider.clone().ok_or_else(|| {
+                    invalid(
+                        format!("model_presets.{id}.provider"),
+                        "model preset requires a provider",
+                    )
+                })?;
+                let model = preset.model.clone().ok_or_else(|| {
+                    invalid(
+                        format!("model_presets.{id}.model"),
+                        "model preset requires a model",
+                    )
+                })?;
+                let dialect = preset.dialect.ok_or_else(|| {
+                    invalid(
+                        format!("model_presets.{id}.dialect"),
+                        "model preset requires a dialect",
+                    )
+                })?;
+                Ok(ModelPresetView {
+                    id: id.clone(),
+                    provider,
+                    model,
+                    dialect,
+                    reasoning_effort: preset.reasoning_effort.clone(),
+                    service_tier: preset.service_tier.clone(),
+                    max_output_tokens: preset.max_output_tokens,
+                    context_mode: preset.context_mode.clone(),
+                    favorite: preset.favorite.unwrap_or(false),
+                    fallback: preset.fallback.clone().unwrap_or_default(),
+                })
+            })
+            .collect()
+    }
+
+    pub fn inspect_field(
+        &self,
+        target_scope: ConfigScope,
+        path: &str,
+    ) -> Result<ConfigFieldView, ConfigRuntimeError> {
+        if !target_scope.is_writable() {
+            return Err(ConfigRuntimeError::ReadOnlyScope(target_scope));
+        }
+        let descriptor = require_schema_entry(path)?;
+        if !descriptor.scopes.contains(&target_scope) {
+            return Err(ConfigRuntimeError::ReadOnlyScope(target_scope));
+        }
+        let target = self.target_document(target_scope)?.get(path)?;
+        let effective = self.get_effective(path)?.cloned();
+        let contents = if descriptor.credential_reference {
+            ConfigFieldContents::CredentialBinding {
+                effective_bound: effective.is_some(),
+                source: effective.as_ref().map(|entry| entry.source),
+                target_bound: target.is_some(),
+            }
+        } else {
+            ConfigFieldContents::Value {
+                effective: effective.as_ref().map(|entry| entry.value.clone()),
+                source: effective.as_ref().map(|entry| entry.source),
+                target,
+            }
+        };
+        Ok(ConfigFieldView {
+            path: path.to_owned(),
+            path_pattern: descriptor.path_pattern,
+            command_path: descriptor.command_path,
+            value_kind: descriptor.value_kind,
+            target_scope,
+            timing: descriptor.timing,
+            editor: descriptor.editor,
+            contents,
+        })
+    }
+
+    pub fn object_fields(
+        &self,
+        target_scope: ConfigScope,
+        kind: ConfigObjectKind,
+        id: &str,
+    ) -> Result<Vec<ConfigFieldView>, ConfigRuntimeError> {
+        validate_id("<id>", id)?;
+        let object = ConfigObjectRef::new(kind, id);
+        if !self.addressable_objects()?.contains(&object) {
+            let path = kind.path_prefix().replace("<id>.", id);
+            return Err(ConfigRuntimeError::UnknownObject(path));
+        }
+        config_schema()
+            .iter()
+            .filter(|entry| entry.path_pattern.starts_with(kind.path_prefix()))
+            .map(|entry| {
+                let path = entry.path_pattern.replacen("<id>", id, 1);
+                self.inspect_field(target_scope, &path)
+            })
+            .collect()
+    }
+
     pub fn config_layers(&self) -> Result<&ConfigLayers, ConfigRuntimeError> {
         self.last_valid
             .as_ref()
             .map(|resolved| &resolved.layers)
             .ok_or_else(|| ConfigRuntimeError::RepairRequired(self.status().issues))
+    }
+
+    fn target_document(&self, scope: ConfigScope) -> Result<&ConfigDocument, ConfigRuntimeError> {
+        let document = match scope {
+            ConfigScope::User => self.user.current.as_ref().map(|layer| &layer.document),
+            ConfigScope::Project => self.project.current.as_ref().map(|layer| &layer.document),
+            ConfigScope::BuiltIn | ConfigScope::Cli => {
+                return Err(ConfigRuntimeError::ReadOnlyScope(scope));
+            }
+        };
+        document.ok_or_else(|| ConfigRuntimeError::RepairRequired(self.status().issues))
     }
 
     pub fn selected_provider_profile(

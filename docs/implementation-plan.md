@@ -171,10 +171,23 @@ overflow-to-unknown, historical schema replay, repeated/skipped DST hours,
 local-zone resolution, changed same-name windows, Product-driver Agent/Team
 scope, and statistics redaction.
 
-This does not complete Phase 3. VT/ConPTY presentation, hierarchical command
-navigation, generated Config editors, Provider wizard, model selector, adaptive
-statusline, Context Pressure, Price Schedules/cost calculation, richer observed
-Provider metadata, and the P0/P1/P2/P6 performance evidence remain pending.
+The first terminal-neutral presentation slice is also implemented. Config
+Schema metadata now owns the bounded hierarchical Command Path registry and one
+credential-safe editor route per field. Config Runtime exposes sorted existing
+Config Objects, effective and target-layer field values with provenance, and
+configured Model Presets without credential read-back. A product presentation
+model derives a bounded Slash Panel, configured-preset search and favorites,
+adaptive status facts, and explicit Runtime, Team, Tool, and Config blockers.
+Pure and subprocess tests cover `/con`, `/config pro url`, root/nested command
+separation, schema-route completeness, unknown facts, blocker visibility, and a
+read-only smoke path. No terminal backend or interactive mutation surface is
+claimed by this slice.
+
+This does not complete Phase 3. VT/ConPTY rendering and input, interactive
+command navigation, generated Config editors, Provider wizard, catalog-backed
+Recent/Compatible model views, statusline width degradation, Context Pressure,
+Price Schedules/cost calculation, richer observed Provider metadata, and the
+P0/P1/P2/P6 performance evidence remain pending.
 Large-history statistics pagination and summary-only rendering also remain
 pending; the current command emits the complete replayed attempt projection.
 

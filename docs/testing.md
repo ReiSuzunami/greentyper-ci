@@ -206,6 +206,14 @@ Fuzz failures become minimized regression fixtures.
 
 ### UI and Command Tests
 
+Current pure tests freeze the four root Command Paths, nested Config routes,
+token-prefix/fuzzy resolution, raw query limits, schema-to-editor-route
+completeness, and credential binding-status-only readback. Terminal-neutral
+presentation tests cover bounded Slash results, configured-preset search and
+unknown compatibility, recovery/blocker projection, Config repair redaction,
+and a pure in-memory subprocess smoke with no filesystem path input. These
+tests do not constitute a TUI or ConPTY terminal claim.
+
 Golden terminal tests cover root Slash Panel size, hierarchical Command Path completion, scoped fuzzy matching, Config Center navigation, narrow-width statusline degradation, expanded status details, model selector states, approval/blocker visibility, and text-fit constraints.
 
 Tests assert that `/config pro url` resolves to the focused Provider editor without registering a flat root command. Every Config Object must have a generic or purpose-built editor route. Credential fields must never support read-back.

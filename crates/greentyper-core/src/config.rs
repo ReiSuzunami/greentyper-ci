@@ -7,7 +7,9 @@ use crate::model::ConfigEpochId;
 use crate::schema::SchemaKind;
 use crate::usage::{MAX_USAGE_WINDOWS, UsageTimezoneSource, UsageWeekday, UsageWindow};
 
+mod command_paths;
 mod runtime;
+pub use command_paths::*;
 pub use runtime::*;
 
 pub const DEFAULT_MAX_OUTPUT_BYTES: u32 = 64 * 1024;

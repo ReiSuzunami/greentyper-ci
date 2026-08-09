@@ -151,6 +151,18 @@ impl<E: ToolEffectExecutor> ProductDriver<E> {
     }
 
     #[must_use]
+    #[cfg(test)]
+    pub(crate) fn team_snapshot(&self) -> Option<greentyper_core::runtime::KernelTeamSnapshot> {
+        self.kernel.team_snapshot()
+    }
+
+    #[must_use]
+    #[cfg(test)]
+    pub(crate) fn tool_snapshot(&self) -> Option<greentyper_core::tool_runtime::ToolSnapshot> {
+        self.kernel.tool_snapshot()
+    }
+
+    #[must_use]
     pub(crate) fn pending_provider_epoch(&self) -> Option<&ProviderEpoch> {
         self.kernel.pending_provider_epoch()
     }
@@ -297,6 +309,7 @@ mod tests {
 
     use greentyper_core::agent_team::TeamOperationRecord;
     use greentyper_core::config::ConfigLayers;
+    use greentyper_core::config::ConfigRuntimeStatus;
     use greentyper_core::provider::{
         ProviderError, ProviderEvent, ProviderRequest, ProviderRuntime, ProviderToolCall,
         ProviderToolOutput, UsageRecord,
@@ -305,6 +318,7 @@ mod tests {
     use greentyper_core::tool_runtime::{AuthorizedToolCall, ToolEffectExecutor, ToolExecution};
 
     use super::*;
+    use crate::presentation::{BlockerView, PresentationSources, TuiViewModel};
 
     static NEXT_TEMP: AtomicU64 = AtomicU64::new(1);
 
@@ -399,6 +413,38 @@ mod tests {
         );
         assert!(matches!(result, Err(ProductDriverError::Interaction(_))));
         assert_eq!(calls.get(), 0);
+        let runtime = driver.snapshot();
+        let team = driver.team_snapshot().expect("Team snapshot");
+        let tools = driver.tool_snapshot().expect("Tool snapshot");
+        let config = ConfigRuntimeStatus {
+            ready: true,
+            issues: Vec::new(),
+        };
+        let view = TuiViewModel::build(
+            "/",
+            "",
+            0,
+            PresentationSources {
+                runtime: &runtime,
+                usage: None,
+                team: Some(&team),
+                tools: Some(&tools),
+                config: &config,
+                provider_profile: None,
+                model: None,
+                context_pressure_percent: None,
+                model_presets: &[],
+            },
+        )
+        .expect("approval presentation");
+        assert!(view.blockers.iter().any(|blocker| matches!(
+            blocker,
+            BlockerView::ToolApproval {
+                tool,
+                expires_at_unix_ms: None,
+                ..
+            } if tool == "local.echo"
+        )));
         drop(driver);
 
         let mut interaction = RecordingInteraction::approve();

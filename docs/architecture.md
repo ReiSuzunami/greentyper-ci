@@ -4,6 +4,11 @@
 
 GreenTyper is a recoverable coding-agent runtime optimized for constrained Windows machines. Its architecture protects four properties in order: correctness of externally visible effects, recoverability from the Event Ledger, explicit authority, and the Performance Contract. Broad compatibility and convenience features may be reduced before any of these properties.
 
+This document describes the target architecture. Implemented boundaries and
+deferred modules are tracked in the [implementation plan](implementation-plan.md);
+the presence of a box or ownership statement below does not by itself claim a
+shipped product surface.
+
 ```mermaid
 flowchart LR
     U["User or client"] --> P["TUI / CLI / App Server"]

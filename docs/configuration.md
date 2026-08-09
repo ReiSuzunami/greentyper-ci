@@ -74,6 +74,13 @@ Unknown keys fail validation unless their owning schema version explicitly reser
 
 ## Interactive Configuration
 
+This section defines the target interaction contract. The current product has
+a terminal-neutral hierarchical Command Path registry generated from Config
+Schema metadata, plus read-only, provenance-aware field views for existing
+Provider Profiles, Model Presets, and Usage Windows. It does not yet ship the
+interactive Config Center, editor dialogs, or App Server surface described
+below.
+
 The root Slash Panel exposes `/config` as one Command Path. It does not register one flat command for every field.
 
 ```text
@@ -115,7 +122,7 @@ Secret values never appear in command arguments or output: an interactive bind
 or replace uses a no-echo prompt, while controlled automation may provide one
 bounded value on standard input. Existing values are never returned.
 
-The App Server exposes the same Config Runtime operations, independent of its eventual wire encoding:
+The planned App Server exposes the same Config Runtime operations, independent of its eventual wire encoding:
 
 | Operation | Required behavior |
 | --- | --- |
@@ -131,7 +138,10 @@ All surfaces share stable error categories: `unknown_object`, `wrong_type`, `inv
 
 ## Provider Profiles
 
-Built-in Provider Templates supply official defaults for OpenAI, DeepSeek, and OpenCode Go. A normal official profile usually requires only a credential binding:
+The target Provider Template catalog supplies official defaults for OpenAI,
+DeepSeek, and OpenCode Go. That catalog and its wizard are not implemented yet.
+Once present, a normal official profile usually requires only a credential
+binding:
 
 ```toml
 schema_version = 1
@@ -180,11 +190,19 @@ Provider Template defaults are suggestions, not locked endpoints. Provider Origi
 - The profile remains a distinct statistics dimension. A gateway's hidden backend is unknown unless trusted response metadata identifies it.
 - The next request starts a new Provider Epoch and cannot reuse incompatible continuation identity.
 
-The provider wizard edits name, template, base URL, routes, credential binding, supported dialects, price source, and catalog behavior, then tests the connection before presenting the Config Draft.
+The planned provider wizard edits name, template, base URL, routes, credential
+binding, supported dialects, price source, and catalog behavior, then tests the
+connection before presenting the Config Draft.
 
 ## Model Catalog and Presets
 
-The release ships a seed Model Catalog and marks every field with its source and freshness. Each catalog record has a stable model key, provider-template identity, catalog schema version, seed revision, and observation time. Every capability, limit, dialect, and price reference is represented as `{ value, source_kind, source_ref, observed_at }`; an explicit user field outranks discovery, which outranks the release seed. Pricing still resolves through a Price Schedule rather than becoming an unversioned catalog number. The initial catalog targets, as verified during design on 2026-08-09, are:
+The following is the target catalog contract. The current Config Runtime stores
+and validates user-defined Model Presets, and the terminal-neutral presentation
+model can search them and identify favorites. Seed catalogs, discovery,
+compatibility evidence, recent selections, and freshness data are not
+implemented yet.
+
+The release will ship a seed Model Catalog and mark every field with its source and freshness. Each catalog record has a stable model key, provider-template identity, catalog schema version, seed revision, and observation time. Every capability, limit, dialect, and price reference is represented as `{ value, source_kind, source_ref, observed_at }`; an explicit user field outranks discovery, which outranks the release seed. Pricing still resolves through a Price Schedule rather than becoming an unversioned catalog number. The initial catalog targets, as verified during design on 2026-08-09, are:
 
 | Provider Template | Seed family | Primary dialects |
 | --- | --- | --- |
@@ -215,13 +233,19 @@ fallback = []
 
 A runnable preset must name its Provider Profile, model, and Provider Dialect. Its route is then resolved from that profile; there is no hidden dialect auto-selection. Presets may also define reasoning effort, reasoning mode where supported, service tier, output limit, context policy, and an explicit fallback chain. They never grant tools, approvals, credentials, or workspace authority.
 
-The model selector provides Favorites, Recent, Compatible, and All views with fuzzy search. Each entry shows provider, dialect, known context limit, capabilities, price freshness, and observed availability. Incompatible entries remain visible with a reason. Catalog refresh is manual or selector-triggered.
+The target model selector provides Favorites, Recent, Compatible, and All views
+with fuzzy search. Each entry shows provider, dialect, known context limit,
+capabilities, price freshness, and observed availability. Incompatible entries
+remain visible with a reason. Catalog refresh is manual or selector-triggered.
 
 A selection applies to the current Agent on its next Turn by default. The user may instead set the default for new Agents or the project. Running child Agents are not silently changed. Any provider/model/dialect change starts a Provider Epoch. Automatic price- or latency-based routing is outside v1; fallback is explicit and must preserve the required capability contract.
 
 ## Statusline
 
-The statusline is event-driven and adaptive. It has four presets:
+The target statusline is event-driven and adaptive. The current
+terminal-neutral projection exposes recovery, provider/model, usage, Agent,
+blocker, Config, and unknown Context Pressure facts, but no terminal renderer or
+width-degradation policy. The target has four presets:
 
 - `minimal`: model, Context Pressure, blocker/approval
 - `balanced`: current Agent/Task, Git, model/effort/tier, context, Thread cost, cache

@@ -10,7 +10,11 @@ GreenTyper is an independent product with selected Codex-compatible protocol and
 
 > Repository topology: [`ReiSuzunami/greentyper`](https://github.com/ReiSuzunami/greentyper) is the private canonical repository. [`ReiSuzunami/greentyper-ci`](https://github.com/ReiSuzunami/greentyper-ci) is a temporary public, non-authoritative mirror used only for hosted CI and build artifacts. See the [repository policy](docs/repository-policy.md).
 
-## Product Shape
+## Target Product Shape
+
+The following bullets describe the intended v1 product, not the current
+implementation status. The concrete status and remaining work are listed under
+[Development](#development) and in the [implementation plan](docs/implementation-plan.md).
 
 - Windows 11 x64 first, targeting x86-64-v3 and modern VT/ConPTY terminals.
 - Keyboard-first TUI plus a headless App Server; IDE and graphical clients come later.
@@ -21,7 +25,7 @@ GreenTyper is an independent product with selected Codex-compatible protocol and
 - Append-only Event Ledger as truth; Context Views, checkpoints, memory retrieval, usage statistics, and indices remain derived.
 - Evidence-linked Durable Memory and safe-barrier Compaction that cannot acquire authority or erase history.
 - Explicit task ownership, capability Delegation, workspace leases, and worktree isolation for Agent Teams.
-- Schema-driven configuration available through TUI dialogs, CLI, App Server, and TOML.
+- Schema-driven configuration shared by TUI dialogs, CLI, App Server, and TOML.
 
 ## Performance Position
 
@@ -118,6 +122,13 @@ Team, rolling, and named-window rollups. Config Epochs freeze normalized Usage
 Windows with concrete IANA identity and rule-set provenance; `stats` reads the
 projection without exposing prompt text. Price Schedules and provider charge
 calculation are not implemented, so cost provenance remains explicitly unknown.
+The first terminal-neutral presentation slice now derives a bounded hierarchical
+Slash Panel, configured-preset selector, adaptive status summary, and explicit
+Runtime, Team, Tool, and Config blockers from core snapshots. Config Schema
+metadata supplies every field-level editor route and the Config Runtime exposes
+provenanced, credential-safe field views for existing Provider Profiles, Model
+Presets, and Usage Windows. This is a read-only presentation model and private
+smoke tracer, not a terminal backend or interactive Config Center.
 Live-provider validation, configurable proxy policy, reconnect/retry, richer
 approval presentation, broader Provider and Tool adapters, Workspace, TUI, and
 App Server work remain. The loopback Provider tracer remains an internal
