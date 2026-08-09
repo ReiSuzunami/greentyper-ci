@@ -89,7 +89,9 @@ Render context occupancy, Thread cost, cache read/write ratios, reasoning effort
 6. Warn on a repeatable regression above 5%; block above 10%. An absolute-budget violation always blocks.
 7. Run the same package against jcode on the same host when available. This comparison is diagnostic; GreenTyper's absolute contract remains the gate.
 
-Network-provider latency is reported separately from local processing. Deterministic fixtures are the regression gate; live provider smoke tests establish integration health, not local performance.
+Network-provider latency is reported separately from local processing.
+Deterministic fixtures are the regression gate. When implemented, live Provider
+smoke tests establish integration health, not local performance.
 
 The initial `agent-team-smoke` fixture measures a small in-process policy transaction solely to prove the versioned evidence pipeline, candidate binding, CPU guard, raw samples, and summary calculation. It is not the P3 workload and cannot approve a technology choice or satisfy a numeric release gate.
 

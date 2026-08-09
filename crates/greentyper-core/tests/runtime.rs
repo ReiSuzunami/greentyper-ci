@@ -149,6 +149,37 @@ fn malformed_provider_output_is_durably_blocked() {
 }
 
 #[test]
+fn provider_error_details_never_enter_the_runtime_ledger() {
+    const SECRET: &str = "https://provider.test/?token=private-token";
+    let path = temp_path("provider-error-redaction");
+    let mut runtime = RuntimeKernel::open(&path).expect("open Runtime");
+    assert!(matches!(
+        runtime.execute(&ConfigLayers::default(), "input", &mut UnavailableProvider,),
+        Err(RuntimeError::Provider(ProviderError::Unavailable { .. }))
+    ));
+    let RecoveryStatus::Blocked { reason, .. } = runtime.snapshot().status else {
+        panic!("Provider error did not block the Turn");
+    };
+    assert_eq!(reason, "Provider became unavailable");
+    drop(runtime);
+
+    let bytes = fs::read(&path).expect("read Runtime Ledger");
+    assert!(
+        !bytes
+            .windows(SECRET.len())
+            .any(|window| window == SECRET.as_bytes())
+    );
+    let recovered = RuntimeKernel::open(&path).expect("replay Runtime Ledger");
+    assert!(matches!(
+        recovered.snapshot().status,
+        RecoveryStatus::Blocked { ref reason, .. }
+            if reason == "Provider became unavailable"
+    ));
+    drop(recovered);
+    fs::remove_file(path).expect("cleanup Runtime ledger");
+}
+
+#[test]
 fn unsupported_runtime_event_schema_fails_closed() {
     let path = temp_path("unsupported-event");
     let (mut ledger, _) = FileLedger::open(&path).expect("open Ledger");
@@ -156,7 +187,7 @@ fn unsupported_runtime_event_schema_fails_closed() {
         .append(
             LedgerHead::default(),
             &[EventData {
-                schema: 2,
+                schema: 3,
                 kind: 1,
                 payload: 1_u64.to_le_bytes().to_vec(),
             }],
@@ -166,11 +197,159 @@ fn unsupported_runtime_event_schema_fails_closed() {
     assert!(matches!(
         RuntimeKernel::open(&path),
         Err(RuntimeError::UnsupportedRuntimeEventSchema {
-            supported: 1,
-            actual: 2
+            supported: 2,
+            actual: 3
         })
     ));
     fs::remove_file(path).expect("cleanup Runtime ledger");
+}
+
+#[test]
+fn schema_one_runtime_turn_replays_and_can_continue_with_schema_two() {
+    let path = temp_path("schema-one-replay");
+    let layers = ConfigLayers::default();
+    let config = greentyper_core::config::ConfigEpoch::freeze(
+        greentyper_core::model::ConfigEpochId::new(1).expect("Config Epoch id"),
+        &layers,
+    )
+    .expect("freeze Config");
+    let profile = config.resolved().provider_profile().value();
+    let model = config.resolved().provider_model().value();
+    let mut config_payload = Vec::new();
+    push_u64(&mut config_payload, config.id().get());
+    push_u64(&mut config_payload, config.fingerprint());
+    push_string(&mut config_payload, profile);
+    config_payload.push(1);
+    push_string(&mut config_payload, model);
+    config_payload.push(1);
+    push_u32(
+        &mut config_payload,
+        *config.resolved().max_output_bytes().value(),
+    );
+    config_payload.push(1);
+
+    let legacy_text = "legacy output";
+    let legacy = vec![
+        EventData {
+            schema: 1,
+            kind: 1,
+            payload: 1_u64.to_le_bytes().to_vec(),
+        },
+        EventData {
+            schema: 1,
+            kind: 2,
+            payload: config_payload,
+        },
+        EventData {
+            schema: 1,
+            kind: 3,
+            payload: encoded(|payload| {
+                push_u64(payload, 1);
+                push_string(payload, profile);
+                push_string(payload, model);
+            }),
+        },
+        EventData {
+            schema: 1,
+            kind: 4,
+            payload: encoded(|payload| {
+                for value in [1, 1, 1, 1, 1] {
+                    push_u64(payload, value);
+                }
+                push_string(payload, "legacy input");
+            }),
+        },
+        EventData {
+            schema: 1,
+            kind: 5,
+            payload: encoded(|payload| {
+                push_u64(payload, 1);
+                push_u64(payload, 2);
+            }),
+        },
+        EventData {
+            schema: 1,
+            kind: 6,
+            payload: encoded(|payload| {
+                push_u64(payload, 1);
+                push_u64(payload, 2);
+                push_string(payload, legacy_text);
+            }),
+        },
+        EventData {
+            schema: 1,
+            kind: 7,
+            payload: encoded(|payload| {
+                push_u64(payload, 1);
+                push_u64(payload, 2);
+                push_u64(payload, 1);
+                push_string(payload, legacy_text);
+                push_u32(payload, 2);
+                push_u32(payload, 3);
+            }),
+        },
+        EventData {
+            schema: 1,
+            kind: 8,
+            payload: encoded(|payload| {
+                push_u64(payload, 1);
+                push_u64(payload, 1);
+            }),
+        },
+        EventData {
+            schema: 1,
+            kind: 9,
+            payload: 1_u64.to_le_bytes().to_vec(),
+        },
+    ];
+    let (mut ledger, _) = FileLedger::open(&path).expect("open legacy Ledger");
+    ledger
+        .append(LedgerHead::default(), &legacy)
+        .expect("append schema one Turn");
+    drop(ledger);
+
+    let mut runtime = RuntimeKernel::open(&path).expect("replay schema one Turn");
+    assert_eq!(runtime.snapshot().items[1].text(), legacy_text);
+    let mut provider = DeterministicProvider::default();
+    let output = runtime
+        .execute(&layers, "current input", &mut provider)
+        .expect("write schema two Turn");
+    runtime
+        .acknowledge(output.delivery())
+        .expect("acknowledge schema two Turn");
+    drop(runtime);
+
+    let recovered = RuntimeKernel::open(&path).expect("replay mixed schema Turns");
+    assert_eq!(recovered.snapshot().items.len(), 4);
+    assert_eq!(recovered.snapshot().items[1].text(), legacy_text);
+    assert_eq!(
+        recovered.snapshot().items[3].text(),
+        "simulated: current input"
+    );
+    drop(recovered);
+    fs::remove_file(path).expect("cleanup Runtime Ledger");
+}
+
+fn encoded(write: impl FnOnce(&mut Vec<u8>)) -> Vec<u8> {
+    let mut payload = Vec::new();
+    write(&mut payload);
+    payload
+}
+
+fn push_u32(payload: &mut Vec<u8>, value: u32) {
+    payload.extend_from_slice(&value.to_le_bytes());
+}
+
+fn push_u64(payload: &mut Vec<u8>, value: u64) {
+    payload.extend_from_slice(&value.to_le_bytes());
+}
+
+fn push_string(payload: &mut Vec<u8>, value: &str) {
+    push_u32(
+        payload,
+        u32::try_from(value.len()).expect("fixture string length"),
+    );
+    payload.extend_from_slice(value.as_bytes());
 }
 
 #[test]
@@ -220,5 +399,15 @@ struct CompletedOnlyProvider;
 impl ProviderRuntime for CompletedOnlyProvider {
     fn run(&mut self, _request: &ProviderRequest) -> Result<Vec<ProviderEvent>, ProviderError> {
         Ok(vec![ProviderEvent::Completed(UsageRecord::default())])
+    }
+}
+
+struct UnavailableProvider;
+
+impl ProviderRuntime for UnavailableProvider {
+    fn run(&mut self, _request: &ProviderRequest) -> Result<Vec<ProviderEvent>, ProviderError> {
+        Err(ProviderError::unavailable(
+            "https://provider.test/?token=private-token",
+        ))
     }
 }

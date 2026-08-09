@@ -11,6 +11,9 @@ use crate::model::{ProviderEpochId, ThreadId, TurnId};
 
 pub const MAX_PROVIDER_ID_BYTES: usize = 512;
 pub const MAX_PROVIDER_ERROR_BYTES: usize = 4096;
+pub const MAX_PROVIDER_TOOL_ARGUMENT_BYTES: usize = 64 * 1024;
+pub const MAX_PROVIDER_TOOL_OUTPUT_BYTES: usize = 256 * 1024;
+pub const MAX_SERVICE_TIER_BYTES: usize = 64;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProviderEpoch {
@@ -48,7 +51,7 @@ impl ProviderEpoch {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct ProviderRequest {
     pub thread: ThreadId,
     pub turn: TurnId,
@@ -57,20 +60,230 @@ pub struct ProviderRequest {
     pub input: String,
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct UsageRecord {
-    pub input_tokens: u32,
-    pub output_tokens: u32,
+impl fmt::Debug for ProviderRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProviderRequest")
+            .field("thread", &self.thread)
+            .field("turn", &self.turn)
+            .field("config", &self.config.id())
+            .field("provider", &self.provider.id())
+            .field("input_bytes", &self.input.len())
+            .finish()
+    }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct UsageRecord {
+    input_tokens: Option<u64>,
+    cached_input_tokens: Option<u64>,
+    cache_write_input_tokens: Option<u64>,
+    output_tokens: Option<u64>,
+    reasoning_output_tokens: Option<u64>,
+    total_tokens: Option<u64>,
+    service_tier: Option<String>,
+}
+
+impl UsageRecord {
+    pub fn new(
+        input_tokens: Option<u64>,
+        cached_input_tokens: Option<u64>,
+        cache_write_input_tokens: Option<u64>,
+        output_tokens: Option<u64>,
+        reasoning_output_tokens: Option<u64>,
+        total_tokens: Option<u64>,
+        service_tier: Option<String>,
+    ) -> Result<Self, ProviderError> {
+        if let Some(value) = service_tier.as_deref() {
+            validate_provider_text("service tier", value, MAX_SERVICE_TIER_BYTES)?;
+        }
+        Ok(Self {
+            input_tokens,
+            cached_input_tokens,
+            cache_write_input_tokens,
+            output_tokens,
+            reasoning_output_tokens,
+            total_tokens,
+            service_tier,
+        })
+    }
+
+    #[must_use]
+    pub fn estimated(input_tokens: u32, output_tokens: u32) -> Self {
+        let input_tokens = u64::from(input_tokens);
+        let output_tokens = u64::from(output_tokens);
+        Self {
+            input_tokens: Some(input_tokens),
+            output_tokens: Some(output_tokens),
+            total_tokens: input_tokens.checked_add(output_tokens),
+            ..Self::default()
+        }
+    }
+
+    #[must_use]
+    pub const fn input_tokens(&self) -> Option<u64> {
+        self.input_tokens
+    }
+
+    #[must_use]
+    pub const fn cached_input_tokens(&self) -> Option<u64> {
+        self.cached_input_tokens
+    }
+
+    #[must_use]
+    pub const fn cache_write_input_tokens(&self) -> Option<u64> {
+        self.cache_write_input_tokens
+    }
+
+    #[must_use]
+    pub const fn output_tokens(&self) -> Option<u64> {
+        self.output_tokens
+    }
+
+    #[must_use]
+    pub const fn reasoning_output_tokens(&self) -> Option<u64> {
+        self.reasoning_output_tokens
+    }
+
+    #[must_use]
+    pub const fn total_tokens(&self) -> Option<u64> {
+        self.total_tokens
+    }
+
+    #[must_use]
+    pub fn service_tier(&self) -> Option<&str> {
+        self.service_tier.as_deref()
+    }
+}
+
+#[derive(Clone, Eq, PartialEq)]
+pub struct ProviderToolCall {
+    call_id: String,
+    tool: String,
+    arguments_json: String,
+}
+
+impl ProviderToolCall {
+    pub fn new(
+        call_id: impl Into<String>,
+        tool: impl Into<String>,
+        arguments_json: impl Into<String>,
+    ) -> Result<Self, ProviderError> {
+        let call = Self {
+            call_id: call_id.into(),
+            tool: tool.into(),
+            arguments_json: arguments_json.into(),
+        };
+        validate_provider_text(
+            "Provider Tool call ID",
+            &call.call_id,
+            MAX_PROVIDER_ID_BYTES,
+        )?;
+        validate_provider_text("Provider Tool name", &call.tool, MAX_PROVIDER_ID_BYTES)?;
+        validate_provider_text(
+            "Provider Tool arguments",
+            &call.arguments_json,
+            MAX_PROVIDER_TOOL_ARGUMENT_BYTES,
+        )?;
+        Ok(call)
+    }
+
+    #[must_use]
+    pub fn call_id(&self) -> &str {
+        &self.call_id
+    }
+
+    #[must_use]
+    pub fn tool(&self) -> &str {
+        &self.tool
+    }
+
+    #[must_use]
+    pub fn arguments_json(&self) -> &str {
+        &self.arguments_json
+    }
+}
+
+impl fmt::Debug for ProviderToolCall {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProviderToolCall")
+            .field("call_id_bytes", &self.call_id.len())
+            .field("tool_bytes", &self.tool.len())
+            .field("arguments_bytes", &self.arguments_json.len())
+            .finish()
+    }
+}
+
+pub struct ProviderToolOutput {
+    call_id: String,
+    output: String,
+}
+
+impl ProviderToolOutput {
+    pub(crate) fn new(call_id: String, output: String) -> Result<Self, ProviderError> {
+        validate_provider_text("Provider Tool call ID", &call_id, MAX_PROVIDER_ID_BYTES)?;
+        if output.len() > MAX_PROVIDER_TOOL_OUTPUT_BYTES {
+            return Err(ProviderError::InvalidResponse(
+                "Provider Tool output exceeds the byte limit",
+            ));
+        }
+        Ok(Self { call_id, output })
+    }
+
+    #[must_use]
+    pub fn call_id(&self) -> &str {
+        &self.call_id
+    }
+
+    #[must_use]
+    pub fn output(&self) -> &str {
+        &self.output
+    }
+}
+
+impl fmt::Debug for ProviderToolOutput {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProviderToolOutput")
+            .field("call_id_bytes", &self.call_id.len())
+            .field("output_bytes", &self.output.len())
+            .finish()
+    }
+}
+
+#[derive(Clone, Eq, PartialEq)]
 pub enum ProviderEvent {
     TextDelta(String),
+    FunctionCall(ProviderToolCall),
     Completed(UsageRecord),
+}
+
+impl fmt::Debug for ProviderEvent {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::TextDelta(delta) => formatter
+                .debug_struct("TextDelta")
+                .field("bytes", &delta.len())
+                .finish(),
+            Self::FunctionCall(call) => formatter.debug_tuple("FunctionCall").field(call).finish(),
+            Self::Completed(usage) => formatter.debug_tuple("Completed").field(usage).finish(),
+        }
+    }
 }
 
 pub trait ProviderRuntime {
     fn run(&mut self, request: &ProviderRequest) -> Result<Vec<ProviderEvent>, ProviderError>;
+
+    fn continue_after_tool(
+        &mut self,
+        _request: &ProviderRequest,
+        _output: &ProviderToolOutput,
+    ) -> Result<Vec<ProviderEvent>, ProviderError> {
+        Err(ProviderError::InvalidRequest(
+            "Provider does not support Tool continuation",
+        ))
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -118,10 +331,10 @@ impl ProviderRuntime for DeterministicProvider {
             .into_iter()
             .map(ProviderEvent::TextDelta)
             .collect::<Vec<_>>();
-        events.push(ProviderEvent::Completed(UsageRecord {
-            input_tokens: approximate_tokens(&request.input),
-            output_tokens: approximate_tokens(&output),
-        }));
+        events.push(ProviderEvent::Completed(UsageRecord::estimated(
+            approximate_tokens(&request.input),
+            approximate_tokens(&output),
+        )));
         Ok(events)
     }
 }
@@ -168,23 +381,58 @@ fn validate_provider_id(field: &'static str, value: &str) -> Result<(), Provider
     Ok(())
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+fn validate_provider_text(
+    field: &'static str,
+    value: &str,
+    max_bytes: usize,
+) -> Result<(), ProviderError> {
+    if value.trim().is_empty()
+        || value.trim() != value
+        || value.len() > max_bytes
+        || value.chars().any(char::is_control)
+    {
+        return Err(ProviderError::InvalidResponse(field));
+    }
+    Ok(())
+}
+
+#[derive(Clone, Eq, PartialEq)]
 pub enum ProviderError {
     InvalidConfiguration(&'static str),
     InvalidRequest(&'static str),
-    Unavailable(String),
+    InvalidResponse(&'static str),
+    Unavailable { diagnostic_bytes: usize },
 }
 
 impl ProviderError {
     pub fn unavailable(message: impl Into<String>) -> Self {
-        let mut message = message.into();
-        if message.len() > MAX_PROVIDER_ERROR_BYTES {
-            message.truncate(MAX_PROVIDER_ERROR_BYTES);
-            while !message.is_char_boundary(message.len()) {
-                message.pop();
-            }
+        let message = message.into();
+        Self::Unavailable {
+            diagnostic_bytes: message.len().min(MAX_PROVIDER_ERROR_BYTES),
         }
-        Self::Unavailable(message)
+    }
+}
+
+impl fmt::Debug for ProviderError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidConfiguration(reason) => formatter
+                .debug_tuple("InvalidConfiguration")
+                .field(reason)
+                .finish(),
+            Self::InvalidRequest(reason) => formatter
+                .debug_tuple("InvalidRequest")
+                .field(reason)
+                .finish(),
+            Self::InvalidResponse(reason) => formatter
+                .debug_tuple("InvalidResponse")
+                .field(reason)
+                .finish(),
+            Self::Unavailable { diagnostic_bytes } => formatter
+                .debug_struct("Unavailable")
+                .field("message_bytes", diagnostic_bytes)
+                .finish(),
+        }
     }
 }
 
@@ -195,7 +443,10 @@ impl fmt::Display for ProviderError {
                 write!(formatter, "invalid provider configuration: {reason}")
             }
             Self::InvalidRequest(reason) => write!(formatter, "invalid provider request: {reason}"),
-            Self::Unavailable(message) => write!(formatter, "provider unavailable: {message}"),
+            Self::InvalidResponse(reason) => {
+                write!(formatter, "invalid provider response: {reason}")
+            }
+            Self::Unavailable { .. } => formatter.write_str("provider unavailable"),
         }
     }
 }

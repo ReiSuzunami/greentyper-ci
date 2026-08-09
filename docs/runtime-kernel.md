@@ -9,12 +9,13 @@ Ledger, calls only a provider-neutral `ProviderRuntime`, and separates durable
 output preparation from user-visible output acknowledgement.
 
 This slice is deliberately smaller than the full Provider Runtime and product
-Agent Team execution path. The core Kernel can own the durable Team and Tool
-adapters, gate root admission, rebind non-terminal Sessions, and reconcile
-prepared Tool effects, but the CLI and Provider/Tool drivers do not yet consume
-that seam. The deterministic simulator is not a provider wire adapter. Core
-now contains bounded SSE framing and an OpenAI Responses dialect decoder, but
-the Kernel does not consume those dialect facts yet. The
+Agent Team execution path. The core Kernel owns the durable Team and Tool
+adapters, gates root admission, rebinds non-terminal Sessions, and reconciles
+prepared Tool effects. A fixture Provider driver can now normalize one OpenAI
+Responses function call, cross Tool Runtime approval and effect durability,
+continue the Provider once, and prepare canonical output. The product CLI does
+not consume that seam and the deterministic simulator is not a provider wire
+adapter. The
 provisional checksummed file Ledger is not yet the recorded SQLite-versus-
 append-log technology choice.
 
@@ -56,6 +57,24 @@ let session = recovered_team
 let request = runtime.request_tool_call(session, intent)?;
 let outcome = runtime.resolve_tool_call(request, decision, &mut executor)?;
 runtime.reconcile_tool_call(session, call, observed_outcome)?;
+
+let turn = runtime.execute_provider_turn(
+    session,
+    &layers,
+    input,
+    &mut provider,
+    |call| resolve_tool_resources(call),
+)?;
+let ProviderTurnOutcome::ApprovalRequired(approval) = turn else {
+    // A text-only Provider response may already be prepared.
+    todo!()
+};
+let prepared = runtime.resolve_provider_tool_call(
+    approval,
+    decision,
+    &mut executor,
+    &mut provider,
+)?;
 ```
 
 `execute` returns only after admission and the complete prepared output are
@@ -127,6 +146,23 @@ digest enters the Ledger. A prepared effect with no terminal outcome is
 reconciliation-required after restart and is never invoked automatically.
 Explicit observed-success or observed-failure reconciliation is durable and
 idempotent for an already-terminal call.
+
+The explicit Provider Turn path authenticates the current Active Session
+before Runtime admission. It accepts provider-neutral text, one canonical
+function call, and optional Usage data; the caller resolves resource
+descriptors while Tool Runtime remains the authority gate. Approval and
+`EffectPrepared` are durable before the injected executor runs. A successful
+UTF-8 result may then enter one Provider continuation. The final
+`OutputPrepared` transaction stores the combined canonical text and one or two
+bounded Usage Records. Runtime Event schema 2 carries those optional token
+classes and service tier; historical schema-1 Runtime transactions replay and
+can be followed by schema-2 transactions.
+
+This tracer bullet intentionally stores only the Tool result digest. If the
+process dies after durable Tool success and before Provider continuation, the
+raw result cannot be reconstructed. Recovery marks the Turn blocked rather
+than repeating the Tool. Ambiguous effects similarly block continuation until
+the existing explicit Tool reconciliation path resolves them.
 
 The Team operation, Tool effect, and single-Agent Turn states have distinct
 Ledgers and writer ownership. A pending Team acknowledgement blocks Team and
@@ -210,10 +246,11 @@ protocol.
   validated open without an ID-to-session conversion.
 - Complete Config Schema default/constraint/normalization/migration metadata,
   TUI/App Server editors, Provider Templates/catalogs, and credential storage.
-- Concrete Provider transport and Kernel integration, credential/origin
-  binding, reconnect policy, normalization into canonical Runtime Items and
-  complete Usage Records, and the unimplemented Provider event kinds. The
-  bounded SSE and first OpenAI Responses dialect decoder are present in core.
+- Concrete Provider transport, credential/origin binding, reconnect policy,
+  multiple or parallel Tool calls, resumable result references, broader
+  canonical Items, and the unimplemented Provider event kinds. The bounded SSE,
+  first OpenAI Responses decoder, neutral normalizer, and one-Tool fixture
+  Kernel path are present in core.
 - Concrete Tool adapters and sandboxing: local process launch, Windows Job
   Objects, filesystem/network enforcement, MCP, product approval UX, and
   credential resolution. Core call identity, Approval Grant binding, prepared-

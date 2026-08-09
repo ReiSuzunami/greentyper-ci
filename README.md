@@ -84,12 +84,15 @@ approval binding, independent authority checks, and ambiguous-effect
 reconciliation are durable core policy; no real process, network, or MCP Tool
 adapter exists yet. The core also has bounded generic SSE framing and a strict
 OpenAI Responses dialect decoder for text, function calls, terminal states, and
-optional usage. The Runtime Kernel still uses a deterministic Provider
-simulator: no real network transport, credential routing, canonical Runtime or
-Tool mapping, or retry path consumes the decoder yet. The file Ledger remains
-provisional. Real Provider and Tool adapters, Workspace, TUI, and App Server
-work remains. The acceptance runner can emit bound raw evidence, but is not yet
-a full Target Acceptance Run. Follow the [implementation plan](docs/implementation-plan.md).
+optional usage. A core fixture path normalizes one Responses function call,
+crosses durable Tool approval/effect policy, continues the Provider once, and
+prepares canonical output without repeating successful or ambiguous effects.
+The product still uses the deterministic simulator: no real network transport,
+credential routing, local-process executor, or retry path exists yet. The file
+Ledger remains provisional. Real Provider and Tool adapters, Workspace, TUI,
+and App Server work remains. The acceptance runner can emit bound raw evidence,
+but is not yet a full Target Acceptance Run. Follow the
+[implementation plan](docs/implementation-plan.md).
 
 ## License
 

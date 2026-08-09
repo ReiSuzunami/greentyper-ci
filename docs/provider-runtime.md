@@ -10,11 +10,13 @@ Provider protocol handling is split into two layers inside `greentyper-core`:
    streaming event subset into typed, dialect-scoped facts.
 
 The Responses facts retain OpenAI response, item, output, and content indices.
-They are not provider-neutral Runtime Events, canonical Items, Tool authority,
-or durable state. The Runtime Kernel still uses the deterministic
-`ProviderRuntime` simulator. No HTTP client, credential lookup, Provider
-Profile routing, retry policy, product delivery, or Tool execution is wired to
-this decoder yet.
+They are not Runtime authority or durable state. A separate normalizer reduces
+the supported terminal stream to provider-neutral text deltas, one canonical
+function call, and one optional Usage Record. The Runtime Kernel can drive that
+neutral interface through Tool Runtime approval and one Tool continuation, but
+the product CLI still uses the deterministic simulator. No HTTP client,
+credential lookup, Provider Profile routing, retry policy, or product delivery
+is wired to this decoder yet.
 
 ## Interface
 
@@ -24,6 +26,7 @@ for chunk in transport_chunks {
     decoder.push(chunk)?;
 }
 let dialect_events = decoder.finish()?;
+let provider_events = normalize_responses_events(&dialect_events)?;
 ```
 
 `SseParser` is separately reusable by transports that need only framing. Both
@@ -90,13 +93,29 @@ and total token counts plus optional service tier. Missing values remain
 unknown instead of becoming zero. Debug output reports lengths and indices but
 does not print Provider text, function arguments, identifiers, or error text.
 
+`normalize_responses_events` removes Responses wire identities that the Kernel
+does not need, preserves the Provider call ID only as stable correlation data,
+maps supported usage fields without fabricating missing values, and classifies
+failed, incomplete, or error terminals without persisting upstream free text.
+
 ## Tool Boundary
 
-A decoded function call is only Provider data. A later adapter must convert it
-into a Tool request through the Tool Runtime, where the current `AgentSession`,
-canonical argument hash, resource binding, Capability Snapshot, Approval Grant,
-durable `EffectPrepared` record, and reconciliation rules are enforced. The
-Provider call ID cannot authorize or directly execute a Tool.
+A decoded function call remains only Provider data. The Kernel's explicit
+Provider Turn driver requires a current `AgentSession`, maps the call to a
+stable Tool identity, and asks the caller to resolve raw resource descriptors.
+Tool Runtime then enforces canonical argument hashing, resource binding, the
+Capability Snapshot, an Approval Grant, durable `EffectPrepared`, and
+reconciliation. The Provider call ID cannot authorize or directly execute a
+Tool.
+
+The current tracer bullet supports at most one function call in a Turn. After a
+successful UTF-8 Tool result, `ProviderRuntime::continue_after_tool` supplies a
+second neutral Provider step and the Kernel prepares one canonical assistant
+output containing both text phases and both Usage Records. A denied, failed,
+ambiguous, oversized, or non-UTF-8 result never reaches Provider continuation.
+If the process dies after a durable Tool success but before continuation, the
+raw result is intentionally unavailable after restart: recovery blocks the
+Turn and never invokes the successful effect again.
 
 ## Evidence
 
@@ -108,6 +127,13 @@ event-count, output, item, argument-byte, argument-depth, and SSE data-line
 bounds, non-object arguments, terminal ordering, missing terminal events,
 poisoning, optional usage, and redacted Debug output.
 
+The Kernel tracer-bullet test decodes a first fixture containing text and one
+function call, durably approves and executes one injected Tool, decodes a
+continuation fixture, prepares and acknowledges the combined output, and then
+replays all three Ledgers. Companion tests cover stale Sessions, ambiguous Tool
+effects, non-UTF-8 Tool output, and process death after durable Tool success
+without effect repetition.
+
 The event shapes are checked against the official
 [OpenAI Responses streaming event reference](https://developers.openai.com/api/reference/resources/responses/streaming-events/).
 
@@ -115,12 +141,12 @@ The event shapes are checked against the official
 
 - A concrete HTTP/SSE transport, credential and origin binding, Provider
   Profiles, reconnect classification, and retry policy.
-- Normalization from these dialect facts into provider-neutral Runtime Items,
-  Runtime Events, and complete Usage Records.
+- Broader normalization into the eventual provider-neutral canonical Item
+  model, including reasoning, refusal, annotations, and hosted Tools.
 - Reasoning, refusal, annotation, hosted-tool, and other Responses event kinds
   not listed above.
-- Wiring function calls through Tool Runtime approval and effect execution, then
-  continuing the Provider Turn canonically.
+- Multiple Tool calls, parallel calls, persisted resumable Provider
+  continuation data, and durable storage of a redacted Tool result reference.
 - Product presentation and acknowledgement, raw diagnostic artifact policy,
   fuzzing, reconnect fixtures, live credential-gated tests, and cross-process
   crash coverage around Provider delivery boundaries.

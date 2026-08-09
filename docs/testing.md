@@ -92,13 +92,23 @@ effect reconciliation. Fault injection proves that a prepared-effect append
 failure invokes no executor,
 while an outcome append failure after one invocation poisons the writer and
 reopens in a reconciliation-required state. Concrete Provider transport,
-credential/profile binding, mapping dialect facts into canonical Runtime Items
-and Tool requests, reasoning/refusal/annotation and other unimplemented
+credential/profile binding, broader canonical Runtime Items,
+reasoning/refusal/annotation and other unimplemented
 Responses event kinds, reconnect/retry fixtures, concrete process, Job Object,
 and MCP adapters, receipt delivery to a user-visible sink, the cross-process
 Tool byte-offset matrix, and final reconciliation presentation remain pending.
 Migration/backup remains in the candidate storage harness rather than these
 provisional product adapters.
+
+The first fixture Provider/Tool tracer bullet decodes and normalizes one
+Responses function call, requires a current Session and exact Tool authority,
+durably crosses approval and `EffectPrepared`, invokes one injected executor,
+continues the Provider once, and replays the acknowledged canonical output plus
+two Usage Records. Companion tests prove stale Sessions invoke no Provider,
+ambiguous effects never reach continuation, non-UTF-8 Tool output is blocked,
+and process death after a durable Tool success cannot repeat the effect. A
+mixed-schema Runtime test replays a complete schema-1 Turn, appends schema-2
+Usage Records, and replays the combined Ledger.
 
 ### Crash and Recovery Tests
 
@@ -154,13 +164,17 @@ suite supports success, slow streams, malformed events, disconnects, resumable
 and non-resumable partial output, reordered tool fragments, missing usage,
 unknown usage fields, and retryable/fatal errors. The current Phase 1
 simulator implements deterministic bounded success; module tests inject
-malformed completion and process interruption after admission. A separate
-first OpenAI Responses decoder now has redacted fixtures for text, function
-calls, optional usage, failed, incomplete, and error terminals, but it is not
-wired into the simulator or Kernel. The remaining scenarios land with concrete
-transport, reconnect, tools, and full usage normalization.
+malformed completion and process interruption after admission. The OpenAI
+Responses decoder has redacted fixtures for text, function calls, optional
+usage, failed, incomplete, and error terminals. One fixture Provider now passes
+its normalized events through the Kernel and Tool Runtime for a single approved
+call and continuation. The remaining scenarios land with concrete transport,
+reconnect, multiple tools, and broader usage normalization.
 
-Live provider tests are opt-in and credential-gated. They verify current integration for OpenAI, DeepSeek, and OpenCode Go but do not run on untrusted pull requests and do not gate local performance. Model-catalog refresh work records the source URL and observation date.
+Live provider integration tests are not implemented yet. Planned opt-in,
+credential-gated tests will verify OpenAI, DeepSeek, and OpenCode Go without
+running on untrusted pull requests or gating local performance. Model-catalog
+refresh work records the source URL and observation date.
 
 ## Performance Testing
 

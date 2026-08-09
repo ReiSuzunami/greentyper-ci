@@ -1,7 +1,8 @@
 use greentyper_core::config::{ConfigEpoch, ConfigLayers};
 use greentyper_core::model::{ConfigEpochId, ProviderEpochId, ThreadId, TurnId};
 use greentyper_core::provider::{
-    DeterministicProvider, ProviderEpoch, ProviderEvent, ProviderRequest, ProviderRuntime,
+    DeterministicProvider, ProviderEpoch, ProviderError, ProviderEvent, ProviderRequest,
+    ProviderRuntime, ProviderToolCall,
 };
 
 const SINGLE_TURN_SUCCESS: &str =
@@ -39,7 +40,7 @@ fn simulator_is_deterministic_and_preserves_unicode_boundaries() {
         .iter()
         .filter_map(|event| match event {
             ProviderEvent::TextDelta(delta) => Some(delta.as_str()),
-            ProviderEvent::Completed(_) => None,
+            ProviderEvent::FunctionCall(_) | ProviderEvent::Completed(_) => None,
         })
         .collect::<String>();
     assert_eq!(output, "reply: 中🙂");
@@ -70,8 +71,46 @@ fn simulator_matches_the_versioned_success_fixture() {
         .iter()
         .filter_map(|event| match event {
             ProviderEvent::TextDelta(delta) => Some(delta.as_str()),
-            ProviderEvent::Completed(_) => None,
+            ProviderEvent::FunctionCall(_) | ProviderEvent::Completed(_) => None,
         })
         .collect::<String>();
     assert_eq!(format!("{output}\n"), SINGLE_TURN_SUCCESS);
+}
+
+#[test]
+fn provider_neutral_debug_redacts_text_and_tool_arguments() {
+    let events = vec![
+        ProviderEvent::TextDelta("private response text".into()),
+        ProviderEvent::FunctionCall(
+            ProviderToolCall::new(
+                "private-call-id",
+                "private-tool-name",
+                r#"{"secret":"private argument"}"#,
+            )
+            .expect("Provider Tool call"),
+        ),
+    ];
+    let debug = format!("{events:?}");
+    for secret in [
+        "private response text",
+        "private-call-id",
+        "private-tool-name",
+        "private argument",
+    ] {
+        assert!(!debug.contains(secret));
+    }
+    assert!(debug.contains("arguments_bytes"));
+}
+
+#[test]
+fn provider_request_and_error_debug_redact_external_text() {
+    let request = request("private user input");
+    let request_debug = format!("{request:?}");
+    assert!(!request_debug.contains("private user input"));
+    assert!(request_debug.contains("input_bytes"));
+
+    let error = ProviderError::unavailable("https://provider.test/?token=private-token");
+    let error_debug = format!("{error:?}");
+    assert!(!error_debug.contains("private-token"));
+    assert!(error_debug.contains("message_bytes"));
 }

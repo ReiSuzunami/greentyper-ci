@@ -3,7 +3,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt;
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
+
+use sha2::{Digest, Sha256};
 
 use crate::agent_team::{
     AgentSession, DurableTeamError, DurableTeamRuntime, TeamCommand, TeamError,
@@ -19,18 +22,21 @@ use crate::model::{
     ThreadId, TurnId,
 };
 use crate::provider::{
-    ProviderEpoch, ProviderError, ProviderEvent, ProviderRequest, ProviderRuntime, UsageRecord,
+    MAX_SERVICE_TIER_BYTES, ProviderEpoch, ProviderError, ProviderEvent, ProviderRequest,
+    ProviderRuntime, ProviderToolCall, ProviderToolOutput, UsageRecord,
 };
 use crate::schema::SchemaKind;
 use crate::tool_runtime::{
-    ApprovalDecision, DurableToolRuntime, ToolApprovalRequest, ToolCallId, ToolCallOutcome,
-    ToolCallRecord, ToolEffectExecutor, ToolIntent, ToolPrincipal, ToolReconciliationDecision,
-    ToolRequestOutcome, ToolRuntimeError, ToolSnapshot,
+    ApprovalDecision, DurableToolRuntime, ToolApprovalRequest, ToolArguments, ToolArgumentsHash,
+    ToolCallId, ToolCallOutcome, ToolCallRecord, ToolCallStatus, ToolEffectExecutor, ToolIntent,
+    ToolPrincipal, ToolReconciliationDecision, ToolRequestOutcome, ToolResources, ToolRuntimeError,
+    ToolSnapshot,
 };
 
 pub const RUNTIME_EVENT_SCHEMA: u16 = SchemaKind::RuntimeEvent.current().get();
 pub const MAX_INPUT_BYTES: usize = 512 * 1024;
 const MAX_BLOCK_REASON_BYTES: usize = 4096;
+const MAX_USAGE_RECORDS_PER_TURN: usize = 64;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RecoveryStatus {
@@ -99,13 +105,26 @@ impl KernelTeamRecovery {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct PreparedOutput {
     delivery: DeliveryId,
     turn: TurnId,
     text: String,
-    usage: UsageRecord,
+    usage_records: Vec<UsageRecord>,
     receipt: DurabilityReceipt,
+}
+
+impl fmt::Debug for PreparedOutput {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PreparedOutput")
+            .field("delivery", &self.delivery)
+            .field("turn", &self.turn)
+            .field("text_bytes", &self.text.len())
+            .field("usage_record_count", &self.usage_records.len())
+            .field("receipt", &self.receipt)
+            .finish()
+    }
 }
 
 impl PreparedOutput {
@@ -125,8 +144,8 @@ impl PreparedOutput {
     }
 
     #[must_use]
-    pub const fn usage(&self) -> UsageRecord {
-        self.usage
+    pub fn usage_records(&self) -> &[UsageRecord] {
+        &self.usage_records
     }
 
     #[must_use]
@@ -139,6 +158,82 @@ impl PreparedOutput {
 pub enum AcknowledgeOutcome {
     Durable(DurabilityReceipt),
     AlreadyAcknowledged,
+}
+
+pub struct ProviderToolApproval {
+    request: ToolApprovalRequest,
+    provider_request: ProviderRequest,
+    provider_call_id: String,
+    leading_deltas: Vec<String>,
+    usage_records: Vec<UsageRecord>,
+}
+
+impl ProviderToolApproval {
+    #[must_use]
+    pub const fn call(&self) -> ToolCallId {
+        self.request.call()
+    }
+
+    #[must_use]
+    pub fn tool(&self) -> &str {
+        self.request.tool()
+    }
+
+    #[must_use]
+    pub fn identity(&self) -> &str {
+        self.request.identity()
+    }
+
+    #[must_use]
+    pub const fn arguments(&self) -> &ToolArguments {
+        self.request.arguments()
+    }
+
+    #[must_use]
+    pub const fn resources(&self) -> &ToolResources {
+        self.request.resources()
+    }
+
+    #[must_use]
+    pub const fn arguments_hash(&self) -> ToolArgumentsHash {
+        self.request.arguments_hash()
+    }
+}
+
+impl fmt::Debug for ProviderToolApproval {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProviderToolApproval")
+            .field("call", &self.request.call())
+            .field("tool", &self.request.tool())
+            .field("provider_call_id_bytes", &self.provider_call_id.len())
+            .field("leading_delta_count", &self.leading_deltas.len())
+            .field("usage_record_count", &self.usage_records.len())
+            .finish_non_exhaustive()
+    }
+}
+
+pub enum ProviderTurnOutcome {
+    Prepared(PreparedOutput),
+    ApprovalRequired(Box<ProviderToolApproval>),
+}
+
+impl fmt::Debug for ProviderTurnOutcome {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Prepared(output) => formatter
+                .debug_struct("Prepared")
+                .field("turn", &output.turn)
+                .field("delivery", &output.delivery)
+                .field("text_bytes", &output.text.len())
+                .field("usage_record_count", &output.usage_records.len())
+                .finish(),
+            Self::ApprovalRequired(approval) => formatter
+                .debug_tuple("ApprovalRequired")
+                .field(approval)
+                .finish(),
+        }
+    }
 }
 
 pub struct RuntimeKernel {
@@ -421,48 +516,126 @@ impl RuntimeKernel {
         input: impl Into<String>,
         provider: &mut impl ProviderRuntime,
     ) -> Result<PreparedOutput, RuntimeError> {
-        self.require_ready()?;
-        self.require_no_tool_reconciliation()?;
-        let input = input.into();
-        validate_input(&input)?;
-
-        let thread = match self.state.thread {
-            Some(thread) => thread,
-            None => ThreadId::new(self.state.next_thread).map_err(RuntimeError::Model)?,
-        };
-        let turn = TurnId::new(self.state.next_turn).map_err(RuntimeError::Model)?;
-        let user_item = ItemId::new(self.state.next_item).map_err(RuntimeError::Model)?;
-        let config_id = ConfigEpochId::new(self.state.next_config).map_err(RuntimeError::Model)?;
-        let provider_id =
-            ProviderEpochId::new(self.state.next_provider).map_err(RuntimeError::Model)?;
-        let config = ConfigEpoch::freeze(config_id, layers).map_err(RuntimeError::Config)?;
-        let provider_epoch = ProviderEpoch::new(
-            provider_id,
-            config.resolved().provider_profile().value().clone(),
-            config.resolved().provider_model().value().clone(),
-        )
-        .map_err(RuntimeError::Provider)?;
-
-        let mut admission = Vec::new();
-        if self.state.thread.is_none() {
-            admission.push(RuntimeEvent::ThreadCreated { thread });
-        }
-        admission.push(RuntimeEvent::ConfigFrozen {
-            epoch: config.clone(),
-        });
-        admission.push(RuntimeEvent::ProviderFrozen {
-            epoch: provider_epoch,
-        });
-        admission.push(RuntimeEvent::TurnAdmitted {
-            thread,
-            turn,
-            user_item,
-            config: config_id,
-            provider: provider_id,
-            input,
-        });
-        self.commit(&admission)?;
+        self.admit_turn(layers, input.into())?;
         self.drive_pending(provider)
+    }
+
+    /// Drives one provider-neutral Turn that may request one Tool.
+    ///
+    /// `map_resources` is a deterministic data mapping. It must not perform I/O
+    /// or external effects because recovery may call it again before Tool
+    /// Runtime resolves the durable identity.
+    pub fn execute_provider_turn<ResolveResources>(
+        &mut self,
+        session: AgentSession,
+        layers: &ConfigLayers,
+        input: impl Into<String>,
+        provider: &mut impl ProviderRuntime,
+        map_resources: ResolveResources,
+    ) -> Result<ProviderTurnOutcome, RuntimeError>
+    where
+        ResolveResources: FnOnce(&ProviderToolCall) -> Result<ToolResources, RuntimeError>,
+    {
+        self.require_provider_session(session)?;
+        self.admit_turn(layers, input.into())?;
+        self.drive_provider_turn(session, provider, map_resources)
+    }
+
+    /// Explicitly resumes a provider-neutral Turn admitted before recovery.
+    ///
+    /// `map_resources` has the same pure, replayable contract as in
+    /// [`Self::execute_provider_turn`].
+    pub fn resume_provider_turn<ResolveResources>(
+        &mut self,
+        session: AgentSession,
+        provider: &mut impl ProviderRuntime,
+        map_resources: ResolveResources,
+    ) -> Result<ProviderTurnOutcome, RuntimeError>
+    where
+        ResolveResources: FnOnce(&ProviderToolCall) -> Result<ToolResources, RuntimeError>,
+    {
+        self.require_provider_session(session)?;
+        match self.state.status() {
+            RecoveryStatus::ResumeRequired { .. } => {
+                self.drive_provider_turn(session, provider, map_resources)
+            }
+            status => Err(RuntimeError::Busy(status)),
+        }
+    }
+
+    pub fn resolve_provider_tool_call(
+        &mut self,
+        approval: Box<ProviderToolApproval>,
+        decision: ApprovalDecision,
+        executor: &mut impl ToolEffectExecutor,
+        provider: &mut impl ProviderRuntime,
+    ) -> Result<PreparedOutput, RuntimeError> {
+        let ProviderToolApproval {
+            request,
+            provider_request,
+            provider_call_id,
+            mut leading_deltas,
+            mut usage_records,
+        } = *approval;
+        let turn = provider_request.turn;
+        let outcome = self.resolve_tool_call(request, decision, executor)?;
+        let output = match outcome {
+            ToolCallOutcome::Succeeded { output, .. } => output,
+            ToolCallOutcome::Denied(record) | ToolCallOutcome::Failed(record) => {
+                self.block_pending(turn, "Provider Tool call did not succeed")?;
+                return Err(RuntimeError::ProviderToolCallTerminated {
+                    call: record.call,
+                    status: record.status,
+                });
+            }
+            ToolCallOutcome::ReconciliationRequired(record) => {
+                return Err(RuntimeError::ToolReconciliationRequired(record.call));
+            }
+        };
+        let output = match String::from_utf8(output) {
+            Ok(output) => output,
+            Err(_) => {
+                self.block_pending(turn, "Provider Tool output is not UTF-8")?;
+                return Err(RuntimeError::InvalidProviderOutput(
+                    "Provider Tool output is not UTF-8",
+                ));
+            }
+        };
+        let provider_output = match ProviderToolOutput::new(provider_call_id, output) {
+            Ok(output) => output,
+            Err(source) => {
+                self.block_pending(turn, provider_block_reason(&source))?;
+                return Err(RuntimeError::Provider(source));
+            }
+        };
+        let provider_events =
+            match provider.continue_after_tool(&provider_request, &provider_output) {
+                Ok(events) => events,
+                Err(source) => {
+                    self.block_pending(turn, provider_block_reason(&source))?;
+                    return Err(RuntimeError::Provider(source));
+                }
+            };
+        match validate_provider_events(&provider_events, self.pending_max_output_bytes(turn)?) {
+            Ok(ValidatedProviderStep::Completed {
+                deltas,
+                usage_record,
+            }) => {
+                leading_deltas.extend(deltas);
+                usage_records.push(usage_record);
+                self.prepare_output(turn, leading_deltas, usage_records)
+            }
+            Ok(ValidatedProviderStep::ToolCall { .. }) => {
+                self.block_pending(turn, "Provider continuation requested another Tool call")?;
+                Err(RuntimeError::InvalidProviderOutput(
+                    "Provider continuation requested more than one Tool call",
+                ))
+            }
+            Err(reason) => {
+                self.block_pending(turn, reason)?;
+                Err(RuntimeError::InvalidProviderOutput(reason))
+            }
+        }
     }
 
     pub fn resume(
@@ -532,10 +705,195 @@ impl RuntimeKernel {
         Ok(())
     }
 
+    fn require_provider_session(&self, session: AgentSession) -> Result<(), RuntimeError> {
+        self.require_no_tool_reconciliation()?;
+        if self.tools.is_none() {
+            return Err(RuntimeError::ToolUnavailable);
+        }
+        let team = self.team.as_ref().ok_or(RuntimeError::TeamUnavailable)?;
+        team.require_ready()?;
+        team.active_agent_context(session)?;
+        Ok(())
+    }
+
+    fn admit_turn(&mut self, layers: &ConfigLayers, input: String) -> Result<(), RuntimeError> {
+        self.require_ready()?;
+        self.require_no_tool_reconciliation()?;
+        validate_input(&input)?;
+
+        let thread = match self.state.thread {
+            Some(thread) => thread,
+            None => ThreadId::new(self.state.next_thread).map_err(RuntimeError::Model)?,
+        };
+        let turn = TurnId::new(self.state.next_turn).map_err(RuntimeError::Model)?;
+        let user_item = ItemId::new(self.state.next_item).map_err(RuntimeError::Model)?;
+        let config_id = ConfigEpochId::new(self.state.next_config).map_err(RuntimeError::Model)?;
+        let provider_id =
+            ProviderEpochId::new(self.state.next_provider).map_err(RuntimeError::Model)?;
+        let config = ConfigEpoch::freeze(config_id, layers).map_err(RuntimeError::Config)?;
+        let provider_epoch = ProviderEpoch::new(
+            provider_id,
+            config.resolved().provider_profile().value().clone(),
+            config.resolved().provider_model().value().clone(),
+        )
+        .map_err(RuntimeError::Provider)?;
+
+        let mut admission = Vec::new();
+        if self.state.thread.is_none() {
+            admission.push(RuntimeEvent::ThreadCreated { thread });
+        }
+        admission.push(RuntimeEvent::ConfigFrozen {
+            epoch: config.clone(),
+        });
+        admission.push(RuntimeEvent::ProviderFrozen {
+            epoch: provider_epoch,
+        });
+        admission.push(RuntimeEvent::TurnAdmitted {
+            thread,
+            turn,
+            user_item,
+            config: config_id,
+            provider: provider_id,
+            input,
+        });
+        self.commit(&admission)?;
+        Ok(())
+    }
+
     fn drive_pending(
         &mut self,
         provider: &mut impl ProviderRuntime,
     ) -> Result<PreparedOutput, RuntimeError> {
+        let (pending, config, request) = self.pending_provider_context()?;
+        let provider_events = match provider.run(&request) {
+            Ok(events) => events,
+            Err(source) => {
+                self.block_pending(pending.turn, provider_block_reason(&source))?;
+                return Err(RuntimeError::Provider(source));
+            }
+        };
+        match validate_provider_events(
+            &provider_events,
+            *config.resolved().max_output_bytes().value() as usize,
+        ) {
+            Ok(ValidatedProviderStep::Completed {
+                deltas,
+                usage_record,
+            }) => self.prepare_output(pending.turn, deltas, vec![usage_record]),
+            Ok(ValidatedProviderStep::ToolCall { .. }) => {
+                self.block_pending(pending.turn, "Provider requested an unavailable Tool")?;
+                Err(RuntimeError::InvalidProviderOutput(
+                    "Provider requested a Tool through the text-only interface",
+                ))
+            }
+            Err(reason) => {
+                self.block_pending(pending.turn, reason)?;
+                Err(RuntimeError::InvalidProviderOutput(reason))
+            }
+        }
+    }
+
+    fn drive_provider_turn<ResolveResources>(
+        &mut self,
+        session: AgentSession,
+        provider: &mut impl ProviderRuntime,
+        map_resources: ResolveResources,
+    ) -> Result<ProviderTurnOutcome, RuntimeError>
+    where
+        ResolveResources: FnOnce(&ProviderToolCall) -> Result<ToolResources, RuntimeError>,
+    {
+        let (pending, config, request) = self.pending_provider_context()?;
+        let provider_events = match provider.run(&request) {
+            Ok(events) => events,
+            Err(source) => {
+                self.block_pending(pending.turn, provider_block_reason(&source))?;
+                return Err(RuntimeError::Provider(source));
+            }
+        };
+        match validate_provider_events(
+            &provider_events,
+            *config.resolved().max_output_bytes().value() as usize,
+        ) {
+            Ok(ValidatedProviderStep::Completed {
+                deltas,
+                usage_record,
+            }) => self
+                .prepare_output(pending.turn, deltas, vec![usage_record])
+                .map(ProviderTurnOutcome::Prepared),
+            Ok(ValidatedProviderStep::ToolCall {
+                deltas,
+                call,
+                usage_record,
+            }) => {
+                let arguments = match ToolArguments::parse(call.arguments_json()) {
+                    Ok(arguments) => arguments,
+                    Err(error) => {
+                        self.block_pending(pending.turn, "Provider Tool arguments were rejected")?;
+                        return Err(RuntimeError::Tool(error));
+                    }
+                };
+                let resources = match map_resources(&call) {
+                    Ok(resources) => resources,
+                    Err(error) => {
+                        self.block_pending(pending.turn, "Provider Tool resources were rejected")?;
+                        return Err(error);
+                    }
+                };
+                let intent = match ToolIntent::new(
+                    provider_tool_identity(pending.turn, call.call_id()),
+                    call.tool(),
+                    arguments,
+                    resources,
+                ) {
+                    Ok(intent) => intent,
+                    Err(error) => {
+                        self.block_pending(pending.turn, "Provider Tool intent was rejected")?;
+                        return Err(RuntimeError::Tool(error));
+                    }
+                };
+                match self.request_tool_call(session, intent)? {
+                    ToolRequestOutcome::ApprovalRequired(tool_request) => Ok(
+                        ProviderTurnOutcome::ApprovalRequired(Box::new(ProviderToolApproval {
+                            request: tool_request,
+                            provider_request: request,
+                            provider_call_id: call.call_id().to_owned(),
+                            leading_deltas: deltas,
+                            usage_records: vec![usage_record],
+                        })),
+                    ),
+                    ToolRequestOutcome::Existing(record)
+                        if record.status == ToolCallStatus::ReconciliationRequired =>
+                    {
+                        Err(RuntimeError::ToolReconciliationRequired(record.call))
+                    }
+                    ToolRequestOutcome::Existing(record)
+                        if record.status == ToolCallStatus::Succeeded =>
+                    {
+                        self.block_pending(
+                            pending.turn,
+                            "Provider Tool result is unavailable after recovery",
+                        )?;
+                        Err(RuntimeError::ProviderToolResultUnavailable(record.call))
+                    }
+                    ToolRequestOutcome::Existing(record) => {
+                        self.block_pending(pending.turn, "Provider Tool call already terminated")?;
+                        Err(RuntimeError::ProviderToolCallTerminated {
+                            call: record.call,
+                            status: record.status,
+                        })
+                    }
+                }
+            }
+            Err(reason) => {
+                self.block_pending(pending.turn, reason)?;
+                Err(RuntimeError::InvalidProviderOutput(reason))
+            }
+        }
+    }
+
+    fn pending_provider_context(
+        &self,
+    ) -> Result<(PendingTurn, ConfigEpoch, ProviderRequest), RuntimeError> {
         let pending = self
             .state
             .pending
@@ -565,51 +923,92 @@ impl RuntimeKernel {
             provider: provider_epoch,
             input: pending.input.clone(),
         };
-        let provider_events = match provider.run(&request) {
-            Ok(events) => events,
-            Err(source) => {
-                self.block_pending(pending.turn, &source.to_string())?;
-                return Err(RuntimeError::Provider(source));
+        Ok((pending, config, request))
+    }
+
+    fn pending_max_output_bytes(&self, turn: TurnId) -> Result<usize, RuntimeError> {
+        let pending = self
+            .state
+            .pending
+            .as_ref()
+            .filter(|pending| pending.turn == turn && pending.phase == PendingPhase::Admitted)
+            .ok_or_else(|| RuntimeError::Busy(self.state.status()))?;
+        Ok(*self
+            .state
+            .configs
+            .get(&pending.config)
+            .ok_or(RuntimeError::CorruptState(
+                "pending Config Epoch is missing",
+            ))?
+            .resolved()
+            .max_output_bytes()
+            .value() as usize)
+    }
+
+    fn prepare_output(
+        &mut self,
+        turn: TurnId,
+        deltas: Vec<String>,
+        usage_records: Vec<UsageRecord>,
+    ) -> Result<PreparedOutput, RuntimeError> {
+        if usage_records.is_empty() || usage_records.len() > MAX_USAGE_RECORDS_PER_TURN {
+            self.block_pending(turn, "Provider usage record count is invalid")?;
+            return Err(RuntimeError::InvalidProviderOutput(
+                "Provider usage record count is invalid",
+            ));
+        }
+        let max_output_bytes = self.pending_max_output_bytes(turn)?;
+        let mut text = String::new();
+        for delta in &deltas {
+            let next_length = text
+                .len()
+                .checked_add(delta.len())
+                .ok_or(RuntimeError::IntegerOverflow)?;
+            if next_length > max_output_bytes {
+                self.block_pending(
+                    turn,
+                    "Provider output exceeds the frozen Config Epoch limit",
+                )?;
+                return Err(RuntimeError::InvalidProviderOutput(
+                    "Provider output exceeds the frozen Config Epoch limit",
+                ));
             }
-        };
-        let (deltas, text, usage) = match validate_provider_events(
-            &provider_events,
-            *config.resolved().max_output_bytes().value() as usize,
-        ) {
-            Ok(output) => output,
-            Err(reason) => {
-                self.block_pending(pending.turn, reason)?;
-                return Err(RuntimeError::InvalidProviderOutput(reason));
-            }
-        };
+            text.push_str(delta);
+        }
+        if text.trim().is_empty() {
+            self.block_pending(turn, "Provider output cannot be empty")?;
+            return Err(RuntimeError::InvalidProviderOutput(
+                "Provider output cannot be empty",
+            ));
+        }
 
         let assistant_item = ItemId::new(self.state.next_item).map_err(RuntimeError::Model)?;
         let delivery = DeliveryId::new(self.state.next_delivery).map_err(RuntimeError::Model)?;
         let mut events = Vec::with_capacity(deltas.len() + 2);
         events.push(RuntimeEvent::AssistantItemStarted {
-            turn: pending.turn,
+            turn,
             item: assistant_item,
         });
         for delta in deltas {
             events.push(RuntimeEvent::AssistantTextDelta {
-                turn: pending.turn,
+                turn,
                 item: assistant_item,
                 delta,
             });
         }
         events.push(RuntimeEvent::OutputPrepared {
-            turn: pending.turn,
+            turn,
             item: assistant_item,
             delivery,
             text: text.clone(),
-            usage,
+            usage_records: usage_records.clone(),
         });
         let receipt = self.commit(&events)?;
         Ok(PreparedOutput {
             delivery,
-            turn: pending.turn,
+            turn,
             text,
-            usage,
+            usage_records,
             receipt,
         })
     }
@@ -679,16 +1078,29 @@ fn validate_input(input: &str) -> Result<(), RuntimeError> {
     Ok(())
 }
 
+enum ValidatedProviderStep {
+    Completed {
+        deltas: Vec<String>,
+        usage_record: UsageRecord,
+    },
+    ToolCall {
+        deltas: Vec<String>,
+        call: ProviderToolCall,
+        usage_record: UsageRecord,
+    },
+}
+
 fn validate_provider_events(
     events: &[ProviderEvent],
     max_output_bytes: usize,
-) -> Result<(Vec<String>, String, UsageRecord), &'static str> {
+) -> Result<ValidatedProviderStep, &'static str> {
     if events.is_empty() {
         return Err("provider emitted no events");
     }
     let mut deltas = Vec::new();
     let mut text = String::new();
     let mut usage = None;
+    let mut tool_call = None;
     for (index, event) in events.iter().enumerate() {
         match event {
             ProviderEvent::TextDelta(delta) => {
@@ -708,8 +1120,16 @@ fn validate_provider_events(
                 text.push_str(delta);
                 deltas.push(delta.clone());
             }
+            ProviderEvent::FunctionCall(call) => {
+                if usage.is_some() {
+                    return Err("provider emitted a Tool call after completion");
+                }
+                if tool_call.replace(call.clone()).is_some() {
+                    return Err("provider emitted more than one Tool call");
+                }
+            }
             ProviderEvent::Completed(record) => {
-                if usage.replace(*record).is_some() {
+                if usage.replace(record.clone()).is_some() {
                     return Err("provider emitted completion more than once");
                 }
                 if index + 1 != events.len() {
@@ -719,10 +1139,29 @@ fn validate_provider_events(
         }
     }
     let usage = usage.ok_or("provider did not emit completion")?;
-    if text.trim().is_empty() {
+    if tool_call.is_none() && text.trim().is_empty() {
         return Err("provider output cannot be empty");
     }
-    Ok((deltas, text, usage))
+    Ok(match tool_call {
+        Some(call) => ValidatedProviderStep::ToolCall {
+            deltas,
+            call,
+            usage_record: usage,
+        },
+        None => ValidatedProviderStep::Completed {
+            deltas,
+            usage_record: usage,
+        },
+    })
+}
+
+fn provider_tool_identity(turn: TurnId, call_id: &str) -> String {
+    let digest = Sha256::digest(call_id.as_bytes());
+    let mut identity = format!("provider-turn-{}-", turn.get());
+    for byte in digest {
+        write!(&mut identity, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    identity
 }
 
 fn bounded_reason(reason: &str) -> String {
@@ -778,7 +1217,7 @@ enum RuntimeEvent {
         item: ItemId,
         delivery: DeliveryId,
         text: String,
-        usage: UsageRecord,
+        usage_records: Vec<UsageRecord>,
     },
     OutputAcknowledged {
         turn: TurnId,
@@ -843,14 +1282,19 @@ impl RuntimeEvent {
                 item,
                 delivery,
                 text,
-                usage,
+                usage_records,
             } => {
                 payload.u64(turn.get());
                 payload.u64(item.get());
                 payload.u64(delivery.get());
                 payload.string(text)?;
-                payload.u32(usage.input_tokens);
-                payload.u32(usage.output_tokens);
+                payload.u32(
+                    u32::try_from(usage_records.len())
+                        .map_err(|_| RuntimeError::IntegerOverflow)?,
+                );
+                for usage in usage_records {
+                    encode_usage_record(&mut payload, usage)?;
+                }
                 7
             }
             Self::OutputAcknowledged { turn, delivery } => {
@@ -876,7 +1320,7 @@ impl RuntimeEvent {
     }
 
     fn decode(event: &StoredEvent) -> Result<Self, RuntimeError> {
-        if event.data.schema != RUNTIME_EVENT_SCHEMA {
+        if event.data.schema != 1 && event.data.schema != RUNTIME_EVENT_SCHEMA {
             return Err(RuntimeError::UnsupportedRuntimeEventSchema {
                 supported: RUNTIME_EVENT_SCHEMA,
                 actual: event.data.schema,
@@ -920,9 +1364,18 @@ impl RuntimeEvent {
                 item: ItemId::new(payload.u64()?).map_err(RuntimeError::Model)?,
                 delivery: DeliveryId::new(payload.u64()?).map_err(RuntimeError::Model)?,
                 text: payload.string(MAX_INPUT_BYTES)?,
-                usage: UsageRecord {
-                    input_tokens: payload.u32()?,
-                    output_tokens: payload.u32()?,
+                usage_records: if event.data.schema == 1 {
+                    vec![UsageRecord::estimated(payload.u32()?, payload.u32()?)]
+                } else {
+                    let count = payload.u32()? as usize;
+                    if count == 0 || count > MAX_USAGE_RECORDS_PER_TURN {
+                        return Err(RuntimeError::CorruptEvent(
+                            "Runtime usage record count is invalid",
+                        ));
+                    }
+                    (0..count)
+                        .map(|_| decode_usage_record(&mut payload))
+                        .collect::<Result<Vec<_>, _>>()?
                 },
             },
             8 => Self::OutputAcknowledged {
@@ -965,7 +1418,7 @@ enum PendingPhase {
 struct PreparedState {
     item: ItemId,
     delivery: DeliveryId,
-    usage: UsageRecord,
+    usage_records: Vec<UsageRecord>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1152,10 +1605,15 @@ impl RuntimeState {
                 item,
                 delivery,
                 text,
-                usage,
+                usage_records,
             } => {
                 if self.acknowledged.contains(&delivery) {
                     return Err(RuntimeError::CorruptState("duplicate Delivery id"));
+                }
+                if usage_records.is_empty() || usage_records.len() > MAX_USAGE_RECORDS_PER_TURN {
+                    return Err(RuntimeError::CorruptState(
+                        "invalid prepared usage record count",
+                    ));
                 }
                 let config = {
                     let pending = self.pending_for(turn)?;
@@ -1196,7 +1654,7 @@ impl RuntimeState {
                 pending.prepared = Some(PreparedState {
                     item,
                     delivery,
-                    usage,
+                    usage_records,
                 });
                 let record = self
                     .turns
@@ -1330,6 +1788,78 @@ fn observe_id(next: &mut u64, observed: u64) -> Result<(), RuntimeError> {
         .ok_or(RuntimeError::IntegerOverflow)?;
     *next = (*next).max(candidate);
     Ok(())
+}
+
+fn provider_block_reason(error: &ProviderError) -> &'static str {
+    match error {
+        ProviderError::InvalidConfiguration(_) => "Provider configuration was rejected",
+        ProviderError::InvalidRequest(_) => "Provider request was rejected",
+        ProviderError::InvalidResponse(_) => "Provider response was rejected",
+        ProviderError::Unavailable { .. } => "Provider became unavailable",
+    }
+}
+
+fn encode_usage_record(encoder: &mut Encoder, usage: &UsageRecord) -> Result<(), RuntimeError> {
+    encode_optional_u64(encoder, usage.input_tokens());
+    encode_optional_u64(encoder, usage.cached_input_tokens());
+    encode_optional_u64(encoder, usage.cache_write_input_tokens());
+    encode_optional_u64(encoder, usage.output_tokens());
+    encode_optional_u64(encoder, usage.reasoning_output_tokens());
+    encode_optional_u64(encoder, usage.total_tokens());
+    match usage.service_tier() {
+        Some(service_tier) => {
+            encoder.u8(1);
+            encoder.string(service_tier)?;
+        }
+        None => encoder.u8(0),
+    }
+    Ok(())
+}
+
+fn decode_usage_record(decoder: &mut Decoder<'_>) -> Result<UsageRecord, RuntimeError> {
+    let input_tokens = decode_optional_u64(decoder)?;
+    let cached_input_tokens = decode_optional_u64(decoder)?;
+    let cache_write_input_tokens = decode_optional_u64(decoder)?;
+    let output_tokens = decode_optional_u64(decoder)?;
+    let reasoning_output_tokens = decode_optional_u64(decoder)?;
+    let total_tokens = decode_optional_u64(decoder)?;
+    let service_tier = match decoder.u8()? {
+        0 => None,
+        1 => Some(decoder.string(MAX_SERVICE_TIER_BYTES)?),
+        _ => {
+            return Err(RuntimeError::CorruptEvent(
+                "invalid optional service tier tag",
+            ));
+        }
+    };
+    UsageRecord::new(
+        input_tokens,
+        cached_input_tokens,
+        cache_write_input_tokens,
+        output_tokens,
+        reasoning_output_tokens,
+        total_tokens,
+        service_tier,
+    )
+    .map_err(RuntimeError::Provider)
+}
+
+fn encode_optional_u64(encoder: &mut Encoder, value: Option<u64>) {
+    match value {
+        Some(value) => {
+            encoder.u8(1);
+            encoder.u64(value);
+        }
+        None => encoder.u8(0),
+    }
+}
+
+fn decode_optional_u64(decoder: &mut Decoder<'_>) -> Result<Option<u64>, RuntimeError> {
+    match decoder.u8()? {
+        0 => Ok(None),
+        1 => Ok(Some(decoder.u64()?)),
+        _ => Err(RuntimeError::CorruptEvent("invalid optional integer tag")),
+    }
 }
 
 fn encode_config_epoch(encoder: &mut Encoder, epoch: &ConfigEpoch) -> Result<(), RuntimeError> {
@@ -1509,9 +2039,17 @@ pub enum RuntimeError {
     ToolUnavailable,
     TeamOperationReconciliationRequired(TeamOperationId),
     ToolReconciliationRequired(ToolCallId),
+    ProviderToolCallTerminated {
+        call: ToolCallId,
+        status: ToolCallStatus,
+    },
+    ProviderToolResultUnavailable(ToolCallId),
     InvalidTeamConfiguration(&'static str),
     InvalidToolConfiguration(&'static str),
-    UnsupportedRuntimeEventSchema { supported: u16, actual: u16 },
+    UnsupportedRuntimeEventSchema {
+        supported: u16,
+        actual: u16,
+    },
     CorruptEvent(&'static str),
     CorruptState(&'static str),
     IntegerOverflow,
@@ -1548,6 +2086,16 @@ impl fmt::Display for RuntimeError {
                     call.get()
                 )
             }
+            Self::ProviderToolCallTerminated { call, status } => write!(
+                formatter,
+                "Provider Tool call {} terminated with status {status:?}",
+                call.get()
+            ),
+            Self::ProviderToolResultUnavailable(call) => write!(
+                formatter,
+                "Provider Tool call {} completed without a resumable raw result",
+                call.get()
+            ),
             Self::InvalidTeamConfiguration(reason) => {
                 write!(formatter, "invalid Agent Team configuration: {reason}")
             }
@@ -1638,7 +2186,7 @@ mod tests {
                 item: assistant_item,
                 delivery,
                 text: "four".to_owned(),
-                usage: UsageRecord::default(),
+                usage_records: vec![UsageRecord::default()],
             }),
             Err(RuntimeError::CorruptState(
                 "prepared output exceeds the frozen Config Epoch limit"

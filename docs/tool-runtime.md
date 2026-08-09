@@ -8,9 +8,10 @@ not choose call IDs, write approval records, order the durability boundary, or
 decide whether a recovered effect may run again.
 
 The first slice is synchronous core policy over a dedicated provisional file
-Ledger. It deliberately uses an injected executor and does not claim a real
-process sandbox, Windows Job Object, network transport, MCP client, credential
-store, Provider tool-call parser, or product approval surface.
+Ledger. A fixture Provider Turn now reaches it through the Kernel, but execution
+still uses an injected executor. It does not claim a real process sandbox,
+Windows Job Object, network transport, MCP client, credential store, or product
+approval surface.
 
 ## Interface
 
@@ -109,9 +110,15 @@ and raw-resource exclusion, ambiguous blocking, explicit reconciliation,
 pre-effect durability failure with zero executor calls, and post-effect outcome
 failure with exactly one executor call.
 
-Still pending: mapping the implemented Responses dialect function-call facts
-into Tool requests through a concrete Provider driver, a real local-process
-executor, Windows Job Object lifetime and resource enforcement,
-filesystem/network/MCP adapters, credential-vault integration, product
-approval and result delivery, cross-process byte-offset termination around
-every effect boundary, fuzzing, and production storage migration.
+The Provider tracer bullet additionally proves one normalized Responses
+function call enters this exact approval/effect state machine, continuation is
+blocked for ambiguous or invalid results, and a successful effect whose raw
+result is lost at process death is not repeated. The Runtime Turn becomes
+blocked because only the digest is durable; storing a resumable redacted result
+reference remains a later contract.
+
+Still pending: a real local-process executor, Windows Job Object lifetime and
+resource enforcement, filesystem/network/MCP adapters, credential-vault
+integration, product approval and result delivery, multiple Provider Tool
+calls, cross-process byte-offset termination around every effect boundary,
+fuzzing, and production storage migration.

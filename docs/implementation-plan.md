@@ -105,12 +105,22 @@ transitions, and redacts Debug output. Its output remains dialect-scoped data,
 not Runtime state or Tool authority. Redacted fixture tests cover success,
 failure, incomplete, and error terminals.
 
-These slices are policy, protocol, and fault-adapter evidence only: a concrete
-HTTP Provider transport, credential/profile routing, normalization into
-provider-neutral Runtime Items and Usage Records, mapping function calls
-through Tool Runtime, a concrete local-process executor, Windows Job Objects,
-product approval/delivery, reconnect/retry behavior, and the cross-process Tool
-crash matrix remain pending.
+A fixture tracer bullet now normalizes the supported Responses facts into
+provider-neutral text, one canonical function call, and optional Usage Records.
+The Kernel authenticates a current Agent Session, routes that call through the
+existing durable Tool approval/effect state machine, feeds one successful UTF-8
+result into a Provider continuation, and durably prepares combined canonical
+output. Recovery tests prove stale Sessions cannot invoke the Provider,
+ambiguous effects cannot continue, and process death after a durable Tool
+success blocks rather than repeating the effect. Runtime Event schema 2 stores
+the expanded optional Usage Records while replaying historical schema 1.
+
+The remaining slices are still policy, protocol, and fault-adapter work: a
+concrete HTTP Provider transport, credential/profile routing, broader canonical
+Items, multiple Tool calls, durable resumable Tool result references, a
+concrete local-process executor, Windows Job Objects, product
+approval/delivery, reconnect/retry behavior, and the cross-process Tool crash
+matrix remain pending.
 
 Exit criteria:
 

@@ -1,5 +1,7 @@
+use greentyper_core::provider::ProviderEvent;
 use greentyper_core::provider::responses::{
     ResponsesError, ResponsesEvent, ResponsesEventKind, ResponsesSseDecoder, ResponsesUsage,
+    normalize_responses_events,
 };
 
 const TEXT_AND_FUNCTION_CALL: &[u8] = include_bytes!(concat!(
@@ -96,6 +98,39 @@ fn responses_sse_assembles_text_and_one_canonical_function_call() {
             ),
         ]
     );
+}
+
+#[test]
+fn responses_normalization_preserves_canonical_facts_and_redacts_terminal_failures() {
+    let normalized = normalize_responses_events(
+        &decode(TEXT_AND_FUNCTION_CALL).expect("complete Responses stream"),
+    )
+    .expect("normalize Responses facts");
+    assert_eq!(normalized.len(), 4);
+    assert!(matches!(
+        &normalized[0],
+        ProviderEvent::TextDelta(delta) if delta == "Hello "
+    ));
+    assert!(matches!(
+        &normalized[2],
+        ProviderEvent::FunctionCall(call)
+            if call.call_id() == "call_fixture_1"
+                && call.tool() == "weather"
+                && call.arguments_json() == "{\"city\":\"香港\",\"unit\":\"c\"}"
+    ));
+    let ProviderEvent::Completed(usage) = &normalized[3] else {
+        panic!("normalized stream did not end in usage");
+    };
+    assert_eq!(usage.input_tokens(), Some(11));
+    assert_eq!(usage.cached_input_tokens(), Some(3));
+    assert_eq!(usage.cache_write_input_tokens(), Some(1));
+    assert_eq!(usage.reasoning_output_tokens(), Some(2));
+    assert_eq!(usage.service_tier(), Some("default"));
+
+    let error = normalize_responses_events(&decode(FAILED).expect("failed Responses stream"))
+        .expect_err("failed Responses stream must not normalize as output");
+    assert_eq!(error.to_string(), "provider unavailable");
+    assert!(!error.to_string().contains("synthetic fixture failure"));
 }
 
 #[test]

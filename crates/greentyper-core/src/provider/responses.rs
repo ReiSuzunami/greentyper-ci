@@ -8,6 +8,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use super::sse::{SseError, SseEvent, SseLimits, SseParser};
+use super::{ProviderError, ProviderEvent, ProviderToolCall, UsageRecord};
 use crate::config::MAX_OUTPUT_BYTES;
 
 const MAX_STREAM_BYTES: usize = 4 * 1024 * 1024;
@@ -690,6 +691,103 @@ impl ResponsesSseDecoder {
             _ => Err(ResponsesError::InvalidTransition),
         }
     }
+}
+
+/// Converts validated Responses wire facts into Provider Runtime facts.
+///
+/// Provider identifiers and terminal error text remain inside this dialect
+/// adapter. Runtime callers receive only bounded text, canonical Tool calls,
+/// normalized usage, or a fixed failure classification.
+pub fn normalize_responses_events(
+    events: &[ResponsesEvent],
+) -> Result<Vec<ProviderEvent>, ProviderError> {
+    let mut response_id = None;
+    let mut completed = false;
+    let mut normalized = Vec::new();
+    for (index, event) in events.iter().enumerate() {
+        if completed {
+            return Err(ProviderError::InvalidResponse(
+                "Responses event followed completion",
+            ));
+        }
+        match &event.kind {
+            ResponsesEventKind::Created {
+                response_id: created,
+            } => {
+                if response_id.replace(created.clone()).is_some() || index != 0 {
+                    return Err(ProviderError::InvalidResponse(
+                        "Responses stream has an invalid creation event",
+                    ));
+                }
+            }
+            ResponsesEventKind::TextDelta { delta, .. } => {
+                if response_id.is_none() {
+                    return Err(ProviderError::InvalidResponse(
+                        "Responses text preceded response creation",
+                    ));
+                }
+                normalized.push(ProviderEvent::TextDelta(delta.clone()));
+            }
+            ResponsesEventKind::FunctionCall {
+                call_id,
+                name,
+                arguments_json,
+                ..
+            } => {
+                if response_id.is_none() {
+                    return Err(ProviderError::InvalidResponse(
+                        "Responses Tool call preceded response creation",
+                    ));
+                }
+                normalized.push(ProviderEvent::FunctionCall(ProviderToolCall::new(
+                    call_id.clone(),
+                    name.clone(),
+                    arguments_json.clone(),
+                )?));
+            }
+            ResponsesEventKind::Completed {
+                response_id: terminal,
+                usage,
+                service_tier,
+            } => {
+                if response_id.as_deref() != Some(terminal.as_str()) || index + 1 != events.len() {
+                    return Err(ProviderError::InvalidResponse(
+                        "Responses completion does not match its stream",
+                    ));
+                }
+                let usage = usage.unwrap_or_default();
+                normalized.push(ProviderEvent::Completed(UsageRecord::new(
+                    usage.input_tokens,
+                    usage.cached_input_tokens,
+                    usage.cache_write_input_tokens,
+                    usage.output_tokens,
+                    usage.reasoning_output_tokens,
+                    usage.total_tokens,
+                    service_tier.clone(),
+                )?));
+                completed = true;
+            }
+            ResponsesEventKind::Failed { .. } => {
+                return Err(ProviderError::unavailable("Responses request failed"));
+            }
+            ResponsesEventKind::Incomplete { .. } => {
+                return Err(ProviderError::unavailable(
+                    "Responses request ended incomplete",
+                ));
+            }
+            ResponsesEventKind::Error { .. } => {
+                return Err(ProviderError::unavailable(
+                    "Responses request returned a protocol error",
+                ));
+            }
+        }
+    }
+    if response_id.is_none() || !completed {
+        return Err(ProviderError::InvalidResponse(
+            "Responses stream has no complete terminal",
+        ));
+    }
+    Ok(normalized)
 }
 
 enum OutputItemState {
