@@ -45,7 +45,8 @@ Each deep module is tested through its Interface:
 
 True external dependencies use mock adapters. Windows facilities use focused integration tests around audited wrappers rather than exposing platform details through every module.
 
-The current Phase 1 spine covers a strict subset of these end-state contracts:
+The current Phase 1 spine and first Phase 2 Tool policy slice cover a strict
+subset of these end-state contracts:
 versioned Config TOML, schema/path/type validation, precedence/provenance,
 dry-run drafts, revision conflicts, atomic writes, backup repair, last-valid
 external-edit behavior, symlink rejection, and immutable Runtime epochs;
@@ -73,10 +74,20 @@ through a synced frame before Fold publication. I/O errors poison the live
 writer; process termination leaves no writer to continue. Both paths forbid
 blind retry and require reopen, yielding either a complete prefix known not to
 contain the command or a complete transaction whose missing caller
-acknowledgement is exposed as pending and blocks later Team commands. Product
-Provider/Tool driving, receipt delivery to a user-visible sink, and the final
-product reconciliation presentation remain pending. Migration/backup remains
-in the candidate storage harness rather than this provisional product adapter.
+acknowledgement is exposed as pending and blocks later Team commands. The core
+Tool Runtime additionally covers canonical argument hashing, stable identity
+deduplication across restart, changed-meaning rejection, Agent-session-bound
+approval requests, exact approval/resource binding, independent filesystem,
+process, and network Capability denial, grant expiry, raw-argument and external-
+reason exclusion from the Tool Ledger and Debug output, and explicit ambiguous-
+effect reconciliation. Fault injection proves that a prepared-effect append
+failure invokes no executor,
+while an outcome append failure after one invocation poisons the writer and
+reopens in a reconciliation-required state. Product Provider tool-call parsing,
+concrete process, Job Object, and MCP adapters, receipt delivery to a user-
+visible sink, the cross-process Tool byte-offset matrix, and final
+reconciliation presentation remain pending. Migration/backup remains in the
+candidate storage harness rather than these provisional product adapters.
 
 ### Crash and Recovery Tests
 

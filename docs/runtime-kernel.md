@@ -8,13 +8,13 @@ identity per Turn, writes canonical Runtime Events to a synchronous Event
 Ledger, calls only a provider-neutral `ProviderRuntime`, and separates durable
 output preparation from user-visible output acknowledgement.
 
-This slice is deliberately smaller than the full Config Runtime, Provider
-Runtime, and product Agent Team execution path. The core Kernel can own the
-durable Team adapter, gate root admission, and rebind non-terminal Sessions,
-but the CLI and Provider/Tool drivers do not yet consume that seam. The
-deterministic simulator is not a provider wire adapter. The provisional
-checksummed file Ledger is not yet the recorded SQLite-versus-append-log
-technology choice.
+This slice is deliberately smaller than the full Provider Runtime and product
+Agent Team execution path. The core Kernel can own the durable Team and Tool
+adapters, gate root admission, rebind non-terminal Sessions, and reconcile
+prepared Tool effects, but the CLI and Provider/Tool drivers do not yet consume
+that seam. The deterministic simulator is not a provider wire adapter. The
+provisional checksummed file Ledger is not yet the recorded SQLite-versus-
+append-log technology choice.
 
 ## Interface
 
@@ -39,6 +39,21 @@ runtime.acknowledge_team_operation(operation.operation)?;
 for session in recovered_team.into_sessions() {
     // Kernel-derived authority; no AgentId-to-session conversion exists.
 }
+
+let (mut runtime, recovered_team) = RuntimeKernel::open_with_team_and_tools(
+    runtime_ledger_path,
+    team_ledger_path,
+    tool_ledger_path,
+    max_active_agents,
+)?;
+let session = recovered_team
+    .into_sessions()
+    .into_iter()
+    .next()
+    .expect("one recovered non-terminal Agent");
+let request = runtime.request_tool_call(session, intent)?;
+let outcome = runtime.resolve_tool_call(request, decision, &mut executor)?;
+runtime.reconcile_tool_call(session, call, observed_outcome)?;
 ```
 
 `execute` returns only after admission and the complete prepared output are
@@ -98,11 +113,25 @@ which yields either a known complete prefix or a complete transaction whose
 caller acknowledgement remains pending. No case automatically repeats the
 command.
 
-The Team operation gate is independent of the single-Agent Turn
-`RecoveryStatus`: the two provisional Ledgers have separate recovery state and
-writer ownership. A pending Team acknowledgement blocks Team commands, while a
-pending single-Agent Turn continues to block only `execute`. Product scheduling
-across both state machines remains part of the later Team driver.
+`open_with_team_and_tools` additionally owns a distinct Tool Ledger. A Tool
+request must carry a current Active `AgentSession`; the Kernel derives the
+Agent's immutable Capability Snapshot and never accepts a bare Agent ID as
+authority. The Tool Runtime canonicalizes JSON arguments, persists only their
+SHA-256 hash, binds the Agent, Tool name, resource axes, expiry, and hash into a
+synchronous Approval Grant, and commits `EffectPrepared` in the same
+transaction before invoking the executor. Raw arguments remain in the non-
+clone approval request and raw output is returned ephemerally; only a result
+digest enters the Ledger. A prepared effect with no terminal outcome is
+reconciliation-required after restart and is never invoked automatically.
+Explicit observed-success or observed-failure reconciliation is durable and
+idempotent for an already-terminal call.
+
+The Team operation, Tool effect, and single-Agent Turn states have distinct
+Ledgers and writer ownership. A pending Team acknowledgement blocks Team and
+Tool admission. A pending Tool effect blocks new Tool calls, Team commands, and
+single-Agent execute/resume until explicit reconciliation. The existing
+single-Agent output acknowledgement remains independent. Product scheduling
+and delivery across all three state machines remains part of the later driver.
 
 ## Ledger Adapter
 
@@ -181,7 +210,10 @@ protocol.
   TUI/App Server editors, Provider Templates/catalogs, and credential storage.
 - Real provider dialects, transport, reconnect policy, credentials, and usage
   normalization.
-- Tool effects, Approval Grants, workspaces, checkpoints, and migrations.
+- Concrete Tool adapters and sandboxing: local process launch, Windows Job
+  Objects, filesystem/network enforcement, MCP, product approval UX, and
+  credential resolution. Core call identity, Approval Grant binding, prepared-
+  effect ordering, terminal digests, and reconciliation are present.
 - Byte-offset process termination around every remaining Runtime, Provider,
   Tool, delivery, and product acknowledgement boundary; fuzzing; and SQLite VFS
   fault injection.

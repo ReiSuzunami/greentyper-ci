@@ -47,6 +47,16 @@ identifier!(EventSeq);
 identifier!(TransactionId);
 identifier!(TeamOperationId);
 
+impl AgentId {
+    pub(crate) const fn from_stored(value: u64) -> Option<Self> {
+        if value == 0 || value == u64::MAX {
+            None
+        } else {
+            Some(Self(value))
+        }
+    }
+}
+
 impl TeamOperationId {
     fn from_next(value: u64) -> Result<Self, TeamError> {
         fresh_identifier(value).map(Self)
@@ -62,6 +72,12 @@ impl TeamOperationId {
 pub struct AgentSession {
     agent: AgentId,
     runtime_authority: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct AgentExecutionContext {
+    pub agent: AgentId,
+    pub capabilities: CapabilitySnapshot,
 }
 
 impl AgentSession {
@@ -1590,6 +1606,25 @@ impl TeamRuntime {
             });
         }
         Ok(session.agent)
+    }
+
+    pub(crate) fn trusted_active_agent_context(
+        &self,
+        session: AgentSession,
+    ) -> Result<AgentExecutionContext, TeamError> {
+        let agent = self.authenticate(session)?;
+        self.require_active(agent)?;
+        let capabilities = self
+            .state
+            .agents
+            .get(&agent)
+            .ok_or(TeamError::UnknownAgent { agent })?
+            .capabilities
+            .clone();
+        Ok(AgentExecutionContext {
+            agent,
+            capabilities,
+        })
     }
 
     fn trusted_rebind_nonterminal_sessions(&self) -> Vec<AgentSession> {

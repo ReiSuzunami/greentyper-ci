@@ -1,0 +1,116 @@
+# Tool Runtime
+
+## Decision
+
+Tool effect safety lives in one deep `Tool Runtime` module in
+`greentyper-core`. Callers provide intent and a current `AgentSession`; they do
+not choose call IDs, write approval records, order the durability boundary, or
+decide whether a recovered effect may run again.
+
+The first slice is synchronous core policy over a dedicated provisional file
+Ledger. It deliberately uses an injected executor and does not claim a real
+process sandbox, Windows Job Object, network transport, MCP client, credential
+store, Provider tool-call parser, or product approval surface.
+
+## Interface
+
+```rust
+let (mut kernel, recovery) = RuntimeKernel::open_with_team_and_tools(
+    runtime_ledger_path,
+    team_ledger_path,
+    tool_ledger_path,
+    max_active_agents,
+)?;
+
+let request = kernel.request_tool_call(agent_session, intent)?;
+let outcome = kernel.resolve_tool_call(request, approval, &mut executor)?;
+
+// Only external evidence may resolve a prepared effect with no terminal record.
+let record = kernel.reconcile_tool_call(agent_session, call, observed_outcome)?;
+```
+
+`ToolApprovalRequest` is non-clone, retains the raw canonical arguments only in
+memory, and is bound to the process-local `AgentSession` that requested it.
+Recovery invalidates that Session and therefore invalidates the request; a
+fresh rebound Session may request the same durable identity again.
+
+## Durable Flow
+
+```mermaid
+flowchart LR
+    I["Tool intent + current AgentSession"] --> V["Canonicalize and validate"]
+    V --> R["CallRequested: identity + args hash"]
+    R --> RS["append + flush + sync"]
+    RS --> A["ApprovalGranted + EffectPrepared"]
+    A --> AS["append + flush + sync"]
+    AS --> E["Invoke injected executor once"]
+    E --> O["Succeeded, Failed, or Ambiguous"]
+    O --> OS["append + flush + sync"]
+```
+
+The raw arguments, raw output, raw resource descriptors, and caller/executor
+free-text reasons never enter the Tool Ledger. `CallRequested` stores a bounded
+caller identity, Agent ID, Tool name, canonical argument hash, and a
+domain-separated SHA-256 resource binding with per-authority-axis counts.
+Success stores only a result digest. Failures persist fixed classifications
+rather than external text.
+
+## State Model
+
+| State | Meaning | Allowed action |
+| --- | --- | --- |
+| `AwaitingApproval` | Identity is durable; no effect boundary crossed | Deny or grant with exact binding |
+| `Denied` | Approval was durably refused | Inspect; use a new identity for changed intent |
+| `ReconciliationRequired` | Grant and prepared effect are durable; terminal outcome is absent or ambiguous | Explicit observed-success/observed-failure reconciliation only |
+| `Succeeded` | Result digest is durable | Duplicate identity returns the record; never invoke again |
+| `Failed` | Failure or reconciled failure is durable | Duplicate identity returns the record; never invoke again |
+
+The same identity with the same Agent, Tool, arguments hash, and resources is
+idempotent across restart. Reusing it with changed meaning fails with
+`IdentityConflict`.
+
+## Authority
+
+The Kernel authenticates the `AgentSession`, requires the Agent to be Active,
+and derives its immutable Capability Snapshot. Authority axes remain
+independent:
+
+- `Tool(name)` authorizes only the named Tool;
+- `WorkspaceRead` is required for filesystem reads;
+- `WorkspaceWrite` is required for filesystem writes;
+- `Process` is required for a process resource;
+- `Network` is required for any network target.
+
+The Approval Grant durably repeats the exact Agent, arguments hash, resource
+binding, and expiry. Raw paths, process descriptors, network targets, and
+credentials are not part of the persisted approval record, result, or
+reconciliation record. A future concrete adapter receives an opaque credential
+reference through a separate product-owned vault seam.
+
+## Failure Rules
+
+- Failure to persist `CallRequested` or `EffectPrepared` invokes no executor.
+- Any Ledger write/flush/sync error poisons that writer; callers close and
+  reopen instead of retrying.
+- Once `EffectPrepared` is durable, absence of a terminal record is ambiguous
+  even when the local process believes it did not finish.
+- A terminal append failure after executor invocation reopens as
+  `ReconciliationRequired`; it never invokes the executor automatically.
+- Explicit reconciliation requires a current Active `AgentSession` for the
+  original call owner and records observed success or failure durably. It does
+  not rerun the effect.
+
+## Current Evidence And Pending Work
+
+Core tests cover canonical argument hashing, strict schema/kind decoding,
+identity deduplication and changed-meaning rejection, restart replay, stale
+Session rejection, independent authority denial, approval expiry, raw-argument
+and raw-resource exclusion, ambiguous blocking, explicit reconciliation,
+pre-effect durability failure with zero executor calls, and post-effect outcome
+failure with exactly one executor call.
+
+Still pending: Responses SSE/tool-call assembly, a real local-process executor,
+Windows Job Object lifetime and resource enforcement, filesystem/network/MCP
+adapters, credential-vault integration, product approval and result delivery,
+cross-process byte-offset termination around every effect boundary, fuzzing,
+and production storage migration.

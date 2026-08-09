@@ -30,6 +30,7 @@ pub enum SchemaKind {
     LedgerFormat,
     RuntimeEvent,
     TeamEvent,
+    ToolEvent,
 }
 
 impl SchemaKind {
@@ -41,7 +42,8 @@ impl SchemaKind {
             | Self::ConfigEpoch
             | Self::DeterministicFixture
             | Self::LedgerFormat
-            | Self::RuntimeEvent => SchemaVersion(1),
+            | Self::RuntimeEvent
+            | Self::ToolEvent => SchemaVersion(1),
             Self::TeamEvent => SchemaVersion(2),
             Self::BenchmarkEvidence => SchemaVersion(2),
         }

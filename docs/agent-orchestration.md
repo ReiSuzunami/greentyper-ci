@@ -89,7 +89,7 @@ Root admission and Delegation automatically reconcile scheduling. When a termina
 
 `AdmitRoot`, `Delegate`, `SendMessage`, `Complete`, `Fail`, and `Cancel` are the only commands in the first slice. Agent commands carry an opaque `AgentSession`, while Events retain the stable Agent ID. They emit canonical ownership, lifecycle, coordination, and Completion Capsule Events. Direct state mutation is private to the fold implementation.
 
-Provider output, tool effects, approvals, Workspace Leases, Read Sets, merge outcomes, Config Epochs, Provider Epochs, and Context Checkpoints are deliberately absent. Adding them as generic fields now would create shallow or false seams.
+Provider output, Tool effects, approvals, Workspace Leases, Read Sets, merge outcomes, Config Epochs, Provider Epochs, and Context Checkpoints remain deliberately absent from the Team Event model. Tool identity, approval, and effect recovery now live in a separate deep Tool Runtime because their authority and retry rules differ; they are not generic Team fields.
 
 ## Dependency Strategy
 
@@ -102,8 +102,8 @@ Provider output, tool effects, approvals, Workspace Leases, Read Sets, merge out
 
 ## Next Slices
 
-1. Connect the Kernel-owned operation journal to product Team driving and user-visible acknowledgement only after Provider and Tool effect contracts exist.
-2. Add Workspace Coordinator facts, then exclusive Workspace Lease and Read Set adapters when the first writable Task lands.
-3. Add Tool and Provider effect preparation/outcome records with their own idempotency keys, prepared-effect boundaries, and ambiguous-result reconciliation.
+1. Add Responses tool-call parsing and a concrete local-process adapter over the implemented Tool identity, prepared-effect, and reconciliation contract; keep Windows Job Object enforcement fail closed.
+2. Connect the Kernel-owned Team operation journal and Tool outcome to product driving and user-visible acknowledgement only after the concrete Provider/Tool effect path exists.
+3. Add Workspace Coordinator facts, then exclusive Workspace Lease and Read Set adapters when the first writable Task lands.
 4. Extend byte-offset process termination from the Team Ledger transaction seam to every product Provider/Tool delivery and acknowledgement boundary.
 5. Exercise Performance Contract workload P3 with two Active Agents on the Target Machine and four on FMDev; measure Dormant increment rather than assuming it.

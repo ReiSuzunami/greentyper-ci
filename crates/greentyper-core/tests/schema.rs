@@ -27,6 +27,26 @@ fn every_persisted_schema_has_an_explicit_current_version() {
     assert_eq!(SchemaKind::LedgerFormat.current().get(), 1);
     assert_eq!(SchemaKind::RuntimeEvent.current().get(), 1);
     assert_eq!(SchemaKind::TeamEvent.current().get(), 2);
+    assert_eq!(SchemaKind::ToolEvent.current().get(), 1);
+}
+
+#[test]
+fn tool_event_schema_requires_current_and_rejects_zero_or_future_versions() {
+    assert_eq!(
+        SchemaKind::ToolEvent.require_current(0),
+        Err(SchemaError::ZeroVersion)
+    );
+    assert_eq!(
+        SchemaKind::ToolEvent.require_current(1),
+        Ok(SchemaKind::ToolEvent.current())
+    );
+    assert!(matches!(
+        SchemaKind::ToolEvent.require_current(2),
+        Err(SchemaError::Unsupported {
+            kind: SchemaKind::ToolEvent,
+            ..
+        })
+    ));
 }
 
 #[test]

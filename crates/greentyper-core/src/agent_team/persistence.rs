@@ -84,6 +84,15 @@ impl DurableTeamRuntime {
         self.runtime.trusted_rebind_nonterminal_sessions()
     }
 
+    pub(crate) fn trusted_active_agent_context(
+        &self,
+        session: AgentSession,
+    ) -> Result<AgentExecutionContext, DurableTeamError> {
+        self.runtime
+            .trusted_active_agent_context(session)
+            .map_err(DurableTeamError::Team)
+    }
+
     pub(crate) fn next_operation_id(&self) -> Result<TeamOperationId, DurableTeamError> {
         self.runtime
             .next_operation_id()

@@ -4,7 +4,7 @@
 
 Implementation proceeds as runnable vertical slices. Each phase must preserve Ledger recovery, authority boundaries, and measured resource behavior; no phase may defer all testing or performance work to the end.
 
-Feature implementation was authorized on 2026-08-09. The first core slice fixes the Agent Team command/event interface, process-local Agent Sessions, and pure orchestration policy early; it does not claim Phase 7 completion. Plain `TeamRuntime` remains volatile. A separate durable Team adapter proves synchronous persistence, and the core Runtime Kernel now owns it, gates root admission, persists operation identity and acknowledgement records in the same Team Ledger, and rebinds the complete non-terminal Session set after recovery. Product Provider/Tool driving and user-visible delivery remain pending.
+Feature implementation was authorized on 2026-08-09. The first core slice fixes the Agent Team command/event interface, process-local Agent Sessions, and pure orchestration policy early; it does not claim Phase 7 completion. Plain `TeamRuntime` remains volatile. A separate durable Team adapter proves synchronous persistence, and the core Runtime Kernel now owns it, gates root admission, persists operation identity and acknowledgement records in the same Team Ledger, and rebinds the complete non-terminal Session set after recovery. The first Phase 2 core slice also persists Tool call identity, Approval Grant binding, prepared-effect state, terminal digests, and explicit ambiguous-effect reconciliation. Product Provider/Tool driving and user-visible delivery remain pending.
 
 ## Phase 0: Repository and Measurement Foundation
 
@@ -81,6 +81,23 @@ Exit criteria:
 ## Phase 2: Provider and Tool Tracer Bullet
 
 Add OpenAI Responses SSE, canonical tool calls, Tool Ledger identities, Approval Grants, one local process tool, Windows process control, usage normalization, and provider retry/recovery behavior.
+
+The first core Tool Runtime slice is implemented behind
+`RuntimeKernel::open_with_team_and_tools`. It uses a dedicated locked Ledger,
+canonical JSON argument hashing, monotonic call IDs, Agent-session-bound
+approval requests, exact Tool/resource binding, independent filesystem,
+process, and network Capability checks, and a durable `CallRequested ->
+ApprovalGranted + EffectPrepared -> terminal outcome` fold. Raw arguments and
+outputs are not persisted; only their hashes or digests are. Prepared effects
+without a terminal outcome block new Tool, Team, and single-Agent execution
+until explicit reconciliation. Tests prove restart deduplication, identity
+conflict rejection, stale-session rejection, expiry denial, raw-argument and
+external-reason exclusion, pre-effect durability failure with zero executor
+calls, and post-effect outcome failure requiring reopen and explicit
+reconciliation. This
+is policy and fault-adapter evidence only: Responses SSE, a concrete local-
+process executor, Windows Job Objects, product approval/delivery, credentials,
+usage normalization, and the cross-process Tool crash matrix remain pending.
 
 Exit criteria:
 

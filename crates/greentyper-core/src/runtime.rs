@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::agent_team::{
     AgentSession, DurableTeamError, DurableTeamRuntime, TeamCommand, TeamError,
@@ -22,6 +22,11 @@ use crate::provider::{
     ProviderEpoch, ProviderError, ProviderEvent, ProviderRequest, ProviderRuntime, UsageRecord,
 };
 use crate::schema::SchemaKind;
+use crate::tool_runtime::{
+    ApprovalDecision, DurableToolRuntime, ToolApprovalRequest, ToolCallId, ToolCallOutcome,
+    ToolCallRecord, ToolEffectExecutor, ToolIntent, ToolPrincipal, ToolReconciliationDecision,
+    ToolRequestOutcome, ToolRuntimeError, ToolSnapshot,
+};
 
 pub const RUNTIME_EVENT_SCHEMA: u16 = SchemaKind::RuntimeEvent.current().get();
 pub const MAX_INPUT_BYTES: usize = 512 * 1024;
@@ -141,6 +146,7 @@ pub struct RuntimeKernel {
     state: RuntimeState,
     recovered_tail_bytes: u64,
     team: Option<KernelTeam>,
+    tools: Option<DurableToolRuntime>,
 }
 
 struct KernelTeam {
@@ -175,6 +181,17 @@ impl KernelTeam {
     }
 
     fn dispatch(&mut self, command: TeamCommand) -> Result<TeamOperationCommit, RuntimeError> {
+        self.require_ready()?;
+        let operation = self
+            .runtime
+            .next_operation_id()
+            .map_err(RuntimeError::Team)?;
+        self.runtime
+            .dispatch_operation(operation, command)
+            .map_err(RuntimeError::Team)
+    }
+
+    fn require_ready(&self) -> Result<(), RuntimeError> {
         if let Some(record) =
             self.runtime.operation_records().into_iter().find(|record| {
                 record.status == TeamOperationStatus::CommittedAwaitingAcknowledgement
@@ -184,12 +201,15 @@ impl KernelTeam {
                 record.operation,
             ));
         }
-        let operation = self
-            .runtime
-            .next_operation_id()
-            .map_err(RuntimeError::Team)?;
+        Ok(())
+    }
+
+    fn active_agent_context(
+        &self,
+        session: AgentSession,
+    ) -> Result<crate::agent_team::AgentExecutionContext, RuntimeError> {
         self.runtime
-            .dispatch_operation(operation, command)
+            .trusted_active_agent_context(session)
             .map_err(RuntimeError::Team)
     }
 
@@ -212,6 +232,7 @@ impl RuntimeKernel {
             state,
             recovered_tail_bytes: report.truncated_tail_bytes,
             team: None,
+            tools: None,
         })
     }
 
@@ -222,7 +243,7 @@ impl RuntimeKernel {
     ) -> Result<(Self, KernelTeamRecovery), RuntimeError> {
         let runtime_path = runtime_path.as_ref();
         let team_path = team_path.as_ref();
-        if runtime_path == team_path {
+        if ledger_paths_may_alias(runtime_path, team_path) {
             return Err(RuntimeError::InvalidTeamConfiguration(
                 "Runtime and Team Ledgers must use different paths",
             ));
@@ -237,6 +258,42 @@ impl RuntimeKernel {
         let (team, recovery) =
             KernelTeam::open(team_path, max_active_agents).map_err(RuntimeError::Team)?;
         kernel.team = Some(team);
+        Ok((kernel, recovery))
+    }
+
+    pub fn open_with_team_and_tools(
+        runtime_path: impl AsRef<Path>,
+        team_path: impl AsRef<Path>,
+        tool_path: impl AsRef<Path>,
+        max_active_agents: usize,
+    ) -> Result<(Self, KernelTeamRecovery), RuntimeError> {
+        let runtime_path = runtime_path.as_ref();
+        let team_path = team_path.as_ref();
+        let tool_path = tool_path.as_ref();
+        if ledger_paths_may_alias(runtime_path, team_path) {
+            return Err(RuntimeError::InvalidTeamConfiguration(
+                "Runtime and Team Ledgers must use different paths",
+            ));
+        }
+        if ledger_paths_may_alias(runtime_path, tool_path)
+            || ledger_paths_may_alias(team_path, tool_path)
+        {
+            return Err(RuntimeError::InvalidToolConfiguration(
+                "Tool Ledger must use a path distinct from Runtime and Team Ledgers",
+            ));
+        }
+        if max_active_agents == 0 {
+            return Err(RuntimeError::Team(DurableTeamError::Team(
+                TeamError::InvalidActiveAgentLimit,
+            )));
+        }
+
+        let mut kernel = Self::open(runtime_path)?;
+        let (team, recovery) =
+            KernelTeam::open(team_path, max_active_agents).map_err(RuntimeError::Team)?;
+        let tools = DurableToolRuntime::open(tool_path).map_err(RuntimeError::Tool)?;
+        kernel.team = Some(team);
+        kernel.tools = Some(tools);
         Ok((kernel, recovery))
     }
 
@@ -281,6 +338,11 @@ impl RuntimeKernel {
         self.team.as_ref().map(KernelTeam::snapshot)
     }
 
+    #[must_use]
+    pub fn tool_snapshot(&self) -> Option<ToolSnapshot> {
+        self.tools.as_ref().map(DurableToolRuntime::snapshot)
+    }
+
     pub fn dispatch_team(
         &mut self,
         command: TeamCommand,
@@ -296,6 +358,63 @@ impl RuntimeKernel {
         team.acknowledge(operation)
     }
 
+    pub fn request_tool_call(
+        &mut self,
+        session: AgentSession,
+        intent: ToolIntent,
+    ) -> Result<ToolRequestOutcome, RuntimeError> {
+        self.require_no_tool_reconciliation()?;
+        let context = {
+            let team = self.team.as_ref().ok_or(RuntimeError::TeamUnavailable)?;
+            team.require_ready()?;
+            team.active_agent_context(session)?
+        };
+        let tools = self.tools.as_mut().ok_or(RuntimeError::ToolUnavailable)?;
+        tools
+            .request(ToolPrincipal::new(session, context), intent)
+            .map_err(RuntimeError::Tool)
+    }
+
+    pub fn resolve_tool_call(
+        &mut self,
+        request: ToolApprovalRequest,
+        decision: ApprovalDecision,
+        executor: &mut impl ToolEffectExecutor,
+    ) -> Result<ToolCallOutcome, RuntimeError> {
+        self.require_no_tool_reconciliation()?;
+        let session = request.session();
+        let context = {
+            let team = self.team.as_ref().ok_or(RuntimeError::TeamUnavailable)?;
+            team.require_ready()?;
+            team.active_agent_context(session)?
+        };
+        let tools = self.tools.as_mut().ok_or(RuntimeError::ToolUnavailable)?;
+        tools
+            .resolve(
+                ToolPrincipal::new(session, context),
+                request,
+                decision,
+                executor,
+            )
+            .map_err(RuntimeError::Tool)
+    }
+
+    pub fn reconcile_tool_call(
+        &mut self,
+        session: AgentSession,
+        call: ToolCallId,
+        decision: ToolReconciliationDecision,
+    ) -> Result<ToolCallRecord, RuntimeError> {
+        let context = {
+            let team = self.team.as_ref().ok_or(RuntimeError::TeamUnavailable)?;
+            team.active_agent_context(session)?
+        };
+        let tools = self.tools.as_mut().ok_or(RuntimeError::ToolUnavailable)?;
+        tools
+            .reconcile(ToolPrincipal::new(session, context), call, decision)
+            .map_err(RuntimeError::Tool)
+    }
+
     pub fn execute(
         &mut self,
         layers: &ConfigLayers,
@@ -303,6 +422,7 @@ impl RuntimeKernel {
         provider: &mut impl ProviderRuntime,
     ) -> Result<PreparedOutput, RuntimeError> {
         self.require_ready()?;
+        self.require_no_tool_reconciliation()?;
         let input = input.into();
         validate_input(&input)?;
 
@@ -349,6 +469,7 @@ impl RuntimeKernel {
         &mut self,
         provider: &mut impl ProviderRuntime,
     ) -> Result<PreparedOutput, RuntimeError> {
+        self.require_no_tool_reconciliation()?;
         match self.state.status() {
             RecoveryStatus::ResumeRequired { .. } => self.drive_pending(provider),
             status => Err(RuntimeError::Busy(status)),
@@ -395,8 +516,20 @@ impl RuntimeKernel {
         &mut self,
         command: TeamCommand,
     ) -> Result<TeamOperationCommit, RuntimeError> {
+        self.require_no_tool_reconciliation()?;
         let team = self.team.as_mut().ok_or(RuntimeError::TeamUnavailable)?;
         team.dispatch(command)
+    }
+
+    fn require_no_tool_reconciliation(&self) -> Result<(), RuntimeError> {
+        if let Some(call) = self
+            .tools
+            .as_ref()
+            .and_then(DurableToolRuntime::pending_reconciliation)
+        {
+            return Err(RuntimeError::ToolReconciliationRequired(call));
+        }
+        Ok(())
     }
 
     fn drive_pending(
@@ -505,6 +638,35 @@ impl RuntimeKernel {
         self.recovered_tail_bytes = 0;
         Ok(receipt)
     }
+}
+
+fn ledger_paths_may_alias(left: &Path, right: &Path) -> bool {
+    if left == right {
+        return true;
+    }
+    let (Some(left), Some(right)) = (ledger_path_key(left), ledger_path_key(right)) else {
+        return false;
+    };
+    path_keys_equal(&left, &right)
+}
+
+fn ledger_path_key(path: &Path) -> Option<PathBuf> {
+    if let Ok(canonical) = path.canonicalize() {
+        return Some(canonical);
+    }
+    let file_name = path.file_name()?;
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    Some(parent.canonicalize().ok()?.join(file_name))
+}
+
+#[cfg(any(windows, target_os = "macos"))]
+fn path_keys_equal(left: &Path, right: &Path) -> bool {
+    left.to_string_lossy().to_lowercase() == right.to_string_lossy().to_lowercase()
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+fn path_keys_equal(left: &Path, right: &Path) -> bool {
+    left == right
 }
 
 fn validate_input(input: &str) -> Result<(), RuntimeError> {
@@ -1335,6 +1497,7 @@ impl<'a> Decoder<'a> {
 pub enum RuntimeError {
     Ledger(LedgerError),
     Team(DurableTeamError),
+    Tool(ToolRuntimeError),
     Config(ConfigError),
     Model(ModelError),
     Provider(ProviderError),
@@ -1343,8 +1506,11 @@ pub enum RuntimeError {
     InvalidInput(&'static str),
     InvalidProviderOutput(&'static str),
     TeamUnavailable,
+    ToolUnavailable,
     TeamOperationReconciliationRequired(TeamOperationId),
+    ToolReconciliationRequired(ToolCallId),
     InvalidTeamConfiguration(&'static str),
+    InvalidToolConfiguration(&'static str),
     UnsupportedRuntimeEventSchema { supported: u16, actual: u16 },
     CorruptEvent(&'static str),
     CorruptState(&'static str),
@@ -1356,6 +1522,7 @@ impl fmt::Display for RuntimeError {
         match self {
             Self::Ledger(source) => write!(formatter, "{source}"),
             Self::Team(source) => write!(formatter, "{source}"),
+            Self::Tool(source) => write!(formatter, "{source}"),
             Self::Config(source) => write!(formatter, "{source}"),
             Self::Model(source) => write!(formatter, "{source}"),
             Self::Provider(source) => write!(formatter, "{source}"),
@@ -1368,13 +1535,24 @@ impl fmt::Display for RuntimeError {
                 write!(formatter, "invalid provider output: {reason}")
             }
             Self::TeamUnavailable => write!(formatter, "Runtime Kernel has no Agent Team"),
+            Self::ToolUnavailable => write!(formatter, "Runtime Kernel has no Tool Runtime"),
             Self::TeamOperationReconciliationRequired(operation) => write!(
                 formatter,
                 "Team operation {} requires acknowledgement reconciliation",
                 operation.get()
             ),
+            Self::ToolReconciliationRequired(call) => {
+                write!(
+                    formatter,
+                    "Tool call {} requires reconciliation",
+                    call.get()
+                )
+            }
             Self::InvalidTeamConfiguration(reason) => {
                 write!(formatter, "invalid Agent Team configuration: {reason}")
+            }
+            Self::InvalidToolConfiguration(reason) => {
+                write!(formatter, "invalid Tool Runtime configuration: {reason}")
             }
             Self::UnsupportedRuntimeEventSchema { supported, actual } => write!(
                 formatter,
@@ -1392,6 +1570,7 @@ impl Error for RuntimeError {
         match self {
             Self::Ledger(source) => Some(source),
             Self::Team(source) => Some(source),
+            Self::Tool(source) => Some(source),
             Self::Config(source) => Some(source),
             Self::Model(source) => Some(source),
             Self::Provider(source) => Some(source),
