@@ -16,6 +16,7 @@ use greentyper_core::runtime::{
     AcknowledgeOutcome, PreparedOutput, ProviderToolApproval, RecoveryStatus, RuntimeKernel,
 };
 use greentyper_core::tool_runtime::ToolEffectExecutor;
+use greentyper_core::usage::{RuntimeUsageSnapshot, UsageError, UsageTimestamp, UsageWindow};
 
 use crate::credential_vault::{
     CredentialVault, CredentialVaultError, MAX_SECRET_BYTES, PlatformCredentialVault,
@@ -43,14 +44,20 @@ pub fn run(arguments: impl Iterator<Item = String>) -> Result<(), CliError> {
             let config = open_config_runtime(default_config_paths()?)?;
             let layers = config.config_layers()?.clone();
             let profile = config.selected_provider_profile()?;
+            let usage_windows = config.resolved_usage_windows()?;
             let mut provider = ConfiguredProvider::for_new_turn(profile, PlatformCredentialVault)?;
             let has_product_state = has_product_driver_state(&ledger)?;
             if local_echo || has_product_state {
                 provider.enable_local_echo();
-                run_product_turn(&ledger, &layers, input, &mut provider)
+                run_product_turn(&ledger, &layers, usage_windows, input, &mut provider)
             } else {
                 let mut runtime = open_runtime(&ledger)?;
-                let output = runtime.execute(&layers, input, &mut provider)?;
+                let output = runtime.execute_with_usage_windows(
+                    &layers,
+                    usage_windows,
+                    input,
+                    &mut provider,
+                )?;
                 deliver_and_ack(&mut runtime, output)
             }
         }
@@ -71,6 +78,14 @@ pub fn run(arguments: impl Iterator<Item = String>) -> Result<(), CliError> {
         Command::Status { ledger } => {
             let snapshot = RuntimeKernel::inspect(&ledger)?;
             print_status(&snapshot.status)
+        }
+        Command::Stats { ledger, at } => {
+            let at = match at {
+                Some(at) => at,
+                None => UsageTimestamp::now()?,
+            };
+            let stats: RuntimeUsageSnapshot = RuntimeKernel::inspect_usage(&ledger, at)?;
+            write_json(&stats)
         }
         Command::Reconcile { ledger, delivery } => {
             let mut runtime = open_runtime(&ledger)?;
@@ -234,6 +249,7 @@ fn deliver_and_ack_to(
 fn run_product_turn(
     ledger: &Path,
     layers: &greentyper_core::config::ConfigLayers,
+    usage_windows: Vec<UsageWindow>,
     input: String,
     provider: &mut ConfiguredProvider<PlatformCredentialVault>,
 ) -> Result<(), CliError> {
@@ -245,7 +261,13 @@ fn run_product_turn(
     };
     let executor = LocalProcessExecutor::current()?;
     let mut driver = ProductDriver::open_with_executor(ledger, executor, &mut interaction)?;
-    let output = driver.execute(layers, input, provider, &mut interaction)?;
+    let output = driver.execute_with_usage_windows(
+        layers,
+        usage_windows,
+        input,
+        provider,
+        &mut interaction,
+    )?;
     deliver_product_and_ack(&mut driver, output)
 }
 
@@ -391,6 +413,10 @@ enum Command {
     Status {
         ledger: PathBuf,
     },
+    Stats {
+        ledger: PathBuf,
+        at: Option<UsageTimestamp>,
+    },
     Reconcile {
         ledger: PathBuf,
         delivery: DeliveryId,
@@ -531,12 +557,14 @@ fn parse(mut arguments: impl Iterator<Item = String>) -> Result<Command, CliErro
     let mut input = None;
     let mut delivery = None;
     let mut tool = None;
+    let mut at = None;
     while let Some(argument) = arguments.next() {
         let slot = match argument.as_str() {
             "--ledger" => &mut ledger,
             "--input" => &mut input,
             "--delivery" => &mut delivery,
             "--tool" => &mut tool,
+            "--at" => &mut at,
             _ => return Err(CliError::Usage("unknown option")),
         };
         if slot.is_some() {
@@ -565,6 +593,7 @@ fn parse(mut arguments: impl Iterator<Item = String>) -> Result<Command, CliErro
     match command.as_str() {
         "headless" => {
             reject_option(&delivery, "--delivery is not valid for headless")?;
+            reject_option(&at, "--at is not valid for headless")?;
             Ok(Command::Headless {
                 ledger,
                 input: input.ok_or(CliError::Usage("headless requires --input"))?,
@@ -574,17 +603,37 @@ fn parse(mut arguments: impl Iterator<Item = String>) -> Result<Command, CliErro
         "resume" => {
             reject_option(&input, "--input is not valid for resume")?;
             reject_option(&delivery, "--delivery is not valid for resume")?;
+            reject_option(&at, "--at is not valid for resume")?;
             Ok(Command::Resume { ledger, local_echo })
         }
         "status" => {
             reject_option(&input, "--input is not valid for status")?;
             reject_option(&delivery, "--delivery is not valid for status")?;
             reject_option(&tool, "--tool is not valid for status")?;
+            reject_option(&at, "--at is not valid for status")?;
             Ok(Command::Status { ledger })
+        }
+        "stats" => {
+            reject_option(&input, "--input is not valid for stats")?;
+            reject_option(&delivery, "--delivery is not valid for stats")?;
+            reject_option(&tool, "--tool is not valid for stats")?;
+            let at = at
+                .map(|value| {
+                    value
+                        .parse::<i64>()
+                        .map_err(|_| CliError::Usage("--at must be Unix milliseconds"))
+                        .and_then(|value| {
+                            UsageTimestamp::from_unix_millis(value)
+                                .map_err(|_| CliError::Usage("--at must be Unix milliseconds"))
+                        })
+                })
+                .transpose()?;
+            Ok(Command::Stats { ledger, at })
         }
         "reconcile" => {
             reject_option(&input, "--input is not valid for reconcile")?;
             reject_option(&tool, "--tool is not valid for reconcile")?;
+            reject_option(&at, "--at is not valid for reconcile")?;
             let delivery = delivery
                 .ok_or(CliError::Usage("reconcile requires --delivery"))?
                 .parse::<u64>()
@@ -1114,6 +1163,7 @@ Usage:\n\
   greentyper headless [--ledger PATH] [--tool local.echo] --input TEXT\n\
   greentyper resume [--ledger PATH] [--tool local.echo]\n\
   greentyper status [--ledger PATH]\n\
+  greentyper stats [--ledger PATH] [--at UNIX_MS]\n\
   greentyper reconcile [--ledger PATH] --delivery ID\n\
   greentyper config schema\n\
   greentyper config get PATH [--user-config PATH] [--project-config PATH]\n\
@@ -1128,6 +1178,7 @@ Usage:\n\
 #[derive(Debug)]
 pub enum CliError {
     Usage(&'static str),
+    UsageRuntime(UsageError),
     Io(io::Error),
     Json(serde_json::Error),
     Config(ConfigRuntimeError),
@@ -1143,6 +1194,7 @@ impl fmt::Display for CliError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Usage(message) => write!(formatter, "{message}\n\n{USAGE}"),
+            Self::UsageRuntime(source) => write!(formatter, "{source}"),
             Self::Io(source) => write!(formatter, "I/O failed: {source}"),
             Self::Json(source) => write!(formatter, "JSON output failed: {source}"),
             Self::Config(source) => {
@@ -1176,6 +1228,7 @@ impl Error for CliError {
             Self::Provider(source) => Some(source),
             Self::Credential(source) => Some(source),
             Self::ProductDriver(source) => Some(source),
+            Self::UsageRuntime(source) => Some(source),
             Self::Usage(_) => None,
         }
     }
@@ -1226,6 +1279,12 @@ impl From<ProviderError> for CliError {
 impl From<ProductDriverError> for CliError {
     fn from(source: ProductDriverError) -> Self {
         Self::ProductDriver(source)
+    }
+}
+
+impl From<UsageError> for CliError {
+    fn from(source: UsageError) -> Self {
+        Self::UsageRuntime(source)
     }
 }
 
@@ -1310,6 +1369,21 @@ mod tests {
                 .into_iter()
             )
             .is_err()
+        );
+        assert!(matches!(
+            parse(
+                [
+                    "stats".to_owned(),
+                    "--at".to_owned(),
+                    "123456789".to_owned(),
+                ]
+                .into_iter()
+            ),
+            Ok(Command::Stats { at: Some(at), .. })
+                if at.unix_millis() == 123_456_789
+        ));
+        assert!(
+            parse(["stats".to_owned(), "--at".to_owned(), "later".to_owned()].into_iter()).is_err()
         );
     }
 

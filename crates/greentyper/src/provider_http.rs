@@ -241,6 +241,10 @@ impl<V: CredentialVault> ProviderRuntime for ResponsesHttpProvider<V> {
         Some(&self.profile)
     }
 
+    fn dialect(&self) -> Option<ProviderDialect> {
+        Some(ProviderDialect::Responses)
+    }
+
     fn run(&mut self, request: &ProviderRequest) -> Result<Vec<ProviderEvent>, ProviderError> {
         if request.provider.profile() != self.profile.profile()
             || request.provider.profile_snapshot() != Some(&self.profile)
@@ -411,6 +415,13 @@ impl<V: CredentialVault> ProviderRuntime for ConfiguredProvider<V> {
         }
     }
 
+    fn dialect(&self) -> Option<ProviderDialect> {
+        match self {
+            Self::Simulator(provider) => provider.dialect(),
+            Self::Responses(provider) => provider.dialect(),
+        }
+    }
+
     fn run(&mut self, request: &ProviderRequest) -> Result<Vec<ProviderEvent>, ProviderError> {
         match self {
             Self::Simulator(provider) => provider.run(request),
@@ -481,6 +492,10 @@ impl LoopbackResponsesProvider {
 impl ProviderRuntime for LoopbackResponsesProvider {
     fn profile_snapshot(&self) -> Option<&ProviderProfileSnapshot> {
         self.inner.profile_snapshot()
+    }
+
+    fn dialect(&self) -> Option<ProviderDialect> {
+        self.inner.dialect()
     }
 
     fn run(&mut self, request: &ProviderRequest) -> Result<Vec<ProviderEvent>, ProviderError> {

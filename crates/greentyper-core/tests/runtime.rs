@@ -7,9 +7,10 @@ use greentyper_core::config::{ConfigDocument, ConfigLayers, ConfigPaths, ConfigR
 use greentyper_core::ledger::{EventData, FileLedger, LedgerHead};
 use greentyper_core::provider::{
     DeterministicProvider, ProviderError, ProviderEvent, ProviderProfileSnapshot, ProviderRequest,
-    ProviderRuntime, UsageRecord,
+    ProviderRuntime, UsageAccuracy, UsageRecord,
 };
 use greentyper_core::runtime::{AcknowledgeOutcome, RecoveryStatus, RuntimeError, RuntimeKernel};
+use greentyper_core::usage::{UsageAttemptOutcome, UsageCostProvenance, UsageTimestamp};
 
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(1);
 
@@ -120,6 +121,16 @@ fn crash_after_admission_requires_explicit_resume() {
         .resume(&mut provider)
         .expect("resume provider Turn");
     assert_eq!(output.text(), "simulated: resume me");
+    let usage = recovered.usage_snapshot(UsageTimestamp::now().unwrap());
+    assert_eq!(usage.attempts().len(), 2);
+    assert_eq!(
+        usage.attempts()[0].outcome(),
+        UsageAttemptOutcome::Interrupted
+    );
+    assert_eq!(
+        usage.attempts()[1].outcome(),
+        UsageAttemptOutcome::Succeeded
+    );
     drop(recovered);
     fs::remove_file(path).expect("cleanup Runtime ledger");
 }
@@ -281,7 +292,7 @@ fn unsupported_runtime_event_schema_fails_closed() {
         .append(
             LedgerHead::default(),
             &[EventData {
-                schema: 4,
+                schema: 5,
                 kind: 1,
                 payload: 1_u64.to_le_bytes().to_vec(),
             }],
@@ -291,15 +302,15 @@ fn unsupported_runtime_event_schema_fails_closed() {
     assert!(matches!(
         RuntimeKernel::open(&path),
         Err(RuntimeError::UnsupportedRuntimeEventSchema {
-            supported: 3,
-            actual: 4
+            supported: 4,
+            actual: 5
         })
     ));
     fs::remove_file(path).expect("cleanup Runtime ledger");
 }
 
 #[test]
-fn schema_one_runtime_turn_replays_and_can_continue_with_schema_three() {
+fn schema_one_runtime_turn_replays_and_can_continue_with_schema_four() {
     let path = temp_path("schema-one-replay");
     let layers = ConfigLayers::default();
     let config = greentyper_core::config::ConfigEpoch::freeze(
@@ -404,13 +415,27 @@ fn schema_one_runtime_turn_replays_and_can_continue_with_schema_three() {
 
     let mut runtime = RuntimeKernel::open(&path).expect("replay schema one Turn");
     assert_eq!(runtime.snapshot().items[1].text(), legacy_text);
+    let legacy_usage = runtime.usage_snapshot(UsageTimestamp::now().expect("usage time"));
+    assert_eq!(legacy_usage.attempts().len(), 1);
+    let legacy_attempt = &legacy_usage.attempts()[0];
+    assert_eq!(legacy_attempt.started_at(), None);
+    assert_eq!(legacy_attempt.outcome(), UsageAttemptOutcome::Succeeded);
+    assert_eq!(
+        legacy_attempt.cost_provenance(),
+        UsageCostProvenance::Unknown
+    );
+    let legacy_record = legacy_attempt.usage().expect("legacy Usage Record");
+    assert_eq!(legacy_record.accuracy(), UsageAccuracy::Estimated);
+    assert_eq!(legacy_record.input_tokens(), Some(2));
+    assert_eq!(legacy_record.output_tokens(), Some(3));
+    assert_eq!(legacy_record.total_tokens(), Some(5));
     let mut provider = DeterministicProvider::default();
     let output = runtime
         .execute(&layers, "current input", &mut provider)
-        .expect("write schema two Turn");
+        .expect("write schema four Turn");
     runtime
         .acknowledge(output.delivery())
-        .expect("acknowledge schema two Turn");
+        .expect("acknowledge schema four Turn");
     drop(runtime);
 
     let recovered = RuntimeKernel::open(&path).expect("replay mixed schema Turns");
@@ -419,6 +444,16 @@ fn schema_one_runtime_turn_replays_and_can_continue_with_schema_three() {
     assert_eq!(
         recovered.snapshot().items[3].text(),
         "simulated: current input"
+    );
+    let mixed_usage = recovered.usage_snapshot(UsageTimestamp::now().expect("usage time"));
+    assert_eq!(mixed_usage.attempts().len(), 2);
+    assert_eq!(
+        mixed_usage.attempts()[0].usage().unwrap().accuracy(),
+        UsageAccuracy::Estimated
+    );
+    assert_eq!(
+        mixed_usage.attempts()[1].usage().unwrap().accuracy(),
+        UsageAccuracy::Estimated
     );
     drop(recovered);
     fs::remove_file(path).expect("cleanup Runtime Ledger");

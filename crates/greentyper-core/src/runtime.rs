@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use sha2::{Digest, Sha256};
 
 use crate::agent_team::{
-    AgentSession, DurableTeamError, DurableTeamRuntime, TeamCommand, TeamError,
+    AgentId, AgentSession, DurableTeamError, DurableTeamRuntime, TeamCommand, TeamError,
     TeamOperationAcknowledgeOutcome, TeamOperationCommit, TeamOperationId, TeamOperationRecord,
     TeamOperationStatus, TeamSnapshot,
 };
@@ -24,7 +24,7 @@ use crate::model::{
 use crate::provider::{
     MAX_PROVIDER_ID_BYTES, MAX_SERVICE_TIER_BYTES, ProviderDialect, ProviderEpoch, ProviderError,
     ProviderEvent, ProviderPricingSource, ProviderProfileSnapshot, ProviderRequest,
-    ProviderRuntime, ProviderToolCall, ProviderToolOutput, UsageRecord,
+    ProviderRuntime, ProviderToolCall, ProviderToolOutput, UsageAccuracy, UsageRecord,
 };
 use crate::schema::SchemaKind;
 use crate::tool_runtime::{
@@ -32,6 +32,10 @@ use crate::tool_runtime::{
     ToolCallId, ToolCallOutcome, ToolCallRecord, ToolCallStatus, ToolEffectExecutor, ToolIntent,
     ToolPrincipal, ToolReconciliationDecision, ToolRequestOutcome, ToolResources, ToolRuntimeError,
     ToolSnapshot,
+};
+use crate::usage::{
+    MAX_USAGE_WINDOWS, RuntimeUsageSnapshot, UsageAttempt, UsageAttemptOutcome, UsageError,
+    UsageProjection, UsageTimestamp, UsageTimezoneSource, UsageWeekday, UsageWindow,
 };
 
 pub const RUNTIME_EVENT_SCHEMA: u16 = SchemaKind::RuntimeEvent.current().get();
@@ -418,6 +422,21 @@ impl RuntimeKernel {
         })
     }
 
+    pub fn inspect_usage(
+        path: impl AsRef<Path>,
+        as_of: UsageTimestamp,
+    ) -> Result<RuntimeUsageSnapshot, RuntimeError> {
+        let report = match FileLedger::inspect(path) {
+            Ok(report) => report,
+            Err(LedgerError::Io(source)) if source.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(UsageProjection::default().snapshot(None, as_of));
+            }
+            Err(source) => return Err(RuntimeError::Ledger(source)),
+        };
+        let state = replay_runtime(&report.events)?;
+        Ok(state.usage.snapshot(state.thread.map(ThreadId::get), as_of))
+    }
+
     #[must_use]
     pub fn snapshot(&self) -> RuntimeSnapshot {
         RuntimeSnapshot {
@@ -427,6 +446,13 @@ impl RuntimeKernel {
             status: self.state.status(),
             recovered_tail_bytes: self.recovered_tail_bytes,
         }
+    }
+
+    #[must_use]
+    pub fn usage_snapshot(&self, as_of: UsageTimestamp) -> RuntimeUsageSnapshot {
+        self.state
+            .usage
+            .snapshot(self.state.thread.map(ThreadId::get), as_of)
     }
 
     /// Returns the frozen Provider Epoch for the current non-terminal Turn.
@@ -527,7 +553,24 @@ impl RuntimeKernel {
         input: impl Into<String>,
         provider: &mut impl ProviderRuntime,
     ) -> Result<PreparedOutput, RuntimeError> {
-        self.admit_turn(layers, input.into(), provider.profile_snapshot().cloned())?;
+        self.execute_with_usage_windows(layers, Vec::new(), input, provider)
+    }
+
+    pub fn execute_with_usage_windows(
+        &mut self,
+        layers: &ConfigLayers,
+        usage_windows: Vec<UsageWindow>,
+        input: impl Into<String>,
+        provider: &mut impl ProviderRuntime,
+    ) -> Result<PreparedOutput, RuntimeError> {
+        self.admit_turn(
+            layers,
+            usage_windows,
+            input.into(),
+            provider.profile_snapshot().cloned(),
+            provider.dialect(),
+            None,
+        )?;
         self.drive_pending(provider)
     }
 
@@ -547,8 +590,37 @@ impl RuntimeKernel {
     where
         ResolveResources: FnOnce(&ProviderToolCall) -> Result<ToolResources, RuntimeError>,
     {
+        self.execute_provider_turn_with_usage_windows(
+            session,
+            layers,
+            Vec::new(),
+            input,
+            provider,
+            map_resources,
+        )
+    }
+
+    pub fn execute_provider_turn_with_usage_windows<ResolveResources>(
+        &mut self,
+        session: AgentSession,
+        layers: &ConfigLayers,
+        usage_windows: Vec<UsageWindow>,
+        input: impl Into<String>,
+        provider: &mut impl ProviderRuntime,
+        map_resources: ResolveResources,
+    ) -> Result<ProviderTurnOutcome, RuntimeError>
+    where
+        ResolveResources: FnOnce(&ProviderToolCall) -> Result<ToolResources, RuntimeError>,
+    {
         self.require_provider_session(session)?;
-        self.admit_turn(layers, input.into(), provider.profile_snapshot().cloned())?;
+        self.admit_turn(
+            layers,
+            usage_windows,
+            input.into(),
+            provider.profile_snapshot().cloned(),
+            provider.dialect(),
+            Some(session.agent()),
+        )?;
         self.drive_provider_turn(session, provider, map_resources)
     }
 
@@ -620,11 +692,18 @@ impl RuntimeKernel {
                 return Err(RuntimeError::Provider(source));
             }
         };
+        let attempt = self.begin_usage_attempt(turn)?;
         let provider_events =
             match provider.continue_after_tool(&provider_request, &provider_output) {
                 Ok(events) => events,
                 Err(source) => {
-                    self.block_pending(turn, provider_block_reason(&source))?;
+                    self.finish_usage_attempt_and_block(
+                        turn,
+                        attempt,
+                        UsageAttemptOutcome::Failed,
+                        None,
+                        provider_block_reason(&source),
+                    )?;
                     return Err(RuntimeError::Provider(source));
                 }
             };
@@ -634,17 +713,32 @@ impl RuntimeKernel {
                 usage_record,
             }) => {
                 leading_deltas.extend(deltas);
-                usage_records.push(usage_record);
-                self.prepare_output(turn, leading_deltas, usage_records)
+                usage_records.push(usage_record.clone());
+                self.prepare_output(turn, leading_deltas, usage_records, attempt, usage_record)
             }
             Ok(ValidatedProviderStep::ToolCall { .. }) => {
-                self.block_pending(turn, "Provider continuation requested another Tool call")?;
+                self.finish_usage_attempt_and_block(
+                    turn,
+                    attempt,
+                    UsageAttemptOutcome::Succeeded,
+                    provider_events.iter().find_map(|event| match event {
+                        ProviderEvent::Completed(usage) => Some(usage.clone()),
+                        _ => None,
+                    }),
+                    "Provider continuation requested another Tool call",
+                )?;
                 Err(RuntimeError::InvalidProviderOutput(
                     "Provider continuation requested more than one Tool call",
                 ))
             }
             Err(reason) => {
-                self.block_pending(turn, reason)?;
+                self.finish_usage_attempt_and_block(
+                    turn,
+                    attempt,
+                    UsageAttemptOutcome::Failed,
+                    None,
+                    reason,
+                )?;
                 Err(RuntimeError::InvalidProviderOutput(reason))
             }
         }
@@ -731,8 +825,11 @@ impl RuntimeKernel {
     fn admit_turn(
         &mut self,
         layers: &ConfigLayers,
+        usage_windows: Vec<UsageWindow>,
         input: String,
         provider_snapshot: Option<ProviderProfileSnapshot>,
+        provider_dialect: Option<ProviderDialect>,
+        agent: Option<AgentId>,
     ) -> Result<(), RuntimeError> {
         self.require_ready()?;
         self.require_no_tool_reconciliation()?;
@@ -747,14 +844,29 @@ impl RuntimeKernel {
         let config_id = ConfigEpochId::new(self.state.next_config).map_err(RuntimeError::Model)?;
         let provider_id =
             ProviderEpochId::new(self.state.next_provider).map_err(RuntimeError::Model)?;
-        let config = ConfigEpoch::freeze(config_id, layers).map_err(RuntimeError::Config)?;
+        for window in &usage_windows {
+            window
+                .require_current_ruleset()
+                .map_err(RuntimeError::Usage)?;
+        }
+        let config = ConfigEpoch::freeze_with_usage_windows(config_id, layers, usage_windows)
+            .map_err(RuntimeError::Config)?;
         let profile = config.resolved().provider_profile().value().clone();
         let model = config.resolved().provider_model().value().clone();
         let provider_epoch = match provider_snapshot {
-            Some(snapshot) => {
-                ProviderEpoch::with_profile_snapshot(provider_id, profile, model, snapshot)
+            Some(snapshot) => ProviderEpoch::with_profile_snapshot_and_dialect(
+                provider_id,
+                profile,
+                model,
+                snapshot,
+                provider_dialect,
+            ),
+            None if profile == "simulator" && provider_dialect.is_none() => {
+                ProviderEpoch::new(provider_id, profile, model)
             }
-            None if profile == "simulator" => ProviderEpoch::new(provider_id, profile, model),
+            None if profile == "simulator" => Err(ProviderError::InvalidConfiguration(
+                "simulator Provider cannot select a wire dialect",
+            )),
             None => Err(ProviderError::InvalidConfiguration(
                 "non-simulator provider requires a frozen Provider Profile snapshot",
             )),
@@ -777,6 +889,7 @@ impl RuntimeKernel {
             user_item,
             config: config_id,
             provider: provider_id,
+            agent,
             input,
         });
         self.commit(&admission)?;
@@ -789,10 +902,17 @@ impl RuntimeKernel {
     ) -> Result<PreparedOutput, RuntimeError> {
         let (pending, config, request) = self.pending_provider_context()?;
         require_provider_snapshot(provider, &request.provider)?;
+        let attempt = self.begin_usage_attempt(pending.turn)?;
         let provider_events = match provider.run(&request) {
             Ok(events) => events,
             Err(source) => {
-                self.block_pending(pending.turn, provider_block_reason(&source))?;
+                self.finish_usage_attempt_and_block(
+                    pending.turn,
+                    attempt,
+                    UsageAttemptOutcome::Failed,
+                    None,
+                    provider_block_reason(&source),
+                )?;
                 return Err(RuntimeError::Provider(source));
             }
         };
@@ -803,15 +923,33 @@ impl RuntimeKernel {
             Ok(ValidatedProviderStep::Completed {
                 deltas,
                 usage_record,
-            }) => self.prepare_output(pending.turn, deltas, vec![usage_record]),
-            Ok(ValidatedProviderStep::ToolCall { .. }) => {
-                self.block_pending(pending.turn, "Provider requested an unavailable Tool")?;
+            }) => self.prepare_output(
+                pending.turn,
+                deltas,
+                vec![usage_record.clone()],
+                attempt,
+                usage_record,
+            ),
+            Ok(ValidatedProviderStep::ToolCall { usage_record, .. }) => {
+                self.finish_usage_attempt_and_block(
+                    pending.turn,
+                    attempt,
+                    UsageAttemptOutcome::Succeeded,
+                    Some(usage_record),
+                    "Provider requested an unavailable Tool",
+                )?;
                 Err(RuntimeError::InvalidProviderOutput(
                     "Provider requested a Tool through the text-only interface",
                 ))
             }
             Err(reason) => {
-                self.block_pending(pending.turn, reason)?;
+                self.finish_usage_attempt_and_block(
+                    pending.turn,
+                    attempt,
+                    UsageAttemptOutcome::Failed,
+                    None,
+                    reason,
+                )?;
                 Err(RuntimeError::InvalidProviderOutput(reason))
             }
         }
@@ -828,10 +966,17 @@ impl RuntimeKernel {
     {
         let (pending, config, request) = self.pending_provider_context()?;
         require_provider_snapshot(provider, &request.provider)?;
+        let attempt = self.begin_usage_attempt(pending.turn)?;
         let provider_events = match provider.run(&request) {
             Ok(events) => events,
             Err(source) => {
-                self.block_pending(pending.turn, provider_block_reason(&source))?;
+                self.finish_usage_attempt_and_block(
+                    pending.turn,
+                    attempt,
+                    UsageAttemptOutcome::Failed,
+                    None,
+                    provider_block_reason(&source),
+                )?;
                 return Err(RuntimeError::Provider(source));
             }
         };
@@ -843,13 +988,25 @@ impl RuntimeKernel {
                 deltas,
                 usage_record,
             }) => self
-                .prepare_output(pending.turn, deltas, vec![usage_record])
+                .prepare_output(
+                    pending.turn,
+                    deltas,
+                    vec![usage_record.clone()],
+                    attempt,
+                    usage_record,
+                )
                 .map(ProviderTurnOutcome::Prepared),
             Ok(ValidatedProviderStep::ToolCall {
                 deltas,
                 call,
                 usage_record,
             }) => {
+                self.finish_usage_attempt(
+                    pending.turn,
+                    attempt,
+                    UsageAttemptOutcome::Succeeded,
+                    Some(usage_record.clone()),
+                )?;
                 let arguments = match ToolArguments::parse(call.arguments_json()) {
                     Ok(arguments) => arguments,
                     Err(error) => {
@@ -910,7 +1067,13 @@ impl RuntimeKernel {
                 }
             }
             Err(reason) => {
-                self.block_pending(pending.turn, reason)?;
+                self.finish_usage_attempt_and_block(
+                    pending.turn,
+                    attempt,
+                    UsageAttemptOutcome::Failed,
+                    None,
+                    reason,
+                )?;
                 Err(RuntimeError::InvalidProviderOutput(reason))
             }
         }
@@ -975,9 +1138,17 @@ impl RuntimeKernel {
         turn: TurnId,
         deltas: Vec<String>,
         usage_records: Vec<UsageRecord>,
+        attempt: u32,
+        current_usage: UsageRecord,
     ) -> Result<PreparedOutput, RuntimeError> {
         if usage_records.is_empty() || usage_records.len() > MAX_USAGE_RECORDS_PER_TURN {
-            self.block_pending(turn, "Provider usage record count is invalid")?;
+            self.finish_usage_attempt_and_block(
+                turn,
+                attempt,
+                UsageAttemptOutcome::Succeeded,
+                Some(current_usage),
+                "Provider usage record count is invalid",
+            )?;
             return Err(RuntimeError::InvalidProviderOutput(
                 "Provider usage record count is invalid",
             ));
@@ -990,8 +1161,11 @@ impl RuntimeKernel {
                 .checked_add(delta.len())
                 .ok_or(RuntimeError::IntegerOverflow)?;
             if next_length > max_output_bytes {
-                self.block_pending(
+                self.finish_usage_attempt_and_block(
                     turn,
+                    attempt,
+                    UsageAttemptOutcome::Succeeded,
+                    Some(current_usage),
                     "Provider output exceeds the frozen Config Epoch limit",
                 )?;
                 return Err(RuntimeError::InvalidProviderOutput(
@@ -1001,7 +1175,13 @@ impl RuntimeKernel {
             text.push_str(delta);
         }
         if text.trim().is_empty() {
-            self.block_pending(turn, "Provider output cannot be empty")?;
+            self.finish_usage_attempt_and_block(
+                turn,
+                attempt,
+                UsageAttemptOutcome::Succeeded,
+                Some(current_usage),
+                "Provider output cannot be empty",
+            )?;
             return Err(RuntimeError::InvalidProviderOutput(
                 "Provider output cannot be empty",
             ));
@@ -1009,7 +1189,16 @@ impl RuntimeKernel {
 
         let assistant_item = ItemId::new(self.state.next_item).map_err(RuntimeError::Model)?;
         let delivery = DeliveryId::new(self.state.next_delivery).map_err(RuntimeError::Model)?;
-        let mut events = Vec::with_capacity(deltas.len() + 2);
+        let completed_at = UsageTimestamp::now().map_err(RuntimeError::Usage)?;
+        let finish = self.usage_attempt_finish_event(
+            turn,
+            attempt,
+            completed_at,
+            UsageAttemptOutcome::Succeeded,
+            Some(current_usage),
+        )?;
+        let mut events = Vec::with_capacity(deltas.len() + 3);
+        events.push(finish);
         events.push(RuntimeEvent::AssistantItemStarted {
             turn,
             item: assistant_item,
@@ -1027,6 +1216,7 @@ impl RuntimeKernel {
             delivery,
             text: text.clone(),
             usage_records: usage_records.clone(),
+            legacy_usage: false,
         });
         let receipt = self.commit(&events)?;
         Ok(PreparedOutput {
@@ -1035,6 +1225,125 @@ impl RuntimeKernel {
             text,
             usage_records,
             receipt,
+        })
+    }
+
+    fn begin_usage_attempt(&mut self, turn: TurnId) -> Result<u32, RuntimeError> {
+        let started_at = UsageTimestamp::now().map_err(RuntimeError::Usage)?;
+        let pending = self
+            .state
+            .pending
+            .as_ref()
+            .filter(|pending| pending.turn == turn && pending.phase == PendingPhase::Admitted)
+            .ok_or_else(|| RuntimeError::Busy(self.state.status()))?;
+        let config = self
+            .state
+            .configs
+            .get(&pending.config)
+            .ok_or(RuntimeError::CorruptState(
+                "pending Config Epoch is missing",
+            ))?;
+        for window in config.usage_windows() {
+            window
+                .require_current_ruleset()
+                .map_err(RuntimeError::Usage)?;
+        }
+        let attempt = pending.next_usage_attempt;
+        let mut events = Vec::with_capacity(2);
+        if let Some(open) = pending.open_usage_attempt {
+            events.push(self.usage_attempt_finish_event(
+                turn,
+                open.attempt,
+                started_at,
+                UsageAttemptOutcome::Interrupted,
+                None,
+            )?);
+        }
+        events.push(RuntimeEvent::UsageAttemptStarted {
+            turn,
+            attempt,
+            started_at,
+        });
+        self.commit(&events)?;
+        Ok(attempt)
+    }
+
+    fn finish_usage_attempt(
+        &mut self,
+        turn: TurnId,
+        attempt: u32,
+        outcome: UsageAttemptOutcome,
+        usage: Option<UsageRecord>,
+    ) -> Result<(), RuntimeError> {
+        let completed_at = UsageTimestamp::now().map_err(RuntimeError::Usage)?;
+        let event = self.usage_attempt_finish_event(turn, attempt, completed_at, outcome, usage)?;
+        self.commit(&[event])?;
+        Ok(())
+    }
+
+    fn finish_usage_attempt_and_block(
+        &mut self,
+        turn: TurnId,
+        attempt: u32,
+        outcome: UsageAttemptOutcome,
+        usage: Option<UsageRecord>,
+        reason: &str,
+    ) -> Result<(), RuntimeError> {
+        let completed_at = UsageTimestamp::now().map_err(RuntimeError::Usage)?;
+        let finish =
+            self.usage_attempt_finish_event(turn, attempt, completed_at, outcome, usage)?;
+        self.commit(&[
+            finish,
+            RuntimeEvent::TurnBlocked {
+                turn,
+                reason: bounded_reason(reason),
+            },
+        ])?;
+        Ok(())
+    }
+
+    fn usage_attempt_finish_event(
+        &self,
+        turn: TurnId,
+        attempt: u32,
+        completed_at: UsageTimestamp,
+        outcome: UsageAttemptOutcome,
+        usage: Option<UsageRecord>,
+    ) -> Result<RuntimeEvent, RuntimeError> {
+        let pending = self
+            .state
+            .pending
+            .as_ref()
+            .filter(|pending| pending.turn == turn && pending.phase == PendingPhase::Admitted)
+            .ok_or_else(|| RuntimeError::Busy(self.state.status()))?;
+        let open = pending
+            .open_usage_attempt
+            .filter(|open| open.attempt == attempt)
+            .ok_or(RuntimeError::CorruptState("usage attempt is not active"))?;
+        let completed_at = completed_at.max(open.started_at);
+        let config = self
+            .state
+            .configs
+            .get(&pending.config)
+            .ok_or(RuntimeError::CorruptState(
+                "pending Config Epoch is missing",
+            ))?;
+        let mut named_windows = Vec::new();
+        for window in config.usage_windows() {
+            if window
+                .contains(open.started_at)
+                .map_err(RuntimeError::Usage)?
+            {
+                named_windows.push(window.id().to_owned());
+            }
+        }
+        Ok(RuntimeEvent::UsageAttemptFinished {
+            turn,
+            attempt,
+            completed_at,
+            outcome,
+            usage,
+            named_windows,
         })
     }
 
@@ -1184,7 +1493,9 @@ fn require_provider_snapshot(
     provider: &impl ProviderRuntime,
     epoch: &ProviderEpoch,
 ) -> Result<(), RuntimeError> {
-    if provider.profile_snapshot() == epoch.profile_snapshot() {
+    if provider.profile_snapshot() == epoch.profile_snapshot()
+        && provider.dialect() == epoch.dialect()
+    {
         Ok(())
     } else {
         Err(RuntimeError::Provider(ProviderError::InvalidConfiguration(
@@ -1239,6 +1550,7 @@ enum RuntimeEvent {
         user_item: ItemId,
         config: ConfigEpochId,
         provider: ProviderEpochId,
+        agent: Option<AgentId>,
         input: String,
     },
     AssistantItemStarted {
@@ -1256,6 +1568,7 @@ enum RuntimeEvent {
         delivery: DeliveryId,
         text: String,
         usage_records: Vec<UsageRecord>,
+        legacy_usage: bool,
     },
     OutputAcknowledged {
         turn: TurnId,
@@ -1267,6 +1580,19 @@ enum RuntimeEvent {
     TurnBlocked {
         turn: TurnId,
         reason: String,
+    },
+    UsageAttemptStarted {
+        turn: TurnId,
+        attempt: u32,
+        started_at: UsageTimestamp,
+    },
+    UsageAttemptFinished {
+        turn: TurnId,
+        attempt: u32,
+        completed_at: UsageTimestamp,
+        outcome: UsageAttemptOutcome,
+        usage: Option<UsageRecord>,
+        named_windows: Vec<String>,
     },
 }
 
@@ -1292,6 +1618,7 @@ impl RuntimeEvent {
                 user_item,
                 config,
                 provider,
+                agent,
                 input,
             } => {
                 payload.u64(thread.get());
@@ -1299,6 +1626,7 @@ impl RuntimeEvent {
                 payload.u64(user_item.get());
                 payload.u64(config.get());
                 payload.u64(provider.get());
+                encode_optional_agent(&mut payload, *agent);
                 payload.string(input)?;
                 4
             }
@@ -1319,6 +1647,7 @@ impl RuntimeEvent {
                 delivery,
                 text,
                 usage_records,
+                legacy_usage: _,
             } => {
                 payload.u64(turn.get());
                 payload.u64(item.get());
@@ -1347,6 +1676,44 @@ impl RuntimeEvent {
                 payload.string(reason)?;
                 10
             }
+            Self::UsageAttemptStarted {
+                turn,
+                attempt,
+                started_at,
+            } => {
+                payload.u64(turn.get());
+                payload.u32(*attempt);
+                payload.i64(started_at.unix_millis());
+                11
+            }
+            Self::UsageAttemptFinished {
+                turn,
+                attempt,
+                completed_at,
+                outcome,
+                usage,
+                named_windows,
+            } => {
+                payload.u64(turn.get());
+                payload.u32(*attempt);
+                payload.i64(completed_at.unix_millis());
+                payload.u8(usage_attempt_outcome_tag(*outcome));
+                match usage {
+                    None => payload.u8(0),
+                    Some(usage) => {
+                        payload.u8(1);
+                        encode_usage_record(&mut payload, usage)?;
+                    }
+                }
+                payload.u32(
+                    u32::try_from(named_windows.len())
+                        .map_err(|_| RuntimeError::IntegerOverflow)?,
+                );
+                for window in named_windows {
+                    payload.string(window)?;
+                }
+                12
+            }
         };
         Ok(EventData {
             schema: RUNTIME_EVENT_SCHEMA,
@@ -1356,7 +1723,7 @@ impl RuntimeEvent {
     }
 
     fn decode(event: &StoredEvent) -> Result<Self, RuntimeError> {
-        if !matches!(event.data.schema, 1 | 2 | RUNTIME_EVENT_SCHEMA) {
+        if !(1..=RUNTIME_EVENT_SCHEMA).contains(&event.data.schema) {
             return Err(RuntimeError::UnsupportedRuntimeEventSchema {
                 supported: RUNTIME_EVENT_SCHEMA,
                 actual: event.data.schema,
@@ -1368,7 +1735,7 @@ impl RuntimeEvent {
                 thread: ThreadId::new(payload.u64()?).map_err(RuntimeError::Model)?,
             },
             2 => Self::ConfigFrozen {
-                epoch: decode_config_epoch(&mut payload)?,
+                epoch: decode_config_epoch(&mut payload, event.data.schema)?,
             },
             3 => Self::ProviderFrozen {
                 epoch: Box::new(decode_provider_epoch(&mut payload, event.data.schema)?),
@@ -1379,6 +1746,11 @@ impl RuntimeEvent {
                 user_item: ItemId::new(payload.u64()?).map_err(RuntimeError::Model)?,
                 config: ConfigEpochId::new(payload.u64()?).map_err(RuntimeError::Model)?,
                 provider: ProviderEpochId::new(payload.u64()?).map_err(RuntimeError::Model)?,
+                agent: if event.data.schema >= 4 {
+                    decode_optional_agent(&mut payload)?
+                } else {
+                    None
+                },
                 input: payload.string(MAX_INPUT_BYTES)?,
             },
             5 => Self::AssistantItemStarted {
@@ -1405,9 +1777,10 @@ impl RuntimeEvent {
                         ));
                     }
                     (0..count)
-                        .map(|_| decode_usage_record(&mut payload))
+                        .map(|_| decode_usage_record(&mut payload, event.data.schema))
                         .collect::<Result<Vec<_>, _>>()?
                 },
+                legacy_usage: event.data.schema < 4,
             },
             8 => Self::OutputAcknowledged {
                 turn: TurnId::new(payload.u64()?).map_err(RuntimeError::Model)?,
@@ -1420,6 +1793,45 @@ impl RuntimeEvent {
                 turn: TurnId::new(payload.u64()?).map_err(RuntimeError::Model)?,
                 reason: payload.string(MAX_BLOCK_REASON_BYTES)?,
             },
+            11 if event.data.schema >= 4 => Self::UsageAttemptStarted {
+                turn: TurnId::new(payload.u64()?).map_err(RuntimeError::Model)?,
+                attempt: payload.u32()?,
+                started_at: UsageTimestamp::from_unix_millis(payload.i64()?)
+                    .map_err(RuntimeError::Usage)?,
+            },
+            12 if event.data.schema >= 4 => {
+                let turn = TurnId::new(payload.u64()?).map_err(RuntimeError::Model)?;
+                let attempt = payload.u32()?;
+                let completed_at = UsageTimestamp::from_unix_millis(payload.i64()?)
+                    .map_err(RuntimeError::Usage)?;
+                let outcome = decode_usage_attempt_outcome(payload.u8()?)?;
+                let usage = match payload.u8()? {
+                    0 => None,
+                    1 => Some(decode_usage_record(&mut payload, event.data.schema)?),
+                    _ => {
+                        return Err(RuntimeError::CorruptEvent(
+                            "invalid optional usage record tag",
+                        ));
+                    }
+                };
+                let count = payload.u32()? as usize;
+                if count > MAX_USAGE_WINDOWS {
+                    return Err(RuntimeError::CorruptEvent(
+                        "usage attempt window count is invalid",
+                    ));
+                }
+                let named_windows = (0..count)
+                    .map(|_| payload.string(MAX_PROVIDER_ID_BYTES))
+                    .collect::<Result<Vec<_>, _>>()?;
+                Self::UsageAttemptFinished {
+                    turn,
+                    attempt,
+                    completed_at,
+                    outcome,
+                    usage,
+                    named_windows,
+                }
+            }
             _ => return Err(RuntimeError::CorruptEvent("unknown Runtime Event kind")),
         };
         payload.finish()?;
@@ -1432,6 +1844,7 @@ struct TurnRecord {
     user_item: ItemId,
     config: ConfigEpochId,
     provider: ProviderEpochId,
+    agent: Option<AgentId>,
     assistant_item: Option<ItemId>,
     delivery: Option<DeliveryId>,
     completed: bool,
@@ -1452,11 +1865,26 @@ struct PreparedState {
     usage_records: Vec<UsageRecord>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct OpenUsageAttempt {
+    attempt: u32,
+    started_at: UsageTimestamp,
+}
+
+struct UsageContext {
+    thread: ThreadId,
+    agent: Option<AgentId>,
+    profile: String,
+    model: String,
+    dialect: Option<ProviderDialect>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct PendingTurn {
     turn: TurnId,
     config: ConfigEpochId,
     provider: ProviderEpochId,
+    agent: Option<AgentId>,
     input: String,
     phase: PendingPhase,
     assistant_item: Option<ItemId>,
@@ -1464,6 +1892,8 @@ struct PendingTurn {
     prepared: Option<PreparedState>,
     acknowledged: bool,
     blocked_reason: Option<String>,
+    next_usage_attempt: u32,
+    open_usage_attempt: Option<OpenUsageAttempt>,
 }
 
 #[derive(Clone, Debug)]
@@ -1475,6 +1905,7 @@ struct RuntimeState {
     items: Vec<CanonicalItem>,
     pending: Option<PendingTurn>,
     acknowledged: BTreeSet<DeliveryId>,
+    usage: UsageProjection,
     next_thread: u64,
     next_turn: u64,
     next_item: u64,
@@ -1493,6 +1924,7 @@ impl Default for RuntimeState {
             items: Vec::new(),
             pending: None,
             acknowledged: BTreeSet::new(),
+            usage: UsageProjection::default(),
             next_thread: 1,
             next_turn: 1,
             next_item: 1,
@@ -1558,6 +1990,7 @@ impl RuntimeState {
                 user_item,
                 config,
                 provider,
+                agent,
                 input,
             } => {
                 if self.thread != Some(thread) || self.pending.is_some() {
@@ -1580,6 +2013,7 @@ impl RuntimeState {
                         user_item,
                         config,
                         provider,
+                        agent,
                         assistant_item: None,
                         delivery: None,
                         completed: false,
@@ -1589,6 +2023,7 @@ impl RuntimeState {
                     turn,
                     config,
                     provider,
+                    agent,
                     input,
                     phase: PendingPhase::Admitted,
                     assistant_item: None,
@@ -1596,6 +2031,8 @@ impl RuntimeState {
                     prepared: None,
                     acknowledged: false,
                     blocked_reason: None,
+                    next_usage_attempt: 1,
+                    open_usage_attempt: None,
                 });
                 observe_id(&mut self.next_turn, turn.get())?;
                 observe_id(&mut self.next_item, user_item.get())?;
@@ -1637,6 +2074,7 @@ impl RuntimeState {
                 delivery,
                 text,
                 usage_records,
+                legacy_usage,
             } => {
                 if self.acknowledged.contains(&delivery) {
                     return Err(RuntimeError::CorruptState("duplicate Delivery id"));
@@ -1674,6 +2112,55 @@ impl RuntimeState {
                 if text.len() > max_output_bytes {
                     return Err(RuntimeError::CorruptState(
                         "prepared output exceeds the frozen Config Epoch limit",
+                    ));
+                }
+                if legacy_usage {
+                    let context = self.usage_context(turn)?;
+                    let next_attempt = self
+                        .pending
+                        .as_ref()
+                        .ok_or(RuntimeError::CorruptState("prepared Turn is missing"))?
+                        .next_usage_attempt;
+                    for (offset, usage) in usage_records.iter().cloned().enumerate() {
+                        let attempt = next_attempt
+                            .checked_add(
+                                u32::try_from(offset).map_err(|_| RuntimeError::IntegerOverflow)?,
+                            )
+                            .ok_or(RuntimeError::IntegerOverflow)?;
+                        self.usage
+                            .record(
+                                UsageAttempt::new(
+                                    attempt,
+                                    context.thread.get(),
+                                    turn.get(),
+                                    context.agent.map(AgentId::get),
+                                    context.profile.clone(),
+                                    context.model.clone(),
+                                    context.dialect,
+                                    None,
+                                    None,
+                                    UsageAttemptOutcome::Succeeded,
+                                    Some(usage),
+                                    Vec::new(),
+                                )
+                                .map_err(RuntimeError::Usage)?,
+                            )
+                            .map_err(RuntimeError::Usage)?;
+                    }
+                    let count = u32::try_from(usage_records.len())
+                        .map_err(|_| RuntimeError::IntegerOverflow)?;
+                    let pending = self.pending_for(turn)?;
+                    pending.next_usage_attempt = pending
+                        .next_usage_attempt
+                        .checked_add(count)
+                        .ok_or(RuntimeError::IntegerOverflow)?;
+                } else if self
+                    .pending
+                    .as_ref()
+                    .is_some_and(|pending| pending.open_usage_attempt.is_some())
+                {
+                    return Err(RuntimeError::CorruptState(
+                        "prepared output has an unfinished usage attempt",
                     ));
                 }
                 self.items.push(
@@ -1732,11 +2219,108 @@ impl RuntimeState {
                     return Err(RuntimeError::CorruptState("invalid blocked reason"));
                 }
                 let pending = self.pending_for(turn)?;
-                if pending.phase != PendingPhase::Admitted {
+                if pending.phase != PendingPhase::Admitted || pending.open_usage_attempt.is_some() {
                     return Err(RuntimeError::CorruptState("invalid blocked transition"));
                 }
                 pending.phase = PendingPhase::Blocked;
                 pending.blocked_reason = Some(reason);
+            }
+            RuntimeEvent::UsageAttemptStarted {
+                turn,
+                attempt,
+                started_at,
+            } => {
+                let pending = self.pending_for(turn)?;
+                if pending.phase != PendingPhase::Admitted
+                    || pending.open_usage_attempt.is_some()
+                    || attempt != pending.next_usage_attempt
+                    || attempt == 0
+                {
+                    return Err(RuntimeError::CorruptState("invalid usage attempt start"));
+                }
+                pending.next_usage_attempt = pending
+                    .next_usage_attempt
+                    .checked_add(1)
+                    .ok_or(RuntimeError::IntegerOverflow)?;
+                pending.open_usage_attempt = Some(OpenUsageAttempt {
+                    attempt,
+                    started_at,
+                });
+            }
+            RuntimeEvent::UsageAttemptFinished {
+                turn,
+                attempt,
+                completed_at,
+                outcome,
+                usage,
+                named_windows,
+            } => {
+                if matches!(outcome, UsageAttemptOutcome::Succeeded) != usage.is_some() {
+                    return Err(RuntimeError::CorruptState(
+                        "usage attempt outcome and record disagree",
+                    ));
+                }
+                let open = self
+                    .pending
+                    .as_ref()
+                    .filter(|pending| {
+                        pending.turn == turn && pending.phase == PendingPhase::Admitted
+                    })
+                    .and_then(|pending| pending.open_usage_attempt)
+                    .filter(|open| open.attempt == attempt)
+                    .ok_or(RuntimeError::CorruptState("invalid usage attempt finish"))?;
+                if completed_at < open.started_at {
+                    return Err(RuntimeError::CorruptState(
+                        "usage attempt completed before it started",
+                    ));
+                }
+                let config = self
+                    .pending
+                    .as_ref()
+                    .filter(|pending| pending.turn == turn)
+                    .map(|pending| pending.config)
+                    .ok_or(RuntimeError::CorruptState("usage Turn is missing"))?;
+                let windows = self
+                    .configs
+                    .get(&config)
+                    .ok_or(RuntimeError::CorruptState("usage Config Epoch is missing"))?
+                    .usage_windows();
+                let mut seen = BTreeSet::new();
+                let mut resolved_windows = Vec::with_capacity(named_windows.len());
+                for window in &named_windows {
+                    let Some(resolved) = windows.iter().find(|candidate| candidate.id() == window)
+                    else {
+                        return Err(RuntimeError::CorruptState(
+                            "usage attempt named window is invalid",
+                        ));
+                    };
+                    if !seen.insert(window.as_str()) {
+                        return Err(RuntimeError::CorruptState(
+                            "usage attempt named window is invalid",
+                        ));
+                    }
+                    resolved_windows.push(resolved.clone());
+                }
+                let context = self.usage_context(turn)?;
+                let usage_attempt = UsageAttempt::new(
+                    attempt,
+                    context.thread.get(),
+                    turn.get(),
+                    context.agent.map(AgentId::get),
+                    context.profile,
+                    context.model,
+                    context.dialect,
+                    Some(open.started_at),
+                    Some(completed_at),
+                    outcome,
+                    usage,
+                    resolved_windows,
+                )
+                .map_err(RuntimeError::Usage)?;
+                self.pending_for(turn)?.open_usage_attempt = None;
+                self.usage
+                    .record(usage_attempt)
+                    .map_err(RuntimeError::Usage)?;
             }
         }
         Ok(())
@@ -1795,6 +2379,29 @@ impl RuntimeState {
                 .and_then(|pending| pending.assistant_item)
                 == Some(item)
     }
+
+    fn usage_context(&self, turn: TurnId) -> Result<UsageContext, RuntimeError> {
+        let thread = self
+            .thread
+            .ok_or(RuntimeError::CorruptState("usage Thread is missing"))?;
+        let record = self
+            .turns
+            .get(&turn)
+            .ok_or(RuntimeError::CorruptState("usage Turn is missing"))?;
+        let provider = self
+            .providers
+            .get(&record.provider)
+            .ok_or(RuntimeError::CorruptState(
+                "usage Provider Epoch is missing",
+            ))?;
+        Ok(UsageContext {
+            thread,
+            agent: record.agent,
+            profile: provider.profile().to_owned(),
+            model: provider.model().to_owned(),
+            dialect: provider.dialect(),
+        })
+    }
 }
 
 fn replay_runtime(events: &[StoredEvent]) -> Result<RuntimeState, RuntimeError> {
@@ -1844,10 +2451,17 @@ fn encode_usage_record(encoder: &mut Encoder, usage: &UsageRecord) -> Result<(),
         }
         None => encoder.u8(0),
     }
+    encoder.u8(match usage.accuracy() {
+        UsageAccuracy::Exact => 1,
+        UsageAccuracy::Estimated => 2,
+    });
     Ok(())
 }
 
-fn decode_usage_record(decoder: &mut Decoder<'_>) -> Result<UsageRecord, RuntimeError> {
+fn decode_usage_record(
+    decoder: &mut Decoder<'_>,
+    schema: u16,
+) -> Result<UsageRecord, RuntimeError> {
     let input_tokens = decode_optional_u64(decoder)?;
     let cached_input_tokens = decode_optional_u64(decoder)?;
     let cache_write_input_tokens = decode_optional_u64(decoder)?;
@@ -1863,6 +2477,15 @@ fn decode_usage_record(decoder: &mut Decoder<'_>) -> Result<UsageRecord, Runtime
             ));
         }
     };
+    let accuracy = if schema >= 4 {
+        match decoder.u8()? {
+            1 => UsageAccuracy::Exact,
+            2 => UsageAccuracy::Estimated,
+            _ => return Err(RuntimeError::CorruptEvent("invalid usage accuracy tag")),
+        }
+    } else {
+        UsageAccuracy::Exact
+    };
     UsageRecord::new(
         input_tokens,
         cached_input_tokens,
@@ -1872,6 +2495,7 @@ fn decode_usage_record(decoder: &mut Decoder<'_>) -> Result<UsageRecord, Runtime
         total_tokens,
         service_tier,
     )
+    .map(|usage| usage.with_accuracy(accuracy))
     .map_err(RuntimeError::Provider)
 }
 
@@ -1905,6 +2529,10 @@ fn encode_provider_epoch(encoder: &mut Encoder, epoch: &ProviderEpoch) -> Result
             encode_provider_profile_snapshot(encoder, snapshot)?;
         }
     }
+    encoder.u8(match epoch.dialect() {
+        None => 0,
+        Some(dialect) => provider_dialect_tag(dialect),
+    });
     Ok(())
 }
 
@@ -1924,17 +2552,31 @@ fn decode_provider_epoch(
     let fingerprint = decoder.u64()?;
     let profile = decoder.string(MAX_PROVIDER_ID_BYTES)?;
     let model = decoder.string(MAX_PROVIDER_ID_BYTES)?;
-    let epoch = match decoder.u8()? {
-        0 => ProviderEpoch::new(id, profile, model),
-        1 => {
-            let snapshot = decode_provider_profile_snapshot(decoder, &profile)?;
-            ProviderEpoch::with_profile_snapshot(id, profile, model, snapshot)
-        }
+    let snapshot = match decoder.u8()? {
+        0 => None,
+        1 => Some(decode_provider_profile_snapshot(decoder, &profile)?),
         _ => {
             return Err(RuntimeError::CorruptEvent(
                 "invalid Provider Profile snapshot tag",
             ));
         }
+    };
+    let dialect = if schema >= 4 {
+        match decoder.u8()? {
+            0 => None,
+            tag => Some(decode_provider_dialect(tag)?),
+        }
+    } else {
+        None
+    };
+    let epoch = match snapshot {
+        None if dialect.is_none() => ProviderEpoch::new(id, profile, model),
+        Some(snapshot) => {
+            ProviderEpoch::with_profile_snapshot_and_dialect(id, profile, model, snapshot, dialect)
+        }
+        None => Err(ProviderError::InvalidConfiguration(
+            "Provider dialect requires a Profile snapshot",
+        )),
     }
     .map_err(RuntimeError::Provider)?;
     if epoch.fingerprint() != fingerprint {
@@ -2105,6 +2747,70 @@ fn decode_provider_dialect(tag: u8) -> Result<ProviderDialect, RuntimeError> {
     }
 }
 
+fn encode_optional_agent(encoder: &mut Encoder, agent: Option<AgentId>) {
+    match agent {
+        None => encoder.u8(0),
+        Some(agent) => {
+            encoder.u8(1);
+            encoder.u64(agent.get());
+        }
+    }
+}
+
+fn decode_optional_agent(decoder: &mut Decoder<'_>) -> Result<Option<AgentId>, RuntimeError> {
+    match decoder.u8()? {
+        0 => Ok(None),
+        1 => AgentId::from_stored(decoder.u64()?)
+            .map(Some)
+            .ok_or(RuntimeError::CorruptEvent(
+                "invalid Agent ID in Runtime Event",
+            )),
+        _ => Err(RuntimeError::CorruptEvent("invalid optional Agent ID tag")),
+    }
+}
+
+const fn usage_attempt_outcome_tag(outcome: UsageAttemptOutcome) -> u8 {
+    match outcome {
+        UsageAttemptOutcome::Succeeded => 1,
+        UsageAttemptOutcome::Failed => 2,
+        UsageAttemptOutcome::Interrupted => 3,
+    }
+}
+
+fn decode_usage_attempt_outcome(tag: u8) -> Result<UsageAttemptOutcome, RuntimeError> {
+    match tag {
+        1 => Ok(UsageAttemptOutcome::Succeeded),
+        2 => Ok(UsageAttemptOutcome::Failed),
+        3 => Ok(UsageAttemptOutcome::Interrupted),
+        _ => Err(RuntimeError::CorruptEvent("invalid usage attempt outcome")),
+    }
+}
+
+const fn usage_weekday_tag(day: UsageWeekday) -> u8 {
+    match day {
+        UsageWeekday::Mon => 1,
+        UsageWeekday::Tue => 2,
+        UsageWeekday::Wed => 3,
+        UsageWeekday::Thu => 4,
+        UsageWeekday::Fri => 5,
+        UsageWeekday::Sat => 6,
+        UsageWeekday::Sun => 7,
+    }
+}
+
+fn decode_usage_weekday(tag: u8) -> Result<UsageWeekday, RuntimeError> {
+    match tag {
+        1 => Ok(UsageWeekday::Mon),
+        2 => Ok(UsageWeekday::Tue),
+        3 => Ok(UsageWeekday::Wed),
+        4 => Ok(UsageWeekday::Thu),
+        5 => Ok(UsageWeekday::Fri),
+        6 => Ok(UsageWeekday::Sat),
+        7 => Ok(UsageWeekday::Sun),
+        _ => Err(RuntimeError::CorruptEvent("invalid usage window weekday")),
+    }
+}
+
 fn encode_config_epoch(encoder: &mut Encoder, epoch: &ConfigEpoch) -> Result<(), RuntimeError> {
     encoder.u64(epoch.id().get());
     encoder.u64(epoch.fingerprint());
@@ -2115,10 +2821,19 @@ fn encode_config_epoch(encoder: &mut Encoder, epoch: &ConfigEpoch) -> Result<(),
     encoder.u8(source_tag(resolved.provider_model().source()));
     encoder.u32(*resolved.max_output_bytes().value());
     encoder.u8(source_tag(resolved.max_output_bytes().source()));
+    encoder.u32(
+        u32::try_from(epoch.usage_windows().len()).map_err(|_| RuntimeError::IntegerOverflow)?,
+    );
+    for window in epoch.usage_windows() {
+        encode_usage_window(encoder, window)?;
+    }
     Ok(())
 }
 
-fn decode_config_epoch(decoder: &mut Decoder<'_>) -> Result<ConfigEpoch, RuntimeError> {
+fn decode_config_epoch(
+    decoder: &mut Decoder<'_>,
+    schema: u16,
+) -> Result<ConfigEpoch, RuntimeError> {
     let id = ConfigEpochId::new(decoder.u64()?).map_err(RuntimeError::Model)?;
     let fingerprint = decoder.u64()?;
     let profile = decoder.string(MAX_BLOCK_REASON_BYTES)?;
@@ -2136,13 +2851,87 @@ fn decode_config_epoch(decoder: &mut Decoder<'_>) -> Result<ConfigEpoch, Runtime
     layer_mut(&mut layers, profile_source).provider_profile = Some(profile);
     layer_mut(&mut layers, model_source).provider_model = Some(model);
     layer_mut(&mut layers, max_output_source).max_output_bytes = Some(max_output);
-    let epoch = ConfigEpoch::freeze(id, &layers).map_err(RuntimeError::Config)?;
+    let usage_windows = if schema >= 4 {
+        let count = decoder.u32()? as usize;
+        if count > MAX_USAGE_WINDOWS {
+            return Err(RuntimeError::CorruptEvent(
+                "Config Epoch usage window count is invalid",
+            ));
+        }
+        (0..count)
+            .map(|_| decode_usage_window(decoder))
+            .collect::<Result<Vec<_>, _>>()?
+    } else {
+        Vec::new()
+    };
+    let epoch = ConfigEpoch::freeze_with_usage_windows(id, &layers, usage_windows)
+        .map_err(RuntimeError::Config)?;
     if epoch.fingerprint() != fingerprint {
         return Err(RuntimeError::CorruptEvent(
             "Config Epoch fingerprint mismatch",
         ));
     }
     Ok(epoch)
+}
+
+fn encode_usage_window(encoder: &mut Encoder, window: &UsageWindow) -> Result<(), RuntimeError> {
+    encoder.string(window.id())?;
+    encoder.u32(u32::from(window.start_minute()));
+    encoder.u32(u32::from(window.end_minute()));
+    encoder.u32(u32::try_from(window.days().len()).map_err(|_| RuntimeError::IntegerOverflow)?);
+    for day in window.days() {
+        encoder.u8(usage_weekday_tag(day));
+    }
+    encoder.string(window.timezone())?;
+    encoder.u8(match window.timezone_source() {
+        UsageTimezoneSource::Explicit => 1,
+        UsageTimezoneSource::LocalSystem => 2,
+    });
+    encoder.string(window.ruleset_version())?;
+    Ok(())
+}
+
+fn decode_usage_window(decoder: &mut Decoder<'_>) -> Result<UsageWindow, RuntimeError> {
+    let id = decoder.string(MAX_PROVIDER_ID_BYTES)?;
+    let start_minute = u16::try_from(decoder.u32()?)
+        .map_err(|_| RuntimeError::CorruptEvent("usage window start is invalid"))?;
+    let end_minute = u16::try_from(decoder.u32()?)
+        .map_err(|_| RuntimeError::CorruptEvent("usage window end is invalid"))?;
+    let day_count = decoder.u32()? as usize;
+    if day_count == 0 || day_count > 7 {
+        return Err(RuntimeError::CorruptEvent(
+            "usage window day count is invalid",
+        ));
+    }
+    let mut days = BTreeSet::new();
+    for _ in 0..day_count {
+        if !days.insert(decode_usage_weekday(decoder.u8()?)?) {
+            return Err(RuntimeError::CorruptEvent(
+                "usage window contains a duplicate day",
+            ));
+        }
+    }
+    let timezone = decoder.string(MAX_PROVIDER_ID_BYTES)?;
+    let timezone_source = match decoder.u8()? {
+        1 => UsageTimezoneSource::Explicit,
+        2 => UsageTimezoneSource::LocalSystem,
+        _ => {
+            return Err(RuntimeError::CorruptEvent(
+                "usage window timezone source is invalid",
+            ));
+        }
+    };
+    let ruleset_version = decoder.string(MAX_PROVIDER_ID_BYTES)?;
+    UsageWindow::from_resolved_parts(
+        id,
+        start_minute,
+        end_minute,
+        days,
+        timezone,
+        timezone_source,
+        ruleset_version,
+    )
+    .map_err(RuntimeError::Usage)
 }
 
 fn layer_mut(layers: &mut ConfigLayers, source: ConfigSource) -> &mut ConfigLayer {
@@ -2188,6 +2977,10 @@ impl Encoder {
     }
 
     fn u64(&mut self, value: u64) {
+        self.bytes.extend_from_slice(&value.to_le_bytes());
+    }
+
+    fn i64(&mut self, value: i64) {
         self.bytes.extend_from_slice(&value.to_le_bytes());
     }
 
@@ -2242,6 +3035,12 @@ impl<'a> Decoder<'a> {
         ))
     }
 
+    fn i64(&mut self) -> Result<i64, RuntimeError> {
+        Ok(i64::from_le_bytes(
+            self.bytes(8)?.try_into().expect("fixed integer slice"),
+        ))
+    }
+
     fn string(&mut self, max_bytes: usize) -> Result<String, RuntimeError> {
         let length = self.u32()? as usize;
         if length > max_bytes {
@@ -2274,6 +3073,7 @@ pub enum RuntimeError {
     Config(ConfigError),
     Model(ModelError),
     Provider(ProviderError),
+    Usage(UsageError),
     Busy(RecoveryStatus),
     UnknownDelivery(DeliveryId),
     InvalidInput(&'static str),
@@ -2307,6 +3107,7 @@ impl fmt::Display for RuntimeError {
             Self::Config(source) => write!(formatter, "{source}"),
             Self::Model(source) => write!(formatter, "{source}"),
             Self::Provider(source) => write!(formatter, "{source}"),
+            Self::Usage(source) => write!(formatter, "{source}"),
             Self::Busy(status) => write!(formatter, "Runtime requires reconciliation: {status}"),
             Self::UnknownDelivery(delivery) => {
                 write!(formatter, "unknown output delivery {}", delivery.get())
@@ -2365,6 +3166,7 @@ impl Error for RuntimeError {
             Self::Config(source) => Some(source),
             Self::Model(source) => Some(source),
             Self::Provider(source) => Some(source),
+            Self::Usage(source) => Some(source),
             _ => None,
         }
     }
@@ -2422,7 +3224,42 @@ mod tests {
     }
 
     #[test]
-    fn schema_three_provider_epoch_round_trips_and_rejects_fingerprint_tampering() {
+    fn schema_two_and_three_usage_records_replay_as_exact_legacy_usage() {
+        for schema in [2, 3] {
+            let mut payload = Encoder::default();
+            payload.u64(1);
+            payload.u64(2);
+            payload.u64(1);
+            payload.string("done").expect("text");
+            payload.u32(1);
+            for value in [Some(3), Some(1), None, Some(2), None, Some(5)] {
+                encode_optional_u64(&mut payload, value);
+            }
+            encode_optional_string(&mut payload, Some("standard")).expect("service tier");
+
+            let decoded = RuntimeEvent::decode(&stored_runtime_event(EventData {
+                schema,
+                kind: 7,
+                payload: payload.finish(),
+            }))
+            .expect("decode historical OutputPrepared");
+            let RuntimeEvent::OutputPrepared {
+                usage_records,
+                legacy_usage,
+                ..
+            } = decoded
+            else {
+                panic!("decoded the wrong Runtime Event")
+            };
+            assert!(legacy_usage);
+            assert_eq!(usage_records.len(), 1);
+            assert_eq!(usage_records[0].accuracy(), UsageAccuracy::Exact);
+            assert_eq!(usage_records[0].total_tokens(), Some(5));
+        }
+    }
+
+    #[test]
+    fn schema_three_provider_epoch_replays_and_schema_four_rejects_fingerprint_tampering() {
         let epoch = ProviderEpoch::with_profile_snapshot(
             ProviderEpochId::new(1).expect("Provider Epoch id"),
             "edge",
@@ -2435,7 +3272,17 @@ mod tests {
         }
         .encode()
         .expect("encode Provider Epoch");
-        assert_eq!(encoded.schema, 3);
+        assert_eq!(encoded.schema, 4);
+        let mut schema_three = encoded.clone();
+        schema_three.schema = 3;
+        assert_eq!(schema_three.payload.pop(), Some(0));
+        assert_eq!(
+            RuntimeEvent::decode(&stored_runtime_event(schema_three))
+                .expect("decode schema-three Provider Epoch"),
+            RuntimeEvent::ProviderFrozen {
+                epoch: Box::new(epoch.clone())
+            }
+        );
         assert_eq!(
             RuntimeEvent::decode(&stored_runtime_event(encoded.clone()))
                 .expect("decode Provider Epoch"),
@@ -2463,6 +3310,51 @@ mod tests {
             Err(RuntimeError::CorruptEvent(
                 "Provider Profile fingerprint mismatch"
             ))
+        ));
+    }
+
+    #[test]
+    fn schema_four_usage_attempt_codec_is_bounded_and_fail_closed() {
+        let turn = TurnId::new(1).expect("Turn id");
+        let started = RuntimeEvent::UsageAttemptStarted {
+            turn,
+            attempt: 1,
+            started_at: UsageTimestamp::from_unix_millis(1_000).expect("timestamp"),
+        };
+        let encoded_start = started.clone().encode().expect("encode attempt start");
+        assert_eq!(
+            RuntimeEvent::decode(&stored_runtime_event(encoded_start.clone()))
+                .expect("decode attempt start"),
+            started
+        );
+
+        let finished = RuntimeEvent::UsageAttemptFinished {
+            turn,
+            attempt: 1,
+            completed_at: UsageTimestamp::from_unix_millis(2_000).expect("timestamp"),
+            outcome: UsageAttemptOutcome::Succeeded,
+            usage: Some(UsageRecord::estimated(2, 3)),
+            named_windows: vec!["workday".to_owned()],
+        };
+        let encoded_finish = finished.clone().encode().expect("encode attempt finish");
+        assert_eq!(
+            RuntimeEvent::decode(&stored_runtime_event(encoded_finish.clone()))
+                .expect("decode attempt finish"),
+            finished
+        );
+
+        let mut invalid_time = encoded_start;
+        invalid_time.payload[12..20].copy_from_slice(&i64::MAX.to_le_bytes());
+        assert!(matches!(
+            RuntimeEvent::decode(&stored_runtime_event(invalid_time)),
+            Err(RuntimeError::Usage(UsageError::TimestampRange))
+        ));
+
+        let mut invalid_outcome = encoded_finish;
+        invalid_outcome.payload[20] = u8::MAX;
+        assert!(matches!(
+            RuntimeEvent::decode(&stored_runtime_event(invalid_outcome)),
+            Err(RuntimeError::CorruptEvent("invalid usage attempt outcome"))
         ));
     }
 
@@ -2502,6 +3394,7 @@ mod tests {
                 user_item,
                 config: config_id,
                 provider: provider_id,
+                agent: None,
                 input: "input".to_owned(),
             },
             RuntimeEvent::AssistantItemStarted {
@@ -2524,6 +3417,7 @@ mod tests {
                 delivery,
                 text: "four".to_owned(),
                 usage_records: vec![UsageRecord::default()],
+                legacy_usage: true,
             }),
             Err(RuntimeError::CorruptState(
                 "prepared output exceeds the frozen Config Epoch limit"

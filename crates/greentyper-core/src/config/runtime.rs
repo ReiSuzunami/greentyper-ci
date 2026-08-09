@@ -7,7 +7,6 @@ use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
-use jiff::tz::TimeZone;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use url::{Host, Url};
@@ -15,6 +14,7 @@ use url::{Host, Url};
 use super::{ConfigLayer, ConfigLayers};
 use crate::provider::{ProviderDialect, ProviderPricingSource, ProviderProfileSnapshot};
 use crate::schema::SchemaKind;
+use crate::usage::{MAX_USAGE_WINDOWS, UsageWeekday, UsageWindow};
 
 pub const CONFIG_FILE_SCHEMA_VERSION: u16 = SchemaKind::ConfigFile.current().get();
 pub const MAX_CONFIG_FILE_BYTES: usize = 1024 * 1024;
@@ -903,6 +903,21 @@ impl ConfigRuntime {
         )
         .map(Some)
         .map_err(|source| invalid("provider.profile", source.to_string()))
+    }
+
+    pub fn resolved_usage_windows(&self) -> Result<Vec<UsageWindow>, ConfigRuntimeError> {
+        let resolved = self
+            .last_valid
+            .as_ref()
+            .ok_or_else(|| ConfigRuntimeError::RepairRequired(self.status().issues))?;
+        resolved
+            .document
+            .stats
+            .windows
+            .iter()
+            .flatten()
+            .map(resolve_usage_window)
+            .collect()
     }
 
     pub fn begin_draft(&self, scope: ConfigScope) -> Result<ConfigDraft, ConfigRuntimeError> {
@@ -1966,14 +1981,18 @@ fn validate_effective(document: &ConfigDocument) -> Result<(), ConfigRuntimeErro
     }
     validate_fallback_cycles(document)?;
 
-    let windows: BTreeSet<_> = document
-        .stats
-        .windows
+    let usage_windows = document.stats.windows.as_deref().unwrap_or_default();
+    if usage_windows.len() > MAX_USAGE_WINDOWS {
+        return Err(invalid(
+            "stats.windows",
+            "usage window count exceeds the supported limit",
+        ));
+    }
+    let windows: BTreeSet<_> = usage_windows
         .iter()
-        .flatten()
         .map(|window| window.id.as_str())
         .collect();
-    for window in document.stats.windows.iter().flatten() {
+    for window in usage_windows {
         validate_usage_window(window)?;
     }
     if let Some(primary) = &document.ui.statusline.primary_usage_window
@@ -2057,9 +2076,13 @@ fn validate_usage_window(window: &UsageWindowLayer) -> Result<(), ConfigRuntimeE
         .end
         .as_deref()
         .ok_or_else(|| invalid(format!("{prefix}.end"), "usage window requires an end"))?;
-    validate_local_time(&format!("{prefix}.start"), start)?;
-    validate_local_time(&format!("{prefix}.end"), end)?;
-    if window.days.as_ref().is_none_or(Vec::is_empty) {
+    let days = window.days.as_ref().ok_or_else(|| {
+        invalid(
+            format!("{prefix}.days"),
+            "usage window requires at least one day",
+        )
+    })?;
+    if days.is_empty() {
         return Err(invalid(
             format!("{prefix}.days"),
             "usage window requires at least one day",
@@ -2071,27 +2094,60 @@ fn validate_usage_window(window: &UsageWindowLayer) -> Result<(), ConfigRuntimeE
             "usage window requires a time zone",
         )
     })?;
-    if timezone != "local" && TimeZone::get(timezone).is_err() {
-        return Err(invalid(
-            format!("{prefix}.timezone"),
-            "unknown IANA time-zone ID",
-        ));
-    }
-    Ok(())
+    UsageWindow::resolve(
+        window.id.clone(),
+        start,
+        end,
+        days.iter().copied().map(usage_weekday),
+        timezone,
+    )
+    .map(|_| ())
+    .map_err(|source| invalid(prefix, source.to_string()))
 }
 
-fn validate_local_time(path: &str, value: &str) -> Result<(), ConfigRuntimeError> {
-    let Some((hour, minute)) = value.split_once(':') else {
-        return Err(invalid(path, "local time must use HH:MM"));
-    };
-    if hour.len() != 2
-        || minute.len() != 2
-        || hour.parse::<u8>().map_or(true, |hour| hour > 23)
-        || minute.parse::<u8>().map_or(true, |minute| minute > 59)
-    {
-        Err(invalid(path, "local time must use valid 24-hour HH:MM"))
-    } else {
-        Ok(())
+fn resolve_usage_window(window: &UsageWindowLayer) -> Result<UsageWindow, ConfigRuntimeError> {
+    let prefix = format!("stats.windows.{}", window.id);
+    UsageWindow::resolve(
+        window.id.clone(),
+        window
+            .start
+            .as_deref()
+            .ok_or_else(|| invalid(format!("{prefix}.start"), "usage window requires a start"))?,
+        window
+            .end
+            .as_deref()
+            .ok_or_else(|| invalid(format!("{prefix}.end"), "usage window requires an end"))?,
+        window
+            .days
+            .as_deref()
+            .ok_or_else(|| {
+                invalid(
+                    format!("{prefix}.days"),
+                    "usage window requires at least one day",
+                )
+            })?
+            .iter()
+            .copied()
+            .map(usage_weekday),
+        window.timezone.as_deref().ok_or_else(|| {
+            invalid(
+                format!("{prefix}.timezone"),
+                "usage window requires a time zone",
+            )
+        })?,
+    )
+    .map_err(|source| invalid(prefix, source.to_string()))
+}
+
+const fn usage_weekday(day: Weekday) -> UsageWeekday {
+    match day {
+        Weekday::Mon => UsageWeekday::Mon,
+        Weekday::Tue => UsageWeekday::Tue,
+        Weekday::Wed => UsageWeekday::Wed,
+        Weekday::Thu => UsageWeekday::Thu,
+        Weekday::Fri => UsageWeekday::Fri,
+        Weekday::Sat => UsageWeekday::Sat,
+        Weekday::Sun => UsageWeekday::Sun,
     }
 }
 

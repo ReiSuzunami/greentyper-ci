@@ -221,6 +221,7 @@ pub struct ProviderEpoch {
     profile: String,
     model: String,
     profile_snapshot: Option<ProviderProfileSnapshot>,
+    dialect: Option<ProviderDialect>,
     fingerprint: u64,
 }
 
@@ -234,12 +235,13 @@ impl ProviderEpoch {
         let model = model.into();
         validate_provider_id("provider profile", &profile)?;
         validate_provider_id("provider model", &model)?;
-        let fingerprint = fingerprint_provider_epoch(&profile, &model, None);
+        let fingerprint = fingerprint_provider_epoch(&profile, &model, None, None);
         Ok(Self {
             id,
             profile,
             model,
             profile_snapshot: None,
+            dialect: None,
             fingerprint,
         })
     }
@@ -259,12 +261,38 @@ impl ProviderEpoch {
                 "Provider Profile snapshot identity mismatch",
             ));
         }
-        let fingerprint = fingerprint_provider_epoch(&profile, &model, Some(&profile_snapshot));
+        Self::with_profile_snapshot_and_dialect(id, profile, model, profile_snapshot, None)
+    }
+
+    pub fn with_profile_snapshot_and_dialect(
+        id: ProviderEpochId,
+        profile: impl Into<String>,
+        model: impl Into<String>,
+        profile_snapshot: ProviderProfileSnapshot,
+        dialect: Option<ProviderDialect>,
+    ) -> Result<Self, ProviderError> {
+        let profile = profile.into();
+        let model = model.into();
+        validate_provider_id("provider profile", &profile)?;
+        validate_provider_id("provider model", &model)?;
+        if profile_snapshot.profile() != profile {
+            return Err(ProviderError::InvalidConfiguration(
+                "Provider Profile snapshot identity mismatch",
+            ));
+        }
+        if dialect.is_some_and(|dialect| !profile_snapshot.supports(dialect)) {
+            return Err(ProviderError::InvalidConfiguration(
+                "Provider dialect is not supported by its frozen Profile",
+            ));
+        }
+        let fingerprint =
+            fingerprint_provider_epoch(&profile, &model, Some(&profile_snapshot), dialect);
         Ok(Self {
             id,
             profile,
             model,
             profile_snapshot: Some(profile_snapshot),
+            dialect,
             fingerprint,
         })
     }
@@ -287,6 +315,11 @@ impl ProviderEpoch {
     #[must_use]
     pub const fn profile_snapshot(&self) -> Option<&ProviderProfileSnapshot> {
         self.profile_snapshot.as_ref()
+    }
+
+    #[must_use]
+    pub const fn dialect(&self) -> Option<ProviderDialect> {
+        self.dialect
     }
 
     #[must_use]
@@ -317,7 +350,15 @@ impl fmt::Debug for ProviderRequest {
     }
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UsageAccuracy {
+    #[default]
+    Exact,
+    Estimated,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct UsageRecord {
     input_tokens: Option<u64>,
     cached_input_tokens: Option<u64>,
@@ -326,6 +367,22 @@ pub struct UsageRecord {
     reasoning_output_tokens: Option<u64>,
     total_tokens: Option<u64>,
     service_tier: Option<String>,
+    accuracy: UsageAccuracy,
+}
+
+impl Default for UsageRecord {
+    fn default() -> Self {
+        Self {
+            input_tokens: None,
+            cached_input_tokens: None,
+            cache_write_input_tokens: None,
+            output_tokens: None,
+            reasoning_output_tokens: None,
+            total_tokens: None,
+            service_tier: None,
+            accuracy: UsageAccuracy::Exact,
+        }
+    }
 }
 
 impl UsageRecord {
@@ -349,6 +406,7 @@ impl UsageRecord {
             reasoning_output_tokens,
             total_tokens,
             service_tier,
+            accuracy: UsageAccuracy::Exact,
         })
     }
 
@@ -360,8 +418,14 @@ impl UsageRecord {
             input_tokens: Some(input_tokens),
             output_tokens: Some(output_tokens),
             total_tokens: input_tokens.checked_add(output_tokens),
+            accuracy: UsageAccuracy::Estimated,
             ..Self::default()
         }
+    }
+
+    pub(crate) fn with_accuracy(mut self, accuracy: UsageAccuracy) -> Self {
+        self.accuracy = accuracy;
+        self
     }
 
     #[must_use]
@@ -397,6 +461,11 @@ impl UsageRecord {
     #[must_use]
     pub fn service_tier(&self) -> Option<&str> {
         self.service_tier.as_deref()
+    }
+
+    #[must_use]
+    pub const fn accuracy(&self) -> UsageAccuracy {
+        self.accuracy
     }
 }
 
@@ -518,6 +587,10 @@ impl fmt::Debug for ProviderEvent {
 
 pub trait ProviderRuntime {
     fn profile_snapshot(&self) -> Option<&ProviderProfileSnapshot> {
+        None
+    }
+
+    fn dialect(&self) -> Option<ProviderDialect> {
         None
     }
 
@@ -740,6 +813,7 @@ fn fingerprint_provider_epoch(
     profile: &str,
     model: &str,
     snapshot: Option<&ProviderProfileSnapshot>,
+    dialect: Option<ProviderDialect>,
 ) -> u64 {
     let mut hash = Fingerprint::new(1);
     hash.string(profile);
@@ -750,6 +824,14 @@ fn fingerprint_provider_epoch(
             hash.byte(1);
             hash.bytes(&snapshot.fingerprint().to_le_bytes());
         }
+    }
+    if let Some(dialect) = dialect {
+        hash.byte(2);
+        hash.byte(match dialect {
+            ProviderDialect::Responses => 1,
+            ProviderDialect::ChatCompletions => 2,
+            ProviderDialect::Messages => 3,
+        });
     }
     hash.finish()
 }

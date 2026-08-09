@@ -22,6 +22,7 @@ use greentyper_core::runtime::{
     RuntimeKernel,
 };
 use greentyper_core::tool_runtime::{ApprovalDecision, ToolEffectExecutor};
+use greentyper_core::usage::UsageWindow;
 
 use crate::local_process::{LOCAL_ECHO_TOOL, local_echo_resources};
 
@@ -93,6 +94,7 @@ impl<E: ToolEffectExecutor> ProductDriver<E> {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn execute(
         &mut self,
         layers: &ConfigLayers,
@@ -100,9 +102,21 @@ impl<E: ToolEffectExecutor> ProductDriver<E> {
         provider: &mut impl ProviderRuntime,
         interaction: &mut impl ProductInteraction,
     ) -> Result<PreparedOutput, ProductDriverError> {
-        let outcome = self.kernel.execute_provider_turn(
+        self.execute_with_usage_windows(layers, Vec::new(), input, provider, interaction)
+    }
+
+    pub(crate) fn execute_with_usage_windows(
+        &mut self,
+        layers: &ConfigLayers,
+        usage_windows: Vec<UsageWindow>,
+        input: impl Into<String>,
+        provider: &mut impl ProviderRuntime,
+        interaction: &mut impl ProductInteraction,
+    ) -> Result<PreparedOutput, ProductDriverError> {
+        let outcome = self.kernel.execute_provider_turn_with_usage_windows(
             self.session,
             layers,
+            usage_windows,
             input,
             provider,
             local_echo_resources,

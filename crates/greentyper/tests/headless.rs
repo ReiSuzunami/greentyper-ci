@@ -98,6 +98,43 @@ fn headless_command_outputs_then_durably_acknowledges() {
 }
 
 #[test]
+fn stats_reports_replayed_usage_without_user_text() {
+    let path = temp_path("stats");
+    let private_input = "usage-private-input-marker";
+    let output = binary()
+        .args(["headless", "--ledger"])
+        .arg(&path)
+        .args(["--input", private_input])
+        .output()
+        .expect("run headless command");
+    assert!(output.status.success(), "{output:?}");
+
+    let at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time after epoch")
+        .as_millis()
+        .saturating_add(1)
+        .to_string();
+    let stats = binary()
+        .args(["stats", "--ledger"])
+        .arg(&path)
+        .args(["--at", at.as_str()])
+        .output()
+        .expect("run stats command");
+    assert!(stats.status.success(), "{stats:?}");
+    let text = String::from_utf8(stats.stdout).expect("stats UTF-8");
+    assert!(!text.contains(private_input), "{text}");
+    let document: serde_json::Value = serde_json::from_str(&text).expect("stats JSON");
+    assert_eq!(document["attempts"].as_array().map(Vec::len), Some(1));
+    assert_eq!(document["attempts"][0]["outcome"], "succeeded");
+    assert_eq!(document["attempts"][0]["usage"]["accuracy"], "estimated");
+    assert_eq!(document["attempts"][0]["cost_provenance"], "unknown");
+    assert_eq!(document["thread"]["usage"]["attempts"], 1);
+    assert_eq!(document["team"], serde_json::Value::Null);
+    fs::remove_file(path).expect("cleanup Runtime ledger");
+}
+
+#[test]
 fn headless_local_echo_mode_uses_the_product_driver_and_returns_ready() {
     let path = temp_path("product-driver");
     let output = binary()
@@ -141,6 +178,26 @@ fn headless_local_echo_mode_uses_the_product_driver_and_returns_ready() {
         .expect("inspect replayed Product driver");
     assert!(replayed_status.status.success(), "{replayed_status:?}");
     assert_eq!(replayed_status.stdout, b"ready\n");
+
+    let at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time after epoch")
+        .as_millis()
+        .saturating_add(1)
+        .to_string();
+    let stats = binary()
+        .args(["stats", "--ledger"])
+        .arg(&path)
+        .args(["--at", at.as_str()])
+        .output()
+        .expect("inspect Product driver usage");
+    assert!(stats.status.success(), "{stats:?}");
+    let document: serde_json::Value = serde_json::from_slice(&stats.stdout).expect("stats JSON");
+    assert_eq!(document["attempts"].as_array().map(Vec::len), Some(2));
+    assert_eq!(document["turns"].as_array().map(Vec::len), Some(2));
+    assert_eq!(document["agents"].as_array().map(Vec::len), Some(1));
+    assert_eq!(document["agents"][0]["usage"]["attempts"], 2);
+    assert_eq!(document["team"]["attempts"], 2);
     fs::remove_file(&path).expect("cleanup Runtime ledger");
     fs::remove_file(sidecar(&path, "team")).expect("cleanup Team ledger");
     fs::remove_file(sidecar(&path, "tool")).expect("cleanup Tool ledger");

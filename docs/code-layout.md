@@ -23,7 +23,8 @@ greentyper/
 The only library package. It contains the canonical model, Config Runtime,
 provisional file Ledger, deterministic Provider seam, bounded generic SSE and
 OpenAI Responses dialect decoding, recoverable single-Agent Runtime Kernel,
-Agent Team Runtime, and durable Tool Runtime policy. Later slices add Workspace
+Agent Team Runtime, durable Tool Runtime policy, and the immutable Usage
+Attempt/window/rollup projection. Later slices add Workspace
 Coordinator and Context Engine; concrete Provider and Tool integration stays
 behind the narrow core interfaces and is owned by the product package.
 

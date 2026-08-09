@@ -25,7 +25,7 @@ fn every_persisted_schema_has_an_explicit_current_version() {
     assert_eq!(SchemaKind::ConfigEpoch.current().get(), 1);
     assert_eq!(SchemaKind::DeterministicFixture.current().get(), 1);
     assert_eq!(SchemaKind::LedgerFormat.current().get(), 1);
-    assert_eq!(SchemaKind::RuntimeEvent.current().get(), 3);
+    assert_eq!(SchemaKind::RuntimeEvent.current().get(), 4);
     assert_eq!(SchemaKind::TeamEvent.current().get(), 2);
     assert_eq!(SchemaKind::ToolEvent.current().get(), 1);
 }

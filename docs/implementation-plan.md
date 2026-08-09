@@ -112,9 +112,10 @@ existing durable Tool approval/effect state machine, feeds one successful UTF-8
 result into a Provider continuation, and durably prepares combined canonical
 output. Recovery tests prove stale Sessions cannot invoke the Provider,
 ambiguous effects cannot continue, and process death after a durable Tool
-success blocks rather than repeating the effect. Runtime Event schema 3 stores
-the expanded optional Usage Records and frozen Provider Profile snapshot while
-replaying historical schema 1 and schema 2.
+success blocks rather than repeating the effect. Runtime Event schema 4 stores
+durable Usage Attempt boundaries, frozen Usage Windows, Provider dialect, the
+expanded optional Usage Records, and the frozen Provider Profile snapshot while
+replaying historical schema 1, schema 2, and schema 3.
 
 A product-private `local.echo` tracer now exercises the concrete process seam.
 It launches a fixed same-binary child without a shell, clears inherited
@@ -155,6 +156,27 @@ Exit criteria:
 ## Phase 3: TUI, Config Center, and Observability
 
 Add VT/ConPTY TUI, hierarchical Command Paths, global command palette, Config Schema-driven editors, Provider wizard, model selector, adaptive statusline, Context Pressure, Usage Records/Rollups, `/stats`, and named Usage Windows.
+
+The first observability slice is implemented. Runtime Event schema 4 durably
+brackets each Provider request and continuation with an immutable Usage Attempt,
+including UTC start/completion, outcome, Agent scope when present, frozen
+Provider Profile/model/dialect, exact or estimated Usage Records, and explicit
+unknown cost provenance. Recovery closes an interrupted attempt before an
+explicit resume starts another. The Runtime Fold incrementally maintains Turn,
+Thread, Agent, single-Team, rolling 1-hour/1-day/7-day, and versioned named-window
+rollups; `greentyper stats` reads the replayed projection as JSON without
+prompt text. Config Epochs freeze half-open/cross-midnight Usage Windows with a
+concrete IANA identity and bundled rule-set version. Tests cover aggregation,
+overflow-to-unknown, historical schema replay, repeated/skipped DST hours,
+local-zone resolution, changed same-name windows, Product-driver Agent/Team
+scope, and statistics redaction.
+
+This does not complete Phase 3. VT/ConPTY presentation, hierarchical command
+navigation, generated Config editors, Provider wizard, model selector, adaptive
+statusline, Context Pressure, Price Schedules/cost calculation, richer observed
+Provider metadata, and the P0/P1/P2/P6 performance evidence remain pending.
+Large-history statistics pagination and summary-only rendering also remain
+pending; the current command emits the complete replayed attempt projection.
 
 Exit criteria:
 

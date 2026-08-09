@@ -47,7 +47,8 @@ statusline, and Usage Window fields listed below. Typed drafts support dry-run,
 revision compare-and-swap, atomic replacement, one recoverable backup, and a
 last-valid repair state. The headless Runtime freezes the bootstrap projection
 (`provider.profile`, `provider.model`, and `runtime.max_output_bytes`) for each
-new Turn. The schema registry currently exposes identity, type, writable
+new Turn and freezes resolved Usage Windows with concrete IANA identity and the
+bundled time-zone rule-set version. The schema registry currently exposes identity, type, writable
 scopes, application timing, credential-reference status, and editor identity;
 default/constraint/normalization/migration metadata, TUI and App Server
 surfaces, and Provider Templates/catalogs remain Phase 1 or later work. The
@@ -102,6 +103,11 @@ Config Drafts, and accept `--dry-run` to return the normalized diff without
 committing. `--user-config` and `--project-config` select explicit absolute
 paths for tests and controlled automation; normal execution uses the platform
 user path and `.greentyper/config.toml` in the current project.
+
+The current headless `stats` command reads the immutable Runtime usage
+projection and accepts an optional Unix-millisecond `--at` instant for
+deterministic rolling-window queries. TUI `/stats` and interactive
+`/config stats-window` presentation remain Phase 3 work.
 
 The product CLI also exposes `credential bind`, `replace`, `test`, and `forget`
 for one lowercase secure-store reference, Provider Profile, and Provider Origin.
@@ -261,6 +267,12 @@ Usage Windows are half-open intervals: the example includes 10:00 and excludes 2
 `timezone` accepts an IANA time-zone ID or `local`. At Config Epoch creation, `local` resolves to a concrete IANA ID using the Windows time-zone mapping; failure to resolve invalidates the draft rather than falling back to UTC. The resolved ID and time-zone rule-set version are projection provenance. Membership converts the attempt's UTC start instant into that zone: both occurrences of a repeated clock hour are eligible, while a skipped clock hour contains no instants. Overlapping named windows are independent, so one Usage Record may appear once in each matching window but never twice in one window.
 
 The statusline may show a compact selected window such as `work 87.2K/$1.43`. `/stats` presents Turn, Thread, Agent, Team, rolling, and named-window views with model, Provider Profile, reasoning effort, service tier, token class, and cache distributions.
+
+The current Runtime implements the underlying durable Usage Attempts, cached
+rollups, and headless JSON projection. It records missing requested/observed
+metadata and all costs as unknown rather than inferring them. Price Schedules,
+charge/estimate/subscription separation, and statusline/TUI rendering remain
+pending.
 
 A Cost Estimate records its Price Schedule version and currency. Historical values are not recomputed after a price change. Provider-reported charge, estimated pay-as-you-go cost, and subscription quota value remain separate; OpenCode Go quota value is not labeled as cash paid.
 

@@ -156,10 +156,13 @@ descriptors while Tool Runtime remains the authority gate. Approval and
 `EffectPrepared` are durable before the injected executor runs. A successful
 UTF-8 result may then enter one Provider continuation. The final
 `OutputPrepared` transaction stores the combined canonical text and one or two
-bounded Usage Records. Runtime Event schema 3 carries those optional token
-classes and service tier plus the frozen Provider Profile snapshot. Historical
-schema-1 and schema-2 Runtime transactions replay and can be followed by
-schema-3 transactions.
+bounded Usage Records. Runtime Event schema 4 also durably brackets every
+Provider request or continuation with Usage Attempt start/finish Events and
+carries the Agent scope, Provider dialect, frozen Usage Windows, UTC times,
+outcome, exact/estimated marker, optional token/cache classes, service tier, and
+frozen Provider Profile snapshot. Historical schema-1, schema-2, and schema-3
+Runtime transactions replay and can be followed by schema-4 transactions;
+schema-1 token counts become explicitly estimated legacy attempts.
 
 This tracer bullet intentionally stores only the Tool result digest. If the
 process dies after durable Tool success and before Provider continuation, the
@@ -206,7 +209,9 @@ new Turn:
 
 - `provider.profile`;
 - `provider.model`;
-- `runtime.max_output_bytes`.
+- `runtime.max_output_bytes`;
+- resolved named Usage Windows, including concrete IANA identity and bundled
+  rule-set version.
 
 The Config Runtime also owns versioned TOML and addressable Provider Profile,
 Model Preset, statusline, and Usage Window fields. Layers resolve in
@@ -231,6 +236,7 @@ startup without one enters repair instead of silently dropping a layer.
 greentyper headless [--ledger PATH] [--tool local.echo] --input TEXT
 greentyper resume [--ledger PATH] [--tool local.echo]
 greentyper status [--ledger PATH]
+greentyper stats [--ledger PATH] [--at UNIX_MS]
 greentyper reconcile [--ledger PATH] --delivery ID
 greentyper config schema
 greentyper config get PATH
@@ -254,6 +260,13 @@ Team-operation and Tool-approval events are written as JSON to stderr and
 flushed before acknowledgement; the decision is read from stdin as exactly
 `approve` or `deny`.
 
+`stats` replays the Runtime Ledger into the cached Usage projection and emits
+one JSON snapshot. It includes immutable attempts plus Turn, Thread, Agent,
+Team, rolling, and versioned named-window rollups. Prompt/provider text and
+credential material are not part of the Usage domain. Requested or observed
+metadata not supplied by the current Provider remains unknown; costs remain
+unknown until a versioned Price Schedule is implemented.
+
 ## Still Pending
 
 - Rich TUI/App Server approval and result presentation beyond the fixed
@@ -262,6 +275,10 @@ flushed before acknowledgement; the decision is read from stdin as exactly
   Kernel-rebound Session bundle; it exposes no Agent-ID-to-session conversion.
 - Complete Config Schema default/constraint/normalization/migration metadata,
   TUI/App Server editors, and Provider Templates/catalogs.
+- TUI/statusline Usage presentation, Price Schedules and separated provider
+  charge/pay-as-you-go/subscription values, richer observed model/effort/tier
+  metadata, and FMDev P6 measurements. The durable attempts, cached rollups,
+  pinned Usage Windows, and headless `stats` projection are present.
 - Live-provider validation, non-Windows credential backends, configurable proxy
   policy, broader TLS platform evidence, reconnect policy, multiple or parallel
   Tool calls, resumable result references, broader canonical Items, and the

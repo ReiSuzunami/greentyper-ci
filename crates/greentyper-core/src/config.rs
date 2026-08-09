@@ -5,6 +5,7 @@ use std::fmt;
 
 use crate::model::ConfigEpochId;
 use crate::schema::SchemaKind;
+use crate::usage::{MAX_USAGE_WINDOWS, UsageTimezoneSource, UsageWeekday, UsageWindow};
 
 mod runtime;
 pub use runtime::*;
@@ -106,16 +107,36 @@ pub struct ConfigEpoch {
     id: ConfigEpochId,
     fingerprint: u64,
     resolved: ResolvedConfig,
+    usage_windows: Vec<UsageWindow>,
 }
 
 impl ConfigEpoch {
     pub fn freeze(id: ConfigEpochId, layers: &ConfigLayers) -> Result<Self, ConfigError> {
+        Self::freeze_with_usage_windows(id, layers, Vec::new())
+    }
+
+    pub fn freeze_with_usage_windows(
+        id: ConfigEpochId,
+        layers: &ConfigLayers,
+        mut usage_windows: Vec<UsageWindow>,
+    ) -> Result<Self, ConfigError> {
         let resolved = layers.resolve()?;
-        let fingerprint = fingerprint(&resolved);
+        if usage_windows.len() > MAX_USAGE_WINDOWS {
+            return Err(ConfigError::TooManyUsageWindows);
+        }
+        usage_windows.sort_by(|left, right| left.id().cmp(right.id()));
+        if usage_windows
+            .windows(2)
+            .any(|pair| pair[0].id() == pair[1].id())
+        {
+            return Err(ConfigError::DuplicateUsageWindow);
+        }
+        let fingerprint = fingerprint(&resolved, &usage_windows);
         Ok(Self {
             id,
             fingerprint,
             resolved,
+            usage_windows,
         })
     }
 
@@ -132,6 +153,11 @@ impl ConfigEpoch {
     #[must_use]
     pub const fn resolved(&self) -> &ResolvedConfig {
         &self.resolved
+    }
+
+    #[must_use]
+    pub fn usage_windows(&self) -> &[UsageWindow] {
+        &self.usage_windows
     }
 }
 
@@ -239,7 +265,7 @@ fn resolve_u32<const N: usize>(
         .ok_or(ConfigError::MissingRequired(key))
 }
 
-fn fingerprint(config: &ResolvedConfig) -> u64 {
+fn fingerprint(config: &ResolvedConfig, usage_windows: &[UsageWindow]) -> u64 {
     let mut hash = 0xcbf2_9ce4_8422_2325_u64;
     for bytes in [
         CONFIG_SCHEMA_VERSION.to_le_bytes().as_slice(),
@@ -257,7 +283,47 @@ fn fingerprint(config: &ResolvedConfig) -> u64 {
             hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
         }
     }
+    for window in usage_windows {
+        for bytes in [
+            window.id().as_bytes(),
+            window.start_minute().to_le_bytes().as_slice(),
+            window.end_minute().to_le_bytes().as_slice(),
+            window.timezone().as_bytes(),
+            &[usage_timezone_source_tag(window.timezone_source())],
+            window.ruleset_version().as_bytes(),
+        ] {
+            hash ^= bytes.len() as u64;
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+            for byte in bytes {
+                hash ^= u64::from(*byte);
+                hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        }
+        for day in window.days() {
+            hash ^= u64::from(usage_weekday_tag(day));
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
     hash
+}
+
+const fn usage_timezone_source_tag(source: UsageTimezoneSource) -> u8 {
+    match source {
+        UsageTimezoneSource::Explicit => 1,
+        UsageTimezoneSource::LocalSystem => 2,
+    }
+}
+
+const fn usage_weekday_tag(day: UsageWeekday) -> u8 {
+    match day {
+        UsageWeekday::Mon => 1,
+        UsageWeekday::Tue => 2,
+        UsageWeekday::Wed => 3,
+        UsageWeekday::Thu => 4,
+        UsageWeekday::Fri => 5,
+        UsageWeekday::Sat => 6,
+        UsageWeekday::Sun => 7,
+    }
 }
 
 const fn source_tag(source: ConfigSource) -> u8 {
@@ -277,6 +343,8 @@ pub enum ConfigError {
     StringTooLong(&'static str),
     ZeroMaxOutputBytes,
     MaxOutputBytesTooLarge,
+    TooManyUsageWindows,
+    DuplicateUsageWindow,
 }
 
 impl fmt::Display for ConfigError {
@@ -300,6 +368,10 @@ impl fmt::Display for ConfigError {
                     "runtime.max_output_bytes exceeds the supported limit"
                 )
             }
+            Self::TooManyUsageWindows => {
+                write!(formatter, "usage window count exceeds the supported limit")
+            }
+            Self::DuplicateUsageWindow => write!(formatter, "usage window IDs must be unique"),
         }
     }
 }

@@ -130,10 +130,11 @@ continues the Provider once, and replays the acknowledged canonical output plus
 two Usage Records. Companion tests prove stale Sessions invoke no Provider,
 ambiguous effects never reach continuation, non-UTF-8 Tool output is blocked,
 and process death after a durable Tool success cannot repeat the effect.
-Migration tests replay a historical schema-1 Ledger before appending schema-3
-events, decode the historical schema-2 Provider Epoch shape separately, and
-round-trip schema-3 Provider Profile snapshots while rejecting fingerprint
-tampering.
+Migration tests replay a historical schema-1 Ledger before appending schema-4
+events, decode historical schema-2 and schema-3 Provider Epoch shapes
+separately, and round-trip schema-4 Provider Profile, dialect, Config Usage
+Window, and Usage Attempt data while rejecting fingerprint, outcome, timestamp,
+and transition tampering.
 
 Product integration tests also run the configured Responses adapter against a
 concrete loopback HTTP tracer. They resolve and freeze the fixture Provider
@@ -150,6 +151,17 @@ Another module test validates the exact two-request Tool protocol: advertised
 Windows-only tests exercise Credential Manager bind, replace, resolve, and
 forget. This does not cover live credentials, proxy authentication,
 reconnect/retry, live Providers, or broader Tool presentation.
+
+The first Usage projection suite durably records Provider request and
+continuation attempts, closes interrupted attempts only on explicit resume,
+and rebuilds cached Turn, Thread, Agent, Team, rolling, and named-window
+rollups. A deterministic exhaustive small-input test compares cached totals to
+source attempts across exact, estimated, unknown, and failed combinations;
+overflow remains unknown instead of wrapping. Window tests cover half-open and
+cross-midnight membership, both repeated DST instants, skipped local hours,
+concrete `local` IANA resolution, pinned rule-set provenance, duplicate-window
+rejection, and changed definitions under one name. Product tests verify Agent
+and Team scope after replay, and the `stats` JSON excludes user input.
 
 ### Crash and Recovery Tests
 

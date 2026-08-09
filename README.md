@@ -72,6 +72,7 @@ cargo run -p greentyper-acceptance -- bench list
 cargo run -p greentyper -- headless --ledger ./target/dev-runtime.ledger --input "hello"
 cargo run -p greentyper -- headless --ledger ./target/tool-runtime.ledger --tool local.echo --input "echo this"
 cargo run -p greentyper -- status --ledger ./target/dev-runtime.ledger
+cargo run -p greentyper -- stats --ledger ./target/dev-runtime.ledger
 cargo run -p greentyper -- config schema
 cargo run -p greentyper -- config get provider.model
 ```
@@ -110,6 +111,13 @@ transport tests. The core also normalizes one Responses function call, crosses
 durable Tool approval/effect policy, continues the Provider once, and prepares
 canonical output without repeating successful or ambiguous effects. Headless
 execution keeps the deterministic simulator when no custom profile is selected.
+Runtime Event schema 4 now brackets every Provider invocation with a durable
+Usage Attempt, records UTC start/completion and outcome, preserves exact,
+estimated, and unknown token classes, and rebuilds cached Turn, Thread, Agent,
+Team, rolling, and named-window rollups. Config Epochs freeze normalized Usage
+Windows with concrete IANA identity and rule-set provenance; `stats` reads the
+projection without exposing prompt text. Price Schedules and provider charge
+calculation are not implemented, so cost provenance remains explicitly unknown.
 Live-provider validation, configurable proxy policy, reconnect/retry, richer
 approval presentation, broader Provider and Tool adapters, Workspace, TUI, and
 App Server work remain. The loopback Provider tracer remains an internal

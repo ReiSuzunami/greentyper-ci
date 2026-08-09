@@ -25,6 +25,10 @@ for configured profiles and retains the deterministic simulator only when no
 custom profile is selected. Windows Credential Manager is the current platform
 backend; non-Windows product credential access fails closed. Retry, reconnect,
 live-provider validation, and broader Tool presentation remain separate work.
+The Kernel durably brackets each request and continuation as a separate Usage
+Attempt before invoking this adapter, so transport failure, interruption,
+successful usage, and replay remain distinguishable without persisting raw
+Provider events.
 
 ## Interface
 
@@ -171,6 +175,9 @@ live-provider test.
 A two-request HTTP test verifies the exact function definition, initial Tool
 call stream, canonical `local.echo` mapping, approved output correlation,
 previous-response continuation request, final text, and both Usage Records.
+Runtime tests additionally verify that those two records become two immutable
+Usage Attempts and that a process interruption closes the prior attempt before
+an explicit resume starts a new one.
 Product-driver tests separately prove denial invokes no executor and an
 interrupted approval can be re-presented after reopen before exactly one
 effect. A binary integration test verifies the opt-in driver creates and
