@@ -42,7 +42,7 @@ kernel.acknowledge_team_operation(operation.operation)?;
 - `event_log` exposes the current canonical events for tests and projection inspection.
 - `recover` accepts only contiguous, complete transactions and rebuilds the same projection or fails closed.
 
-Plain `TeamRuntime` commits remain `CommitDurability::Volatile` and cannot drive a user-visible acknowledgement. `DurableTeamRuntime` returns `CommitDurability::Synchronous` only after the dedicated Team Ledger has flushed a complete checksummed transaction. The core Runtime Kernel now owns that adapter when opened with a dedicated Team Ledger, gates root admission, persists operation identity and acknowledgement records, exposes pending operation status through `KernelTeamSnapshot`, and issues one consumable recovery bundle per open for Active, Dormant, and Blocked owners while excluding terminal Agents. Sessions inside the bundle remain ordinary copyable process-local capabilities. Standalone adapter recovery still invalidates every old Session. Operation IDs remain inspection and reconciliation identities, never Agent authority; no caller-selected ID conversion exists. Configured single-Agent Provider driving is present in the product CLI; product Team/Tool driving and user-visible Team acknowledgement remain outside this slice.
+Plain `TeamRuntime` commits remain `CommitDurability::Volatile` and cannot drive a user-visible acknowledgement. `DurableTeamRuntime` returns `CommitDurability::Synchronous` only after the dedicated Team Ledger has flushed a complete checksummed transaction. The core Runtime Kernel now owns that adapter when opened with a dedicated Team Ledger, gates root admission, persists operation identity and acknowledgement records, exposes pending operation status through `KernelTeamSnapshot`, and issues one consumable recovery bundle per open for Active, Dormant, and Blocked owners while excluding terminal Agents. Sessions inside the bundle remain ordinary copyable process-local capabilities. Standalone adapter recovery still invalidates every old Session. Operation IDs remain inspection and reconciliation identities, never Agent authority; no caller-selected ID conversion exists. The product CLI now composes this path for one fixed `local.echo` Tool: it presents and durably acknowledges the Team operation receipt, requests an explicit grant or denial, and restores the dedicated Team and Tool Ledgers on reopen. Multi-Agent presentation, broader Tool catalogs, and TUI/App Server acknowledgement remain pending.
 
 ## Command Flow
 
@@ -104,12 +104,12 @@ Provider output, Tool effects, approvals, Workspace Leases, Read Sets, merge out
 
 1. Harden the configured remote Responses path with live-provider validation,
    broader TLS platform evidence, configurable proxy policy, and explicit
-   reconnect/retry rules; extend the private fixed `local.echo` tracer into a
-   public product Tool path only after caller-selected process policy and
-   complete Windows Job evidence can fail closed.
-2. Connect the Kernel-owned Team operation journal and Tool outcome to product
-   driving and user-visible acknowledgement; the concrete Provider path exists,
-   while the product Tool effect path does not.
+   reconnect/retry rules; broaden the fixed public `local.echo` path only after
+   caller-selected process policy and complete Windows Job evidence can fail
+   closed.
+2. Extend the current Kernel-owned ProductDriver and CLI receipt/approval path
+   into TUI/App Server presentation, durable resumable Tool-result references,
+   and richer reconciliation without exposing Agent Session authority.
 3. Add Workspace Coordinator facts, then exclusive Workspace Lease and Read Set adapters when the first writable Task lands.
 4. Extend byte-offset process termination from the Team Ledger transaction seam to every product Provider/Tool delivery and acknowledgement boundary.
 5. Exercise Performance Contract workload P3 with two Active Agents on the Target Machine and four on FMDev; measure Dormant increment rather than assuming it.

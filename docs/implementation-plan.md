@@ -4,7 +4,7 @@
 
 Implementation proceeds as runnable vertical slices. Each phase must preserve Ledger recovery, authority boundaries, and measured resource behavior; no phase may defer all testing or performance work to the end.
 
-Feature implementation was authorized on 2026-08-09. The first core slice fixes the Agent Team command/event interface, process-local Agent Sessions, and pure orchestration policy early; it does not claim Phase 7 completion. Plain `TeamRuntime` remains volatile. A separate durable Team adapter proves synchronous persistence, and the core Runtime Kernel now owns it, gates root admission, persists operation identity and acknowledgement records in the same Team Ledger, and rebinds the complete non-terminal Session set after recovery. The first Phase 2 slices persist Tool call identity, Approval Grant binding, prepared-effect state, terminal digests, and explicit ambiguous-effect reconciliation, and add bounded generic SSE framing plus a strict OpenAI Responses streaming decoder. Configured product Provider driving is now present; product Tool driving and user-visible Tool delivery remain pending.
+Feature implementation was authorized on 2026-08-09. The first core slice fixes the Agent Team command/event interface, process-local Agent Sessions, and pure orchestration policy early; it does not claim Phase 7 completion. Plain `TeamRuntime` remains volatile. A separate durable Team adapter proves synchronous persistence, and the core Runtime Kernel now owns it, gates root admission, persists operation identity and acknowledgement records in the same Team Ledger, and rebinds the complete non-terminal Session set after recovery. The first Phase 2 slices persist Tool call identity, Approval Grant binding, prepared-effect state, terminal digests, and explicit ambiguous-effect reconciliation, and add bounded generic SSE framing plus a strict OpenAI Responses streaming decoder. Configured product Provider driving and one explicit `local.echo` approval/delivery path are now present; broader Tool catalogs and presentation remain pending.
 
 ## Phase 0: Repository and Measurement Foundation
 
@@ -121,9 +121,10 @@ It launches a fixed same-binary child without a shell, clears inherited
 environment and working-directory state, bounds all three standard streams and
 execution time, kills the Unix process group on abort, and on Windows creates
 the process suspended before assigning a single-process, 128 MiB,
-kill-on-close Job Object. The adapter rejects filesystem and network resources;
-it is evidence for one narrow local process Tool, not a general process
-sandbox or public product command.
+kill-on-close Job Object. The adapter rejects filesystem and network resources.
+The product exposes it only through explicit `--tool local.echo` approval; it
+is one narrow local process Tool, not a general process sandbox or
+caller-selected command.
 
 A configured product adapter now exercises the concrete Responses HTTP seam.
 Config Runtime resolves and freezes its typed Provider Profile, origin,
@@ -139,9 +140,9 @@ trusted and untrusted TLS, and missing credential failure before network access.
 The remaining slices are still policy, protocol, and fault-adapter work:
 live-provider validation, non-Windows credential backends, configurable proxy
 policy, Provider Template defaults/catalogs, broader canonical Items, multiple
-Tool calls, durable resumable Tool result references, a public Product Tool
-driver and approval/delivery, caller-selected process policy, complete Windows
-Job lifetime/resource evidence, reconnect/retry behavior, and the cross-process
+Tool calls, durable resumable Tool result references, richer TUI/App Server
+approval/delivery, caller-selected process policy, complete Windows Job
+lifetime/resource evidence, reconnect/retry behavior, and the cross-process
 Tool crash matrix remain pending.
 
 Exit criteria:

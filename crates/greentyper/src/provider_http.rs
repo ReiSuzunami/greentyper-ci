@@ -9,10 +9,13 @@ use std::time::{Duration, Instant};
 use greentyper_core::config::{
     ConfigDocument, ConfigPaths, ConfigRuntime, ConfigRuntimeError, DEFAULT_MAX_OUTPUT_BYTES,
 };
-use greentyper_core::provider::responses::{ResponsesSseDecoder, normalize_responses_events};
+use greentyper_core::provider::responses::{
+    ResponsesEventKind, ResponsesSseDecoder, normalize_responses_events,
+};
 use greentyper_core::provider::{
     DeterministicProvider, ProviderDialect, ProviderEpoch, ProviderError, ProviderEvent,
     ProviderPricingSource, ProviderProfileSnapshot, ProviderRequest, ProviderRuntime,
+    ProviderToolCall, ProviderToolOutput,
 };
 use greentyper_core::runtime::{RuntimeError, RuntimeKernel};
 use reqwest::blocking::{Client, ClientBuilder};
@@ -40,6 +43,12 @@ const READ_CHUNK_BYTES: usize = 8 * 1024;
 const PRIVATE_ERROR_BODY: &[u8] = b"provider-private-error-marker";
 const SUCCESS_SSE: &[u8] =
     include_bytes!("../../../tests/fixtures/provider/responses/v1/http-text.sse");
+#[cfg(test)]
+const TOOL_CALL_SSE: &[u8] =
+    include_bytes!("../../../tests/fixtures/provider/responses/v1/http-tool-call.sse");
+#[cfg(test)]
+const TOOL_CONTINUATION_SSE: &[u8] =
+    include_bytes!("../../../tests/fixtures/provider/responses/v1/http-tool-continuation.sse");
 
 pub(crate) struct ResponsesHttpProvider<V> {
     client: Client,
@@ -47,6 +56,13 @@ pub(crate) struct ResponsesHttpProvider<V> {
     profile: ProviderProfileSnapshot,
     credential_scope: ProviderCredentialScope,
     vault: V,
+    local_echo_enabled: bool,
+    pending_continuation: Option<PendingContinuation>,
+}
+
+struct PendingContinuation {
+    response_id: String,
+    call_id: String,
 }
 
 impl<V> fmt::Debug for ResponsesHttpProvider<V> {
@@ -122,34 +138,27 @@ impl<V: CredentialVault> ResponsesHttpProvider<V> {
             profile,
             credential_scope,
             vault,
+            local_echo_enabled: false,
+            pending_continuation: None,
         })
     }
-}
 
-impl<V: CredentialVault> ProviderRuntime for ResponsesHttpProvider<V> {
-    fn profile_snapshot(&self) -> Option<&ProviderProfileSnapshot> {
-        Some(&self.profile)
+    fn enable_local_echo(&mut self) {
+        self.local_echo_enabled = true;
     }
 
-    fn run(&mut self, request: &ProviderRequest) -> Result<Vec<ProviderEvent>, ProviderError> {
-        if request.provider.profile() != self.profile.profile()
-            || request.provider.profile_snapshot() != Some(&self.profile)
-        {
-            return Err(ProviderError::InvalidConfiguration(
-                "Responses provider identity does not match its frozen Profile",
-            ));
-        }
+    fn send_request(
+        &self,
+        body: serde_json::Value,
+        max_output_bytes: usize,
+    ) -> Result<(String, Vec<ProviderEvent>), ProviderError> {
         let secret = self
             .vault
             .resolve(&self.credential_scope)
             .map_err(map_credential_resolve_error)?;
         let authorization = bearer_header(&secret)?;
-        let body = serde_json::to_vec(&serde_json::json!({
-            "input": request.input,
-            "model": request.provider.model(),
-            "stream": true,
-        }))
-        .map_err(|_| ProviderError::InvalidRequest("Responses request could not be encoded"))?;
+        let body = serde_json::to_vec(&body)
+            .map_err(|_| ProviderError::InvalidRequest("Responses request could not be encoded"))?;
         let mut response = self
             .client
             .post(self.endpoint.clone())
@@ -174,9 +183,6 @@ impl<V: CredentialVault> ProviderRuntime for ResponsesHttpProvider<V> {
             ));
         }
 
-        let max_output_bytes =
-            usize::try_from(*request.config.resolved().max_output_bytes().value())
-                .map_err(|_| ProviderError::InvalidConfiguration("output byte limit is invalid"))?;
         let mut decoder = ResponsesSseDecoder::new(max_output_bytes).map_err(|_| {
             ProviderError::InvalidConfiguration("Responses decoder limits are invalid")
         })?;
@@ -195,8 +201,166 @@ impl<V: CredentialVault> ProviderRuntime for ResponsesHttpProvider<V> {
         let events = decoder
             .finish()
             .map_err(|_| ProviderError::InvalidResponse("Responses HTTP stream ended invalidly"))?;
-        normalize_responses_events(&events)
+        let response_id = match events.first().map(|event| &event.kind) {
+            Some(ResponsesEventKind::Created { response_id }) => response_id.clone(),
+            _ => {
+                return Err(ProviderError::InvalidResponse(
+                    "Responses HTTP stream omitted response creation",
+                ));
+            }
+        };
+        let events = normalize_responses_events(&events)?;
+        Ok((response_id, events))
     }
+
+    fn take_pending_continuation(
+        &mut self,
+        call_id: &str,
+    ) -> Result<PendingContinuation, ProviderError> {
+        let pending = self
+            .pending_continuation
+            .as_ref()
+            .ok_or(ProviderError::InvalidRequest(
+                "Responses Provider has no pending Tool continuation",
+            ))?;
+        if call_id != pending.call_id {
+            return Err(ProviderError::InvalidRequest(
+                "Responses Tool output does not match the pending call",
+            ));
+        }
+        self.pending_continuation
+            .take()
+            .ok_or(ProviderError::InvalidRequest(
+                "Responses Provider has no pending Tool continuation",
+            ))
+    }
+}
+
+impl<V: CredentialVault> ProviderRuntime for ResponsesHttpProvider<V> {
+    fn profile_snapshot(&self) -> Option<&ProviderProfileSnapshot> {
+        Some(&self.profile)
+    }
+
+    fn run(&mut self, request: &ProviderRequest) -> Result<Vec<ProviderEvent>, ProviderError> {
+        if request.provider.profile() != self.profile.profile()
+            || request.provider.profile_snapshot() != Some(&self.profile)
+        {
+            return Err(ProviderError::InvalidConfiguration(
+                "Responses provider identity does not match its frozen Profile",
+            ));
+        }
+        let max_output_bytes =
+            usize::try_from(*request.config.resolved().max_output_bytes().value())
+                .map_err(|_| ProviderError::InvalidConfiguration("output byte limit is invalid"))?;
+        self.pending_continuation = None;
+        let body = if self.local_echo_enabled {
+            serde_json::json!({
+                "input": request.input,
+                "model": request.provider.model(),
+                "stream": true,
+                "tool_choice": "auto",
+                "tools": [local_echo_tool_definition()],
+            })
+        } else {
+            serde_json::json!({
+                "input": request.input,
+                "model": request.provider.model(),
+                "stream": true,
+            })
+        };
+        let (response_id, events) = self.send_request(body, max_output_bytes)?;
+        let events = if self.local_echo_enabled {
+            normalize_local_echo_calls(events)?
+        } else {
+            events
+        };
+        let mut calls = events.iter().filter_map(|event| match event {
+            ProviderEvent::FunctionCall(call) => Some(call),
+            ProviderEvent::TextDelta(_) | ProviderEvent::Completed(_) => None,
+        });
+        if let (Some(call), None) = (calls.next(), calls.next()) {
+            self.pending_continuation = Some(PendingContinuation {
+                response_id,
+                call_id: call.call_id().to_owned(),
+            });
+        }
+        Ok(events)
+    }
+
+    fn continue_after_tool(
+        &mut self,
+        request: &ProviderRequest,
+        output: &ProviderToolOutput,
+    ) -> Result<Vec<ProviderEvent>, ProviderError> {
+        if request.provider.profile() != self.profile.profile()
+            || request.provider.profile_snapshot() != Some(&self.profile)
+        {
+            return Err(ProviderError::InvalidConfiguration(
+                "Responses provider identity does not match its frozen Profile",
+            ));
+        }
+        if !self.local_echo_enabled {
+            return Err(ProviderError::InvalidRequest(
+                "Responses Provider has no enabled Tool continuation",
+            ));
+        }
+        let pending = self.take_pending_continuation(output.call_id())?;
+        let max_output_bytes =
+            usize::try_from(*request.config.resolved().max_output_bytes().value())
+                .map_err(|_| ProviderError::InvalidConfiguration("output byte limit is invalid"))?;
+        let body = serde_json::json!({
+            "input": [{
+                "type": "function_call_output",
+                "call_id": output.call_id(),
+                "output": output.output(),
+            }],
+            "model": request.provider.model(),
+            "previous_response_id": pending.response_id,
+            "stream": true,
+            "tool_choice": "none",
+            "tools": [local_echo_tool_definition()],
+        });
+        self.send_request(body, max_output_bytes)
+            .map(|(_, events)| events)
+    }
+}
+
+fn local_echo_tool_definition() -> serde_json::Value {
+    serde_json::json!({
+        "type": "function",
+        "name": "local_echo",
+        "description": "Return the supplied message unchanged.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "message": {"type": "string"},
+            },
+            "required": ["message"],
+            "additionalProperties": false,
+        },
+        "strict": true,
+    })
+}
+
+fn normalize_local_echo_calls(
+    events: Vec<ProviderEvent>,
+) -> Result<Vec<ProviderEvent>, ProviderError> {
+    events
+        .into_iter()
+        .map(|event| match event {
+            ProviderEvent::FunctionCall(call) if call.tool() == "local_echo" => {
+                Ok(ProviderEvent::FunctionCall(ProviderToolCall::new(
+                    call.call_id(),
+                    "local.echo",
+                    call.arguments_json(),
+                )?))
+            }
+            ProviderEvent::FunctionCall(_) => Err(ProviderError::InvalidResponse(
+                "Responses Provider returned an unconfigured Tool",
+            )),
+            other => Ok(other),
+        })
+        .collect()
 }
 
 pub(crate) enum ConfiguredProvider<V> {
@@ -205,6 +369,12 @@ pub(crate) enum ConfiguredProvider<V> {
 }
 
 impl<V: CredentialVault> ConfiguredProvider<V> {
+    pub(crate) fn enable_local_echo(&mut self) {
+        if let Self::Responses(provider) = self {
+            provider.enable_local_echo();
+        }
+    }
+
     pub(crate) fn for_new_turn(
         profile: Option<ProviderProfileSnapshot>,
         vault: V,
@@ -245,6 +415,17 @@ impl<V: CredentialVault> ProviderRuntime for ConfiguredProvider<V> {
         match self {
             Self::Simulator(provider) => provider.run(request),
             Self::Responses(provider) => provider.run(request),
+        }
+    }
+
+    fn continue_after_tool(
+        &mut self,
+        request: &ProviderRequest,
+        output: &ProviderToolOutput,
+    ) -> Result<Vec<ProviderEvent>, ProviderError> {
+        match self {
+            Self::Simulator(provider) => provider.continue_after_tool(request, output),
+            Self::Responses(provider) => provider.continue_after_tool(request, output),
         }
     }
 }
@@ -900,13 +1081,23 @@ impl From<ConfigRuntimeError> for ProviderHttpError {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
+    use greentyper_core::agent_team::{
+        Capability, CapabilitySnapshot, CommandOutcome, ResourceBudget, TaskScope, TaskSpec,
+        TeamCommand,
+    };
     use greentyper_core::config::{ConfigEpoch, ConfigLayers};
     use greentyper_core::model::{ConfigEpochId, ProviderEpochId, ThreadId, TurnId};
     use greentyper_core::provider::ProviderEpoch;
+    use greentyper_core::runtime::ProviderTurnOutcome;
+    use greentyper_core::tool_runtime::{
+        ApprovalDecision, AuthorizedToolCall, ToolEffectExecutor, ToolExecution, ToolResources,
+    };
     use rcgen::{CertifiedKey, generate_simple_self_signed};
     use rustls::pki_types::PrivatePkcs8KeyDer;
     use rustls::{ServerConfig, ServerConnection, StreamOwned};
@@ -1025,6 +1216,49 @@ mod tests {
                 "Provider credential binding was not found"
             ))
         ));
+    }
+
+    #[test]
+    fn mismatched_tool_output_does_not_consume_the_pending_continuation() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("loopback listener");
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let runtime =
+            fixture_config_runtime(&base_url, test_config_paths("mismatched-continuation-call"))
+                .expect("valid fixture Config");
+        let profile = runtime
+            .selected_provider_profile()
+            .expect("resolve fixture Provider Profile")
+            .expect("custom Provider Profile");
+        let scope = ProviderCredentialScope::from_profile(&profile).expect("credential scope");
+        let mut vault = InMemoryCredentialVault::default();
+        vault
+            .bind(&scope, SecretValue::new(SYNTHETIC_SECRET.to_vec()).unwrap())
+            .expect("bind credential");
+        let mut provider = ResponsesHttpProvider::with_timeout(profile, vault, HTTP_TIMEOUT)
+            .expect("Responses Provider");
+        provider.pending_continuation = Some(PendingContinuation {
+            response_id: "resp_pending_1".into(),
+            call_id: "call_pending_1".into(),
+        });
+
+        assert!(matches!(
+            provider.take_pending_continuation("call_wrong"),
+            Err(ProviderError::InvalidRequest(
+                "Responses Tool output does not match the pending call"
+            ))
+        ));
+        assert_eq!(
+            provider
+                .pending_continuation
+                .as_ref()
+                .map(|pending| pending.call_id.as_str()),
+            Some("call_pending_1")
+        );
+        let pending = provider
+            .take_pending_continuation("call_pending_1")
+            .expect("consume matching continuation");
+        assert_eq!(pending.response_id, "resp_pending_1");
+        assert!(provider.pending_continuation.is_none());
     }
 
     #[test]
@@ -1188,5 +1422,211 @@ mod tests {
 
         assert!(matches!(events.last(), Some(ProviderEvent::Completed(_))));
         server.join().expect("join TLS server");
+    }
+
+    #[test]
+    fn responses_provider_continues_one_approved_function_call_over_http() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("loopback listener");
+        let address = listener.local_addr().expect("listener address");
+        let server = thread::spawn(move || {
+            let (mut initial, _) = listener.accept().expect("accept initial request");
+            configure_fixture_stream(&initial).expect("configure initial request");
+            let initial_body = read_test_request_body(&mut initial);
+            assert_eq!(
+                initial_body,
+                serde_json::json!({
+                    "input": "echo through the approved tool",
+                    "model": FIXTURE_MODEL,
+                    "stream": true,
+                    "tool_choice": "auto",
+                    "tools": [{
+                        "type": "function",
+                        "name": "local_echo",
+                        "description": "Return the supplied message unchanged.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"message": {"type": "string"}},
+                            "required": ["message"],
+                            "additionalProperties": false,
+                        },
+                        "strict": true,
+                    }],
+                })
+            );
+            write_fixture_response(
+                &mut initial,
+                "200 OK",
+                "text/event-stream",
+                TOOL_CALL_SSE,
+                true,
+            )
+            .expect("write Tool call response");
+
+            let (mut continuation, _) = listener.accept().expect("accept continuation request");
+            configure_fixture_stream(&continuation).expect("configure continuation request");
+            let continuation_body = read_test_request_body(&mut continuation);
+            assert_eq!(
+                continuation_body,
+                serde_json::json!({
+                    "input": [{
+                        "type": "function_call_output",
+                        "call_id": "call_http_echo_1",
+                        "output": "tool says hi",
+                    }],
+                    "model": FIXTURE_MODEL,
+                    "previous_response_id": "resp_http_tool_1",
+                    "stream": true,
+                    "tool_choice": "none",
+                    "tools": [{
+                        "type": "function",
+                        "name": "local_echo",
+                        "description": "Return the supplied message unchanged.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"message": {"type": "string"}},
+                            "required": ["message"],
+                            "additionalProperties": false,
+                        },
+                        "strict": true,
+                    }],
+                })
+            );
+            write_fixture_response(
+                &mut continuation,
+                "200 OK",
+                "text/event-stream",
+                TOOL_CONTINUATION_SSE,
+                true,
+            )
+            .expect("write Tool continuation response");
+        });
+
+        let base_url = format!("http://{address}");
+        let runtime =
+            provider_config_runtime(&base_url, true, test_config_paths("tool-continuation-http"))
+                .expect("valid loopback Provider Config");
+        let profile = runtime
+            .selected_provider_profile()
+            .expect("resolve Provider Profile")
+            .expect("Provider Profile");
+        let scope = ProviderCredentialScope::from_profile(&profile).expect("credential scope");
+        let mut vault = InMemoryCredentialVault::default();
+        vault
+            .bind(&scope, SecretValue::new(SYNTHETIC_SECRET.to_vec()).unwrap())
+            .expect("bind credential");
+        let mut provider =
+            ResponsesHttpProvider::with_timeout(profile, vault, Duration::from_secs(2))
+                .expect("Responses provider");
+        provider.enable_local_echo();
+
+        let runtime_path = test_ledger_path("tool-continuation", "runtime");
+        let team_path = test_ledger_path("tool-continuation", "team");
+        let tool_path = test_ledger_path("tool-continuation", "tool");
+        let (mut kernel, recovery) =
+            RuntimeKernel::open_with_team_and_tools(&runtime_path, &team_path, &tool_path, 1)
+                .expect("open Kernel");
+        assert!(recovery.into_sessions().is_empty());
+        let operation = kernel
+            .dispatch_team(TeamCommand::AdmitRoot {
+                task: TaskSpec::new(
+                    "exercise one HTTP Tool continuation",
+                    TaskScope::from_labels(["provider-tool-http"]),
+                ),
+                budget: ResourceBudget::new(1_000, 1),
+                capabilities: CapabilitySnapshot::from_capabilities([
+                    Capability::Tool("local.echo".into()),
+                    Capability::Process,
+                ]),
+            })
+            .expect("admit root");
+        kernel
+            .acknowledge_team_operation(operation.operation)
+            .expect("acknowledge root admission");
+        let root = match operation.commit.outcome {
+            CommandOutcome::RootAdmitted { session, .. } => session,
+            other => panic!("unexpected root outcome: {other:?}"),
+        };
+        let outcome = kernel
+            .execute_provider_turn(
+                root,
+                runtime.config_layers().expect("Config layers"),
+                "echo through the approved tool",
+                &mut provider,
+                |_| Ok(ToolResources::default().with_process("greentyper.local.echo.v1")),
+            )
+            .expect("prepare Tool approval");
+        let approval = match outcome {
+            ProviderTurnOutcome::ApprovalRequired(approval) => approval,
+            other => panic!("unexpected Provider outcome: {other:?}"),
+        };
+        let output = kernel
+            .resolve_provider_tool_call(
+                approval,
+                ApprovalDecision::Grant {
+                    expires_at_unix_ms: u64::MAX,
+                },
+                &mut EchoExecutor,
+                &mut provider,
+            )
+            .expect("continue after Tool output");
+        assert_eq!(output.text(), "Echoed: tool says hi");
+        assert_eq!(output.usage_records().len(), 2);
+        server.join().expect("join HTTP server");
+
+        drop(kernel);
+        fs::remove_file(runtime_path).expect("cleanup Runtime Ledger");
+        fs::remove_file(team_path).expect("cleanup Team Ledger");
+        fs::remove_file(tool_path).expect("cleanup Tool Ledger");
+    }
+
+    struct EchoExecutor;
+
+    impl ToolEffectExecutor for EchoExecutor {
+        fn execute(&mut self, call: &AuthorizedToolCall<'_>) -> ToolExecution {
+            assert_eq!(call.tool(), "local.echo");
+            assert_eq!(
+                call.arguments().canonical_json(),
+                r#"{"message":"tool says hi"}"#
+            );
+            ToolExecution::Succeeded {
+                output: b"tool says hi".to_vec(),
+            }
+        }
+    }
+
+    fn test_ledger_path(name: &str, ledger: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time after epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "greentyper-provider-http-{name}-{ledger}-{}-{nonce}-{}",
+            std::process::id(),
+            NEXT_CONFIG.fetch_add(1, Ordering::Relaxed)
+        ))
+    }
+
+    fn read_test_request_body(stream: &mut impl Read) -> serde_json::Value {
+        let mut bytes = Vec::new();
+        let mut chunk = [0_u8; 4096];
+        let (body_start, content_length) = loop {
+            let read = stream.read(&mut chunk).expect("read request");
+            assert_ne!(read, 0, "request ended before headers");
+            bytes.extend_from_slice(&chunk[..read]);
+            let Some(header_end) = find_header_end(&bytes) else {
+                continue;
+            };
+            let headers = std::str::from_utf8(&bytes[..header_end]).expect("request headers UTF-8");
+            let content_length = parse_fixture_headers(headers).expect("canonical headers");
+            break (header_end + 4, content_length);
+        };
+        let expected_len = body_start + content_length;
+        while bytes.len() < expected_len {
+            let read = stream.read(&mut chunk).expect("read request body");
+            assert_ne!(read, 0, "request body ended early");
+            bytes.extend_from_slice(&chunk[..read]);
+        }
+        assert_eq!(bytes.len(), expected_len, "request had trailing bytes");
+        serde_json::from_slice(&bytes[body_start..]).expect("request body JSON")
     }
 }

@@ -15,7 +15,14 @@ fixed same-binary child, not a caller-selected command or shell. Unix runs in a
 dedicated process group; Windows creates the child suspended, assigns a Job
 Object, then resumes it. This does not claim a general filesystem/network
 sandbox, network transport, MCP client, credential store, or product approval
-surface.
+surface beyond the fixed tracer.
+
+The product CLI exposes this one adapter through
+`headless --tool local.echo`. A product-owned driver restores the Agent
+Session, publishes the durable Team receipt, displays the exact bounded
+arguments and resources, and requires `approve` or `deny` before the Kernel
+crosses `EffectPrepared`. This is a narrow approval surface, not a general Tool
+catalog or caller-selected process interface.
 
 ## Interface
 
@@ -138,9 +145,9 @@ failed or ambiguous no-repeat state. A Windows-only test verifies that the Job
 Object's active-process limit denies a descendant; cross-target checks compile
 the audited handle wrapper.
 
-Still pending: a public Product Tool driver and approval/result delivery,
+Still pending: richer TUI/App Server approval and result presentation,
 caller-selected process policy, complete Windows Job kill-on-close and memory-
 limit evidence on the Target Machine, filesystem/network/MCP adapters,
-credential-vault integration, multiple Provider Tool calls, cross-process
-byte-offset termination around every effect boundary, fuzzing, and production
-storage migration.
+credential-vault integration for Tools, multiple Provider Tool calls,
+cross-process byte-offset termination around every effect boundary, fuzzing,
+and production storage migration.

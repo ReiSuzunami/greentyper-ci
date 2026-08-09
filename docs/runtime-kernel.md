@@ -15,8 +15,9 @@ prepared Tool effects. A fixture Provider driver can now normalize one OpenAI
 Responses function call, cross Tool Runtime approval and effect durability,
 continue the Provider once, and prepare canonical output. The product CLI now
 drives configured Responses profiles through the provider-neutral seam and
-retains the deterministic simulator for the unconfigured default; it still
-does not expose the Tool approval/continuation path. The
+retains the deterministic simulator for the unconfigured default. Its opt-in
+`local.echo` path composes the Kernel-owned Team, Tool, Provider continuation,
+explicit approval, stdout delivery, and acknowledgement seams. The
 provisional checksummed file Ledger is not yet the recorded SQLite-versus-
 append-log technology choice.
 
@@ -227,8 +228,8 @@ startup without one enters repair instead of silently dropping a layer.
 ## Current Commands
 
 ```text
-greentyper headless [--ledger PATH] --input TEXT
-greentyper resume [--ledger PATH]
+greentyper headless [--ledger PATH] [--tool local.echo] --input TEXT
+greentyper resume [--ledger PATH] [--tool local.echo]
 greentyper status [--ledger PATH]
 greentyper reconcile [--ledger PATH] --delivery ID
 greentyper config schema
@@ -248,16 +249,17 @@ on other Unix systems. Without a configured Provider Profile, headless uses the
 synthetic bounded simulator. Headless stdout is the raw canonical UTF-8 text
 sink, not a terminal-safe or JSON framing layer. Untrusted configured Provider
 output still needs an explicit framing or presentation policy before this
-interface becomes a public automation protocol.
+interface becomes a public automation protocol. In `local.echo` mode, durable
+Team-operation and Tool-approval events are written as JSON to stderr and
+flushed before acknowledgement; the decision is read from stdin as exactly
+`approve` or `deny`.
 
 ## Still Pending
 
-- Product CLI and Provider/Tool driving over the Kernel-owned Agent Team seam,
-  including delivery of the already-persisted operation receipt to a
-  user-visible sink before the Kernel acknowledgement call. Core already owns
-  the dedicated adapter, operation journal, explicit acknowledgement surface,
-  root gate, and one consumable complete non-terminal Session bundle per
-  validated open without an ID-to-session conversion.
+- Rich TUI/App Server approval and result presentation beyond the fixed
+  `local.echo` CLI. The current product driver already delivers the persisted
+  operation receipt before acknowledgement and consumes only the complete
+  Kernel-rebound Session bundle; it exposes no Agent-ID-to-session conversion.
 - Complete Config Schema default/constraint/normalization/migration metadata,
   TUI/App Server editors, and Provider Templates/catalogs.
 - Live-provider validation, non-Windows credential backends, configurable proxy
@@ -270,7 +272,7 @@ interface becomes a public automation protocol.
 - Broader Tool adapters and sandboxing: the private fixed `local.echo` tracer,
   Unix process-group termination, and Windows Job wrapper are present;
   caller-selected process policy, complete Windows lifetime/resource evidence,
-  filesystem/network enforcement, MCP, product approval UX, and credential
+  filesystem/network enforcement, MCP, richer approval UX, and Tool credential
   resolution remain pending. Core call identity, Approval Grant binding,
   prepared-effect ordering, terminal digests, and reconciliation are present.
 - Byte-offset process termination around every remaining Runtime, Provider,

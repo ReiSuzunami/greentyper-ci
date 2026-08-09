@@ -98,6 +98,55 @@ fn headless_command_outputs_then_durably_acknowledges() {
 }
 
 #[test]
+fn headless_local_echo_mode_uses_the_product_driver_and_returns_ready() {
+    let path = temp_path("product-driver");
+    let output = binary()
+        .args(["headless", "--ledger"])
+        .arg(&path)
+        .args(["--tool", "local.echo", "--input", "hello"])
+        .output()
+        .expect("run Product driver command");
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(output.stdout, b"simulated: hello\n");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("team-operation-committed"),
+        "{output:?}"
+    );
+
+    let status = binary()
+        .args(["status", "--ledger"])
+        .arg(&path)
+        .output()
+        .expect("run status command");
+    assert!(status.status.success(), "{status:?}");
+    assert_eq!(status.stdout, b"ready\n");
+
+    let replayed = binary()
+        .args(["headless", "--ledger"])
+        .arg(&path)
+        .args(["--input", "again"])
+        .output()
+        .expect("reopen Product driver from sidecar state");
+    assert!(replayed.status.success(), "{replayed:?}");
+    assert_eq!(replayed.stdout, b"simulated: again\n");
+    assert!(
+        !String::from_utf8_lossy(&replayed.stderr).contains("team-operation-committed"),
+        "replayed Team receipt must not be emitted twice: {replayed:?}"
+    );
+
+    let replayed_status = binary()
+        .args(["status", "--ledger"])
+        .arg(&path)
+        .output()
+        .expect("inspect replayed Product driver");
+    assert!(replayed_status.status.success(), "{replayed_status:?}");
+    assert_eq!(replayed_status.stdout, b"ready\n");
+    fs::remove_file(&path).expect("cleanup Runtime ledger");
+    fs::remove_file(sidecar(&path, "team")).expect("cleanup Team ledger");
+    fs::remove_file(sidecar(&path, "tool")).expect("cleanup Tool ledger");
+}
+
+#[test]
 fn headless_refuses_to_repeat_prepared_unacknowledged_output() {
     let path = temp_path("reconcile");
     let mut runtime = RuntimeKernel::open(&path).expect("open Runtime");
@@ -210,4 +259,11 @@ impl ProviderRuntime for PanicProvider {
     fn run(&mut self, _request: &ProviderRequest) -> Result<Vec<ProviderEvent>, ProviderError> {
         panic!("injected crash after admission")
     }
+}
+
+fn sidecar(path: &Path, kind: &str) -> PathBuf {
+    let mut sidecar = path.as_os_str().to_owned();
+    sidecar.push(".");
+    sidecar.push(kind);
+    PathBuf::from(sidecar)
 }

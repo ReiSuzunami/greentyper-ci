@@ -33,7 +33,7 @@ The core must build and run pure tests on macOS ARM. Platform-specific I/O enter
 
 ### `greentyper`
 
-The shipped product executable. It owns composition, TUI, CLI, App Server, and concrete production adapters. Its current private adapters include configured Responses HTTP/SSE, origin-bound Windows Credential Manager access, and the fixed `local.echo` process tracer. Audited Windows wrappers for terminal, process, credential, and transport facilities remain private to this package unless a second real caller proves a smaller shared package is needed.
+The shipped product executable. It owns composition, TUI, CLI, App Server, and concrete production adapters. Its current private modules include configured Responses HTTP/SSE, origin-bound Windows Credential Manager access, the fixed `local.echo` process executor, and a ProductDriver that composes the Kernel-owned Team, Tool, Provider, approval, and delivery seams. Audited Windows wrappers for terminal, process, credential, and transport facilities remain private to this package unless a second real caller proves a smaller shared package is needed.
 
 Presentation translates user intent into core interfaces. It does not reimplement runtime, configuration, usage, or authority policy.
 

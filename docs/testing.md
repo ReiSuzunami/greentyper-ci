@@ -96,9 +96,10 @@ now binds typed, frozen Provider Profile and route metadata to origin-scoped
 credential lookup. Live-provider validation, non-Windows credential backends,
 configurable proxy policy, broader TLS platform evidence, broader canonical
 Runtime Items, reasoning/refusal/annotation and other unimplemented Responses
-event kinds, reconnect/retry fixtures, MCP adapters, receipt delivery to a
-user-visible Tool sink, the cross-process Tool byte-offset matrix, and final
-reconciliation presentation remain pending.
+event kinds, reconnect/retry fixtures, MCP adapters, richer TUI/App Server Tool
+presentation, the cross-process Tool byte-offset matrix, and final
+reconciliation presentation remain pending. The fixed CLI path now flushes the
+Team receipt and exact approval event before acknowledgement.
 Migration/backup remains in the candidate storage harness rather than these
 provisional product adapters.
 
@@ -111,6 +112,16 @@ argument/resource rejection, raw-resource exclusion from the Tool Ledger, and
 Unix process-group descendant termination. The Windows job also runs a
 platform-only descendant-denial test; kill-on-close and process-memory-limit
 evidence on a real Windows runner/Target remains a separate gate.
+
+Product-driver tests cover explicit grant, denial with zero executor calls,
+an interrupted approval reopened from the three durable Ledgers before exactly
+one effect, fail-closed partial sidecars, ambiguous-effect reconciliation, and
+process death after a durable Tool success without repeating the effect. A
+presentation test leaves Product output unacknowledged after a broken writer.
+A binary test exercises `headless --tool local.echo`, verifies the Team receipt
+and final stdout, then reopens the same three Ledgers for another Turn without
+presenting the already-acknowledged Team receipt again; Runtime returns to
+`ready` after both Turns.
 
 The first fixture Provider/Tool tracer bullet decodes and normalizes one
 Responses function call, requires a current Session and exact Tool authority,
@@ -133,9 +144,12 @@ item; classify HTTP 503 and request timeout without exposing an upstream
 private marker; and reject unsafe endpoints. Module tests verify a locally
 trusted HTTPS root, reject an untrusted certificate, enforce origin-bound
 credential lookup before network access, and cover status/endpoint policy.
+Another module test validates the exact two-request Tool protocol: advertised
+`local_echo`, streamed call, canonical `local.echo` mapping, correlated
+`function_call_output`, previous response ID, final text, and two Usage Records.
 Windows-only tests exercise Credential Manager bind, replace, resolve, and
 forget. This does not cover live credentials, proxy authentication,
-reconnect/retry, live Providers, or product Tool delivery.
+reconnect/retry, live Providers, or broader Tool presentation.
 
 ### Crash and Recovery Tests
 

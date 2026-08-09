@@ -2,23 +2,32 @@ use std::env;
 use std::error::Error;
 use std::fmt;
 use std::fs;
-use std::io::{self, IsTerminal, Read, Write};
+use std::io::{self, BufRead, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 
+use greentyper_core::agent_team::TeamOperationRecord;
 use greentyper_core::config::{
     CONFIG_FILE_SCHEMA_VERSION, ConfigDocument, ConfigPaths, ConfigRuntime, ConfigRuntimeError,
     ConfigScope, config_schema,
 };
 use greentyper_core::model::DeliveryId;
 use greentyper_core::provider::ProviderError;
-use greentyper_core::runtime::{AcknowledgeOutcome, RecoveryStatus, RuntimeKernel};
+use greentyper_core::runtime::{
+    AcknowledgeOutcome, PreparedOutput, ProviderToolApproval, RecoveryStatus, RuntimeKernel,
+};
+use greentyper_core::tool_runtime::ToolEffectExecutor;
 
 use crate::credential_vault::{
     CredentialVault, CredentialVaultError, MAX_SECRET_BYTES, PlatformCredentialVault,
     ProviderCredentialScope, SecretValue,
 };
 use crate::local_process::{
-    LocalProcessChildMode, LocalProcessError, LocalProcessSmokeOutcome, LocalProcessSmokeScenario,
+    LOCAL_ECHO_TOOL, LocalProcessChildMode, LocalProcessError, LocalProcessExecutor,
+    LocalProcessSmokeOutcome, LocalProcessSmokeScenario,
+};
+use crate::product_driver::{
+    ProductDriver, ProductDriverError, ProductInteraction, ProductToolDecision,
+    has_product_driver_state,
 };
 use crate::provider_http::{
     ConfiguredProvider, ProviderHttpError, ProviderHttpSmokeOutcome, ProviderHttpSmokeScenario,
@@ -26,23 +35,38 @@ use crate::provider_http::{
 
 pub fn run(arguments: impl Iterator<Item = String>) -> Result<(), CliError> {
     match parse(arguments)? {
-        Command::Headless { ledger, input } => {
+        Command::Headless {
+            ledger,
+            input,
+            local_echo,
+        } => {
             let config = open_config_runtime(default_config_paths()?)?;
             let layers = config.config_layers()?.clone();
             let profile = config.selected_provider_profile()?;
             let mut provider = ConfiguredProvider::for_new_turn(profile, PlatformCredentialVault)?;
-            let mut runtime = open_runtime(&ledger)?;
-            let output = runtime.execute(&layers, input, &mut provider)?;
-            deliver_and_ack(&mut runtime, output)
+            let has_product_state = has_product_driver_state(&ledger)?;
+            if local_echo || has_product_state {
+                provider.enable_local_echo();
+                run_product_turn(&ledger, &layers, input, &mut provider)
+            } else {
+                let mut runtime = open_runtime(&ledger)?;
+                let output = runtime.execute(&layers, input, &mut provider)?;
+                deliver_and_ack(&mut runtime, output)
+            }
         }
-        Command::Resume { ledger } => {
-            let mut runtime = open_runtime(&ledger)?;
-            let mut provider = match runtime.pending_provider_epoch() {
-                Some(epoch) => ConfiguredProvider::from_epoch(epoch, PlatformCredentialVault)?,
-                None => ConfiguredProvider::for_new_turn(None, PlatformCredentialVault)?,
-            };
-            let output = runtime.resume(&mut provider)?;
-            deliver_and_ack(&mut runtime, output)
+        Command::Resume { ledger, local_echo } => {
+            let has_product_state = has_product_driver_state(&ledger)?;
+            if local_echo || has_product_state {
+                resume_product_turn(&ledger)
+            } else {
+                let mut runtime = open_runtime(&ledger)?;
+                let mut provider = match runtime.pending_provider_epoch() {
+                    Some(epoch) => ConfiguredProvider::from_epoch(epoch, PlatformCredentialVault)?,
+                    None => ConfiguredProvider::for_new_turn(None, PlatformCredentialVault)?,
+                };
+                let output = runtime.resume(&mut provider)?;
+                deliver_and_ack(&mut runtime, output)
+            }
         }
         Command::Status { ledger } => {
             let snapshot = RuntimeKernel::inspect(&ledger)?;
@@ -207,6 +231,130 @@ fn deliver_and_ack_to(
     Ok(())
 }
 
+fn run_product_turn(
+    ledger: &Path,
+    layers: &greentyper_core::config::ConfigLayers,
+    input: String,
+    provider: &mut ConfiguredProvider<PlatformCredentialVault>,
+) -> Result<(), CliError> {
+    let stdin = io::stdin();
+    let stderr = io::stderr();
+    let mut interaction = CliProductInteraction {
+        input: stdin.lock(),
+        output: stderr.lock(),
+    };
+    let executor = LocalProcessExecutor::current()?;
+    let mut driver = ProductDriver::open_with_executor(ledger, executor, &mut interaction)?;
+    let output = driver.execute(layers, input, provider, &mut interaction)?;
+    deliver_product_and_ack(&mut driver, output)
+}
+
+fn resume_product_turn(ledger: &Path) -> Result<(), CliError> {
+    let stdin = io::stdin();
+    let stderr = io::stderr();
+    let mut interaction = CliProductInteraction {
+        input: stdin.lock(),
+        output: stderr.lock(),
+    };
+    let executor = LocalProcessExecutor::current()?;
+    let mut driver = ProductDriver::open_with_executor(ledger, executor, &mut interaction)?;
+    let mut provider = match driver.pending_provider_epoch() {
+        Some(epoch) => ConfiguredProvider::from_epoch(epoch, PlatformCredentialVault)?,
+        None => ConfiguredProvider::for_new_turn(None, PlatformCredentialVault)?,
+    };
+    provider.enable_local_echo();
+    let output = driver.resume(&mut provider, &mut interaction)?;
+    deliver_product_and_ack(&mut driver, output)
+}
+
+fn deliver_product_and_ack<E: ToolEffectExecutor>(
+    driver: &mut ProductDriver<E>,
+    output: PreparedOutput,
+) -> Result<(), CliError> {
+    let stdout = io::stdout();
+    let mut stdout = stdout.lock();
+    deliver_product_and_ack_to(driver, output, &mut stdout)
+}
+
+fn deliver_product_and_ack_to<E: ToolEffectExecutor>(
+    driver: &mut ProductDriver<E>,
+    output: PreparedOutput,
+    writer: &mut impl Write,
+) -> Result<(), CliError> {
+    writer.write_all(output.text().as_bytes())?;
+    writer.write_all(b"\n")?;
+    writer.flush()?;
+    driver.acknowledge(output.delivery())?;
+    Ok(())
+}
+
+struct CliProductInteraction<R, W> {
+    input: R,
+    output: W,
+}
+
+impl<R: BufRead, W: Write> ProductInteraction for CliProductInteraction<R, W> {
+    fn present_team_operation(&mut self, record: TeamOperationRecord) -> io::Result<()> {
+        self.write_event(&serde_json::json!({
+            "event": "team-operation-committed",
+            "operation": record.operation.get(),
+            "transaction": record.transaction.get(),
+            "first_sequence": record.first_sequence.get(),
+            "last_sequence": record.last_sequence.get(),
+            "event_count": record.event_count,
+        }))
+    }
+
+    fn decide_tool(&mut self, approval: &ProviderToolApproval) -> io::Result<ProductToolDecision> {
+        let arguments: serde_json::Value =
+            serde_json::from_str(approval.arguments().canonical_json()).map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidData, "Tool arguments are invalid")
+            })?;
+        let filesystem_reads: Vec<_> = approval.resources().filesystem_reads().collect();
+        let filesystem_writes: Vec<_> = approval.resources().filesystem_writes().collect();
+        let network_targets: Vec<_> = approval.resources().network_targets().collect();
+        self.write_event(&serde_json::json!({
+            "event": "approval-required",
+            "call": approval.call().get(),
+            "tool": approval.tool(),
+            "identity": approval.identity(),
+            "arguments": arguments,
+            "resources": {
+                "filesystem_reads": filesystem_reads,
+                "filesystem_writes": filesystem_writes,
+                "process": approval.resources().process(),
+                "network_targets": network_targets,
+            },
+        }))?;
+        self.output
+            .write_all(b"Approve local.echo? Type approve or deny: ")?;
+        self.output.flush()?;
+        let mut decision = String::new();
+        if self.input.read_line(&mut decision)? == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "Tool approval input ended",
+            ));
+        }
+        match decision.trim() {
+            "approve" => Ok(ProductToolDecision::Approve),
+            "deny" => Ok(ProductToolDecision::Deny),
+            _ => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Tool approval must be approve or deny",
+            )),
+        }
+    }
+}
+
+impl<R, W: Write> CliProductInteraction<R, W> {
+    fn write_event(&mut self, value: &impl serde::Serialize) -> io::Result<()> {
+        serde_json::to_writer(&mut self.output, value).map_err(io::Error::other)?;
+        self.output.write_all(b"\n")?;
+        self.output.flush()
+    }
+}
+
 fn print_status(status: &RecoveryStatus) -> Result<(), CliError> {
     write_stdout_line(&status.to_string())
 }
@@ -234,9 +382,11 @@ enum Command {
     Headless {
         ledger: PathBuf,
         input: String,
+        local_echo: bool,
     },
     Resume {
         ledger: PathBuf,
+        local_echo: bool,
     },
     Status {
         ledger: PathBuf,
@@ -380,11 +530,13 @@ fn parse(mut arguments: impl Iterator<Item = String>) -> Result<Command, CliErro
     let mut ledger = None;
     let mut input = None;
     let mut delivery = None;
+    let mut tool = None;
     while let Some(argument) = arguments.next() {
         let slot = match argument.as_str() {
             "--ledger" => &mut ledger,
             "--input" => &mut input,
             "--delivery" => &mut delivery,
+            "--tool" => &mut tool,
             _ => return Err(CliError::Usage("unknown option")),
         };
         if slot.is_some() {
@@ -405,26 +557,34 @@ fn parse(mut arguments: impl Iterator<Item = String>) -> Result<Command, CliErro
         Some(path) => PathBuf::from(path),
         None => default_ledger_path()?,
     };
+    let local_echo = match tool.as_deref() {
+        Some(LOCAL_ECHO_TOOL) => true,
+        Some(_) => return Err(CliError::Usage("--tool must be local.echo")),
+        None => false,
+    };
     match command.as_str() {
         "headless" => {
             reject_option(&delivery, "--delivery is not valid for headless")?;
             Ok(Command::Headless {
                 ledger,
                 input: input.ok_or(CliError::Usage("headless requires --input"))?,
+                local_echo,
             })
         }
         "resume" => {
             reject_option(&input, "--input is not valid for resume")?;
             reject_option(&delivery, "--delivery is not valid for resume")?;
-            Ok(Command::Resume { ledger })
+            Ok(Command::Resume { ledger, local_echo })
         }
         "status" => {
             reject_option(&input, "--input is not valid for status")?;
             reject_option(&delivery, "--delivery is not valid for status")?;
+            reject_option(&tool, "--tool is not valid for status")?;
             Ok(Command::Status { ledger })
         }
         "reconcile" => {
             reject_option(&input, "--input is not valid for reconcile")?;
+            reject_option(&tool, "--tool is not valid for reconcile")?;
             let delivery = delivery
                 .ok_or(CliError::Usage("reconcile requires --delivery"))?
                 .parse::<u64>()
@@ -951,8 +1111,8 @@ const USAGE: &str = "\
 GreenTyper headless Runtime\n\
 \n\
 Usage:\n\
-  greentyper headless [--ledger PATH] --input TEXT\n\
-  greentyper resume [--ledger PATH]\n\
+  greentyper headless [--ledger PATH] [--tool local.echo] --input TEXT\n\
+  greentyper resume [--ledger PATH] [--tool local.echo]\n\
   greentyper status [--ledger PATH]\n\
   greentyper reconcile [--ledger PATH] --delivery ID\n\
   greentyper config schema\n\
@@ -976,6 +1136,7 @@ pub enum CliError {
     ProviderHttp(ProviderHttpError),
     Provider(ProviderError),
     Credential(CredentialVaultError),
+    ProductDriver(ProductDriverError),
 }
 
 impl fmt::Display for CliError {
@@ -998,6 +1159,7 @@ impl fmt::Display for CliError {
             Self::ProviderHttp(source) => write!(formatter, "{source}"),
             Self::Provider(source) => write!(formatter, "{source}"),
             Self::Credential(source) => write!(formatter, "{source}"),
+            Self::ProductDriver(source) => write!(formatter, "{source}"),
         }
     }
 }
@@ -1013,6 +1175,7 @@ impl Error for CliError {
             Self::ProviderHttp(source) => Some(source),
             Self::Provider(source) => Some(source),
             Self::Credential(source) => Some(source),
+            Self::ProductDriver(source) => Some(source),
             Self::Usage(_) => None,
         }
     }
@@ -1060,21 +1223,31 @@ impl From<ProviderError> for CliError {
     }
 }
 
+impl From<ProductDriverError> for CliError {
+    fn from(source: ProductDriverError) -> Self {
+        Self::ProductDriver(source)
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsString;
     use std::io::{self, Cursor, Read};
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
 
+    use greentyper_core::agent_team::TeamOperationRecord;
     use greentyper_core::config::{ConfigLayers, ConfigScope};
     use greentyper_core::provider::DeterministicProvider;
-    use greentyper_core::runtime::{RecoveryStatus, RuntimeKernel};
+    use greentyper_core::runtime::{ProviderToolApproval, RecoveryStatus, RuntimeKernel};
+    use greentyper_core::tool_runtime::{AuthorizedToolCall, ToolEffectExecutor, ToolExecution};
 
     use crate::credential_vault::InMemoryCredentialVault;
+    use crate::product_driver::{ProductDriver, ProductInteraction, ProductToolDecision};
 
     use super::{
         Command, ConfigCommand, CredentialCommand, CredentialOutcome, deliver_and_ack_to,
-        execute_credential_command, parse,
+        deliver_product_and_ack_to, execute_credential_command, parse,
     };
 
     static NEXT_TEMP: AtomicU64 = AtomicU64::new(1);
@@ -1085,6 +1258,13 @@ mod tests {
             std::process::id(),
             NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
         ))
+    }
+
+    fn sidecar(path: &Path, kind: &str) -> PathBuf {
+        let mut sidecar = OsString::from(path.as_os_str());
+        sidecar.push(".");
+        sidecar.push(kind);
+        PathBuf::from(sidecar)
     }
 
     #[test]
@@ -1102,6 +1282,35 @@ mod tests {
             ),
             Ok(Command::Headless { input, .. }) if input == "hello"
         ));
+        assert!(matches!(
+            parse(
+                [
+                    "headless".to_owned(),
+                    "--input".to_owned(),
+                    "hello".to_owned(),
+                    "--tool".to_owned(),
+                    "local.echo".to_owned(),
+                ]
+                .into_iter()
+            ),
+            Ok(Command::Headless {
+                local_echo: true,
+                ..
+            })
+        ));
+        assert!(
+            parse(
+                [
+                    "headless".to_owned(),
+                    "--input".to_owned(),
+                    "hello".to_owned(),
+                    "--tool".to_owned(),
+                    "shell".to_owned(),
+                ]
+                .into_iter()
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -1294,7 +1503,47 @@ mod tests {
         std::fs::remove_file(path).expect("cleanup Runtime ledger");
     }
 
+    #[test]
+    fn product_output_write_failure_never_acknowledges_delivery() {
+        let path = temp_path();
+        let mut interaction = SilentInteraction;
+        let mut driver = ProductDriver::open_with_executor(&path, NeverExecutor, &mut interaction)
+            .expect("open Product driver");
+        let mut provider = DeterministicProvider::default();
+        let output = driver
+            .execute(
+                &ConfigLayers::default(),
+                "visible once",
+                &mut provider,
+                &mut interaction,
+            )
+            .expect("prepare Product output");
+
+        assert!(
+            deliver_product_and_ack_to(&mut driver, output, &mut BrokenWriter).is_err(),
+            "broken presentation sink must fail"
+        );
+        assert!(matches!(
+            driver.snapshot().status,
+            RecoveryStatus::ReconciliationRequired { .. }
+        ));
+        drop(driver);
+        assert!(matches!(
+            RuntimeKernel::inspect(&path)
+                .expect("replay Runtime")
+                .status,
+            RecoveryStatus::ReconciliationRequired { .. }
+        ));
+        std::fs::remove_file(&path).expect("cleanup Runtime ledger");
+        std::fs::remove_file(sidecar(&path, "team")).expect("cleanup Team ledger");
+        std::fs::remove_file(sidecar(&path, "tool")).expect("cleanup Tool ledger");
+    }
+
     struct BrokenWriter;
+
+    struct NeverExecutor;
+
+    struct SilentInteraction;
 
     struct PanicReader;
 
@@ -1314,6 +1563,25 @@ mod tests {
 
         fn flush(&mut self) -> io::Result<()> {
             Ok(())
+        }
+    }
+
+    impl ToolEffectExecutor for NeverExecutor {
+        fn execute(&mut self, _call: &AuthorizedToolCall<'_>) -> ToolExecution {
+            panic!("deterministic Provider must not execute a Tool")
+        }
+    }
+
+    impl ProductInteraction for SilentInteraction {
+        fn present_team_operation(&mut self, _record: TeamOperationRecord) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn decide_tool(
+            &mut self,
+            _approval: &ProviderToolApproval,
+        ) -> io::Result<ProductToolDecision> {
+            panic!("deterministic Provider must not request Tool approval")
         }
     }
 }

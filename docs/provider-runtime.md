@@ -24,7 +24,7 @@ product vault; remote origins require HTTPS. The headless CLI uses this adapter
 for configured profiles and retains the deterministic simulator only when no
 custom profile is selected. Windows Credential Manager is the current platform
 backend; non-Windows product credential access fails closed. Retry, reconnect,
-live-provider validation, and product Tool delivery remain separate work.
+live-provider validation, and broader Tool presentation remain separate work.
 
 ## Interface
 
@@ -125,6 +125,19 @@ If the process dies after a durable Tool success but before continuation, the
 raw result is intentionally unavailable after restart: recovery blocks the
 Turn and never invokes the successful effect again.
 
+When `local.echo` is enabled, the HTTP adapter advertises the Responses-safe
+function name `local_echo`, maps it back to the stable product Tool identity
+`local.echo`, and rejects every unconfigured returned Tool. Continuation sends
+one `function_call_output` item correlated by the Provider call ID and the
+previous response ID. Those response identifiers remain process-local; they
+are not authority and are not written to the Runtime or Tool Ledger.
+
+The product `ProductDriver` owns the narrow user-visible path. It restores the
+Kernel-derived Agent Session, presents and flushes any durable Team operation
+receipt before acknowledgement, presents the exact arguments and resources,
+accepts only explicit approval or denial, then delegates effect ordering back
+to the Kernel. Final canonical output is acknowledged only after stdout flush.
+
 ## Evidence
 
 Redacted fixtures under `tests/fixtures/provider/responses/v1/` cover text and
@@ -155,6 +168,15 @@ classification, require an origin-bound credential before network access, and
 redact Authorization. The fixture remains synthetic and does not constitute a
 live-provider test.
 
+A two-request HTTP test verifies the exact function definition, initial Tool
+call stream, canonical `local.echo` mapping, approved output correlation,
+previous-response continuation request, final text, and both Usage Records.
+Product-driver tests separately prove denial invokes no executor and an
+interrupted approval can be re-presented after reopen before exactly one
+effect. A binary integration test verifies the opt-in driver creates and
+replays its dedicated Team and Tool Ledgers while preserving stdout delivery
+and final `ready` status.
+
 The event shapes are checked against the official
 [OpenAI Responses streaming event reference](https://developers.openai.com/api/reference/resources/responses/streaming-events/).
 
@@ -171,7 +193,8 @@ The event shapes are checked against the official
   not listed above.
 - Multiple Tool calls, parallel calls, persisted resumable Provider
   continuation data, and durable storage of a redacted Tool result reference.
-- Product Tool presentation and acknowledgement, non-Windows credential
-  backends, raw diagnostic artifact policy, fuzzing, reconnect fixtures, live
-  credential-gated tests, and cross-process crash coverage around Provider
-  delivery boundaries.
+- Rich TUI/App Server Tool presentation, non-Windows credential backends, raw
+  diagnostic artifact policy, fuzzing, reconnect fixtures, live
+  credential-gated tests, and cross-process crash coverage around Provider and
+  presentation boundaries. The current CLI interaction is intentionally one
+  fixed `local.echo` approval prompt.

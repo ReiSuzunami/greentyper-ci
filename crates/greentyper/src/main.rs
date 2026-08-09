@@ -3,6 +3,7 @@
 mod cli;
 mod credential_vault;
 mod local_process;
+mod product_driver;
 mod provider_http;
 
 use std::process::ExitCode;

@@ -17,6 +17,7 @@ use greentyper_core::agent_team::{
     Capability, CapabilitySnapshot, CommandOutcome, ResourceBudget, TaskScope, TaskSpec,
     TeamCommand,
 };
+use greentyper_core::provider::ProviderToolCall;
 use greentyper_core::runtime::{RuntimeError, RuntimeKernel};
 use greentyper_core::tool_runtime::{
     ApprovalDecision, AuthorizedToolCall, ToolArguments, ToolCallOutcome, ToolCallStatus,
@@ -26,7 +27,7 @@ use greentyper_core::tool_runtime::{
 use serde::Deserialize;
 
 pub(crate) const LOCAL_ECHO_TOOL: &str = "local.echo";
-const LOCAL_ECHO_PROCESS: &str = "greentyper.local.echo.v1";
+pub(crate) const LOCAL_ECHO_PROCESS: &str = "greentyper.local.echo.v1";
 const CHILD_COMMAND: &str = "__local-process-child";
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
 const SMOKE_TIMEOUT: Duration = Duration::from_millis(100);
@@ -179,7 +180,7 @@ pub(crate) struct LocalProcessExecutor {
 }
 
 impl LocalProcessExecutor {
-    fn current() -> Result<Self, LocalProcessError> {
+    pub(crate) fn current() -> Result<Self, LocalProcessError> {
         let executable = std::env::current_exe().map_err(LocalProcessError::Io)?;
         let executable = executable.canonicalize().map_err(LocalProcessError::Io)?;
         if !executable.is_absolute() || !executable.is_file() {
@@ -337,6 +338,23 @@ impl LocalProcessExecutor {
             output_limit_exceeded.load(Ordering::Relaxed),
         ))
     }
+}
+
+pub(crate) fn local_echo_resources(call: &ProviderToolCall) -> Result<ToolResources, RuntimeError> {
+    if call.tool() != LOCAL_ECHO_TOOL {
+        return Err(RuntimeError::InvalidProviderOutput(
+            "Provider requested an unsupported Tool",
+        ));
+    }
+    let arguments: EchoArguments = serde_json::from_str(call.arguments_json()).map_err(|_| {
+        RuntimeError::InvalidProviderOutput("Provider requested invalid local.echo arguments")
+    })?;
+    if arguments.message.len() > MAX_INPUT_BYTES {
+        return Err(RuntimeError::InvalidProviderOutput(
+            "Provider local.echo input exceeds the byte limit",
+        ));
+    }
+    Ok(ToolResources::default().with_process(LOCAL_ECHO_PROCESS))
 }
 
 impl ToolEffectExecutor for LocalProcessExecutor {

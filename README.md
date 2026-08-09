@@ -70,6 +70,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo run -p greentyper-acceptance -- verify-cpu
 cargo run -p greentyper-acceptance -- bench list
 cargo run -p greentyper -- headless --ledger ./target/dev-runtime.ledger --input "hello"
+cargo run -p greentyper -- headless --ledger ./target/tool-runtime.ledger --tool local.echo --input "echo this"
 cargo run -p greentyper -- status --ledger ./target/dev-runtime.ledger
 cargo run -p greentyper -- config schema
 cargo run -p greentyper -- config get provider.model
@@ -92,6 +93,13 @@ group, and assigns the Windows child to a constrained Job Object before
 execution. It rejects filesystem and network resources and is not a general
 process sandbox, network Tool, or MCP adapter.
 
+`headless --tool local.echo` now composes that adapter with the recoverable
+Agent Team, Tool Runtime, and Provider Turn driver. It writes the durable Team
+operation receipt and exact Tool approval request to stderr, accepts only an
+explicit `approve` or `deny` decision from stdin, and acknowledges final output
+only after stdout is flushed. A restart before approval re-presents the durable
+request; a successful or ambiguous effect is never automatically repeated.
+
 Configured OpenAI-compatible Responses profiles now run through a no-proxy,
 no-redirect HTTPS client, origin-bound credential lookup, bounded streaming
 decode, and a fixed deadline. Config Runtime freezes the normalized origin,
@@ -102,10 +110,11 @@ transport tests. The core also normalizes one Responses function call, crosses
 durable Tool approval/effect policy, continues the Provider once, and prepares
 canonical output without repeating successful or ambiguous effects. Headless
 execution keeps the deterministic simulator when no custom profile is selected.
-Live-provider validation, configurable proxy policy, reconnect/retry,
-user-facing Tool approval/delivery, broader Provider and Tool adapters,
-Workspace, TUI, and App Server work remain. The `local.echo` and loopback
-Provider tracers remain internal harnesses. The file Ledger remains
+Live-provider validation, configurable proxy policy, reconnect/retry, richer
+approval presentation, broader Provider and Tool adapters, Workspace, TUI, and
+App Server work remain. The loopback Provider tracer remains an internal
+harness; `local.echo` is intentionally a fixed opt-in command rather than a
+general process runner. The file Ledger remains
 provisional. The acceptance runner can emit bound raw evidence,
 but is not yet a full Target Acceptance Run. Follow the
 [implementation plan](docs/implementation-plan.md).
