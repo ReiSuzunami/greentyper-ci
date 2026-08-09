@@ -331,7 +331,7 @@ mod windows {
         secret: &SecretValue,
     ) -> Result<(), CredentialVaultError> {
         let mut target = wide(scope.target_name());
-        let mut credential = CREDENTIALW {
+        let credential = CREDENTIALW {
             Type: CRED_TYPE_GENERIC,
             TargetName: target.as_mut_ptr(),
             CredentialBlobSize: u32::try_from(secret.expose().len())
@@ -341,7 +341,7 @@ mod windows {
             Persist: CRED_PERSIST_LOCAL_MACHINE,
             ..CREDENTIALW::default()
         };
-        if unsafe { CredWriteW(&mut credential, 0) } == 0 {
+        if unsafe { CredWriteW(&credential, 0) } == 0 {
             Err(CredentialVaultError::Unavailable)
         } else {
             Ok(())
