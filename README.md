@@ -6,7 +6,7 @@ GreenTyper is a Windows-first coding-agent runtime written in Rust. It is design
 
 GreenTyper is an independent product with selected Codex-compatible protocol and Agent semantics. It is not a Codex CLI clone, a command-compatible replacement, or a wrapper around another agent process.
 
-> Status: feature implementation started. The first runnable core slice implements deterministic Agent Team orchestration policy; no complete product workflow exists yet.
+> Status: feature implementation is active. The repository now contains deterministic Agent Team policy plus a recoverable single-Agent headless spine with immutable Turn snapshots, synchronous Ledger replay, a deterministic Provider simulator, and explicit output reconciliation. It is not yet a complete coding-agent product.
 
 > Repository topology: [`ReiSuzunami/greentyper`](https://github.com/ReiSuzunami/greentyper) is the private canonical repository. [`ReiSuzunami/greentyper-ci`](https://github.com/ReiSuzunami/greentyper-ci) is a temporary public, non-authoritative mirror used only for hosted CI and build artifacts. See the [repository policy](docs/repository-policy.md).
 
@@ -39,6 +39,7 @@ Initial design budgets include a headless idle Private Bytes limit of 25 MB, a s
 - [Testing strategy](docs/testing.md)
 - [Implementation plan](docs/implementation-plan.md)
 - [Agent orchestration](docs/agent-orchestration.md)
+- [Recoverable single-Agent Runtime](docs/runtime-kernel.md)
 - [Measurement harness](docs/measurement-harness.md)
 - [Technology benchmarks](docs/technology-benchmarks.md)
 - [Repository policy](docs/repository-policy.md)
@@ -66,9 +67,17 @@ cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo run -p greentyper-acceptance -- verify-cpu
 cargo run -p greentyper-acceptance -- bench list
+cargo run -p greentyper -- headless --ledger ./target/dev-runtime.ledger --input "hello"
+cargo run -p greentyper -- status --ledger ./target/dev-runtime.ledger
 ```
 
-The core Agent Team policy slice compiles and runs through interface-level tests. The acceptance runner can execute a versioned deterministic fixture and emit bound raw evidence; this bootstraps measurement and is not yet a full Target Acceptance Run. Presentation, persistent storage, Provider, Tool, and Workspace behavior remain unimplemented; follow the [implementation plan](docs/implementation-plan.md).
+The core Agent Team policy and recoverable single-Agent Runtime compile and run
+through interface-level and cross-process headless tests. The current Provider
+is a deterministic simulator and the file Ledger is a provisional Phase 1
+adapter; real Provider, Tool, Workspace, full Config, TUI, and App Server work
+remains. The acceptance runner can emit bound raw evidence, but is not yet a
+full Target Acceptance Run. Follow the
+[implementation plan](docs/implementation-plan.md).
 
 ## License
 

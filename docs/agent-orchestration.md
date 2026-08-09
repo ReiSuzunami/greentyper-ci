@@ -22,7 +22,7 @@ let recovered = TeamRuntime::recover(max_active_agents, events.iter().cloned())?
 - `event_log` exposes the current in-memory canonical events for tests and the future Ledger seam.
 - `recover` accepts only contiguous, complete transactions and rebuilds the same projection or fails closed.
 
-The current `TeamCommit` is marked `CommitDurability::Volatile`. Its in-memory append proves ordering but is not a crash-safe Durability Boundary and must not drive a user-visible acknowledgement. Phase 1 will replace this implementation detail with the selected persistent Ledger adapter.
+The current `TeamCommit` is marked `CommitDurability::Volatile`. Its in-memory append proves ordering but is not a crash-safe Durability Boundary and must not drive a user-visible acknowledgement. Phase 1 now has a synchronously durable Ledger and single-Agent Runtime Kernel, but the Team Runtime is not yet plugged into that seam; Team commands therefore remain non-product orchestration evidence.
 
 ## Command Flow
 
@@ -35,7 +35,7 @@ flowchart LR
     F --> R["Return commit and snapshot revision"]
 ```
 
-Every transaction carries a monotonic transaction ID, Event sequence, zero-based position, and total Event count. Recovery rejects gaps, reordered positions, mixed transaction IDs, changed transaction sizes, incomplete tails, invalid transitions, and non-quiescent scheduler state.
+Every Team transaction carries a monotonic transaction ID, Event sequence, zero-based position, and total Event count. Team recovery rejects gaps, reordered positions, mixed transaction IDs, changed transaction sizes, incomplete tails, invalid transitions, and non-quiescent scheduler state. The separate Phase 1 file Ledger reports and repairs one checksummed torn final frame only on explicit writer recovery; read-only inspection never mutates it.
 
 ## State Model
 
@@ -80,8 +80,8 @@ Provider output, tool effects, approvals, Workspace Leases, Read Sets, merge out
 
 ## Next Slices
 
-1. Define canonical serialization and plug `TeamRuntime` transactions into the Phase 1 Ledger Store with synchronous durability receipts.
-2. Let Runtime Kernel admission create the root Agent and feed canonical Provider simulator Events without exposing wire types.
+1. Plug `TeamRuntime` transactions into the implemented Phase 1 Ledger Store with synchronous durability receipts.
+2. Let trusted Runtime Kernel admission create and rebind the root Agent without exposing an ID-to-session authority seam.
 3. Add Workspace Coordinator facts, then exclusive Workspace Lease and Read Set adapters when the first writable Task lands.
 4. Add Tool and Provider effect preparation/outcome records only after their own idempotency and recovery contracts exist.
 5. Exercise Performance Contract workload P3 with two Active Agents on the Target Machine and four on FMDev; measure Dormant increment rather than assuming it.

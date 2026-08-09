@@ -565,6 +565,9 @@ dependencies = [
 [[package]]
 name = "greentyper-core"
 version = "0.0.0"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "h2"

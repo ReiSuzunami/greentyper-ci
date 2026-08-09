@@ -3,4 +3,9 @@
 //! Feature modules are added only with their first runnable vertical slice.
 
 pub mod agent_team;
+pub mod config;
+pub mod ledger;
+pub mod model;
+pub mod provider;
+pub mod runtime;
 pub mod schema;

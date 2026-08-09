@@ -25,6 +25,21 @@ Exit criteria:
 
 Implement Config Runtime basics, canonical Thread/Turn/Item/Event types, Ledger Store append/replay, Runtime Kernel admission, one logical Agent, deterministic provider simulator, and headless output.
 
+Current implementation includes provider-neutral Thread/Turn/Item identities,
+immutable bootstrap Config and Provider Epochs, a synchronously durable
+checksummed file Ledger with exclusive writer locking and read-only inspection,
+canonical Runtime Event replay, explicit `resume` and output `reconcile`
+states, a versioned deterministic Provider fixture, and a headless CLI that
+flushes output before durably acknowledging it. Core and cross-process product
+tests prove admission recovery, prepared-but-unacknowledged output blocking,
+idempotent acknowledgement, malformed Provider blocking, corruption failure,
+unsupported format failure, torn-tail reporting/repair, and writer exclusion.
+
+This does not complete Phase 1. The full machine-readable Config Schema and
+TOML surfaces, Agent Team-to-persistent-Ledger integration, exhaustive
+byte-offset Runtime crash/fault matrix, and headless FMDev/Target idle resource
+evidence remain pending. See [Recoverable Single-Agent Runtime](runtime-kernel.md).
+
 Exit criteria:
 
 - One Turn survives crash and replay without duplicate output acknowledgement.

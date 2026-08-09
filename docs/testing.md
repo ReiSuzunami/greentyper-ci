@@ -45,6 +45,16 @@ Each deep module is tested through its Interface:
 
 True external dependencies use mock adapters. Windows facilities use focused integration tests around audited wrappers rather than exposing platform details through every module.
 
+The current Phase 1 spine covers a strict subset of these end-state contracts:
+typed Config precedence and immutable epochs; canonical ID and Item bounds;
+Ledger append/sync/replay, single-writer exclusion, expected-Head conflict,
+torn-tail read-only inspection and writer repair, checksum/length/schema
+tampering, and symlink rejection; deterministic Provider success and malformed
+output; Runtime admission resume, prepared-output reconciliation, idempotent
+acknowledgement, and blocked replay; and cross-process headless CLI output,
+status, resume, and reconcile behavior. Migration/backup remains in the
+candidate storage harness rather than this provisional product adapter.
+
 ### Crash and Recovery Tests
 
 Crash injection runs at every Durability Boundary and representative byte offsets around storage commits. Restart must produce one of two explicit outcomes: the effect is known and not repeated, or the effect is ambiguous and blocked for reconciliation.
@@ -94,7 +104,13 @@ Tests assert that `/config pro url` resolves to the focused Provider editor with
 
 ## Provider Testing
 
-Deterministic local simulators are the required gate. They support success, slow streams, malformed events, disconnects, resumable and non-resumable partial output, reordered tool fragments, missing usage, unknown usage fields, and retryable/fatal errors.
+Deterministic local simulators are the required gate. The end-state simulator
+suite supports success, slow streams, malformed events, disconnects, resumable
+and non-resumable partial output, reordered tool fragments, missing usage,
+unknown usage fields, and retryable/fatal errors. The current Phase 1
+simulator implements deterministic bounded success; module tests inject
+malformed completion and process interruption after admission. The remaining
+scenarios land with reconnect, tools, and usage normalization.
 
 Live provider tests are opt-in and credential-gated. They verify current integration for OpenAI, DeepSeek, and OpenCode Go but do not run on untrusted pull requests and do not gate local performance. Model-catalog refresh work records the source URL and observation date.
 

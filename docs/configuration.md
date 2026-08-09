@@ -37,6 +37,13 @@ The Config Runtime stages edits, presents a diff, validates the complete affecte
 
 Before implementation, the following names and types are the normative v1 design contract for the fields used in this document. Phase 1 materializes this contract as the versioned machine-readable Config Schema; generated reference documentation may extend it but may not change these meanings without an ADR.
 
+Implementation status: the first Phase 1 Runtime slice currently freezes a
+typed schema-version-1 bootstrap subset (`provider.profile`,
+`provider.model`, and `runtime.max_output_bytes`) with layer provenance and
+bounded validation. It deliberately does not claim the full machine-readable
+schema, TOML parsing/editing, Provider Profile objects, generic editors, or
+migration behavior below; those remain Phase 1 work.
+
 | Config Object | Type and constraint | Application timing |
 | --- | --- | --- |
 | `providers.<id>.template` | Provider Template ID | Next Provider Epoch |

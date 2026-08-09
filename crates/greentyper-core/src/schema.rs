@@ -24,14 +24,21 @@ impl SchemaVersion {
 pub enum SchemaKind {
     AcceptanceEvidence,
     BenchmarkEvidence,
+    ConfigEpoch,
     DeterministicFixture,
+    LedgerFormat,
+    RuntimeEvent,
 }
 
 impl SchemaKind {
     #[must_use]
     pub const fn current(self) -> SchemaVersion {
         match self {
-            Self::AcceptanceEvidence | Self::DeterministicFixture => SchemaVersion(1),
+            Self::AcceptanceEvidence
+            | Self::ConfigEpoch
+            | Self::DeterministicFixture
+            | Self::LedgerFormat
+            | Self::RuntimeEvent => SchemaVersion(1),
             Self::BenchmarkEvidence => SchemaVersion(2),
         }
     }

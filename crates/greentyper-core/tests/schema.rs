@@ -18,10 +18,13 @@ fn schema_versions_are_positive_and_explicitly_supported() {
 }
 
 #[test]
-fn every_phase_zero_wire_schema_has_an_explicit_current_version() {
+fn every_persisted_schema_has_an_explicit_current_version() {
     assert_eq!(SchemaKind::AcceptanceEvidence.current().get(), 1);
     assert_eq!(SchemaKind::BenchmarkEvidence.current().get(), 2);
+    assert_eq!(SchemaKind::ConfigEpoch.current().get(), 1);
     assert_eq!(SchemaKind::DeterministicFixture.current().get(), 1);
+    assert_eq!(SchemaKind::LedgerFormat.current().get(), 1);
+    assert_eq!(SchemaKind::RuntimeEvent.current().get(), 1);
 }
 
 #[test]
