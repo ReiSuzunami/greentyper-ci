@@ -22,6 +22,7 @@ pub(super) enum Command {
 pub(super) struct Options {
     comparison: String,
     implementation: String,
+    workload: String,
     candidate_id: String,
     source_revision: String,
     output: PathBuf,
@@ -38,6 +39,7 @@ pub(super) fn parse(arguments: &[String]) -> AppResult<Command> {
 
     let mut comparison = None;
     let mut implementation = None;
+    let mut workload = None;
     let mut candidate_id = None;
     let mut source_revision = None;
     let mut output = None;
@@ -49,6 +51,7 @@ pub(super) fn parse(arguments: &[String]) -> AppResult<Command> {
     parse_options(arguments, |name, value| match name {
         "--comparison" => set_once(&mut comparison, name, value),
         "--implementation" => set_once(&mut implementation, name, value),
+        "--workload" => set_once(&mut workload, name, value),
         "--candidate-id" => set_once(&mut candidate_id, name, value),
         "--source-revision" => set_once(&mut source_revision, name, value),
         "--output" => set_once(&mut output, name, value),
@@ -67,17 +70,20 @@ pub(super) fn parse(arguments: &[String]) -> AppResult<Command> {
 
     let comparison = required(comparison, "--comparison")?;
     let implementation = required(implementation, "--implementation")?;
+    let workload = required(workload, "--workload")?;
     let candidate_id = required(candidate_id, "--candidate-id")?;
     let source_revision = required(source_revision, "--source-revision")?;
     let output = PathBuf::from(required(output, "--output")?);
     validate_benchmark_label("comparison", &comparison)?;
     validate_benchmark_label("implementation", &implementation)?;
+    validate_benchmark_label("workload", &workload)?;
     validate_candidate_id(&candidate_id)?;
     validate_source_revision(&source_revision)?;
 
     Ok(Command::Run(Options {
         comparison,
         implementation,
+        workload,
         candidate_id,
         source_revision,
         output,
@@ -351,16 +357,20 @@ struct BenchmarkObservation {
 }
 
 fn target_for(options: &Options) -> AppResult<Box<dyn BenchmarkTarget>> {
-    match (options.comparison.as_str(), options.implementation.as_str()) {
-        ("harness", "sha256-loop") => {
+    match (
+        options.comparison.as_str(),
+        options.implementation.as_str(),
+        options.workload.as_str(),
+    ) {
+        ("harness", "sha256-loop", "sha256-loop") => {
             let fixture: HarnessFixture = serde_json::from_str(HARNESS_FIXTURE_JSON)?;
             validate_fixture(&fixture)?;
             Ok(Box::new(Sha256LoopTarget { fixture }))
         }
         #[cfg(feature = "bench-storage")]
-        ("storage", implementation) => storage::target(implementation),
-        (comparison, implementation) => Err(cli_error(format!(
-            "benchmark implementation {comparison}/{implementation} is not compiled into this runner"
+        ("storage", implementation, workload) => storage::target(implementation, workload),
+        (comparison, implementation, workload) => Err(cli_error(format!(
+            "benchmark target {comparison}/{implementation}/{workload} is not compiled into this runner"
         ))),
     }
 }
@@ -528,6 +538,8 @@ mod tests {
             "harness",
             "--implementation",
             "sha256-loop",
+            "--workload",
+            "sha256-loop",
             "--candidate-id",
             "rc.bench",
             "--source-revision",
@@ -563,6 +575,7 @@ mod tests {
         let options = Options {
             comparison: "storage".into(),
             implementation: "unknown".into(),
+            workload: "critical-append-replay".into(),
             candidate_id: "rc".into(),
             source_revision: "0123456".into(),
             output: "bench.json".into(),

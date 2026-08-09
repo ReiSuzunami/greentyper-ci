@@ -10,7 +10,7 @@ Feature implementation was authorized on 2026-08-09. The first core slice fixes 
 
 Create the Cargo workspace, Windows-first build profiles, formatting/lint policy, GitHub CI, schema/version conventions, deterministic fixture harness, benchmark harness, and portable packaging skeleton.
 
-Current implementation includes the workspace, CI, schema convention, one embedded deterministic Agent Team fixture, versioned acceptance and benchmark evidence, an x86-64-v3 runtime guard, a portable ZIP skeleton, and the first isolated SQLite WAL versus checksummed append-log sync/replay workload. The storage slice has not yet passed its full crash/CAS/backup/migration matrix or 30-run FMDev comparison; terminal, transport, and allocator candidates also remain required before Phase 0 exits.
+Current implementation includes the workspace, CI, schema convention, one embedded deterministic Agent Team fixture, versioned acceptance and benchmark evidence, an x86-64-v3 runtime guard, a portable ZIP skeleton, and an isolated five-workload SQLite WAL versus checksummed append-log matrix. The storage matrix covers critical sync/replay, max-event streaming batches, one-winner CAS, backup/restore, and in-process old-or-new migration recovery. It has not yet passed timer-expiry batching, cross-process crash/fault injection, fuzzing, cross-process CAS, or the complete same-commit 30-run FMDev comparison; terminal, transport, and allocator candidates also remain required before Phase 0 exits.
 
 Benchmark WinHTTP versus a cross-platform HTTP stack, direct VT versus a TUI library, SQLite WAL versus a custom append log, and allocator options using minimal representative workloads.
 

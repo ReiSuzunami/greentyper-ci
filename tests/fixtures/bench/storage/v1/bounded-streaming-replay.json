@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "comparison_id": "storage",
+  "workload_id": "bounded-streaming-replay",
+  "workload_version": 1,
+  "transactions": 8,
+  "events_per_transaction": 32,
+  "payload_bytes": 128,
+  "max_batch_events": 32
+}

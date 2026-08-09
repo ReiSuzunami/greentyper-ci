@@ -218,7 +218,7 @@ fn parse_machine_identifier_policy(value: Option<String>) -> AppResult<MachineId
 }
 
 fn usage() -> String {
-    "usage:\n  greentyper-acceptance verify-cpu [--expect-baseline NAME]\n  greentyper-acceptance run --candidate-id ID --source-revision HEX --output FILE [--runs N] [--warmup-runs N] [--expect-baseline NAME] [--machine-identifiers full|redacted]\n  greentyper-acceptance bench list\n  greentyper-acceptance bench --comparison ID --implementation ID --candidate-id ID --source-revision HEX --output FILE [--runs N] [--warmup-runs N] [--expect-baseline NAME] [--machine-identifiers full|redacted]".into()
+    "usage:\n  greentyper-acceptance verify-cpu [--expect-baseline NAME]\n  greentyper-acceptance run --candidate-id ID --source-revision HEX --output FILE [--runs N] [--warmup-runs N] [--expect-baseline NAME] [--machine-identifiers full|redacted]\n  greentyper-acceptance bench list\n  greentyper-acceptance bench --comparison ID --implementation ID --workload ID --candidate-id ID --source-revision HEX --output FILE [--runs N] [--warmup-runs N] [--expect-baseline NAME] [--machine-identifiers full|redacted]".into()
 }
 
 fn run_acceptance(options: RunOptions) -> AppResult<()> {

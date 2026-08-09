@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "comparison_id": "storage",
+  "workload_id": "cas-one-winner",
+  "workload_version": 1,
+  "transactions": 16,
+  "events_per_transaction": 4,
+  "payload_bytes": 256,
+  "cas_contenders": 8
+}

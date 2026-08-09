@@ -89,6 +89,7 @@ jobs:
           target/release/greentyper-acceptance.exe bench `
             --comparison harness `
             --implementation sha256-loop `
+            --workload sha256-loop `
             --candidate-id "ci-$env:GITHUB_SHA" `
             --source-revision "$env:GITHUB_SHA" `
             --output dist/benchmark-harness-smoke.json `
@@ -104,6 +105,7 @@ jobs:
           target/bench-storage/release/greentyper-acceptance.exe bench `
             --comparison storage `
             --implementation sqlite-wal `
+            --workload critical-append-replay `
             --candidate-id "ci-$env:GITHUB_SHA" `
             --source-revision "$env:GITHUB_SHA" `
             --output candidate-smoke/storage-sqlite-wal.json `
@@ -114,6 +116,7 @@ jobs:
           target/bench-storage/release/greentyper-acceptance.exe bench `
             --comparison storage `
             --implementation append-log `
+            --workload critical-append-replay `
             --candidate-id "ci-$env:GITHUB_SHA" `
             --source-revision "$env:GITHUB_SHA" `
             --output candidate-smoke/storage-append-log.json `

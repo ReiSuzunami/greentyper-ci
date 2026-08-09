@@ -54,6 +54,21 @@ Windows CI uses the repository's configured x86-64-v3 target policy, requires th
 
 ## Technology Comparison Evidence
 
-`greentyper-acceptance bench` uses a separate Benchmark Evidence schema. It keeps the release candidate, comparison, implementation, and workload as independent identities so the same versioned workload can compare multiple implementations without changing its meaning. Each file records the implementation revision, declared feature set, locked dependency-graph fingerprint, fixture hash, timing boundary, process mode, operation units, correctness digest, every raw operation duration, optional named sub-timings and gauges, and the common host and CPU evidence.
+`greentyper-acceptance bench` uses a separate Benchmark Evidence schema. It keeps the release candidate, comparison, implementation, and workload as independent identities so the same versioned workload can compare multiple implementations without changing its meaning. Each file records the implementation revision, a fingerprint binding the declared dependency/features input and locked dependency graph, fixture hash, timing boundary, process mode, operation units, correctness digest, every raw operation duration, optional named sub-timings and gauges, and the common host and CPU evidence.
 
 `bench list` reports only implementations compiled into the runner. The initial `harness/sha256-loop` entry proves parsing, timing, correctness checks, evidence serialization, and CI packaging. The optional `bench-storage` feature adds `storage/sqlite-wal` and `storage/append-log`; neither enters the default product graph. Harness and CI smoke results cannot select storage, terminal, transport, or allocator behavior.
+
+Every benchmark run names a workload independently from its implementation:
+
+```text
+greentyper-acceptance bench \
+  --comparison storage \
+  --implementation sqlite-wal \
+  --workload critical-append-replay \
+  --candidate-id rc-0001 \
+  --source-revision 0123456789abcdef0123456789abcdef01234567 \
+  --output storage-sqlite-wal.json \
+  --expect-baseline x86-64-v3
+```
+
+The storage feature currently exposes five workload IDs. CI executes the complete feature test suite and emits one representative redacted `critical-append-replay` sample per candidate. The other workload tests are correctness evidence, not substitutes for the same-host 30-run FMDev matrix.

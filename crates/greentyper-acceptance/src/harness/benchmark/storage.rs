@@ -1,5 +1,5 @@
 use super::*;
-use rusqlite::{Connection, TransactionBehavior, params};
+use rusqlite::{Connection, MAIN_DB, TransactionBehavior, params};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::fs::{self, File, OpenOptions};
@@ -13,7 +13,24 @@ const STORAGE_FIXTURE_JSON: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../tests/fixtures/bench/storage/v1/critical-append-replay.json"
 ));
+const STREAMING_FIXTURE_JSON: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../tests/fixtures/bench/storage/v1/bounded-streaming-replay.json"
+));
+const CAS_FIXTURE_JSON: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../tests/fixtures/bench/storage/v1/cas-one-winner.json"
+));
+const BACKUP_FIXTURE_JSON: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../tests/fixtures/bench/storage/v1/backup-restore.json"
+));
+const MIGRATION_FIXTURE_JSON: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../tests/fixtures/bench/storage/v1/interrupted-migration.json"
+));
 const LOG_HEADER: &[u8; 8] = b"GTLG\x01\0\0\0";
+const LOG_HEADER_V2: &[u8; 8] = b"GTLG\x02\0\0\0";
 const TRANSACTION_MAGIC: &[u8; 4] = b"GTXN";
 const MAX_FRAME_BYTES: usize = 4 * 1024 * 1024;
 const MAX_EVENTS_PER_TRANSACTION: u32 = 4_096;
@@ -25,14 +42,21 @@ pub(super) fn catalog_entry() -> serde_json::Value {
         "id": "storage",
         "version": 1,
         "implementations": ["sqlite-wal", "append-log"],
-        "workloads": [{"id": "critical-append-replay", "version": 1}],
+        "workloads": [
+            {"id": "critical-append-replay", "version": 1},
+            {"id": "bounded-streaming-replay", "version": 1},
+            {"id": "cas-one-winner", "version": 1},
+            {"id": "backup-restore", "version": 1},
+            {"id": "interrupted-migration", "version": 1}
+        ],
         "purpose": "candidate evidence; not a storage selection"
     })
 }
 
-pub(super) fn target(implementation: &str) -> AppResult<Box<dyn BenchmarkTarget>> {
-    let fixture: StorageFixture = serde_json::from_str(STORAGE_FIXTURE_JSON)?;
-    validate_fixture(&fixture)?;
+pub(super) fn target(implementation: &str, workload: &str) -> AppResult<Box<dyn BenchmarkTarget>> {
+    let (workload, fixture_bytes) = StorageWorkload::resolve(workload)?;
+    let fixture: StorageFixture = serde_json::from_slice(fixture_bytes)?;
+    validate_fixture(&fixture, workload)?;
     let engine = match implementation {
         "sqlite-wal" => StorageEngine::SqliteWal,
         "append-log" => StorageEngine::AppendLog,
@@ -45,7 +69,9 @@ pub(super) fn target(implementation: &str) -> AppResult<Box<dyn BenchmarkTarget>
     let events = generate_events(&fixture)?;
     Ok(Box::new(StorageTarget {
         engine,
+        workload,
         fixture,
+        fixture_bytes,
         events,
         run_dir: None,
     }))
@@ -60,17 +86,71 @@ struct StorageFixture {
     transactions: u32,
     events_per_transaction: u32,
     payload_bytes: u32,
+    #[serde(default)]
+    max_batch_events: Option<u32>,
+    #[serde(default)]
+    cas_contenders: Option<u32>,
+    #[serde(default)]
+    backup_restore_cycles: Option<u32>,
+    #[serde(default)]
+    migration_interruptions: Option<u32>,
 }
 
-fn validate_fixture(fixture: &StorageFixture) -> AppResult<()> {
+fn validate_fixture(fixture: &StorageFixture, workload: StorageWorkload) -> AppResult<()> {
     SchemaKind::DeterministicFixture.require_current(fixture.schema_version)?;
-    if fixture.comparison_id != "storage"
-        || fixture.workload_id != "critical-append-replay"
-        || fixture.workload_version != 1
-        || fixture.transactions != 16
-        || fixture.events_per_transaction != 4
-        || fixture.payload_bytes != 256
-    {
+    let shape_is_valid = match workload {
+        StorageWorkload::CriticalAppendReplay => {
+            fixture.workload_id == "critical-append-replay"
+                && fixture.transactions == 16
+                && fixture.events_per_transaction == 4
+                && fixture.payload_bytes == 256
+                && fixture.max_batch_events.is_none()
+                && fixture.cas_contenders.is_none()
+                && fixture.backup_restore_cycles.is_none()
+                && fixture.migration_interruptions.is_none()
+        }
+        StorageWorkload::BoundedStreamingReplay => {
+            fixture.workload_id == "bounded-streaming-replay"
+                && fixture.transactions == 8
+                && fixture.events_per_transaction == 32
+                && fixture.payload_bytes == 128
+                && fixture.max_batch_events == Some(32)
+                && fixture.cas_contenders.is_none()
+                && fixture.backup_restore_cycles.is_none()
+                && fixture.migration_interruptions.is_none()
+        }
+        StorageWorkload::CasOneWinner => {
+            fixture.workload_id == "cas-one-winner"
+                && fixture.transactions == 16
+                && fixture.events_per_transaction == 4
+                && fixture.payload_bytes == 256
+                && fixture.max_batch_events.is_none()
+                && fixture.cas_contenders == Some(8)
+                && fixture.backup_restore_cycles.is_none()
+                && fixture.migration_interruptions.is_none()
+        }
+        StorageWorkload::BackupRestore => {
+            fixture.workload_id == "backup-restore"
+                && fixture.transactions == 16
+                && fixture.events_per_transaction == 4
+                && fixture.payload_bytes == 256
+                && fixture.max_batch_events.is_none()
+                && fixture.cas_contenders.is_none()
+                && fixture.backup_restore_cycles == Some(1)
+                && fixture.migration_interruptions.is_none()
+        }
+        StorageWorkload::InterruptedMigration => {
+            fixture.workload_id == "interrupted-migration"
+                && fixture.transactions == 16
+                && fixture.events_per_transaction == 4
+                && fixture.payload_bytes == 256
+                && fixture.max_batch_events.is_none()
+                && fixture.cas_contenders.is_none()
+                && fixture.backup_restore_cycles.is_none()
+                && fixture.migration_interruptions == Some(3)
+        }
+    };
+    if fixture.comparison_id != "storage" || fixture.workload_version != 1 || !shape_is_valid {
         return Err(cli_error("storage benchmark fixture is invalid"));
     }
     Ok(())
@@ -119,6 +199,96 @@ enum StorageEngine {
     AppendLog,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StorageWorkload {
+    CriticalAppendReplay,
+    BoundedStreamingReplay,
+    CasOneWinner,
+    BackupRestore,
+    InterruptedMigration,
+}
+
+impl StorageWorkload {
+    fn resolve(workload: &str) -> AppResult<(Self, &'static [u8])> {
+        match workload {
+            "critical-append-replay" => {
+                Ok((Self::CriticalAppendReplay, STORAGE_FIXTURE_JSON.as_bytes()))
+            }
+            "bounded-streaming-replay" => Ok((
+                Self::BoundedStreamingReplay,
+                STREAMING_FIXTURE_JSON.as_bytes(),
+            )),
+            "cas-one-winner" => Ok((Self::CasOneWinner, CAS_FIXTURE_JSON.as_bytes())),
+            "backup-restore" => Ok((Self::BackupRestore, BACKUP_FIXTURE_JSON.as_bytes())),
+            "interrupted-migration" => Ok((
+                Self::InterruptedMigration,
+                MIGRATION_FIXTURE_JSON.as_bytes(),
+            )),
+            _ => Err(cli_error(format!(
+                "benchmark workload storage/{workload} is not compiled into this runner"
+            ))),
+        }
+    }
+
+    const fn id(self) -> &'static str {
+        match self {
+            Self::CriticalAppendReplay => "critical-append-replay",
+            Self::BoundedStreamingReplay => "bounded-streaming-replay",
+            Self::CasOneWinner => "cas-one-winner",
+            Self::BackupRestore => "backup-restore",
+            Self::InterruptedMigration => "interrupted-migration",
+        }
+    }
+
+    const fn input_shape(self) -> &'static str {
+        match self {
+            Self::CriticalAppendReplay => "16 sync transactions x 4 events x 256 payload bytes",
+            Self::BoundedStreamingReplay => "8 max-event batches x 32 events x 128 payload bytes",
+            Self::CasOneWinner => {
+                "64-event Ledger followed by 8 CAS contenders at one expected head"
+            }
+            Self::BackupRestore => "64-event Ledger backed up once and restored into a fresh store",
+            Self::InterruptedMigration => {
+                "64-event v1 Ledger with 3 interruption boundaries before v2 recovery"
+            }
+        }
+    }
+
+    const fn unit(self) -> &'static str {
+        match self {
+            Self::CriticalAppendReplay => "events synchronously committed and replayed",
+            Self::BoundedStreamingReplay => {
+                "stream events committed in bounded batches and replayed"
+            }
+            Self::CasOneWinner => "CAS contenders resolved with exactly one winner",
+            Self::BackupRestore => "events backed up, restored, replayed, and verified",
+            Self::InterruptedMigration => {
+                "migration interruption boundaries recovered as complete v1 or v2"
+            }
+        }
+    }
+
+    const fn boundary(self) -> &'static str {
+        match self {
+            Self::CriticalAppendReplay => {
+                "create store, append 16 synchronous transactions, close, reopen, replay, and verify"
+            }
+            Self::BoundedStreamingReplay => {
+                "create store, commit 8 max-event streaming batches, close, reopen, replay, and verify"
+            }
+            Self::CasOneWinner => {
+                "prepare a 64-event store, evaluate 8 stale-head CAS contenders, reopen, and verify one winner"
+            }
+            Self::BackupRestore => {
+                "prepare a 64-event store, create a verified backup, restore into a fresh store, replay, and verify"
+            }
+            Self::InterruptedMigration => {
+                "prepare v1, interrupt migration before commit boundaries, publish v2, reopen, and verify no mixed schema"
+            }
+        }
+    }
+}
+
 impl StorageEngine {
     const fn implementation(self) -> &'static str {
         match self {
@@ -137,7 +307,9 @@ impl StorageEngine {
 
 struct StorageTarget {
     engine: StorageEngine,
+    workload: StorageWorkload,
     fixture: StorageFixture,
+    fixture_bytes: &'static [u8],
     events: Vec<EventRecord>,
     run_dir: Option<PathBuf>,
 }
@@ -148,15 +320,15 @@ impl BenchmarkTarget for StorageTarget {
             comparison_id: "storage",
             comparison_version: 1,
             implementation: self.engine.implementation(),
-            implementation_revision: "1",
+            implementation_revision: "2",
             dependencies: self.engine.dependencies(),
-            workload_id: "critical-append-replay",
+            workload_id: self.workload.id(),
             workload_version: self.fixture.workload_version,
-            input_shape: "16 sync transactions x 4 events x 256 payload bytes",
-            unit: "events synchronously committed and replayed",
-            boundary: "create store, append 16 synchronous transactions, close, reopen, replay, and verify",
+            input_shape: self.workload.input_shape(),
+            unit: self.workload.unit(),
+            boundary: self.workload.boundary(),
             process_mode: "in-process",
-            fixture_bytes: STORAGE_FIXTURE_JSON.as_bytes(),
+            fixture_bytes: self.fixture_bytes,
         }
     }
 
@@ -182,6 +354,41 @@ impl BenchmarkTarget for StorageTarget {
             .run_dir
             .as_deref()
             .ok_or_else(|| cli_error("storage benchmark run directory was not prepared"))?;
+        match self.workload {
+            StorageWorkload::CasOneWinner => {
+                return run_cas_workload(
+                    self.engine,
+                    run_dir,
+                    &self.events,
+                    self.fixture
+                        .cas_contenders
+                        .ok_or_else(|| cli_error("CAS fixture has no contender count"))?,
+                );
+            }
+            StorageWorkload::BackupRestore => {
+                return run_backup_restore_workload(self.engine, run_dir, &self.events);
+            }
+            StorageWorkload::InterruptedMigration => {
+                return run_interrupted_migration_workload(
+                    self.engine,
+                    run_dir,
+                    &self.events,
+                    self.fixture.migration_interruptions.ok_or_else(|| {
+                        cli_error("migration fixture has no interruption boundary count")
+                    })?,
+                );
+            }
+            StorageWorkload::CriticalAppendReplay | StorageWorkload::BoundedStreamingReplay => {}
+        }
+        let observed_max_batch_events = match self.workload {
+            StorageWorkload::BoundedStreamingReplay => Some(validate_max_event_batches(
+                &self.events,
+                self.fixture
+                    .max_batch_events
+                    .ok_or_else(|| cli_error("streaming fixture has no batch event limit"))?,
+            )?),
+            _ => None,
+        };
         let observation = match self.engine {
             StorageEngine::SqliteWal => run_sqlite(run_dir, &self.events)?,
             StorageEngine::AppendLog => run_append_log(run_dir, &self.events)?,
@@ -191,6 +398,31 @@ impl BenchmarkTarget for StorageTarget {
                 "storage benchmark replay differs from canonical events",
             ));
         }
+        let mut gauges = BTreeMap::from([
+            (
+                "batch_event_limit".into(),
+                u64::from(
+                    self.fixture
+                        .max_batch_events
+                        .unwrap_or(self.fixture.events_per_transaction),
+                ),
+            ),
+            (
+                "final_storage_bytes".into(),
+                observation.final_storage_bytes,
+            ),
+            (
+                "post_append_storage_bytes".into(),
+                observation.post_append_storage_bytes,
+            ),
+            (
+                "transaction_count".into(),
+                u64::from(self.fixture.transactions),
+            ),
+        ]);
+        if let Some(observed) = observed_max_batch_events {
+            gauges.insert("observed_max_batch_events".into(), observed);
+        }
         Ok(BenchmarkObservation {
             operation_units: u64::try_from(observation.replayed.len())?,
             output_digest: canonical_digest(&observation.replayed)?,
@@ -199,16 +431,7 @@ impl BenchmarkTarget for StorageTarget {
                 ("replay".into(), observation.replay_ns),
                 ("setup".into(), observation.setup_ns),
             ]),
-            gauges: BTreeMap::from([
-                (
-                    "final_storage_bytes".into(),
-                    observation.final_storage_bytes,
-                ),
-                (
-                    "post_append_storage_bytes".into(),
-                    observation.post_append_storage_bytes,
-                ),
-            ]),
+            gauges,
         })
     }
 
@@ -231,10 +454,537 @@ struct StorageObservation {
     final_storage_bytes: u64,
 }
 
+fn run_cas_workload(
+    engine: StorageEngine,
+    run_dir: &Path,
+    events: &[EventRecord],
+    contenders: u32,
+) -> AppResult<BenchmarkObservation> {
+    if contenders < 2 {
+        return Err(cli_error("CAS workload requires at least two contenders"));
+    }
+    let candidate = cas_event(events)?;
+    let expected_head = candidate
+        .sequence
+        .checked_sub(1)
+        .ok_or_else(|| cli_error("CAS candidate sequence starts at zero"))?;
+    let (replayed, prepare_ns, cas_ns, replay_ns, winners, storage_bytes) = match engine {
+        StorageEngine::SqliteWal => {
+            let path = run_dir.join("ledger.sqlite3");
+            let prepare_started = Instant::now();
+            let mut connection = create_sqlite_store(&path)?;
+            append_sqlite_events(&mut connection, events)?;
+            let prepare_ns = elapsed_ns(prepare_started)?;
+
+            let cas_started = Instant::now();
+            let mut winners = 0_u32;
+            for _ in 0..contenders {
+                let transaction =
+                    connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                let changed = transaction.execute(
+                    "UPDATE ledger_state SET head_sequence = ?1
+                     WHERE singleton = 1 AND head_sequence = ?2",
+                    params![
+                        i64::try_from(candidate.sequence)?,
+                        i64::try_from(expected_head)?
+                    ],
+                )?;
+                if changed == 1 {
+                    transaction.execute(
+                        "INSERT INTO events
+                         (sequence, transaction_id, event_index, payload)
+                         VALUES (?1, ?2, ?3, ?4)",
+                        params![
+                            i64::try_from(candidate.sequence)?,
+                            i64::try_from(candidate.transaction)?,
+                            i64::from(candidate.index),
+                            &candidate.payload,
+                        ],
+                    )?;
+                    winners = winners
+                        .checked_add(1)
+                        .ok_or_else(|| cli_error("CAS winner count overflow"))?;
+                }
+                transaction.commit()?;
+            }
+            let cas_ns = elapsed_ns(cas_started)?;
+            drop(connection);
+
+            let replay_started = Instant::now();
+            let replayed = replay_sqlite(&path)?;
+            let replay_ns = elapsed_ns(replay_started)?;
+            let storage_bytes = directory_size(run_dir)?;
+            (
+                replayed,
+                prepare_ns,
+                cas_ns,
+                replay_ns,
+                winners,
+                storage_bytes,
+            )
+        }
+        StorageEngine::AppendLog => {
+            let path = run_dir.join("ledger.gtlog");
+            let prepare_started = Instant::now();
+            let mut file = create_append_log(&path)?;
+            append_log_events(&mut file, events)?;
+            let prepare_ns = elapsed_ns(prepare_started)?;
+
+            let cas_started = Instant::now();
+            let mut winners = 0_u32;
+            let mut current_head = expected_head;
+            for _ in 0..contenders {
+                if current_head == expected_head {
+                    write_transaction(&mut file, std::slice::from_ref(&candidate))?;
+                    file.flush()?;
+                    file.sync_data()?;
+                    current_head = candidate.sequence;
+                    winners = winners
+                        .checked_add(1)
+                        .ok_or_else(|| cli_error("CAS winner count overflow"))?;
+                }
+            }
+            let cas_ns = elapsed_ns(cas_started)?;
+            drop(file);
+
+            let replay_started = Instant::now();
+            let outcome = replay_log(&path)?;
+            if outcome.incomplete_tail {
+                return Err(cli_error("CAS append log has an incomplete tail"));
+            }
+            let replay_ns = elapsed_ns(replay_started)?;
+            let storage_bytes = directory_size(run_dir)?;
+            (
+                outcome.events,
+                prepare_ns,
+                cas_ns,
+                replay_ns,
+                winners,
+                storage_bytes,
+            )
+        }
+    };
+
+    let mut expected = events.to_vec();
+    expected.push(candidate);
+    if winners != 1 || replayed != expected {
+        return Err(cli_error(
+            "storage CAS did not produce exactly one canonical winner",
+        ));
+    }
+    Ok(BenchmarkObservation {
+        operation_units: u64::from(contenders),
+        output_digest: canonical_digest(&replayed)?,
+        timings_ns: BTreeMap::from([
+            ("cas".into(), cas_ns),
+            ("prepare".into(), prepare_ns),
+            ("replay".into(), replay_ns),
+        ]),
+        gauges: BTreeMap::from([
+            ("cas_losers".into(), u64::from(contenders - winners)),
+            ("cas_winners".into(), u64::from(winners)),
+            ("final_storage_bytes".into(), storage_bytes),
+        ]),
+    })
+}
+
+fn cas_event(events: &[EventRecord]) -> AppResult<EventRecord> {
+    let last = events
+        .last()
+        .ok_or_else(|| cli_error("CAS workload has no base events"))?;
+    Ok(EventRecord {
+        sequence: last
+            .sequence
+            .checked_add(1)
+            .ok_or_else(|| cli_error("CAS event sequence overflow"))?,
+        transaction: last
+            .transaction
+            .checked_add(1)
+            .ok_or_else(|| cli_error("CAS transaction identity overflow"))?,
+        index: 0,
+        payload: b"GreenTyper checkpoint CAS winner v1".to_vec(),
+    })
+}
+
+fn run_backup_restore_workload(
+    engine: StorageEngine,
+    run_dir: &Path,
+    events: &[EventRecord],
+) -> AppResult<BenchmarkObservation> {
+    let (replayed, prepare_ns, backup_ns, restore_ns, backup_bytes, restored_bytes) = match engine {
+        StorageEngine::SqliteWal => {
+            let source_path = run_dir.join("source.sqlite3");
+            let backup_path = run_dir.join("backup.sqlite3");
+            let restored_path = run_dir.join("restored.sqlite3");
+            let prepare_started = Instant::now();
+            let mut source = create_sqlite_store(&source_path)?;
+            append_sqlite_events(&mut source, events)?;
+            let prepare_ns = elapsed_ns(prepare_started)?;
+
+            let backup_started = Instant::now();
+            source.backup(MAIN_DB, &backup_path, None)?;
+            let backup_replay = replay_sqlite(&backup_path)?;
+            if backup_replay != events {
+                return Err(cli_error("SQLite backup differs from source events"));
+            }
+            let backup_ns = elapsed_ns(backup_started)?;
+            let backup_bytes = fs::metadata(&backup_path)?.len();
+            drop(source);
+
+            let restore_started = Instant::now();
+            let mut restored = Connection::open(&restored_path)?;
+            restored.restore(
+                MAIN_DB,
+                &backup_path,
+                None::<fn(rusqlite::backup::Progress)>,
+            )?;
+            drop(restored);
+            let replayed = replay_sqlite(&restored_path)?;
+            let restore_ns = elapsed_ns(restore_started)?;
+            let restored_bytes = fs::metadata(&restored_path)?.len();
+            (
+                replayed,
+                prepare_ns,
+                backup_ns,
+                restore_ns,
+                backup_bytes,
+                restored_bytes,
+            )
+        }
+        StorageEngine::AppendLog => {
+            let source_path = run_dir.join("source.gtlog");
+            let backup_path = run_dir.join("backup.gtlog");
+            let restored_path = run_dir.join("restored.gtlog");
+            let prepare_started = Instant::now();
+            let mut source = create_append_log(&source_path)?;
+            append_log_events(&mut source, events)?;
+            drop(source);
+            let prepare_ns = elapsed_ns(prepare_started)?;
+
+            let backup_started = Instant::now();
+            publish_durable_copy(&source_path, &backup_path)?;
+            let backup_replay = replay_log(&backup_path)?;
+            if backup_replay.incomplete_tail || backup_replay.events != events {
+                return Err(cli_error("append-log backup differs from source events"));
+            }
+            let backup_ns = elapsed_ns(backup_started)?;
+            let backup_bytes = fs::metadata(&backup_path)?.len();
+
+            let restore_started = Instant::now();
+            publish_durable_copy(&backup_path, &restored_path)?;
+            let restored = replay_log(&restored_path)?;
+            if restored.incomplete_tail {
+                return Err(cli_error("restored append log has an incomplete tail"));
+            }
+            let restore_ns = elapsed_ns(restore_started)?;
+            let restored_bytes = fs::metadata(&restored_path)?.len();
+            (
+                restored.events,
+                prepare_ns,
+                backup_ns,
+                restore_ns,
+                backup_bytes,
+                restored_bytes,
+            )
+        }
+    };
+
+    if replayed != events {
+        return Err(cli_error(
+            "restored storage candidate differs from canonical events",
+        ));
+    }
+    Ok(BenchmarkObservation {
+        operation_units: u64::try_from(replayed.len())?,
+        output_digest: canonical_digest(&replayed)?,
+        timings_ns: BTreeMap::from([
+            ("backup".into(), backup_ns),
+            ("prepare".into(), prepare_ns),
+            ("restore_and_replay".into(), restore_ns),
+        ]),
+        gauges: BTreeMap::from([
+            ("backup_bytes".into(), backup_bytes),
+            ("restored_bytes".into(), restored_bytes),
+        ]),
+    })
+}
+
+fn run_interrupted_migration_workload(
+    engine: StorageEngine,
+    run_dir: &Path,
+    events: &[EventRecord],
+    expected_boundaries: u32,
+) -> AppResult<BenchmarkObservation> {
+    let (replayed, prepare_ns, migration_ns, old_recoveries, new_recoveries, schema_version) =
+        match engine {
+            StorageEngine::SqliteWal => run_sqlite_migration(run_dir, events)?,
+            StorageEngine::AppendLog => run_append_log_migration(run_dir, events)?,
+        };
+    if replayed != events
+        || old_recoveries + new_recoveries != u64::from(expected_boundaries)
+        || old_recoveries != 2
+        || new_recoveries != 1
+        || schema_version != 2
+    {
+        return Err(cli_error(
+            "storage migration did not recover as exactly two v1 states and one v2 state",
+        ));
+    }
+    Ok(BenchmarkObservation {
+        operation_units: old_recoveries + new_recoveries,
+        output_digest: canonical_digest(&replayed)?,
+        timings_ns: BTreeMap::from([
+            ("migration_and_recovery".into(), migration_ns),
+            ("prepare".into(), prepare_ns),
+        ]),
+        gauges: BTreeMap::from([
+            ("final_schema_version".into(), schema_version),
+            ("final_storage_bytes".into(), directory_size(run_dir)?),
+            ("new_generation_recoveries".into(), new_recoveries),
+            ("old_generation_recoveries".into(), old_recoveries),
+        ]),
+    })
+}
+
+fn run_sqlite_migration(
+    run_dir: &Path,
+    events: &[EventRecord],
+) -> AppResult<(Vec<EventRecord>, u64, u64, u64, u64, u64)> {
+    let path = run_dir.join("ledger.sqlite3");
+    let prepare_started = Instant::now();
+    let mut connection = create_sqlite_store(&path)?;
+    append_sqlite_events(&mut connection, events)?;
+    drop(connection);
+    verify_sqlite_schema(&path, 1, false, events)?;
+    let prepare_ns = elapsed_ns(prepare_started)?;
+
+    let migration_started = Instant::now();
+    rollback_sqlite_migration(&path, false)?;
+    verify_sqlite_schema(&path, 1, false, events)?;
+    rollback_sqlite_migration(&path, true)?;
+    verify_sqlite_schema(&path, 1, false, events)?;
+    commit_sqlite_migration(&path)?;
+    let replayed = verify_sqlite_schema(&path, 2, true, events)?;
+    let migration_ns = elapsed_ns(migration_started)?;
+    Ok((replayed, prepare_ns, migration_ns, 2, 1, 2))
+}
+
+fn rollback_sqlite_migration(database_path: &Path, include_backfill: bool) -> AppResult<()> {
+    let mut connection = Connection::open(database_path)?;
+    configure_sqlite_durability(&connection)?;
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    transaction.execute_batch("ALTER TABLE events ADD COLUMN payload_size INTEGER;")?;
+    if include_backfill {
+        transaction.execute_batch(
+            "UPDATE events SET payload_size = length(payload);
+             PRAGMA user_version = 2;",
+        )?;
+    }
+    transaction.rollback()?;
+    Ok(())
+}
+
+fn commit_sqlite_migration(database_path: &Path) -> AppResult<()> {
+    let mut connection = Connection::open(database_path)?;
+    configure_sqlite_durability(&connection)?;
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    transaction.execute_batch(
+        "ALTER TABLE events ADD COLUMN payload_size INTEGER;
+         UPDATE events SET payload_size = length(payload);
+         PRAGMA user_version = 2;",
+    )?;
+    transaction.commit()?;
+    Ok(())
+}
+
+fn verify_sqlite_schema(
+    database_path: &Path,
+    expected_version: u64,
+    expect_payload_size: bool,
+    expected_events: &[EventRecord],
+) -> AppResult<Vec<EventRecord>> {
+    let connection = Connection::open(database_path)?;
+    let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    let has_payload_size = sqlite_column_exists(&connection, "events", "payload_size")?;
+    if u64::try_from(version)? != expected_version || has_payload_size != expect_payload_size {
+        return Err(cli_error("SQLite migration exposed a mixed schema"));
+    }
+    if expect_payload_size {
+        let invalid_rows: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM events
+             WHERE payload_size IS NULL OR payload_size != length(payload)",
+            [],
+            |row| row.get(0),
+        )?;
+        if invalid_rows != 0 {
+            return Err(cli_error("SQLite migration left invalid payload sizes"));
+        }
+    }
+    drop(connection);
+    let replayed = replay_sqlite(database_path)?;
+    if replayed != expected_events {
+        return Err(cli_error("SQLite migration changed canonical events"));
+    }
+    Ok(replayed)
+}
+
+fn sqlite_column_exists(connection: &Connection, table: &str, column: &str) -> AppResult<bool> {
+    let mut statement = connection.prepare(&format!("PRAGMA table_info({table})"))?;
+    let names = statement.query_map([], |row| row.get::<_, String>(1))?;
+    for name in names {
+        if name? == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn run_append_log_migration(
+    run_dir: &Path,
+    events: &[EventRecord],
+) -> AppResult<(Vec<EventRecord>, u64, u64, u64, u64, u64)> {
+    let v1_path = run_dir.join("ledger-v1.gtlog");
+    let v2_partial_path = run_dir.join("ledger-v2.partial");
+    let v2_temporary_path = run_dir.join(".ledger-v2.gtlog.tmp");
+    let v2_path = run_dir.join("ledger-v2.gtlog");
+
+    let prepare_started = Instant::now();
+    let mut v1 = create_append_log(&v1_path)?;
+    append_log_events(&mut v1, events)?;
+    drop(v1);
+    let initial = select_append_log_generation(run_dir)?;
+    if initial.format_version != 1 || initial.events != events {
+        return Err(cli_error("append-log v1 generation is invalid"));
+    }
+    let prepare_ns = elapsed_ns(prepare_started)?;
+
+    let migration_started = Instant::now();
+    let first_transaction = transaction_slices(events)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| cli_error("migration workload has no transaction"))?;
+    let mut partial = create_append_log_with_header(&v2_partial_path, LOG_HEADER_V2)?;
+    write_transaction(&mut partial, first_transaction)?;
+    partial.flush()?;
+    partial.sync_all()?;
+    let partial_length = partial.metadata()?.len();
+    if partial_length <= u64::try_from(LOG_HEADER_V2.len())? {
+        return Err(cli_error("append-log migration partial frame is empty"));
+    }
+    partial.set_len(partial_length - 1)?;
+    partial.sync_all()?;
+    drop(partial);
+    let incomplete = replay_log(&v2_partial_path)?;
+    if incomplete.format_version != 2 || !incomplete.incomplete_tail {
+        return Err(cli_error(
+            "append-log partial v2 generation was not detected",
+        ));
+    }
+    let old_after_partial = select_append_log_generation(run_dir)?;
+    if old_after_partial.format_version != 1 || old_after_partial.events != events {
+        return Err(cli_error("append-log selected an unpublished generation"));
+    }
+
+    let mut temporary = create_append_log_with_header(&v2_temporary_path, LOG_HEADER_V2)?;
+    append_log_events(&mut temporary, events)?;
+    drop(temporary);
+    let candidate = replay_log(&v2_temporary_path)?;
+    if candidate.format_version != 2 || candidate.incomplete_tail || candidate.events != events {
+        return Err(cli_error("append-log complete v2 candidate is invalid"));
+    }
+    let old_before_publish = select_append_log_generation(run_dir)?;
+    if old_before_publish.format_version != 1 || old_before_publish.events != events {
+        return Err(cli_error("append-log selected v2 before publication"));
+    }
+
+    fs::rename(&v2_temporary_path, &v2_path)?;
+    sync_directory(run_dir)?;
+    let published = select_append_log_generation(run_dir)?;
+    if published.format_version != 2 || published.incomplete_tail || published.events != events {
+        return Err(cli_error("append-log published v2 generation is invalid"));
+    }
+    let migration_ns = elapsed_ns(migration_started)?;
+    Ok((published.events, prepare_ns, migration_ns, 2, 1, 2))
+}
+
+fn select_append_log_generation(run_dir: &Path) -> AppResult<ReplayOutcome> {
+    let v1 = replay_log(&run_dir.join("ledger-v1.gtlog"))?;
+    if v1.format_version != 1 || v1.incomplete_tail {
+        return Err(cli_error("append-log v1 migration base is invalid"));
+    }
+    let v2_path = run_dir.join("ledger-v2.gtlog");
+    let selected = if v2_path.exists() {
+        let v2 = replay_log(&v2_path)?;
+        if v2.format_version != 2 || v2.events != v1.events {
+            return Err(cli_error(
+                "append-log v2 generation does not match its migration base",
+            ));
+        }
+        v2
+    } else {
+        v1
+    };
+    if selected.incomplete_tail {
+        return Err(cli_error(
+            "selected append-log generation has an incomplete tail",
+        ));
+    }
+    Ok(selected)
+}
+
+fn publish_durable_copy(source: &Path, destination: &Path) -> AppResult<()> {
+    let file_name = destination
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| cli_error("backup destination has no UTF-8 file name"))?;
+    let temporary = destination.with_file_name(format!(".{file_name}.tmp"));
+    let mut reader = File::open(source)?;
+    let mut writer = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)?;
+    io::copy(&mut reader, &mut writer)?;
+    writer.flush()?;
+    writer.sync_all()?;
+    drop(writer);
+    fs::rename(&temporary, destination)?;
+    let parent = destination
+        .parent()
+        .ok_or_else(|| cli_error("backup destination has no parent directory"))?;
+    sync_directory(parent)?;
+    Ok(())
+}
+
 fn run_sqlite(run_dir: &Path, events: &[EventRecord]) -> AppResult<StorageObservation> {
     let database_path = run_dir.join("ledger.sqlite3");
     let setup_started = Instant::now();
-    let mut connection = Connection::open(&database_path)?;
+    let mut connection = create_sqlite_store(&database_path)?;
+    let setup_ns = elapsed_ns(setup_started)?;
+
+    let append_started = Instant::now();
+    append_sqlite_events(&mut connection, events)?;
+    let append_ns = elapsed_ns(append_started)?;
+    let post_append_storage_bytes = directory_size(run_dir)?;
+    drop(connection);
+
+    let replay_started = Instant::now();
+    let replayed = replay_sqlite(&database_path)?;
+    validate_event_sequence(&replayed)?;
+    let replay_ns = elapsed_ns(replay_started)?;
+    let final_storage_bytes = directory_size(run_dir)?;
+
+    Ok(StorageObservation {
+        replayed,
+        setup_ns,
+        append_ns,
+        replay_ns,
+        post_append_storage_bytes,
+        final_storage_bytes,
+    })
+}
+
+fn create_sqlite_store(database_path: &Path) -> AppResult<Connection> {
+    let connection = Connection::open(database_path)?;
     let journal_mode: String =
         connection.query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))?;
     if !journal_mode.eq_ignore_ascii_case("wal") {
@@ -250,7 +1000,22 @@ fn run_sqlite(run_dir: &Path, events: &[EventRecord]) -> AppResult<StorageObserv
              transaction_id INTEGER NOT NULL,
              event_index INTEGER NOT NULL,
              payload BLOB NOT NULL
-         );",
+         );
+         CREATE TABLE ledger_state (
+             singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+             head_sequence INTEGER NOT NULL
+         );
+         INSERT INTO ledger_state (singleton, head_sequence) VALUES (1, 0);
+         PRAGMA user_version = 1;",
+    )?;
+    configure_sqlite_durability(&connection)?;
+    Ok(connection)
+}
+
+fn configure_sqlite_durability(connection: &Connection) -> AppResult<()> {
+    connection.execute_batch(
+        "PRAGMA synchronous=FULL;
+         PRAGMA wal_autocheckpoint=0;",
     )?;
     let synchronous: i64 = connection.query_row("PRAGMA synchronous", [], |row| row.get(0))?;
     if synchronous != 2 {
@@ -258,10 +1023,21 @@ fn run_sqlite(run_dir: &Path, events: &[EventRecord]) -> AppResult<StorageObserv
             "SQLite synchronous mode is {synchronous}; expected FULL (2)"
         )));
     }
-    let setup_ns = elapsed_ns(setup_started)?;
+    Ok(())
+}
 
-    let append_started = Instant::now();
+fn append_sqlite_events(connection: &mut Connection, events: &[EventRecord]) -> AppResult<()> {
     for transaction_events in transaction_slices(events)? {
+        let first = transaction_events
+            .first()
+            .ok_or_else(|| cli_error("cannot append an empty SQLite transaction"))?;
+        let last = transaction_events
+            .last()
+            .ok_or_else(|| cli_error("cannot append an empty SQLite transaction"))?;
+        let expected_head = first
+            .sequence
+            .checked_sub(1)
+            .ok_or_else(|| cli_error("SQLite transaction sequence starts at zero"))?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         {
             let mut statement = transaction.prepare(
@@ -277,16 +1053,64 @@ fn run_sqlite(run_dir: &Path, events: &[EventRecord]) -> AppResult<StorageObserv
                 ])?;
             }
         }
+        let changed = transaction.execute(
+            "UPDATE ledger_state SET head_sequence = ?1
+             WHERE singleton = 1 AND head_sequence = ?2",
+            params![i64::try_from(last.sequence)?, i64::try_from(expected_head)?],
+        )?;
+        if changed != 1 {
+            return Err(cli_error("SQLite Ledger head compare-and-swap failed"));
+        }
         transaction.commit()?;
     }
-    let append_ns = elapsed_ns(append_started)?;
-    let post_append_storage_bytes = directory_size(run_dir)?;
-    drop(connection);
+    Ok(())
+}
 
-    let replay_started = Instant::now();
-    let replay_connection = Connection::open(&database_path)?;
+fn replay_sqlite(database_path: &Path) -> AppResult<Vec<EventRecord>> {
+    let replay_connection = Connection::open(database_path)?;
+    let integrity: String =
+        replay_connection.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
+    if integrity != "ok" {
+        return Err(cli_error(format!(
+            "SQLite integrity check failed: {integrity}"
+        )));
+    }
+    let schema_version: i64 =
+        replay_connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    let has_payload_size = sqlite_column_exists(&replay_connection, "events", "payload_size")?;
+    match (schema_version, has_payload_size) {
+        (1, false) => {}
+        (2, true) => {
+            let invalid_rows: i64 = replay_connection.query_row(
+                "SELECT COUNT(*) FROM events
+                 WHERE payload_size IS NULL OR payload_size != length(payload)",
+                [],
+                |row| row.get(0),
+            )?;
+            if invalid_rows != 0 {
+                return Err(cli_error("SQLite v2 payload sizes are invalid"));
+            }
+        }
+        (1 | 2, _) => return Err(cli_error("SQLite Ledger schema is mixed")),
+        _ => return Err(cli_error("SQLite Ledger schema version is unsupported")),
+    }
+    let replayed = read_sqlite_events(&replay_connection)?;
+    validate_event_sequence(&replayed)?;
+    let stored_head: i64 = replay_connection.query_row(
+        "SELECT head_sequence FROM ledger_state WHERE singleton = 1",
+        [],
+        |row| row.get(0),
+    )?;
+    let actual_head = replayed.last().map_or(0, |event| event.sequence);
+    if u64::try_from(stored_head)? != actual_head {
+        return Err(cli_error("SQLite Ledger head differs from replayed events"));
+    }
+    Ok(replayed)
+}
+
+fn read_sqlite_events(connection: &Connection) -> AppResult<Vec<EventRecord>> {
     let replayed = {
-        let mut statement = replay_connection.prepare(
+        let mut statement = connection.prepare(
             "SELECT sequence, transaction_id, event_index, payload
              FROM events ORDER BY sequence",
         )?;
@@ -298,7 +1122,7 @@ fn run_sqlite(run_dir: &Path, events: &[EventRecord]) -> AppResult<StorageObserv
                 row.get::<_, Vec<u8>>(3)?,
             ))
         })?;
-        let mut replayed = Vec::with_capacity(events.len());
+        let mut replayed = Vec::new();
         for row in rows {
             let (sequence, transaction, index, payload) = row?;
             replayed.push(EventRecord {
@@ -310,40 +1134,17 @@ fn run_sqlite(run_dir: &Path, events: &[EventRecord]) -> AppResult<StorageObserv
         }
         replayed
     };
-    drop(replay_connection);
-    validate_event_sequence(&replayed)?;
-    let replay_ns = elapsed_ns(replay_started)?;
-    let final_storage_bytes = directory_size(run_dir)?;
-
-    Ok(StorageObservation {
-        replayed,
-        setup_ns,
-        append_ns,
-        replay_ns,
-        post_append_storage_bytes,
-        final_storage_bytes,
-    })
+    Ok(replayed)
 }
 
 fn run_append_log(run_dir: &Path, events: &[EventRecord]) -> AppResult<StorageObservation> {
     let log_path = run_dir.join("ledger.gtlog");
     let setup_started = Instant::now();
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&log_path)?;
-    file.write_all(LOG_HEADER)?;
-    file.flush()?;
-    file.sync_all()?;
-    sync_directory(run_dir)?;
+    let mut file = create_append_log(&log_path)?;
     let setup_ns = elapsed_ns(setup_started)?;
 
     let append_started = Instant::now();
-    for transaction_events in transaction_slices(events)? {
-        write_transaction(&mut file, transaction_events)?;
-        file.flush()?;
-        file.sync_data()?;
-    }
+    append_log_events(&mut file, events)?;
     let append_ns = elapsed_ns(append_started)?;
     let post_append_storage_bytes = directory_size(run_dir)?;
     drop(file);
@@ -369,6 +1170,34 @@ fn run_append_log(run_dir: &Path, events: &[EventRecord]) -> AppResult<StorageOb
     })
 }
 
+fn create_append_log(log_path: &Path) -> AppResult<File> {
+    create_append_log_with_header(log_path, LOG_HEADER)
+}
+
+fn create_append_log_with_header(log_path: &Path, header: &[u8; 8]) -> AppResult<File> {
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(log_path)?;
+    file.write_all(header)?;
+    file.flush()?;
+    file.sync_all()?;
+    let parent = log_path
+        .parent()
+        .ok_or_else(|| cli_error("append-log path has no parent directory"))?;
+    sync_directory(parent)?;
+    Ok(file)
+}
+
+fn append_log_events(file: &mut File, events: &[EventRecord]) -> AppResult<()> {
+    for transaction_events in transaction_slices(events)? {
+        write_transaction(file, transaction_events)?;
+        file.flush()?;
+        file.sync_data()?;
+    }
+    Ok(())
+}
+
 fn transaction_slices(events: &[EventRecord]) -> AppResult<Vec<&[EventRecord]>> {
     let mut slices = Vec::new();
     let mut start = 0;
@@ -385,6 +1214,20 @@ fn transaction_slices(events: &[EventRecord]) -> AppResult<Vec<&[EventRecord]>> 
         return Err(cli_error("storage workload contains no transactions"));
     }
     Ok(slices)
+}
+
+fn validate_max_event_batches(events: &[EventRecord], limit: u32) -> AppResult<u64> {
+    if limit == 0 {
+        return Err(cli_error("streaming batch event limit must be positive"));
+    }
+    let mut observed_max = 0_usize;
+    for batch in transaction_slices(events)? {
+        if batch.len() > usize::try_from(limit)? {
+            return Err(cli_error("streaming batch exceeds its event limit"));
+        }
+        observed_max = observed_max.max(batch.len());
+    }
+    Ok(u64::try_from(observed_max)?)
 }
 
 fn write_transaction(file: &mut File, events: &[EventRecord]) -> AppResult<()> {
@@ -435,14 +1278,22 @@ fn write_transaction(file: &mut File, events: &[EventRecord]) -> AppResult<()> {
 struct ReplayOutcome {
     events: Vec<EventRecord>,
     incomplete_tail: bool,
+    format_version: u64,
 }
 
 fn replay_log(path: &Path) -> AppResult<ReplayOutcome> {
     let mut file = File::open(path)?;
     let mut header = [0_u8; LOG_HEADER.len()];
-    if read_exact_state(&mut file, &mut header)? != ReadState::Full || &header != LOG_HEADER {
+    if read_exact_state(&mut file, &mut header)? != ReadState::Full {
         return Err(cli_error("append-log header is missing or corrupt"));
     }
+    let format_version = if &header == LOG_HEADER {
+        1
+    } else if &header == LOG_HEADER_V2 {
+        2
+    } else {
+        return Err(cli_error("append-log schema version is unsupported"));
+    };
 
     let mut events = Vec::new();
     let mut expected_transaction = 1_u64;
@@ -454,12 +1305,14 @@ fn replay_log(path: &Path) -> AppResult<ReplayOutcome> {
                 return Ok(ReplayOutcome {
                     events,
                     incomplete_tail: false,
+                    format_version,
                 });
             }
             ReadState::Partial => {
                 return Ok(ReplayOutcome {
                     events,
                     incomplete_tail: true,
+                    format_version,
                 });
             }
             ReadState::Full => {}
@@ -473,6 +1326,7 @@ fn replay_log(path: &Path) -> AppResult<ReplayOutcome> {
             return Ok(ReplayOutcome {
                 events,
                 incomplete_tail: true,
+                format_version,
             });
         }
         let frame_len = usize::try_from(u32::from_le_bytes(frame_len_bytes))?;
@@ -485,6 +1339,7 @@ fn replay_log(path: &Path) -> AppResult<ReplayOutcome> {
             return Ok(ReplayOutcome {
                 events,
                 incomplete_tail: true,
+                format_version,
             });
         }
         let checksum_offset = frame_len - size_of::<u32>();
@@ -693,7 +1548,8 @@ mod tests {
     fn fixture() -> StorageFixture {
         let fixture: StorageFixture =
             serde_json::from_str(STORAGE_FIXTURE_JSON).expect("storage fixture JSON");
-        validate_fixture(&fixture).expect("valid storage fixture");
+        validate_fixture(&fixture, StorageWorkload::CriticalAppendReplay)
+            .expect("valid storage fixture");
         fixture
     }
 
@@ -729,6 +1585,7 @@ mod tests {
         let options = |implementation: &str| Options {
             comparison: "storage".into(),
             implementation: implementation.into(),
+            workload: "critical-append-replay".into(),
             candidate_id: "test".into(),
             source_revision: "0123456".into(),
             output: "unused.json".into(),
@@ -849,6 +1706,165 @@ mod tests {
     fn storage_fixture_shape_is_frozen() {
         let mut fixture = fixture();
         fixture.events_per_transaction = 5;
-        assert!(validate_fixture(&fixture).is_err());
+        assert!(validate_fixture(&fixture, StorageWorkload::CriticalAppendReplay).is_err());
+    }
+
+    #[test]
+    fn streaming_batch_limit_is_enforced_by_execution() {
+        let fixture: StorageFixture =
+            serde_json::from_str(STREAMING_FIXTURE_JSON).expect("streaming fixture JSON");
+        let events = generate_events(&fixture).expect("events");
+        assert_eq!(validate_max_event_batches(&events, 32).expect("valid"), 32);
+        assert!(validate_max_event_batches(&events, 31).is_err());
+        assert!(validate_max_event_batches(&events, 0).is_err());
+    }
+
+    #[test]
+    fn sqlite_replay_rejects_unknown_and_mixed_schema_versions() {
+        let fixture = fixture();
+        let events = generate_events(&fixture).expect("events");
+        let directory = isolated_dir("sqlite-schema");
+        let path = directory.join("ledger.sqlite3");
+        let mut connection = create_sqlite_store(&path).expect("SQLite store");
+        append_sqlite_events(&mut connection, &events).expect("events");
+        connection
+            .execute_batch("PRAGMA user_version = 2;")
+            .expect("mixed version");
+        drop(connection);
+        assert!(replay_sqlite(&path).is_err());
+
+        let connection = Connection::open(&path).expect("SQLite reopen");
+        connection
+            .execute_batch("PRAGMA user_version = 99;")
+            .expect("unsupported version");
+        drop(connection);
+        assert!(replay_sqlite(&path).is_err());
+        fs::remove_dir_all(directory).expect("cleanup");
+    }
+
+    #[test]
+    fn append_log_generation_selection_fails_closed_on_published_corruption() {
+        let fixture = fixture();
+        let events = generate_events(&fixture).expect("events");
+        let directory = isolated_dir("published-corruption");
+        let v1_path = directory.join("ledger-v1.gtlog");
+        let mut v1 = create_append_log(&v1_path).expect("v1");
+        append_log_events(&mut v1, &events).expect("events");
+        drop(v1);
+        fs::write(directory.join("ledger-v2.gtlog"), LOG_HEADER_V2).expect("empty v2");
+        assert!(select_append_log_generation(&directory).is_err());
+        fs::remove_dir_all(directory).expect("cleanup");
+    }
+
+    #[test]
+    fn bounded_streaming_fixture_replays_all_batches() {
+        let options = |implementation: &str| Options {
+            comparison: "storage".into(),
+            implementation: implementation.into(),
+            workload: "bounded-streaming-replay".into(),
+            candidate_id: "test".into(),
+            source_revision: "0123456".into(),
+            output: "unused.json".into(),
+            runs: 1,
+            warmup_runs: 1,
+            expect_baseline: None,
+            machine_identifiers: MachineIdentifierPolicy::Redacted,
+        };
+        let mut sqlite = target_for(&options("sqlite-wal")).expect("SQLite target");
+        let mut append = target_for(&options("append-log")).expect("append target");
+        let (_, sqlite_observation) = execute_once(sqlite.as_mut()).expect("SQLite run");
+        let (_, append_observation) = execute_once(append.as_mut()).expect("append run");
+        assert_eq!(sqlite_observation.operation_units, 256);
+        assert_eq!(
+            sqlite_observation.output_digest,
+            append_observation.output_digest
+        );
+        assert_eq!(sqlite_observation.gauges["batch_event_limit"], 32);
+        assert_eq!(append_observation.gauges["observed_max_batch_events"], 32);
+    }
+
+    #[test]
+    fn cas_workload_has_one_winner_for_both_candidates() {
+        let options = |implementation: &str| Options {
+            comparison: "storage".into(),
+            implementation: implementation.into(),
+            workload: "cas-one-winner".into(),
+            candidate_id: "test".into(),
+            source_revision: "0123456".into(),
+            output: "unused.json".into(),
+            runs: 1,
+            warmup_runs: 1,
+            expect_baseline: None,
+            machine_identifiers: MachineIdentifierPolicy::Redacted,
+        };
+        let mut sqlite = target_for(&options("sqlite-wal")).expect("SQLite target");
+        let mut append = target_for(&options("append-log")).expect("append target");
+        let (_, sqlite_observation) = execute_once(sqlite.as_mut()).expect("SQLite CAS");
+        let (_, append_observation) = execute_once(append.as_mut()).expect("append CAS");
+        assert_eq!(sqlite_observation.gauges["cas_winners"], 1);
+        assert_eq!(append_observation.gauges["cas_winners"], 1);
+        assert_eq!(sqlite_observation.gauges["cas_losers"], 7);
+        assert_eq!(
+            sqlite_observation.output_digest,
+            append_observation.output_digest
+        );
+    }
+
+    #[test]
+    fn backup_restore_workload_replays_identical_events() {
+        let options = |implementation: &str| Options {
+            comparison: "storage".into(),
+            implementation: implementation.into(),
+            workload: "backup-restore".into(),
+            candidate_id: "test".into(),
+            source_revision: "0123456".into(),
+            output: "unused.json".into(),
+            runs: 1,
+            warmup_runs: 1,
+            expect_baseline: None,
+            machine_identifiers: MachineIdentifierPolicy::Redacted,
+        };
+        let mut sqlite = target_for(&options("sqlite-wal")).expect("SQLite target");
+        let mut append = target_for(&options("append-log")).expect("append target");
+        let (_, sqlite_observation) = execute_once(sqlite.as_mut()).expect("SQLite backup");
+        let (_, append_observation) = execute_once(append.as_mut()).expect("append backup");
+        assert_eq!(sqlite_observation.operation_units, 64);
+        assert_eq!(append_observation.operation_units, 64);
+        assert_eq!(
+            sqlite_observation.output_digest,
+            append_observation.output_digest
+        );
+        assert!(sqlite_observation.gauges["backup_bytes"] > 0);
+        assert!(append_observation.gauges["restored_bytes"] > 0);
+    }
+
+    #[test]
+    fn interrupted_migration_recovers_only_complete_generations() {
+        let options = |implementation: &str| Options {
+            comparison: "storage".into(),
+            implementation: implementation.into(),
+            workload: "interrupted-migration".into(),
+            candidate_id: "test".into(),
+            source_revision: "0123456".into(),
+            output: "unused.json".into(),
+            runs: 1,
+            warmup_runs: 1,
+            expect_baseline: None,
+            machine_identifiers: MachineIdentifierPolicy::Redacted,
+        };
+        let mut sqlite = target_for(&options("sqlite-wal")).expect("SQLite target");
+        let mut append = target_for(&options("append-log")).expect("append target");
+        let (_, sqlite_observation) = execute_once(sqlite.as_mut()).expect("SQLite migration");
+        let (_, append_observation) = execute_once(append.as_mut()).expect("append migration");
+        for observation in [&sqlite_observation, &append_observation] {
+            assert_eq!(observation.operation_units, 3);
+            assert_eq!(observation.gauges["old_generation_recoveries"], 2);
+            assert_eq!(observation.gauges["new_generation_recoveries"], 1);
+            assert_eq!(observation.gauges["final_schema_version"], 2);
+        }
+        assert_eq!(
+            sqlite_observation.output_digest,
+            append_observation.output_digest
+        );
     }
 }
