@@ -6,6 +6,7 @@
 *.yml text eol=lf
 *.json text eol=lf
 *.sh text eol=lf
+*.txt text eol=lf
 
 *.bin binary
 *.zip binary
