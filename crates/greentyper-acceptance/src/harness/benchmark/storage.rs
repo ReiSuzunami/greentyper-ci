@@ -19,6 +19,10 @@ const STREAMING_FIXTURE_JSON: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../tests/fixtures/bench/storage/v1/bounded-streaming-replay.json"
 ));
+const TIMER_STREAMING_FIXTURE_JSON: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../tests/fixtures/bench/storage/v1/timer-expiry-streaming-replay.json"
+));
 const CAS_FIXTURE_JSON: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../tests/fixtures/bench/storage/v1/cas-one-winner.json"
@@ -51,6 +55,7 @@ pub(super) fn catalog_entry() -> serde_json::Value {
         "workloads": [
             {"id": "critical-append-replay", "version": 1},
             {"id": "bounded-streaming-replay", "version": 1},
+            {"id": "timer-expiry-streaming-replay", "version": 1},
             {"id": "cas-one-winner", "version": 1},
             {"id": "backup-restore", "version": 1},
             {"id": "interrupted-migration", "version": 1},
@@ -74,12 +79,31 @@ pub(super) fn target(implementation: &str, workload: &str) -> AppResult<Box<dyn 
         }
     };
     let events = generate_events(&fixture)?;
+    let (events, timer_batch_stats) = if workload == StorageWorkload::TimerExpiryStreamingReplay {
+        let plan = plan_timer_expiry_batches(
+            &events,
+            fixture
+                .inter_event_delays_ms
+                .as_deref()
+                .ok_or_else(|| cli_error("timer streaming fixture has no event delays"))?,
+            fixture
+                .max_batch_events
+                .ok_or_else(|| cli_error("timer streaming fixture has no event limit"))?,
+            fixture
+                .batch_expiry_ms
+                .ok_or_else(|| cli_error("timer streaming fixture has no batch expiry"))?,
+        )?;
+        (plan.events, Some(plan.stats))
+    } else {
+        (events, None)
+    };
     Ok(Box::new(StorageTarget {
         engine,
         workload,
         fixture,
         fixture_bytes,
         events,
+        timer_batch_stats,
         run_dir: None,
     }))
 }
@@ -100,6 +124,10 @@ struct StorageFixture {
     #[serde(default)]
     max_batch_events: Option<u32>,
     #[serde(default)]
+    batch_expiry_ms: Option<u32>,
+    #[serde(default)]
+    inter_event_delays_ms: Option<Vec<u32>>,
+    #[serde(default)]
     cas_contenders: Option<u32>,
     #[serde(default)]
     backup_restore_cycles: Option<u32>,
@@ -118,6 +146,8 @@ fn validate_fixture(fixture: &StorageFixture, workload: StorageWorkload) -> AppR
                 && fixture.events_per_transaction == 4
                 && fixture.payload_bytes == 256
                 && fixture.max_batch_events.is_none()
+                && fixture.batch_expiry_ms.is_none()
+                && fixture.inter_event_delays_ms.is_none()
                 && fixture.cas_contenders.is_none()
                 && fixture.backup_restore_cycles.is_none()
                 && fixture.migration_interruptions.is_none()
@@ -129,6 +159,22 @@ fn validate_fixture(fixture: &StorageFixture, workload: StorageWorkload) -> AppR
                 && fixture.events_per_transaction == 32
                 && fixture.payload_bytes == 128
                 && fixture.max_batch_events == Some(32)
+                && fixture.batch_expiry_ms.is_none()
+                && fixture.inter_event_delays_ms.is_none()
+                && fixture.cas_contenders.is_none()
+                && fixture.backup_restore_cycles.is_none()
+                && fixture.migration_interruptions.is_none()
+                && fixture.crash_cases.is_none()
+        }
+        StorageWorkload::TimerExpiryStreamingReplay => {
+            fixture.workload_id == "timer-expiry-streaming-replay"
+                && fixture.transactions == 1
+                && fixture.events_per_transaction == 11
+                && fixture.payload_bytes == 128
+                && fixture.max_batch_events == Some(4)
+                && fixture.batch_expiry_ms == Some(250)
+                && fixture.inter_event_delays_ms.as_deref()
+                    == Some([0, 100, 100, 50, 10, 10, 10, 20, 250, 10, 10].as_slice())
                 && fixture.cas_contenders.is_none()
                 && fixture.backup_restore_cycles.is_none()
                 && fixture.migration_interruptions.is_none()
@@ -140,6 +186,8 @@ fn validate_fixture(fixture: &StorageFixture, workload: StorageWorkload) -> AppR
                 && fixture.events_per_transaction == 4
                 && fixture.payload_bytes == 256
                 && fixture.max_batch_events.is_none()
+                && fixture.batch_expiry_ms.is_none()
+                && fixture.inter_event_delays_ms.is_none()
                 && fixture.cas_contenders == Some(8)
                 && fixture.backup_restore_cycles.is_none()
                 && fixture.migration_interruptions.is_none()
@@ -151,6 +199,8 @@ fn validate_fixture(fixture: &StorageFixture, workload: StorageWorkload) -> AppR
                 && fixture.events_per_transaction == 4
                 && fixture.payload_bytes == 256
                 && fixture.max_batch_events.is_none()
+                && fixture.batch_expiry_ms.is_none()
+                && fixture.inter_event_delays_ms.is_none()
                 && fixture.cas_contenders.is_none()
                 && fixture.backup_restore_cycles == Some(1)
                 && fixture.migration_interruptions.is_none()
@@ -162,6 +212,8 @@ fn validate_fixture(fixture: &StorageFixture, workload: StorageWorkload) -> AppR
                 && fixture.events_per_transaction == 4
                 && fixture.payload_bytes == 256
                 && fixture.max_batch_events.is_none()
+                && fixture.batch_expiry_ms.is_none()
+                && fixture.inter_event_delays_ms.is_none()
                 && fixture.cas_contenders.is_none()
                 && fixture.backup_restore_cycles.is_none()
                 && fixture.migration_interruptions == Some(3)
@@ -173,6 +225,8 @@ fn validate_fixture(fixture: &StorageFixture, workload: StorageWorkload) -> AppR
                 && fixture.events_per_transaction == 4
                 && fixture.payload_bytes == 128
                 && fixture.max_batch_events.is_none()
+                && fixture.batch_expiry_ms.is_none()
+                && fixture.inter_event_delays_ms.is_none()
                 && fixture.cas_contenders.is_none()
                 && fixture.backup_restore_cycles.is_none()
                 && fixture.migration_interruptions.is_none()
@@ -232,6 +286,7 @@ enum StorageEngine {
 enum StorageWorkload {
     CriticalAppendReplay,
     BoundedStreamingReplay,
+    TimerExpiryStreamingReplay,
     CasOneWinner,
     BackupRestore,
     InterruptedMigration,
@@ -247,6 +302,10 @@ impl StorageWorkload {
             "bounded-streaming-replay" => Ok((
                 Self::BoundedStreamingReplay,
                 STREAMING_FIXTURE_JSON.as_bytes(),
+            )),
+            "timer-expiry-streaming-replay" => Ok((
+                Self::TimerExpiryStreamingReplay,
+                TIMER_STREAMING_FIXTURE_JSON.as_bytes(),
             )),
             "cas-one-winner" => Ok((Self::CasOneWinner, CAS_FIXTURE_JSON.as_bytes())),
             "backup-restore" => Ok((Self::BackupRestore, BACKUP_FIXTURE_JSON.as_bytes())),
@@ -267,6 +326,7 @@ impl StorageWorkload {
         match self {
             Self::CriticalAppendReplay => "critical-append-replay",
             Self::BoundedStreamingReplay => "bounded-streaming-replay",
+            Self::TimerExpiryStreamingReplay => "timer-expiry-streaming-replay",
             Self::CasOneWinner => "cas-one-winner",
             Self::BackupRestore => "backup-restore",
             Self::InterruptedMigration => "interrupted-migration",
@@ -278,6 +338,9 @@ impl StorageWorkload {
         match self {
             Self::CriticalAppendReplay => "16 sync transactions x 4 events x 256 payload bytes",
             Self::BoundedStreamingReplay => "8 max-event batches x 32 events x 128 payload bytes",
+            Self::TimerExpiryStreamingReplay => {
+                "11 timed stream events x 128 payload bytes with 4-event/250ms limits"
+            }
             Self::CasOneWinner => {
                 "64-event Ledger followed by 8 CAS contenders at one expected head"
             }
@@ -297,6 +360,9 @@ impl StorageWorkload {
             Self::BoundedStreamingReplay => {
                 "stream events committed in bounded batches and replayed"
             }
+            Self::TimerExpiryStreamingReplay => {
+                "timed stream events committed on expiry, event limit, or final drain"
+            }
             Self::CasOneWinner => "CAS contenders resolved with exactly one winner",
             Self::BackupRestore => "events backed up, restored, replayed, and verified",
             Self::InterruptedMigration => {
@@ -315,6 +381,9 @@ impl StorageWorkload {
             }
             Self::BoundedStreamingReplay => {
                 "create store, commit 8 max-event streaming batches, close, reopen, replay, and verify"
+            }
+            Self::TimerExpiryStreamingReplay => {
+                "plan deterministic event arrivals, commit batches at the 250ms deadline or 4-event limit, close, reopen, replay, and verify"
             }
             Self::CasOneWinner => {
                 "prepare a 64-event store, evaluate 8 stale-head CAS contenders, reopen, and verify one winner"
@@ -354,6 +423,7 @@ struct StorageTarget {
     fixture: StorageFixture,
     fixture_bytes: &'static [u8],
     events: Vec<EventRecord>,
+    timer_batch_stats: Option<TimerBatchStats>,
     run_dir: Option<PathBuf>,
 }
 
@@ -363,7 +433,7 @@ impl BenchmarkTarget for StorageTarget {
             comparison_id: "storage",
             comparison_version: 1,
             implementation: self.engine.implementation(),
-            implementation_revision: "3",
+            implementation_revision: "4",
             dependencies: self.engine.dependencies(),
             workload_id: self.workload.id(),
             workload_version: self.fixture.workload_version,
@@ -434,10 +504,13 @@ impl BenchmarkTarget for StorageTarget {
                         .ok_or_else(|| cli_error("crash fixture has no case count"))?,
                 );
             }
-            StorageWorkload::CriticalAppendReplay | StorageWorkload::BoundedStreamingReplay => {}
+            StorageWorkload::CriticalAppendReplay
+            | StorageWorkload::BoundedStreamingReplay
+            | StorageWorkload::TimerExpiryStreamingReplay => {}
         }
         let observed_max_batch_events = match self.workload {
-            StorageWorkload::BoundedStreamingReplay => Some(validate_max_event_batches(
+            StorageWorkload::BoundedStreamingReplay
+            | StorageWorkload::TimerExpiryStreamingReplay => Some(validate_max_event_batches(
                 &self.events,
                 self.fixture
                     .max_batch_events
@@ -454,6 +527,7 @@ impl BenchmarkTarget for StorageTarget {
                 "storage benchmark replay differs from canonical events",
             ));
         }
+        let transaction_count = u64::try_from(transaction_slices(&self.events)?.len())?;
         let mut gauges = BTreeMap::from([
             (
                 "batch_event_limit".into(),
@@ -471,13 +545,27 @@ impl BenchmarkTarget for StorageTarget {
                 "post_append_storage_bytes".into(),
                 observation.post_append_storage_bytes,
             ),
-            (
-                "transaction_count".into(),
-                u64::from(self.fixture.transactions),
-            ),
+            ("transaction_count".into(), transaction_count),
         ]);
         if let Some(observed) = observed_max_batch_events {
             gauges.insert("observed_max_batch_events".into(), observed);
+        }
+        if let Some(stats) = self.timer_batch_stats {
+            gauges.extend([
+                ("batch_expiry_ms".into(), u64::from(stats.expiry_ms)),
+                ("expiry_flushes".into(), u64::from(stats.expiry_flushes)),
+                (
+                    "event_limit_flushes".into(),
+                    u64::from(stats.event_limit_flushes),
+                ),
+                ("final_flushes".into(), u64::from(stats.final_flushes)),
+                ("max_planned_batch_age_ms".into(), stats.max_batch_age_ms),
+                ("planned_batch_count".into(), u64::from(stats.batch_count)),
+                (
+                    "virtual_stream_duration_ms".into(),
+                    stats.stream_duration_ms,
+                ),
+            ]);
         }
         Ok(BenchmarkObservation {
             operation_units: u64::try_from(observation.replayed.len())?,
@@ -1291,6 +1379,124 @@ fn validate_max_event_batches(events: &[EventRecord], limit: u32) -> AppResult<u
     Ok(u64::try_from(observed_max)?)
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct TimerBatchStats {
+    expiry_ms: u32,
+    expiry_flushes: u32,
+    event_limit_flushes: u32,
+    final_flushes: u32,
+    batch_count: u32,
+    max_batch_age_ms: u64,
+    stream_duration_ms: u64,
+}
+
+struct TimerBatchPlan {
+    events: Vec<EventRecord>,
+    stats: TimerBatchStats,
+}
+
+fn plan_timer_expiry_batches(
+    events: &[EventRecord],
+    inter_event_delays_ms: &[u32],
+    max_batch_events: u32,
+    expiry_ms: u32,
+) -> AppResult<TimerBatchPlan> {
+    if events.is_empty()
+        || inter_event_delays_ms.len() != events.len()
+        || inter_event_delays_ms.first() != Some(&0)
+        || max_batch_events == 0
+        || expiry_ms == 0
+    {
+        return Err(cli_error("timer streaming batch plan is invalid"));
+    }
+
+    let mut planned = Vec::with_capacity(events.len());
+    let mut arrival_ms = 0_u64;
+    let mut batch_started_ms: Option<u64> = None;
+    let mut batch_events = 0_u32;
+    let mut transaction = 1_u64;
+    let mut stats = TimerBatchStats {
+        expiry_ms,
+        expiry_flushes: 0,
+        event_limit_flushes: 0,
+        final_flushes: 0,
+        batch_count: 0,
+        max_batch_age_ms: 0,
+        stream_duration_ms: 0,
+    };
+
+    for (event, delay_ms) in events.iter().zip(inter_event_delays_ms) {
+        arrival_ms = arrival_ms
+            .checked_add(u64::from(*delay_ms))
+            .ok_or_else(|| cli_error("timer streaming arrival time overflow"))?;
+        if let Some(started_ms) = batch_started_ms
+            && started_ms
+                .checked_add(u64::from(expiry_ms))
+                .ok_or_else(|| cli_error("timer streaming deadline overflow"))?
+                <= arrival_ms
+        {
+            let deadline_ms = started_ms + u64::from(expiry_ms);
+            stats.expiry_flushes = stats
+                .expiry_flushes
+                .checked_add(1)
+                .ok_or_else(|| cli_error("timer expiry flush count overflow"))?;
+            stats.batch_count = stats
+                .batch_count
+                .checked_add(1)
+                .ok_or_else(|| cli_error("timer batch count overflow"))?;
+            stats.max_batch_age_ms = stats.max_batch_age_ms.max(deadline_ms - started_ms);
+            transaction = transaction
+                .checked_add(1)
+                .ok_or_else(|| cli_error("timer transaction identity overflow"))?;
+            batch_started_ms = None;
+            batch_events = 0;
+        }
+        let started_ms = *batch_started_ms.get_or_insert(arrival_ms);
+        planned.push(EventRecord {
+            sequence: event.sequence,
+            transaction,
+            index: batch_events,
+            payload: event.payload.clone(),
+        });
+        batch_events = batch_events
+            .checked_add(1)
+            .ok_or_else(|| cli_error("timer batch event count overflow"))?;
+        if batch_events == max_batch_events {
+            stats.event_limit_flushes = stats
+                .event_limit_flushes
+                .checked_add(1)
+                .ok_or_else(|| cli_error("timer event-limit flush count overflow"))?;
+            stats.batch_count = stats
+                .batch_count
+                .checked_add(1)
+                .ok_or_else(|| cli_error("timer batch count overflow"))?;
+            stats.max_batch_age_ms = stats.max_batch_age_ms.max(arrival_ms - started_ms);
+            transaction = transaction
+                .checked_add(1)
+                .ok_or_else(|| cli_error("timer transaction identity overflow"))?;
+            batch_started_ms = None;
+            batch_events = 0;
+        }
+    }
+
+    if batch_events != 0 {
+        let started_ms =
+            batch_started_ms.ok_or_else(|| cli_error("timer final batch has no start time"))?;
+        stats.final_flushes = 1;
+        stats.batch_count = stats
+            .batch_count
+            .checked_add(1)
+            .ok_or_else(|| cli_error("timer batch count overflow"))?;
+        stats.max_batch_age_ms = stats.max_batch_age_ms.max(arrival_ms - started_ms);
+    }
+    stats.stream_duration_ms = arrival_ms;
+    validate_event_sequence(&planned)?;
+    Ok(TimerBatchPlan {
+        events: planned,
+        stats,
+    })
+}
+
 fn write_transaction(file: &mut File, events: &[EventRecord]) -> AppResult<()> {
     file.write_all(&encode_transaction(events)?)?;
     Ok(())
@@ -1803,6 +2009,98 @@ mod tests {
     }
 
     #[test]
+    fn timer_streaming_plan_flushes_on_expiry_limit_and_final_drain() {
+        let fixture: StorageFixture =
+            serde_json::from_str(TIMER_STREAMING_FIXTURE_JSON).expect("timer fixture JSON");
+        let events = generate_events(&fixture).expect("events");
+        let plan = plan_timer_expiry_batches(
+            &events,
+            fixture
+                .inter_event_delays_ms
+                .as_deref()
+                .expect("event delays"),
+            fixture.max_batch_events.expect("event limit"),
+            fixture.batch_expiry_ms.expect("expiry"),
+        )
+        .expect("timer plan");
+        let batch_sizes: Vec<usize> = transaction_slices(&plan.events)
+            .expect("batches")
+            .iter()
+            .map(|batch| batch.len())
+            .collect();
+        assert_eq!(batch_sizes, [3, 4, 1, 3]);
+        assert_eq!(plan.stats.expiry_flushes, 2);
+        assert_eq!(plan.stats.event_limit_flushes, 1);
+        assert_eq!(plan.stats.final_flushes, 1);
+        assert_eq!(plan.stats.batch_count, 4);
+        assert_eq!(plan.stats.max_batch_age_ms, 250);
+        assert_eq!(plan.stats.stream_duration_ms, 570);
+        let delayed =
+            plan_timer_expiry_batches(&events[..2], &[0, 400], 4, 250).expect("idle deadline plan");
+        assert_eq!(
+            transaction_slices(&delayed.events)
+                .expect("idle batches")
+                .iter()
+                .map(|batch| batch.len())
+                .collect::<Vec<_>>(),
+            [1, 1]
+        );
+        assert_eq!(delayed.stats.expiry_flushes, 1);
+        assert_eq!(delayed.stats.final_flushes, 1);
+        assert_eq!(delayed.stats.max_batch_age_ms, 250);
+        assert_eq!(delayed.stats.stream_duration_ms, 400);
+        assert!(plan_timer_expiry_batches(&[], &[], 4, 250).is_err());
+        assert!(plan_timer_expiry_batches(&events, &[0], 4, 250).is_err());
+        assert!(plan_timer_expiry_batches(&events, &[1; 11], 4, 250).is_err());
+        assert!(
+            plan_timer_expiry_batches(
+                &events,
+                fixture
+                    .inter_event_delays_ms
+                    .as_deref()
+                    .expect("event delays"),
+                0,
+                250,
+            )
+            .is_err()
+        );
+        assert!(
+            plan_timer_expiry_batches(
+                &events,
+                fixture
+                    .inter_event_delays_ms
+                    .as_deref()
+                    .expect("event delays"),
+                4,
+                0,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn timer_streaming_fixture_shape_is_frozen() {
+        let fixture: StorageFixture =
+            serde_json::from_str(TIMER_STREAMING_FIXTURE_JSON).expect("timer fixture JSON");
+        validate_fixture(&fixture, StorageWorkload::TimerExpiryStreamingReplay)
+            .expect("frozen fixture");
+
+        let mut changed_expiry = fixture.clone();
+        changed_expiry.batch_expiry_ms = Some(249);
+        assert!(
+            validate_fixture(&changed_expiry, StorageWorkload::TimerExpiryStreamingReplay).is_err()
+        );
+        let mut changed_delay = fixture.clone();
+        changed_delay
+            .inter_event_delays_ms
+            .as_mut()
+            .expect("event delays")[3] = 51;
+        assert!(
+            validate_fixture(&changed_delay, StorageWorkload::TimerExpiryStreamingReplay).is_err()
+        );
+    }
+
+    #[test]
     fn sqlite_replay_rejects_unknown_and_mixed_schema_versions() {
         let fixture = fixture();
         let events = generate_events(&fixture).expect("events");
@@ -1864,6 +2162,48 @@ mod tests {
         );
         assert_eq!(sqlite_observation.gauges["batch_event_limit"], 32);
         assert_eq!(append_observation.gauges["observed_max_batch_events"], 32);
+    }
+
+    #[test]
+    fn timer_streaming_fixture_replays_the_same_planned_batches() {
+        let options = |implementation: &str| Options {
+            comparison: "storage".into(),
+            implementation: implementation.into(),
+            workload: "timer-expiry-streaming-replay".into(),
+            candidate_id: "test".into(),
+            source_revision: "0123456".into(),
+            output: "unused.json".into(),
+            runs: 1,
+            warmup_runs: 1,
+            expect_baseline: None,
+            machine_identifiers: MachineIdentifierPolicy::Redacted,
+        };
+        let mut sqlite = target_for(&options("sqlite-wal")).expect("SQLite target");
+        let mut append = target_for(&options("append-log")).expect("append target");
+        let (_, sqlite_observation) = execute_once(sqlite.as_mut()).expect("SQLite run");
+        let (_, append_observation) = execute_once(append.as_mut()).expect("append run");
+        assert_eq!(sqlite_observation.operation_units, 11);
+        assert_eq!(
+            sqlite_observation.output_digest,
+            append_observation.output_digest
+        );
+        for observation in [&sqlite_observation, &append_observation] {
+            assert_eq!(observation.gauges["batch_event_limit"], 4);
+            assert_eq!(observation.gauges["batch_expiry_ms"], 250);
+            assert_eq!(observation.gauges["expiry_flushes"], 2);
+            assert_eq!(observation.gauges["event_limit_flushes"], 1);
+            assert_eq!(observation.gauges["final_flushes"], 1);
+            assert_eq!(observation.gauges["planned_batch_count"], 4);
+            assert_eq!(observation.gauges["observed_max_batch_events"], 4);
+            assert_eq!(observation.gauges["max_planned_batch_age_ms"], 250);
+            assert_eq!(observation.gauges["virtual_stream_duration_ms"], 570);
+            assert_eq!(observation.gauges["transaction_count"], 4);
+        }
+        assert_eq!(
+            sqlite_observation.gauges.keys().collect::<Vec<_>>(),
+            append_observation.gauges.keys().collect::<Vec<_>>()
+        );
+        assert_eq!(sqlite_observation.gauges.len(), 12);
     }
 
     #[test]

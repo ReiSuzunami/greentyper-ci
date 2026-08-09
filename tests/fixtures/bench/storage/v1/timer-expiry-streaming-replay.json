@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "comparison_id": "storage",
+  "workload_id": "timer-expiry-streaming-replay",
+  "workload_version": 1,
+  "transactions": 1,
+  "events_per_transaction": 11,
+  "payload_bytes": 128,
+  "max_batch_events": 4,
+  "batch_expiry_ms": 250,
+  "inter_event_delays_ms": [0, 100, 100, 50, 10, 10, 10, 20, 250, 10, 10]
+}

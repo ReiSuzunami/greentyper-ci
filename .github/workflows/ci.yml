@@ -127,6 +127,28 @@ jobs:
           target/bench-storage/release/greentyper-acceptance.exe bench `
             --comparison storage `
             --implementation sqlite-wal `
+            --workload timer-expiry-streaming-replay `
+            --candidate-id "ci-$env:GITHUB_SHA" `
+            --source-revision "$env:GITHUB_SHA" `
+            --output candidate-smoke/storage-sqlite-wal-timer.json `
+            --runs 1 `
+            --warmup-runs 1 `
+            --expect-baseline x86-64-v3 `
+            --machine-identifiers redacted
+          target/bench-storage/release/greentyper-acceptance.exe bench `
+            --comparison storage `
+            --implementation append-log `
+            --workload timer-expiry-streaming-replay `
+            --candidate-id "ci-$env:GITHUB_SHA" `
+            --source-revision "$env:GITHUB_SHA" `
+            --output candidate-smoke/storage-append-log-timer.json `
+            --runs 1 `
+            --warmup-runs 1 `
+            --expect-baseline x86-64-v3 `
+            --machine-identifiers redacted
+          target/bench-storage/release/greentyper-acceptance.exe bench `
+            --comparison storage `
+            --implementation sqlite-wal `
             --workload cross-process-crash-replay `
             --candidate-id "ci-$env:GITHUB_SHA" `
             --source-revision "$env:GITHUB_SHA" `
