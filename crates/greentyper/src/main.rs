@@ -1,6 +1,7 @@
 //! GreenTyper product entry point.
 
 mod cli;
+mod local_process;
 
 use std::process::ExitCode;
 

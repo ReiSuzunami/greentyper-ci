@@ -81,14 +81,21 @@ cross-process headless tests. Config currently includes versioned TOML, drafts,
 provenance, atomic replacement, and repair, but not the eventual TUI/App Server
 editors, catalogs, or credential store. Tool call identity, argument hashing,
 approval binding, independent authority checks, and ambiguous-effect
-reconciliation are durable core policy; no real process, network, or MCP Tool
-adapter exists yet. The core also has bounded generic SSE framing and a strict
+reconciliation are durable core policy. The product now has a private
+`local.echo` process tracer: it launches only a fixed same-binary child after
+the durable effect boundary, clears ambient environment and working-directory
+state, bounds I/O and time, terminates a Unix process group, and assigns the
+Windows child to a constrained Job Object before execution. It rejects
+filesystem and network resources and is not a general process sandbox,
+network Tool, or MCP adapter. The core also has bounded generic SSE framing and a strict
 OpenAI Responses dialect decoder for text, function calls, terminal states, and
 optional usage. A core fixture path normalizes one Responses function call,
 crosses durable Tool approval/effect policy, continues the Provider once, and
 prepares canonical output without repeating successful or ambiguous effects.
 The product still uses the deterministic simulator: no real network transport,
-credential routing, local-process executor, or retry path exists yet. The file
+credential routing, user-facing Tool approval/delivery path, or retry path
+exists yet. The `local.echo` tracer is exercised through an internal
+cross-process harness rather than a public Tool command. The file
 Ledger remains provisional. Real Provider and Tool adapters, Workspace, TUI,
 and App Server work remains. The acceptance runner can emit bound raw evidence,
 but is not yet a full Target Acceptance Run. Follow the

@@ -251,10 +251,12 @@ protocol.
   canonical Items, and the unimplemented Provider event kinds. The bounded SSE,
   first OpenAI Responses decoder, neutral normalizer, and one-Tool fixture
   Kernel path are present in core.
-- Concrete Tool adapters and sandboxing: local process launch, Windows Job
-  Objects, filesystem/network enforcement, MCP, product approval UX, and
-  credential resolution. Core call identity, Approval Grant binding, prepared-
-  effect ordering, terminal digests, and reconciliation are present.
+- Broader Tool adapters and sandboxing: the private fixed `local.echo` tracer,
+  Unix process-group termination, and Windows Job wrapper are present;
+  caller-selected process policy, complete Windows lifetime/resource evidence,
+  filesystem/network enforcement, MCP, product approval UX, and credential
+  resolution remain pending. Core call identity, Approval Grant binding,
+  prepared-effect ordering, terminal digests, and reconciliation are present.
 - Byte-offset process termination around every remaining Runtime, Provider,
   Tool, delivery, and product acknowledgement boundary; fuzzing; and SQLite VFS
   fault injection.

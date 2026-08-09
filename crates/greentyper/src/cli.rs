@@ -13,6 +13,10 @@ use greentyper_core::model::DeliveryId;
 use greentyper_core::provider::DeterministicProvider;
 use greentyper_core::runtime::{AcknowledgeOutcome, RecoveryStatus, RuntimeKernel};
 
+use crate::local_process::{
+    LocalProcessChildMode, LocalProcessError, LocalProcessSmokeOutcome, LocalProcessSmokeScenario,
+};
+
 pub fn run(arguments: impl Iterator<Item = String>) -> Result<(), CliError> {
     match parse(arguments)? {
         Command::Headless { ledger, input } => {
@@ -44,6 +48,35 @@ pub fn run(arguments: impl Iterator<Item = String>) -> Result<(), CliError> {
             Ok(())
         }
         Command::Config(command) => run_config(command),
+        Command::LocalProcessChild { mode } => {
+            crate::local_process::run_local_process_child(mode).map_err(CliError::Io)
+        }
+        Command::LocalProcessSmoke {
+            run_dir,
+            scenario,
+            message,
+        } => {
+            match crate::local_process::run_smoke(&run_dir, scenario, &message)? {
+                LocalProcessSmokeOutcome::Succeeded(output) => {
+                    let stdout = io::stdout();
+                    let mut stdout = stdout.lock();
+                    stdout.write_all(&output)?;
+                    stdout.write_all(b"\n")?;
+                    stdout.flush()?;
+                }
+                LocalProcessSmokeOutcome::SucceededWithoutOutput => {
+                    write_stdout_line("succeeded-existing")?;
+                }
+                LocalProcessSmokeOutcome::Failed => write_stdout_line("failed")?,
+                LocalProcessSmokeOutcome::ReconciliationRequired => {
+                    write_stdout_line("reconciliation-required")?;
+                }
+                LocalProcessSmokeOutcome::ReconciliationRequiredExisting => {
+                    write_stdout_line("reconciliation-required-existing")?;
+                }
+            }
+            Ok(())
+        }
         Command::Help => {
             print!("{USAGE}");
             Ok(())
@@ -172,6 +205,14 @@ enum Command {
         delivery: DeliveryId,
     },
     Config(ConfigCommand),
+    LocalProcessChild {
+        mode: LocalProcessChildMode,
+    },
+    LocalProcessSmoke {
+        run_dir: PathBuf,
+        scenario: LocalProcessSmokeScenario,
+        message: String,
+    },
     Help,
 }
 
@@ -211,6 +252,19 @@ fn parse(mut arguments: impl Iterator<Item = String>) -> Result<Command, CliErro
     }
     if command == "config" {
         return parse_config(arguments).map(Command::Config);
+    }
+    if command == "__local-process-child" {
+        let mode = LocalProcessChildMode::parse(arguments.next().as_deref())
+            .ok_or(CliError::Usage("local-process child requires a valid mode"))?;
+        if arguments.next().is_some() {
+            return Err(CliError::Usage(
+                "local-process child does not accept options",
+            ));
+        }
+        return Ok(Command::LocalProcessChild { mode });
+    }
+    if command == "__local-process-smoke" {
+        return parse_local_process_smoke(arguments);
     }
     let mut ledger = None;
     let mut input = None;
@@ -270,6 +324,46 @@ fn parse(mut arguments: impl Iterator<Item = String>) -> Result<Command, CliErro
         }
         _ => Err(CliError::Usage("unknown command")),
     }
+}
+
+fn parse_local_process_smoke(
+    mut arguments: impl Iterator<Item = String>,
+) -> Result<Command, CliError> {
+    let mut run_dir = None;
+    let mut scenario = None;
+    let mut message = None;
+    while let Some(argument) = arguments.next() {
+        let slot = match argument.as_str() {
+            "--run-dir" => &mut run_dir,
+            "--scenario" => &mut scenario,
+            "--message" => &mut message,
+            _ => return Err(CliError::Usage("unknown local-process smoke option")),
+        };
+        if slot.is_some() {
+            return Err(CliError::Usage("duplicate local-process smoke option"));
+        }
+        *slot = Some(arguments.next().ok_or(CliError::Usage(
+            "local-process smoke option is missing its value",
+        ))?);
+    }
+    let run_dir =
+        PathBuf::from(run_dir.ok_or(CliError::Usage("local-process smoke requires --run-dir"))?);
+    if !run_dir.is_absolute() {
+        return Err(CliError::Usage(
+            "local-process smoke run directory must be absolute",
+        ));
+    }
+    let scenario = LocalProcessSmokeScenario::parse(
+        scenario
+            .as_deref()
+            .ok_or(CliError::Usage("local-process smoke requires --scenario"))?,
+    )
+    .ok_or(CliError::Usage("unsupported local-process smoke scenario"))?;
+    Ok(Command::LocalProcessSmoke {
+        run_dir,
+        scenario,
+        message: message.ok_or(CliError::Usage("local-process smoke requires --message"))?,
+    })
 }
 
 fn parse_config(mut arguments: impl Iterator<Item = String>) -> Result<ConfigCommand, CliError> {
@@ -578,6 +672,7 @@ pub enum CliError {
     Json(serde_json::Error),
     Config(ConfigRuntimeError),
     Runtime(greentyper_core::runtime::RuntimeError),
+    LocalProcess(LocalProcessError),
 }
 
 impl fmt::Display for CliError {
@@ -596,6 +691,7 @@ impl fmt::Display for CliError {
                 write!(formatter, "{rendered}")
             }
             Self::Runtime(source) => write!(formatter, "{source}"),
+            Self::LocalProcess(source) => write!(formatter, "{source}"),
         }
     }
 }
@@ -607,6 +703,7 @@ impl Error for CliError {
             Self::Json(source) => Some(source),
             Self::Config(source) => Some(source),
             Self::Runtime(source) => Some(source),
+            Self::LocalProcess(source) => Some(source),
             Self::Usage(_) => None,
         }
     }
@@ -627,6 +724,12 @@ impl From<ConfigRuntimeError> for CliError {
 impl From<greentyper_core::runtime::RuntimeError> for CliError {
     fn from(source: greentyper_core::runtime::RuntimeError) -> Self {
         Self::Runtime(source)
+    }
+}
+
+impl From<LocalProcessError> for CliError {
+    fn from(source: LocalProcessError) -> Self {
+        Self::LocalProcess(source)
     }
 }
 

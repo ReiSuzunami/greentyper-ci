@@ -9,9 +9,13 @@ decide whether a recovered effect may run again.
 
 The first slice is synchronous core policy over a dedicated provisional file
 Ledger. A fixture Provider Turn now reaches it through the Kernel, but execution
-still uses an injected executor. It does not claim a real process sandbox,
-Windows Job Object, network transport, MCP client, credential store, or product
-approval surface.
+there still uses an injected executor. The product package now also owns a
+private `local.echo` tracer over the same executor seam. It launches only a
+fixed same-binary child, not a caller-selected command or shell. Unix runs in a
+dedicated process group; Windows creates the child suspended, assigns a Job
+Object, then resumes it. This does not claim a general filesystem/network
+sandbox, network transport, MCP client, credential store, or product approval
+surface.
 
 ## Interface
 
@@ -44,7 +48,7 @@ flowchart LR
     R --> RS["append + flush + sync"]
     RS --> A["ApprovalGranted + EffectPrepared"]
     A --> AS["append + flush + sync"]
-    AS --> E["Invoke injected executor once"]
+    AS --> E["Invoke executor once"]
     E --> O["Succeeded, Failed, or Ambiguous"]
     O --> OS["append + flush + sync"]
 ```
@@ -88,6 +92,15 @@ credentials are not part of the persisted approval record, result, or
 reconciliation record. A future concrete adapter receives an opaque credential
 reference through a separate product-owned vault seam.
 
+The product `local.echo` tracer requires the exact `Tool(local.echo)` and
+`Process` authorities and rejects all filesystem and network resources even
+when the Agent otherwise holds those capabilities. It clears the inherited
+environment, uses a fixed working directory and child argv, pipes stdin/stdout/
+stderr, applies a five-second deadline and a combined 256 KiB output limit,
+and never invokes a shell. Timeout, output overflow, or post-launch I/O
+uncertainty returns `ReconciliationRequired`; a proven pre-spawn failure is a
+normal durable failure.
+
 ## Failure Rules
 
 - Failure to persist `CallRequested` or `EffectPrepared` invokes no executor.
@@ -117,8 +130,17 @@ result is lost at process death is not repeated. The Runtime Turn becomes
 blocked because only the digest is durable; storing a resumable redacted result
 reference remains a later contract.
 
-Still pending: a real local-process executor, Windows Job Object lifetime and
-resource enforcement, filesystem/network/MCP adapters, credential-vault
-integration, product approval and result delivery, multiple Provider Tool
-calls, cross-process byte-offset termination around every effect boundary,
-fuzzing, and production storage migration.
+Product integration tests additionally execute `local.echo` in a real child,
+reopen its digest, reject unsupported authority and argument shapes, prove
+environment and working-directory isolation, stop blocked stdin and output
+floods at the deadline, kill Unix descendants as a process group, and preserve
+failed or ambiguous no-repeat state. A Windows-only test verifies that the Job
+Object's active-process limit denies a descendant; cross-target checks compile
+the audited handle wrapper.
+
+Still pending: a public Product Tool driver and approval/result delivery,
+caller-selected process policy, complete Windows Job kill-on-close and memory-
+limit evidence on the Target Machine, filesystem/network/MCP adapters,
+credential-vault integration, multiple Provider Tool calls, cross-process
+byte-offset termination around every effect boundary, fuzzing, and production
+storage migration.

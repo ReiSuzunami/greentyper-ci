@@ -94,11 +94,21 @@ while an outcome append failure after one invocation poisons the writer and
 reopens in a reconciliation-required state. Concrete Provider transport,
 credential/profile binding, broader canonical Runtime Items,
 reasoning/refusal/annotation and other unimplemented
-Responses event kinds, reconnect/retry fixtures, concrete process, Job Object,
-and MCP adapters, receipt delivery to a user-visible sink, the cross-process
-Tool byte-offset matrix, and final reconciliation presentation remain pending.
+Responses event kinds, reconnect/retry fixtures, MCP adapters, receipt delivery
+to a user-visible sink, the cross-process Tool byte-offset matrix, and final
+reconciliation presentation remain pending.
 Migration/backup remains in the candidate storage harness rather than these
 provisional product adapters.
+
+Product integration tests now drive a private `local.echo` adapter through the
+real Kernel approval/effect seam. They cover successful child output and digest
+replay, known pre-spawn and nonzero-exit failures, timeout and output-overflow
+reconciliation without replay, deadline-controlled blocked stdin and output
+floods, parent environment and working-directory exclusion, exact process/
+argument/resource rejection, raw-resource exclusion from the Tool Ledger, and
+Unix process-group descendant termination. The Windows job also runs a
+platform-only descendant-denial test; kill-on-close and process-memory-limit
+evidence on a real Windows runner/Target remains a separate gate.
 
 The first fixture Provider/Tool tracer bullet decodes and normalizes one
 Responses function call, requires a current Session and exact Tool authority,

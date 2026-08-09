@@ -115,12 +115,21 @@ ambiguous effects cannot continue, and process death after a durable Tool
 success blocks rather than repeating the effect. Runtime Event schema 2 stores
 the expanded optional Usage Records while replaying historical schema 1.
 
+A product-private `local.echo` tracer now exercises the concrete process seam.
+It launches a fixed same-binary child without a shell, clears inherited
+environment and working-directory state, bounds all three standard streams and
+execution time, kills the Unix process group on abort, and on Windows creates
+the process suspended before assigning a single-process, 128 MiB,
+kill-on-close Job Object. The adapter rejects filesystem and network resources;
+it is evidence for one narrow local process Tool, not a general process
+sandbox or public product command.
+
 The remaining slices are still policy, protocol, and fault-adapter work: a
 concrete HTTP Provider transport, credential/profile routing, broader canonical
 Items, multiple Tool calls, durable resumable Tool result references, a
-concrete local-process executor, Windows Job Objects, product
-approval/delivery, reconnect/retry behavior, and the cross-process Tool crash
-matrix remain pending.
+public Product Tool driver and approval/delivery, caller-selected process
+policy, complete Windows Job lifetime/resource evidence, reconnect/retry
+behavior, and the cross-process Tool crash matrix remain pending.
 
 Exit criteria:
 
