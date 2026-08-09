@@ -39,10 +39,14 @@ jobs:
         run: cargo test --workspace --all-targets --locked
       - name: Test storage candidates
         run: cargo test -p greentyper-acceptance --all-targets --features bench-storage --locked
+      - name: Test terminal candidates
+        run: cargo test -p greentyper-acceptance --all-targets --features bench-terminal --locked
       - name: Lint workspace
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Lint storage candidates
         run: cargo clippy -p greentyper-acceptance --all-targets --features bench-storage --locked -- -D warnings
+      - name: Lint terminal candidates
+        run: cargo clippy -p greentyper-acceptance --all-targets --features bench-terminal --locked -- -D warnings
 
   windows:
     if: github.repository == 'ReiSuzunami/greentyper-ci'
@@ -65,14 +69,20 @@ jobs:
         run: cargo test --workspace --all-targets --locked
       - name: Test storage candidates
         run: cargo test -p greentyper-acceptance --all-targets --features bench-storage --locked
+      - name: Test terminal candidates
+        run: cargo test -p greentyper-acceptance --all-targets --features bench-terminal --locked
       - name: Lint workspace
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Lint storage candidates
         run: cargo clippy -p greentyper-acceptance --all-targets --features bench-storage --locked -- -D warnings
+      - name: Lint terminal candidates
+        run: cargo clippy -p greentyper-acceptance --all-targets --features bench-terminal --locked -- -D warnings
       - name: Build release binaries
         run: cargo build --workspace --release --locked
       - name: Build storage candidate runner
         run: cargo build -p greentyper-acceptance --release --features bench-storage --target-dir target/bench-storage --locked
+      - name: Build terminal candidate runner
+        run: cargo build -p greentyper-acceptance --release --features bench-terminal --target-dir target/bench-terminal --locked
       - name: Verify CPU baseline and acceptance harness
         shell: pwsh
         run: |
@@ -168,6 +178,33 @@ jobs:
             --warmup-runs 1 `
             --expect-baseline x86-64-v3 `
             --machine-identifiers redacted
+      - name: Verify terminal candidate pipeline
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force terminal-smoke | Out-Null
+          target/bench-terminal/release/greentyper-acceptance.exe verify-cpu --expect-baseline x86-64-v3
+          target/bench-terminal/release/greentyper-acceptance.exe bench `
+            --comparison terminal `
+            --implementation direct-vt `
+            --workload render-matrix `
+            --candidate-id "ci-$env:GITHUB_SHA" `
+            --source-revision "$env:GITHUB_SHA" `
+            --output terminal-smoke/terminal-direct-vt.json `
+            --runs 1 `
+            --warmup-runs 1 `
+            --expect-baseline x86-64-v3 `
+            --machine-identifiers redacted
+          target/bench-terminal/release/greentyper-acceptance.exe bench `
+            --comparison terminal `
+            --implementation ratatui-crossterm `
+            --workload render-matrix `
+            --candidate-id "ci-$env:GITHUB_SHA" `
+            --source-revision "$env:GITHUB_SHA" `
+            --output terminal-smoke/terminal-ratatui-crossterm.json `
+            --runs 1 `
+            --warmup-runs 1 `
+            --expect-baseline x86-64-v3 `
+            --machine-identifiers redacted
       - name: Package portable build
         id: package
         shell: pwsh
@@ -190,5 +227,12 @@ jobs:
         with:
           name: greentyper-storage-candidate-smoke-${{ github.sha }}
           path: candidate-smoke/*.json
+          if-no-files-found: error
+          retention-days: 14
+      - name: Upload terminal candidate smoke
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: greentyper-terminal-candidate-smoke-${{ github.sha }}
+          path: terminal-smoke/*.json
           if-no-files-found: error
           retention-days: 14

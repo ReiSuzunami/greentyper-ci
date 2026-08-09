@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "comparison_id": "terminal",
+  "workload_id": "render-matrix",
+  "workload_version": 1,
+  "screen_sizes": [[40, 12], [80, 24], [160, 50]],
+  "stream_updates": 4,
+  "expected_frames": 27,
+  "expected_digest": "48b53fc097ae0f566e625d4236f15af56fa46b0a15832fc0cc2cf4f778e156ea"
+}

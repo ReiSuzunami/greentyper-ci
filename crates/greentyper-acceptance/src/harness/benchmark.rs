@@ -5,6 +5,8 @@ use std::collections::BTreeMap;
 
 #[cfg(feature = "bench-storage")]
 mod storage;
+#[cfg(feature = "bench-terminal")]
+mod terminal;
 
 const HARNESS_FIXTURE_JSON: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -200,14 +202,20 @@ fn benchmark_catalog() -> serde_json::Value {
 }
 
 fn candidate_catalog_entries() -> Vec<serde_json::Value> {
+    let entries = Vec::new();
     #[cfg(feature = "bench-storage")]
-    {
-        vec![storage::catalog_entry()]
-    }
-    #[cfg(not(feature = "bench-storage"))]
-    {
-        Vec::new()
-    }
+    let entries = {
+        let mut entries = entries;
+        entries.push(storage::catalog_entry());
+        entries
+    };
+    #[cfg(feature = "bench-terminal")]
+    let entries = {
+        let mut entries = entries;
+        entries.push(terminal::catalog_entry());
+        entries
+    };
+    entries
 }
 
 fn run_benchmark(options: Options) -> AppResult<()> {
@@ -438,6 +446,8 @@ fn target_for(options: &Options) -> AppResult<Box<dyn BenchmarkTarget>> {
         }
         #[cfg(feature = "bench-storage")]
         ("storage", implementation, workload) => storage::target(implementation, workload),
+        #[cfg(feature = "bench-terminal")]
+        ("terminal", implementation, workload) => terminal::target(implementation, workload),
         (comparison, implementation, workload) => Err(cli_error(format!(
             "benchmark target {comparison}/{implementation}/{workload} is not compiled into this runner"
         ))),
