@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "comparison_id": "storage",
+  "workload_id": "cross-process-crash-replay",
+  "workload_version": 1,
+  "transactions": 4,
+  "events_per_transaction": 4,
+  "payload_bytes": 128,
+  "crash_cases": 6
+}

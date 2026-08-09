@@ -111,7 +111,7 @@ Results include main process, TUI, per-Agent increment, child processes, and tot
 
 ## CI Matrix
 
-This is the required end-state matrix for a release candidate. The current bootstrap workflow implements formatting, checks, tests, lints, release packaging, the x86-64-v3 guard, an acceptance-harness smoke, a one-sample benchmark-pipeline smoke, and isolated compile/test coverage for the five in-process storage workloads plus a representative storage smoke. Integration, cross-process crash, security, cross-process migration, and fuzz jobs are added with the slices that make them executable.
+This is the required end-state matrix for a release candidate. The current bootstrap workflow implements formatting, checks, tests, lints, release packaging, the x86-64-v3 guard, an acceptance-harness smoke, a one-sample benchmark-pipeline smoke, isolated compile/test coverage for six storage workloads, and a real same-binary child termination/restart integration test on macOS ARM and Windows. Broader Runtime/tool-effect crash, security, cross-process CAS/migration, and fuzz jobs are added with the slices that make them executable.
 
 | Environment | Required evidence |
 | --- | --- |
@@ -122,7 +122,7 @@ This is the required end-state matrix for a release candidate. The current boots
 
 Sanitizer, loom-style concurrency exploration, or equivalent tools should run on a supported CI host when they add evidence unavailable on Windows. Platform-specific behavior still requires Windows tests.
 
-Windows CI executes the release-built acceptance binary's x86-64-v3 feature guard, a three-sample acceptance smoke, and a one-sample benchmark-pipeline smoke. It separately builds and tests the optional storage-candidate runner and executes one redacted `critical-append-replay` sample for SQLite WAL and append log without placing that binary in the portable product package. FMDev and Target evidence still use at least 30 measured runs for every required named workload; CI smoke samples are never treated as performance evidence.
+Windows CI executes the release-built acceptance binary's x86-64-v3 feature guard, a three-sample acceptance smoke, and a one-sample benchmark-pipeline smoke. It separately builds and tests the optional storage-candidate runner and executes redacted `critical-append-replay` and `cross-process-crash-replay` samples for SQLite WAL and append log without placing that binary in the portable product package. FMDev and Target evidence still use at least 30 measured runs for every required named workload; CI smoke samples are never treated as performance evidence.
 
 ## Release Gate
 

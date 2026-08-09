@@ -124,6 +124,28 @@ jobs:
             --warmup-runs 1 `
             --expect-baseline x86-64-v3 `
             --machine-identifiers redacted
+          target/bench-storage/release/greentyper-acceptance.exe bench `
+            --comparison storage `
+            --implementation sqlite-wal `
+            --workload cross-process-crash-replay `
+            --candidate-id "ci-$env:GITHUB_SHA" `
+            --source-revision "$env:GITHUB_SHA" `
+            --output candidate-smoke/storage-sqlite-wal-crash.json `
+            --runs 1 `
+            --warmup-runs 1 `
+            --expect-baseline x86-64-v3 `
+            --machine-identifiers redacted
+          target/bench-storage/release/greentyper-acceptance.exe bench `
+            --comparison storage `
+            --implementation append-log `
+            --workload cross-process-crash-replay `
+            --candidate-id "ci-$env:GITHUB_SHA" `
+            --source-revision "$env:GITHUB_SHA" `
+            --output candidate-smoke/storage-append-log-crash.json `
+            --runs 1 `
+            --warmup-runs 1 `
+            --expect-baseline x86-64-v3 `
+            --machine-identifiers redacted
       - name: Package portable build
         id: package
         shell: pwsh

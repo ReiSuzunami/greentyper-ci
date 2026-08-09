@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+mod crash;
+
 const STORAGE_FIXTURE_JSON: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../tests/fixtures/bench/storage/v1/critical-append-replay.json"
@@ -29,6 +31,10 @@ const MIGRATION_FIXTURE_JSON: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../tests/fixtures/bench/storage/v1/interrupted-migration.json"
 ));
+const CRASH_FIXTURE_JSON: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../tests/fixtures/bench/storage/v1/cross-process-crash-replay.json"
+));
 const LOG_HEADER: &[u8; 8] = b"GTLG\x01\0\0\0";
 const LOG_HEADER_V2: &[u8; 8] = b"GTLG\x02\0\0\0";
 const TRANSACTION_MAGIC: &[u8; 4] = b"GTXN";
@@ -47,7 +53,8 @@ pub(super) fn catalog_entry() -> serde_json::Value {
             {"id": "bounded-streaming-replay", "version": 1},
             {"id": "cas-one-winner", "version": 1},
             {"id": "backup-restore", "version": 1},
-            {"id": "interrupted-migration", "version": 1}
+            {"id": "interrupted-migration", "version": 1},
+            {"id": "cross-process-crash-replay", "version": 1}
         ],
         "purpose": "candidate evidence; not a storage selection"
     })
@@ -77,6 +84,10 @@ pub(super) fn target(implementation: &str, workload: &str) -> AppResult<Box<dyn 
     }))
 }
 
+pub(super) fn run_crash_child(options: StorageCrashChildOptions) -> AppResult<()> {
+    crash::run_child(options)
+}
+
 #[derive(Clone, Debug, Deserialize)]
 struct StorageFixture {
     schema_version: u16,
@@ -94,6 +105,8 @@ struct StorageFixture {
     backup_restore_cycles: Option<u32>,
     #[serde(default)]
     migration_interruptions: Option<u32>,
+    #[serde(default)]
+    crash_cases: Option<u32>,
 }
 
 fn validate_fixture(fixture: &StorageFixture, workload: StorageWorkload) -> AppResult<()> {
@@ -108,6 +121,7 @@ fn validate_fixture(fixture: &StorageFixture, workload: StorageWorkload) -> AppR
                 && fixture.cas_contenders.is_none()
                 && fixture.backup_restore_cycles.is_none()
                 && fixture.migration_interruptions.is_none()
+                && fixture.crash_cases.is_none()
         }
         StorageWorkload::BoundedStreamingReplay => {
             fixture.workload_id == "bounded-streaming-replay"
@@ -118,6 +132,7 @@ fn validate_fixture(fixture: &StorageFixture, workload: StorageWorkload) -> AppR
                 && fixture.cas_contenders.is_none()
                 && fixture.backup_restore_cycles.is_none()
                 && fixture.migration_interruptions.is_none()
+                && fixture.crash_cases.is_none()
         }
         StorageWorkload::CasOneWinner => {
             fixture.workload_id == "cas-one-winner"
@@ -128,6 +143,7 @@ fn validate_fixture(fixture: &StorageFixture, workload: StorageWorkload) -> AppR
                 && fixture.cas_contenders == Some(8)
                 && fixture.backup_restore_cycles.is_none()
                 && fixture.migration_interruptions.is_none()
+                && fixture.crash_cases.is_none()
         }
         StorageWorkload::BackupRestore => {
             fixture.workload_id == "backup-restore"
@@ -138,6 +154,7 @@ fn validate_fixture(fixture: &StorageFixture, workload: StorageWorkload) -> AppR
                 && fixture.cas_contenders.is_none()
                 && fixture.backup_restore_cycles == Some(1)
                 && fixture.migration_interruptions.is_none()
+                && fixture.crash_cases.is_none()
         }
         StorageWorkload::InterruptedMigration => {
             fixture.workload_id == "interrupted-migration"
@@ -148,6 +165,18 @@ fn validate_fixture(fixture: &StorageFixture, workload: StorageWorkload) -> AppR
                 && fixture.cas_contenders.is_none()
                 && fixture.backup_restore_cycles.is_none()
                 && fixture.migration_interruptions == Some(3)
+                && fixture.crash_cases.is_none()
+        }
+        StorageWorkload::CrossProcessCrashReplay => {
+            fixture.workload_id == "cross-process-crash-replay"
+                && fixture.transactions == 4
+                && fixture.events_per_transaction == 4
+                && fixture.payload_bytes == 128
+                && fixture.max_batch_events.is_none()
+                && fixture.cas_contenders.is_none()
+                && fixture.backup_restore_cycles.is_none()
+                && fixture.migration_interruptions.is_none()
+                && fixture.crash_cases == Some(6)
         }
     };
     if fixture.comparison_id != "storage" || fixture.workload_version != 1 || !shape_is_valid {
@@ -206,6 +235,7 @@ enum StorageWorkload {
     CasOneWinner,
     BackupRestore,
     InterruptedMigration,
+    CrossProcessCrashReplay,
 }
 
 impl StorageWorkload {
@@ -224,6 +254,9 @@ impl StorageWorkload {
                 Self::InterruptedMigration,
                 MIGRATION_FIXTURE_JSON.as_bytes(),
             )),
+            "cross-process-crash-replay" => {
+                Ok((Self::CrossProcessCrashReplay, CRASH_FIXTURE_JSON.as_bytes()))
+            }
             _ => Err(cli_error(format!(
                 "benchmark workload storage/{workload} is not compiled into this runner"
             ))),
@@ -237,6 +270,7 @@ impl StorageWorkload {
             Self::CasOneWinner => "cas-one-winner",
             Self::BackupRestore => "backup-restore",
             Self::InterruptedMigration => "interrupted-migration",
+            Self::CrossProcessCrashReplay => "cross-process-crash-replay",
         }
     }
 
@@ -251,6 +285,9 @@ impl StorageWorkload {
             Self::InterruptedMigration => {
                 "64-event v1 Ledger with 3 interruption boundaries before v2 recovery"
             }
+            Self::CrossProcessCrashReplay => {
+                "16-event Ledger with 6 child-process termination and restart cases"
+            }
         }
     }
 
@@ -264,6 +301,9 @@ impl StorageWorkload {
             Self::BackupRestore => "events backed up, restored, replayed, and verified",
             Self::InterruptedMigration => {
                 "migration interruption boundaries recovered as complete v1 or v2"
+            }
+            Self::CrossProcessCrashReplay => {
+                "child crashes recovered as known-not-repeated or ambiguous-blocked"
             }
         }
     }
@@ -284,6 +324,9 @@ impl StorageWorkload {
             }
             Self::InterruptedMigration => {
                 "prepare v1, interrupt migration before commit boundaries, publish v2, reopen, and verify no mixed schema"
+            }
+            Self::CrossProcessCrashReplay => {
+                "spawn and terminate one child before write, at four transaction progress points, and after sync before acknowledgement; restart and reconcile"
             }
         }
     }
@@ -320,14 +363,17 @@ impl BenchmarkTarget for StorageTarget {
             comparison_id: "storage",
             comparison_version: 1,
             implementation: self.engine.implementation(),
-            implementation_revision: "2",
+            implementation_revision: "3",
             dependencies: self.engine.dependencies(),
             workload_id: self.workload.id(),
             workload_version: self.fixture.workload_version,
             input_shape: self.workload.input_shape(),
             unit: self.workload.unit(),
             boundary: self.workload.boundary(),
-            process_mode: "in-process",
+            process_mode: match self.workload {
+                StorageWorkload::CrossProcessCrashReplay => "cross-process",
+                _ => "in-process",
+            },
             fixture_bytes: self.fixture_bytes,
         }
     }
@@ -344,8 +390,8 @@ impl BenchmarkTarget for StorageTarget {
             "greentyper-storage-bench-{}-{timestamp}-{sequence}",
             std::process::id()
         ));
-        fs::create_dir(&path)?;
-        self.run_dir = Some(path);
+        create_private_directory(&path)?;
+        self.run_dir = Some(fs::canonicalize(path)?);
         Ok(())
     }
 
@@ -376,6 +422,16 @@ impl BenchmarkTarget for StorageTarget {
                     self.fixture.migration_interruptions.ok_or_else(|| {
                         cli_error("migration fixture has no interruption boundary count")
                     })?,
+                );
+            }
+            StorageWorkload::CrossProcessCrashReplay => {
+                return crash::run_workload(
+                    self.engine,
+                    run_dir,
+                    &self.events,
+                    self.fixture
+                        .crash_cases
+                        .ok_or_else(|| cli_error("crash fixture has no case count"))?,
                 );
             }
             StorageWorkload::CriticalAppendReplay | StorageWorkload::BoundedStreamingReplay => {}
@@ -436,6 +492,11 @@ impl BenchmarkTarget for StorageTarget {
     }
 
     fn cleanup_run(&mut self) -> AppResult<()> {
+        let path = self
+            .run_dir
+            .as_deref()
+            .ok_or_else(|| cli_error("storage benchmark run directory was not active"))?;
+        crash::require_no_active_children(path)?;
         let path = self
             .run_dir
             .take()
@@ -1231,6 +1292,11 @@ fn validate_max_event_batches(events: &[EventRecord], limit: u32) -> AppResult<u
 }
 
 fn write_transaction(file: &mut File, events: &[EventRecord]) -> AppResult<()> {
+    file.write_all(&encode_transaction(events)?)?;
+    Ok(())
+}
+
+fn encode_transaction(events: &[EventRecord]) -> AppResult<Vec<u8>> {
     let first = events
         .first()
         .ok_or_else(|| cli_error("cannot write an empty transaction"))?;
@@ -1267,11 +1333,18 @@ fn write_transaction(file: &mut File, events: &[EventRecord]) -> AppResult<()> {
     if frame_len > MAX_FRAME_BYTES {
         return Err(cli_error("append-log frame exceeds configured maximum"));
     }
-    file.write_all(TRANSACTION_MAGIC)?;
-    file.write_all(&u32::try_from(frame_len)?.to_le_bytes())?;
-    file.write_all(&body)?;
-    file.write_all(&crc32c::crc32c(&body).to_le_bytes())?;
-    Ok(())
+    let mut frame = Vec::with_capacity(
+        TRANSACTION_MAGIC
+            .len()
+            .checked_add(size_of::<u32>())
+            .and_then(|length| length.checked_add(frame_len))
+            .ok_or_else(|| cli_error("append-log encoded frame length overflow"))?,
+    );
+    frame.extend_from_slice(TRANSACTION_MAGIC);
+    frame.extend_from_slice(&u32::try_from(frame_len)?.to_le_bytes());
+    frame.extend_from_slice(&body);
+    frame.extend_from_slice(&crc32c::crc32c(&body).to_le_bytes());
+    Ok(frame)
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -1538,6 +1611,16 @@ fn sync_directory(path: &Path) -> AppResult<()> {
     File::open(path)?.sync_all()?;
     #[cfg(not(unix))]
     let _ = path;
+    Ok(())
+}
+
+fn create_private_directory(path: &Path) -> AppResult<()> {
+    fs::create_dir(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+    }
     Ok(())
 }
 

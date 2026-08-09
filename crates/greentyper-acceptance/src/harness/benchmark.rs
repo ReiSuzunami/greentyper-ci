@@ -16,6 +16,7 @@ const CARGO_LOCK: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../.
 pub(super) enum Command {
     List,
     Run(Options),
+    StorageCrashChild(StorageCrashChildOptions),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -32,9 +33,20 @@ pub(super) struct Options {
     machine_identifiers: MachineIdentifierPolicy,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct StorageCrashChildOptions {
+    pub(super) implementation: String,
+    pub(super) case_name: String,
+    pub(super) run_dir: PathBuf,
+    pub(super) supervisor_token: String,
+}
+
 pub(super) fn parse(arguments: &[String]) -> AppResult<Command> {
     if arguments == ["list"] {
         return Ok(Command::List);
+    }
+    if arguments.first().map(String::as_str) == Some("__storage-crash-child") {
+        return parse_storage_crash_child(&arguments[1..]);
     }
 
     let mut comparison = None;
@@ -94,6 +106,48 @@ pub(super) fn parse(arguments: &[String]) -> AppResult<Command> {
     }))
 }
 
+fn parse_storage_crash_child(arguments: &[String]) -> AppResult<Command> {
+    let mut implementation = None;
+    let mut case_name = None;
+    let mut run_dir = None;
+    let mut supervisor_token = None;
+    parse_options(arguments, |name, value| match name {
+        "--implementation" => set_once(&mut implementation, name, value),
+        "--case" => set_once(&mut case_name, name, value),
+        "--run-dir" => set_once(&mut run_dir, name, value),
+        "--supervisor-token" => set_once(&mut supervisor_token, name, value),
+        _ => Err(cli_error(format!(
+            "unknown storage crash child option {name}"
+        ))),
+    })?;
+    let implementation = required(implementation, "--implementation")?;
+    let case_name = required(case_name, "--case")?;
+    let run_dir = PathBuf::from(required(run_dir, "--run-dir")?);
+    let supervisor_token = required(supervisor_token, "--supervisor-token")?;
+    validate_benchmark_label("implementation", &implementation)?;
+    validate_benchmark_label("crash case", &case_name)?;
+    if supervisor_token.len() != 64
+        || !supervisor_token
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        return Err(cli_error(
+            "storage crash supervisor token must be 64 lowercase hexadecimal characters",
+        ));
+    }
+    if !run_dir.is_absolute() {
+        return Err(cli_error(
+            "storage crash child run directory must be absolute",
+        ));
+    }
+    Ok(Command::StorageCrashChild(StorageCrashChildOptions {
+        implementation,
+        case_name,
+        run_dir,
+        supervisor_token,
+    }))
+}
+
 fn validate_benchmark_label(name: &str, value: &str) -> AppResult<()> {
     if value.is_empty()
         || value.len() > 64
@@ -115,6 +169,21 @@ pub(super) fn run(command: Command) -> AppResult<()> {
             Ok(())
         }
         Command::Run(options) => run_benchmark(options),
+        Command::StorageCrashChild(options) => run_storage_crash_child(options),
+    }
+}
+
+fn run_storage_crash_child(options: StorageCrashChildOptions) -> AppResult<()> {
+    #[cfg(feature = "bench-storage")]
+    {
+        storage::run_crash_child(options)
+    }
+    #[cfg(not(feature = "bench-storage"))]
+    {
+        let _ = options;
+        Err(cli_error(
+            "storage crash child is not compiled into this runner",
+        ))
     }
 }
 
@@ -556,6 +625,52 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn storage_crash_child_is_hidden_and_requires_an_absolute_directory() {
+        assert!(
+            parse(&strings(&[
+                "__storage-crash-child",
+                "--implementation",
+                "sqlite-wal",
+                "--case",
+                "before-write",
+                "--run-dir",
+                "relative",
+                "--supervisor-token",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ]))
+            .is_err()
+        );
+        assert!(
+            parse(&[
+                "__storage-crash-child".into(),
+                "--implementation".into(),
+                "sqlite-wal".into(),
+                "--case".into(),
+                "before-write".into(),
+                "--run-dir".into(),
+                std::env::temp_dir().to_string_lossy().into_owned(),
+            ])
+            .is_err()
+        );
+        let run_dir = std::env::temp_dir().join("greentyper-hidden-child-parse");
+        let command = parse(&[
+            "__storage-crash-child".into(),
+            "--implementation".into(),
+            "sqlite-wal".into(),
+            "--case".into(),
+            "before-write".into(),
+            "--run-dir".into(),
+            run_dir.to_string_lossy().into_owned(),
+            "--supervisor-token".into(),
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+        ])
+        .expect("hidden child");
+        assert!(matches!(command, Command::StorageCrashChild(_)));
+        let catalog = benchmark_catalog().to_string();
+        assert!(!catalog.contains("__storage-crash-child"));
     }
 
     #[test]

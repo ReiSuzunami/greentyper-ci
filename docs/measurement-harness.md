@@ -71,4 +71,4 @@ greentyper-acceptance bench \
   --expect-baseline x86-64-v3
 ```
 
-The storage feature currently exposes five workload IDs. CI executes the complete feature test suite and emits one representative redacted `critical-append-replay` sample per candidate. The other workload tests are correctness evidence, not substitutes for the same-host 30-run FMDev matrix.
+The storage feature currently exposes six workload IDs. CI executes the complete feature test suite and emits one redacted `critical-append-replay` plus one `cross-process-crash-replay` sample per candidate. The crash workload records `process_mode = cross-process`, six killed child processes, and separate known-not-repeated and ambiguous-blocked counts. The other workload tests are correctness evidence, not substitutes for the same-host 30-run FMDev matrix.
