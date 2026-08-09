@@ -20,5 +20,6 @@ fn schema_versions_are_positive_and_explicitly_supported() {
 #[test]
 fn every_phase_zero_wire_schema_starts_at_version_one() {
     assert_eq!(SchemaKind::AcceptanceEvidence.current().get(), 1);
+    assert_eq!(SchemaKind::BenchmarkEvidence.current().get(), 1);
     assert_eq!(SchemaKind::DeterministicFixture.current().get(), 1);
 }

@@ -4,6 +4,6 @@ Fixtures are synthetic, redacted, and versioned. A fixture is immutable once a
 released schema references it; upstream or workload changes add a new fixture
 version and a reviewed explanation instead of rewriting prior evidence.
 
-The Phase 0 acceptance fixture is compiled into the acceptance runner. Provider,
-Ledger, crash, terminal, configuration, and Memory fixtures land with the first
-vertical slice that consumes them.
+The Phase 0 acceptance and benchmark-pipeline fixtures are compiled into the
+acceptance runner. Provider, Ledger, crash, terminal, configuration, and Memory
+fixtures land with the first vertical slice that consumes them.

@@ -76,6 +76,16 @@ jobs:
             --warmup-runs 1 `
             --expect-baseline x86-64-v3 `
             --machine-identifiers redacted
+          target/release/greentyper-acceptance.exe bench `
+            --comparison harness `
+            --implementation sha256-loop `
+            --candidate-id "ci-$env:GITHUB_SHA" `
+            --source-revision "$env:GITHUB_SHA" `
+            --output dist/benchmark-harness-smoke.json `
+            --runs 1 `
+            --warmup-runs 1 `
+            --expect-baseline x86-64-v3 `
+            --machine-identifiers redacted
       - name: Package portable build
         id: package
         shell: pwsh

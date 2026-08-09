@@ -16,6 +16,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+mod benchmark;
+
 const FIXTURE_JSON: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../tests/fixtures/acceptance/v1/agent-team-smoke.json"
@@ -44,6 +46,7 @@ fn run_cli(arguments: impl IntoIterator<Item = String>) -> AppResult<()> {
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
         AcceptanceCommand::Run(options) => run_acceptance(options)?,
+        AcceptanceCommand::Bench(command) => benchmark::run(command)?,
     }
     Ok(())
 }
@@ -52,6 +55,7 @@ fn run_cli(arguments: impl IntoIterator<Item = String>) -> AppResult<()> {
 enum AcceptanceCommand {
     VerifyCpu { expect_baseline: Option<String> },
     Run(RunOptions),
+    Bench(benchmark::Command),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -129,6 +133,7 @@ fn parse_command(arguments: impl IntoIterator<Item = String>) -> AppResult<Accep
                 machine_identifiers,
             }))
         }
+        "bench" => benchmark::parse(&remaining).map(AcceptanceCommand::Bench),
         "help" | "--help" | "-h" => Err(cli_error(usage())),
         _ => Err(cli_error(format!("unknown command {command}\n{}", usage()))),
     }
@@ -213,7 +218,7 @@ fn parse_machine_identifier_policy(value: Option<String>) -> AppResult<MachineId
 }
 
 fn usage() -> String {
-    "usage:\n  greentyper-acceptance verify-cpu [--expect-baseline NAME]\n  greentyper-acceptance run --candidate-id ID --source-revision HEX --output FILE [--runs N] [--warmup-runs N] [--expect-baseline NAME] [--machine-identifiers full|redacted]".into()
+    "usage:\n  greentyper-acceptance verify-cpu [--expect-baseline NAME]\n  greentyper-acceptance run --candidate-id ID --source-revision HEX --output FILE [--runs N] [--warmup-runs N] [--expect-baseline NAME] [--machine-identifiers full|redacted]\n  greentyper-acceptance bench list\n  greentyper-acceptance bench --comparison ID --implementation ID --candidate-id ID --source-revision HEX --output FILE [--runs N] [--warmup-runs N] [--expect-baseline NAME] [--machine-identifiers full|redacted]".into()
 }
 
 fn run_acceptance(options: RunOptions) -> AppResult<()> {

@@ -40,6 +40,7 @@ Initial design budgets include a headless idle Private Bytes limit of 25 MB, a s
 - [Implementation plan](docs/implementation-plan.md)
 - [Agent orchestration](docs/agent-orchestration.md)
 - [Measurement harness](docs/measurement-harness.md)
+- [Technology benchmarks](docs/technology-benchmarks.md)
 - [Repository policy](docs/repository-policy.md)
 - [Architecture Decision Records](docs/adr/README.md)
 
@@ -64,6 +65,7 @@ cargo check --workspace --all-targets
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo run -p greentyper-acceptance -- verify-cpu
+cargo run -p greentyper-acceptance -- bench list
 ```
 
 The core Agent Team policy slice compiles and runs through interface-level tests. The acceptance runner can execute a versioned deterministic fixture and emit bound raw evidence; this bootstraps measurement and is not yet a full Target Acceptance Run. Presentation, persistent storage, Provider, Tool, and Workspace behavior remain unimplemented; follow the [implementation plan](docs/implementation-plan.md).

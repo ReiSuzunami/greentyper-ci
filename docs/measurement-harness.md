@@ -46,4 +46,10 @@ Schema zero is reserved. Readers accept only the schema versions they explicitly
 
 ## CI and Release Boundary
 
-Windows CI uses the repository's configured x86-64-v3 target policy, requires the release binary to self-report that baseline, runs its host-feature guard, and packages a redacted three-sample smoke result. That proves executable wiring and configuration agreement only. FMDev performance evidence uses the fixed host and at least 30 samples. A Target Acceptance ZIP additionally binds the release-candidate package, applies redaction, runs all required named workloads, and remains mandatory for Alpha.
+Windows CI uses the repository's configured x86-64-v3 target policy, requires the release binary to self-report that baseline, runs its host-feature guard, and packages a redacted three-sample acceptance smoke plus a one-sample benchmark-pipeline smoke. That proves executable wiring and configuration agreement only. FMDev performance evidence uses the fixed host and at least 30 samples. A Target Acceptance ZIP additionally binds the release-candidate package, applies redaction, runs all required named workloads, and remains mandatory for Alpha.
+
+## Technology Comparison Evidence
+
+`greentyper-acceptance bench` uses a separate Benchmark Evidence schema. It keeps the release candidate, comparison, implementation, and workload as independent identities so the same versioned workload can compare multiple implementations without changing its meaning. Each file records the implementation revision, declared feature set, locked dependency-graph fingerprint, fixture hash, timing boundary, process mode, operation units, correctness digest, every raw duration, and the common host and CPU evidence.
+
+`bench list` reports only implementations compiled into the runner. The initial `harness/sha256-loop` entry proves parsing, timing, correctness checks, evidence serialization, and CI packaging. It is not a technology candidate and cannot select storage, terminal, transport, or allocator behavior.

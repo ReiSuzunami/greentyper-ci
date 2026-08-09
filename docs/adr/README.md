@@ -54,3 +54,4 @@ GreenTyper records decisions here when they constrain later implementation. Each
 - [0030 - Use a temporary public CI mirror](0030-use-a-temporary-public-ci-mirror.md): keep private development canonical while hosted builds run against an explicitly disposable public mirror.
 - [0031 - Drive Agent Teams through command transactions](0031-drive-agent-teams-through-command-transactions.md): keep callers out of scheduling policy while making every state change replayable and inspectable.
 - [0032 - Bind versioned evidence to one candidate](0032-bind-versioned-evidence-to-one-candidate.md): make raw measurements attributable and reject silent schema drift.
+- [0033 - Isolate technology candidates from the product graph](0033-isolate-technology-candidates-from-the-product-graph.md): compare alternatives through one evidence contract without prematurely making them runtime dependencies.

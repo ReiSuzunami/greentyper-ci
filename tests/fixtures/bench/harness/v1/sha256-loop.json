@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "comparison_id": "harness",
+  "workload_id": "sha256-loop",
+  "workload_version": 1,
+  "payload": "GreenTyper deterministic benchmark fixture\n",
+  "iterations": 256,
+  "expected_digest": "03b802339659c8f986b86e9b15a825e2218a533d67155cc10398fa143bccbce0"
+}

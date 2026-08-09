@@ -23,6 +23,7 @@ impl SchemaVersion {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SchemaKind {
     AcceptanceEvidence,
+    BenchmarkEvidence,
     DeterministicFixture,
 }
 
@@ -30,7 +31,9 @@ impl SchemaKind {
     #[must_use]
     pub const fn current(self) -> SchemaVersion {
         match self {
-            Self::AcceptanceEvidence | Self::DeterministicFixture => SchemaVersion(1),
+            Self::AcceptanceEvidence | Self::BenchmarkEvidence | Self::DeterministicFixture => {
+                SchemaVersion(1)
+            }
         }
     }
 
