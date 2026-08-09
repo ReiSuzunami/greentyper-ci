@@ -437,6 +437,14 @@ struct SseParser {
 
 impl SseParser {
     fn push(&mut self, chunk: &[u8]) -> AppResult<()> {
+        self.push_inner(chunk, false).map(|_| ())
+    }
+
+    fn push_until_first_event(&mut self, chunk: &[u8]) -> AppResult<bool> {
+        self.push_inner(chunk, true)
+    }
+
+    fn push_inner(&mut self, chunk: &[u8], stop_after_first_event: bool) -> AppResult<bool> {
         self.total_bytes = self
             .total_bytes
             .checked_add(chunk.len())
@@ -455,11 +463,14 @@ impl SseParser {
                 line.pop();
             }
             self.process_line(&line)?;
+            if stop_after_first_event && !self.events.is_empty() {
+                return Ok(true);
+            }
         }
         if self.buffer.len() > MAX_SSE_LINE_BYTES {
             return Err(cli_error("SSE line exceeds the benchmark byte limit"));
         }
-        Ok(())
+        Ok(false)
     }
 
     fn process_line(&mut self, line: &[u8]) -> AppResult<()> {
@@ -753,10 +764,9 @@ impl CandidateAdapter for ReqwestAdapter {
             let chunk = chunk?;
             chunks += 1;
             body_bytes += u64::try_from(chunk.len())?;
-            parser.push(&chunk)?;
-            if !parser.events().is_empty() {
+            if parser.push_until_first_event(&chunk)? {
                 return Ok(CancelRead {
-                    events: parser.events().to_vec(),
+                    events: vec![parser.events()[0].clone()],
                     body_bytes,
                     chunks,
                 });
@@ -900,10 +910,9 @@ impl CandidateAdapter for WinHttpWrestAdapter {
             let chunk = chunk?;
             chunks += 1;
             body_bytes += u64::try_from(chunk.len())?;
-            parser.push(&chunk)?;
-            if !parser.events().is_empty() {
+            if parser.push_until_first_event(&chunk)? {
                 return Ok(CancelRead {
-                    events: parser.events().to_vec(),
+                    events: vec![parser.events()[0].clone()],
                     body_bytes,
                     chunks,
                 });
@@ -1375,6 +1384,23 @@ mod tests {
         let mut parser = SseParser::default();
         parser.push(b"data: incomplete").expect("bounded fragment");
         assert!(parser.finish().is_err());
+    }
+
+    #[test]
+    fn cancellation_stops_at_the_first_event_inside_a_coalesced_chunk() {
+        let mut parser = SseParser::default();
+        assert!(
+            parser
+                .push_until_first_event(b"event: first\ndata: one\n\nevent: second\ndata: two\n\n")
+                .expect("bounded SSE")
+        );
+        assert_eq!(
+            parser.events(),
+            &[SseEvent {
+                event: "first".into(),
+                data: "one".into(),
+            }]
+        );
     }
 
     #[test]
