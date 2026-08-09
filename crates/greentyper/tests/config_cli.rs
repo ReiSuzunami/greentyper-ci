@@ -195,6 +195,51 @@ fn config_cli_dry_run_commit_get_repair_and_headless_gate_are_wired() {
     );
 }
 
+#[test]
+fn config_get_reports_only_credential_binding_policy_without_reference_readback() {
+    let temp = TempTree::new();
+    for (path, value) in [
+        ("providers.edge.template", "openai-compatible"),
+        (
+            "providers.edge.credential",
+            "synthetic-edge-credential-reference",
+        ),
+    ] {
+        let output = temp
+            .config_command("set")
+            .args([path, value, "--scope", "user"])
+            .output()
+            .expect("set credential fixture field");
+        assert_success(&output);
+        if path.ends_with(".credential") {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                !stdout.contains("synthetic-edge-credential-reference"),
+                "{output:?}"
+            );
+            let change = &json(&output.stdout)["changes"][0];
+            assert_eq!(change["before"], Value::Null);
+            assert_eq!(change["after"], Value::Null);
+            assert_eq!(change["credential_binding"]["before_bound"], false);
+            assert_eq!(change["credential_binding"]["after_bound"], true);
+        }
+    }
+
+    let get = temp
+        .config_command("get")
+        .arg("providers.edge.credential")
+        .output()
+        .expect("run credential config get");
+    assert!(!get.status.success(), "{get:?}");
+    assert!(get.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&get.stderr);
+    assert!(stderr.contains("secret_read_forbidden"), "{get:?}");
+    assert!(
+        !stderr.contains("synthetic-edge-credential-reference"),
+        "{get:?}"
+    );
+}
+
 fn backup_path(path: &Path) -> PathBuf {
     let mut value = path.as_os_str().to_owned();
     value.push(".bak");

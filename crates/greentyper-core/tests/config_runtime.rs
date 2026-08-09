@@ -117,7 +117,7 @@ schema_version = 1
 
 [providers.edge]
 template = "openai-compatible"
-credential = "edge-credential"
+credential = "synthetic-edge-credential-reference"
 base_url = "https://gateway.example.com/v1"
 dialects = ["responses"]
 
@@ -143,7 +143,7 @@ source = "unknown"
     );
     assert!(matches!(
         ConfigDocument::parse(
-            "schema_version = 1\n[providers.edge]\ntemplate = \"openai\"\ncredential = \"sk_secret_value\"\n"
+            "schema_version = 1\n[providers.edge]\ntemplate = \"openai\"\ncredential = \"sk_synthetic_fixture_not_a_real_secret\"\n"
         ),
         Err(ConfigRuntimeError::InvalidValue { path, .. })
             if path == "providers.edge.credential"
@@ -161,7 +161,7 @@ schema_version = 1
 
 [providers.edge]
 template = "openai-compatible"
-credential = "edge-credential"
+credential = "synthetic-edge-credential-reference"
 base_url = "https://gateway.example.com/v1"
 dialects = ["responses"]
 
@@ -223,7 +223,28 @@ timezone = "Asia/Hong_Kong"
         }
     );
     let encoded = serde_json::to_string(&credential).expect("serialize credential view");
-    assert!(!encoded.contains("edge-credential"));
+    assert!(!encoded.contains("synthetic-edge-credential-reference"));
+    assert!(matches!(
+        runtime.get_effective("providers.edge.credential"),
+        Err(ConfigRuntimeError::SecretReadForbidden(path))
+            if path == "providers.edge.credential"
+    ));
+    assert!(
+        runtime
+            .effective_entries()
+            .expect("safe effective entries")
+            .iter()
+            .all(|entry| entry.path != "providers.edge.credential")
+    );
+    let project_draft = runtime
+        .begin_draft(ConfigScope::Project)
+        .expect("begin credential-safe draft");
+    assert!(matches!(
+        project_draft.get("providers.edge.credential"),
+        Err(ConfigRuntimeError::SecretReadForbidden(path))
+            if path == "providers.edge.credential"
+    ));
+    assert!(!format!("{project_draft:?}").contains("synthetic-edge-credential-reference"));
 
     let provider_fields = runtime
         .object_fields(ConfigScope::User, ConfigObjectKind::ProviderProfile, "edge")
@@ -257,6 +278,42 @@ timezone = "Asia/Hong_Kong"
     assert_eq!(presets[0].dialect, ProviderDialect::Responses);
     assert!(!presets[0].favorite);
     assert!(presets[0].fallback.is_empty());
+}
+
+#[test]
+fn draft_field_view_preserves_effective_provenance_and_staged_target() {
+    let temp = TempTree::new("draft-field-view");
+    let runtime =
+        ConfigRuntime::open(temp.paths(), ConfigDocument::empty()).expect("open config runtime");
+    let mut draft = runtime
+        .begin_draft(ConfigScope::User)
+        .expect("begin user draft");
+    draft
+        .set_raw("provider.model", "staged-model")
+        .expect("stage model");
+
+    let field = runtime
+        .inspect_draft_field(&draft, "provider.model")
+        .expect("inspect staged model");
+    assert_eq!(field.target_scope, ConfigScope::User);
+    assert_eq!(
+        field.contents,
+        ConfigFieldContents::Value {
+            effective: Some(value_string("deterministic-v1")),
+            source: Some(ConfigScope::BuiltIn),
+            target: Some(value_string("staged-model")),
+        }
+    );
+    assert_eq!(
+        runtime.validate_draft(&draft).expect("validate draft"),
+        vec![greentyper_core::config::ConfigChange {
+            path: "provider.model".into(),
+            before: None,
+            after: Some(value_string("staged-model")),
+            credential_binding: None,
+            timing: ConfigApplicationTiming::NextProviderEpoch,
+        }]
+    );
 }
 
 #[test]
@@ -599,7 +656,10 @@ fn provider_origin_validation_reports_the_exact_profile_path() {
         .expect("begin provider draft");
     for (path, value) in [
         ("providers.edge.template", "openai-compatible"),
-        ("providers.edge.credential", "edge-credential"),
+        (
+            "providers.edge.credential",
+            "synthetic-edge-credential-reference",
+        ),
         ("providers.edge.base_url", "https://gateway.example.com/v1"),
         ("providers.edge.pricing.source", "unknown"),
     ] {
@@ -628,7 +688,7 @@ model = "fixture-model"
 
 [providers.edge]
 template = "openai-compatible"
-credential = "edge-credential"
+credential = "synthetic-edge-credential-reference"
 base_url = "https://gateway.example.com/v1/"
 dialects = ["responses", "chat_completions"]
 
@@ -649,7 +709,10 @@ source = "unknown"
 
     assert_eq!(snapshot.profile(), "edge");
     assert_eq!(snapshot.template(), "openai-compatible");
-    assert_eq!(snapshot.credential_reference(), Some("edge-credential"));
+    assert_eq!(
+        snapshot.credential_reference(),
+        Some("synthetic-edge-credential-reference")
+    );
     assert_eq!(snapshot.base_url(), Some("https://gateway.example.com/v1"));
     assert_eq!(
         snapshot.route(ProviderDialect::Responses),
@@ -667,7 +730,7 @@ source = "unknown"
     assert!(!snapshot.allow_insecure_loopback());
 
     let debug = format!("{snapshot:?}");
-    assert!(!debug.contains("edge-credential"));
+    assert!(!debug.contains("synthetic-edge-credential-reference"));
     assert!(!debug.contains("gateway.example.com"));
 
     let simulator = ConfigRuntime::open(temp.paths(), ConfigDocument::empty())

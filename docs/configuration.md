@@ -48,10 +48,15 @@ revision compare-and-swap, atomic replacement, one recoverable backup, and a
 last-valid repair state. The headless Runtime freezes the bootstrap projection
 (`provider.profile`, `provider.model`, and `runtime.max_output_bytes`) for each
 new Turn and freezes resolved Usage Windows with concrete IANA identity and the
-bundled time-zone rule-set version. The schema registry currently exposes identity, type, writable
-scopes, application timing, credential-reference status, and editor identity;
-default/constraint/normalization/migration metadata, TUI and App Server
-surfaces, and Provider Templates/catalogs remain Phase 1 or later work. The
+bundled time-zone rule-set version. The schema registry currently exposes
+identity, type, writable scopes, application timing, credential-reference
+status, and editor identity. A terminal-neutral Config editor session resolves
+a Command Path plus selected object into one revision-bound Config Draft,
+exposes the focused field without credential read-back, previews the normalized
+diff through full validation and locking, and commits through the existing
+atomic compare-and-swap path. Default/constraint/normalization/migration
+metadata, rendered TUI and App Server surfaces, and Provider Templates/catalogs
+remain later work. The
 product now provides origin-bound credential bind, replace, test, and forget
 operations backed by Windows Credential Manager; non-Windows access fails
 closed until another platform backend is implemented.
@@ -76,10 +81,11 @@ Unknown keys fail validation unless their owning schema version explicitly reser
 
 This section defines the target interaction contract. The current product has
 a terminal-neutral hierarchical Command Path registry generated from Config
-Schema metadata, plus read-only, provenance-aware field views for existing
-Provider Profiles, Model Presets, and Usage Windows. It does not yet ship the
-interactive Config Center, editor dialogs, or App Server surface described
-below.
+Schema metadata, read-only provenance-aware field views for existing Provider
+Profiles, Model Presets, and Usage Windows, and a reusable Config Runtime editor
+session for focused draft validation and commit. It does not yet ship the
+rendered interactive Config Center, terminal editor dialogs, or App Server
+surface described below.
 
 The root Slash Panel exposes `/config` as one Command Path. It does not register one flat command for every field.
 
@@ -121,6 +127,8 @@ for one lowercase secure-store reference, Provider Profile, and Provider Origin.
 Secret values never appear in command arguments or output: an interactive bind
 or replace uses a no-echo prompt, while controlled automation may provide one
 bounded value on standard input. Existing values are never returned.
+Generic effective-value reads also reject credential-reference fields; editor
+views expose only whether the target and effective layers are bound.
 
 The planned App Server exposes the same Config Runtime operations, independent of its eventual wire encoding:
 

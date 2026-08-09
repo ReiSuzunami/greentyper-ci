@@ -520,7 +520,15 @@ pub struct ConfigChange {
     pub path: String,
     pub before: Option<ConfigValue>,
     pub after: Option<ConfigValue>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub credential_binding: Option<ConfigCredentialBindingChange>,
     pub timing: ConfigApplicationTiming,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub struct ConfigCredentialBindingChange {
+    pub before_bound: bool,
+    pub after_bound: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize)]
@@ -826,7 +834,7 @@ impl UiLayer {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ConfigDraft {
     scope: ConfigScope,
     base_revision: ConfigRevision,
@@ -845,6 +853,9 @@ impl ConfigDraft {
     }
 
     pub fn get(&self, path: &str) -> Result<Option<ConfigValue>, ConfigRuntimeError> {
+        if require_schema_entry(path)?.credential_reference {
+            return Err(ConfigRuntimeError::SecretReadForbidden(path.to_owned()));
+        }
         self.document.get(path)
     }
 
@@ -858,6 +869,16 @@ impl ConfigDraft {
 
     pub fn reset(&mut self, path: &str) -> Result<(), ConfigRuntimeError> {
         self.document.reset(self.scope, path)
+    }
+}
+
+impl fmt::Debug for ConfigDraft {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ConfigDraft")
+            .field("scope", &self.scope)
+            .field("base_revision", &self.base_revision)
+            .finish_non_exhaustive()
     }
 }
 
@@ -888,6 +909,7 @@ impl LayerState {
 struct ResolvedState {
     document: ConfigDocument,
     entries: Vec<EffectiveConfigEntry>,
+    internal_entries: Vec<EffectiveConfigEntry>,
     layers: ConfigLayers,
 }
 
@@ -955,21 +977,18 @@ impl ConfigRuntime {
     }
 
     pub fn effective_entries(&self) -> Result<&[EffectiveConfigEntry], ConfigRuntimeError> {
-        self.last_valid
-            .as_ref()
-            .map(|resolved| resolved.entries.as_slice())
-            .ok_or_else(|| ConfigRuntimeError::RepairRequired(self.status().issues))
+        Ok(self.resolved_state()?.entries.as_slice())
     }
 
     pub fn get_effective(
         &self,
         path: &str,
     ) -> Result<Option<&EffectiveConfigEntry>, ConfigRuntimeError> {
-        require_schema_entry(path)?;
-        Ok(self
-            .effective_entries()?
-            .iter()
-            .find(|entry| entry.path == path))
+        let descriptor = require_schema_entry(path)?;
+        if descriptor.credential_reference {
+            return Err(ConfigRuntimeError::SecretReadForbidden(path.to_owned()));
+        }
+        self.effective_entry(path)
     }
 
     pub fn addressable_objects(&self) -> Result<Vec<ConfigObjectRef>, ConfigRuntimeError> {
@@ -1050,6 +1069,24 @@ impl ConfigRuntime {
         target_scope: ConfigScope,
         path: &str,
     ) -> Result<ConfigFieldView, ConfigRuntimeError> {
+        let target = self.target_document(target_scope)?;
+        self.inspect_document_field(target_scope, path, target)
+    }
+
+    pub fn inspect_draft_field(
+        &self,
+        draft: &ConfigDraft,
+        path: &str,
+    ) -> Result<ConfigFieldView, ConfigRuntimeError> {
+        self.inspect_document_field(draft.scope, path, &draft.document)
+    }
+
+    fn inspect_document_field(
+        &self,
+        target_scope: ConfigScope,
+        path: &str,
+        target_document: &ConfigDocument,
+    ) -> Result<ConfigFieldView, ConfigRuntimeError> {
         if !target_scope.is_writable() {
             return Err(ConfigRuntimeError::ReadOnlyScope(target_scope));
         }
@@ -1057,8 +1094,8 @@ impl ConfigRuntime {
         if !descriptor.scopes.contains(&target_scope) {
             return Err(ConfigRuntimeError::ReadOnlyScope(target_scope));
         }
-        let target = self.target_document(target_scope)?.get(path)?;
-        let effective = self.get_effective(path)?.cloned();
+        let target = target_document.get(path)?;
+        let effective = self.effective_entry(path)?.cloned();
         let contents = if descriptor.credential_reference {
             ConfigFieldContents::CredentialBinding {
                 effective_bound: effective.is_some(),
@@ -1082,6 +1119,23 @@ impl ConfigRuntime {
             editor: descriptor.editor,
             contents,
         })
+    }
+
+    fn resolved_state(&self) -> Result<&ResolvedState, ConfigRuntimeError> {
+        self.last_valid
+            .as_ref()
+            .ok_or_else(|| ConfigRuntimeError::RepairRequired(self.status().issues))
+    }
+
+    fn effective_entry(
+        &self,
+        path: &str,
+    ) -> Result<Option<&EffectiveConfigEntry>, ConfigRuntimeError> {
+        Ok(self
+            .resolved_state()?
+            .internal_entries
+            .iter()
+            .find(|entry| entry.path == path))
     }
 
     pub fn object_fields(
@@ -1431,9 +1485,20 @@ fn resolve_documents(
     layers
         .resolve()
         .map_err(|source| invalid("<effective>", source.to_string()))?;
+    let internal_entries = effective.into_values().collect::<Vec<_>>();
+    let entries = internal_entries
+        .iter()
+        .filter(|entry| {
+            !require_schema_entry(&entry.path)
+                .expect("effective entries are schema-owned")
+                .credential_reference
+        })
+        .cloned()
+        .collect();
     Ok(ResolvedState {
         document,
-        entries: effective.into_values().collect(),
+        entries,
+        internal_entries,
         layers,
     })
 }
@@ -1454,13 +1519,26 @@ fn diff_documents(before: &ConfigDocument, after: &ConfigDocument) -> Vec<Config
             if old == new {
                 None
             } else {
+                let descriptor =
+                    require_schema_entry(&path).expect("flatten emits only schema-owned paths");
+                let (old, new, credential_binding) = if descriptor.credential_reference {
+                    (
+                        None,
+                        None,
+                        Some(ConfigCredentialBindingChange {
+                            before_bound: old.is_some(),
+                            after_bound: new.is_some(),
+                        }),
+                    )
+                } else {
+                    (old, new, None)
+                };
                 Some(ConfigChange {
-                    timing: require_schema_entry(&path)
-                        .expect("flatten emits only schema-owned paths")
-                        .timing,
+                    timing: descriptor.timing,
                     path,
                     before: old,
                     after: new,
+                    credential_binding,
                 })
             }
         })

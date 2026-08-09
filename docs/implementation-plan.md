@@ -171,20 +171,25 @@ overflow-to-unknown, historical schema replay, repeated/skipped DST hours,
 local-zone resolution, changed same-name windows, Product-driver Agent/Team
 scope, and statistics redaction.
 
-The first terminal-neutral presentation slice is also implemented. Config
+The terminal-neutral presentation and editor slices are also implemented. Config
 Schema metadata now owns the bounded hierarchical Command Path registry and one
 credential-safe editor route per field. Config Runtime exposes sorted existing
 Config Objects, effective and target-layer field values with provenance, and
 configured Model Presets without credential read-back. A product presentation
 model derives a bounded Slash Panel, configured-preset search and favorites,
 adaptive status facts, and explicit Runtime, Team, Tool, and Config blockers.
-Pure and subprocess tests cover `/con`, `/config pro url`, root/nested command
-separation, schema-route completeness, unknown facts, blocker visibility, and a
-read-only smoke path. No terminal backend or interactive mutation surface is
-claimed by this slice.
+The Config Runtime can open the selected field route as one revision-bound
+editor session, retain invalid staged values for correction, preview through the
+real dry-run lock and validation path, reset, and atomically commit. Credential
+routes expose binding status but refuse generic value mutation. Pure and
+subprocess tests cover `/con`, `/config pro url`, focused Profile editing,
+root/nested command separation, schema-route completeness, invalid-value
+recovery, revision races, credential non-read-back, unknown facts, blocker
+visibility, and a read-only smoke path. No terminal backend, rendered dialog, or
+App Server surface is claimed by these slices.
 
 This does not complete Phase 3. VT/ConPTY rendering and input, interactive
-command navigation, generated Config editors, Provider wizard, catalog-backed
+command navigation and rendered schema editors, Provider wizard, catalog-backed
 Recent/Compatible model views, statusline width degradation, Context Pressure,
 Price Schedules/cost calculation, richer observed Provider metadata, and the
 P0/P1/P2/P6 performance evidence remain pending.

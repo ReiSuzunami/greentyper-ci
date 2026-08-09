@@ -274,7 +274,9 @@ unknown until a versioned Price Schedule is implemented.
   operation receipt before acknowledgement and consumes only the complete
   Kernel-rebound Session bundle; it exposes no Agent-ID-to-session conversion.
 - Complete Config Schema default/constraint/normalization/migration metadata,
-  TUI/App Server editors, and Provider Templates/catalogs.
+  rendered TUI/App Server editors, and Provider Templates/catalogs. The
+  terminal-neutral schema route, field view, revision-bound editor session,
+  dry-run validation, and atomic commit path are present.
 - TUI/statusline Usage presentation, Price Schedules and separated provider
   charge/pay-as-you-go/subscription values, richer observed model/effort/tier
   metadata, and FMDev P6 measurements. The durable attempts, cached rollups,

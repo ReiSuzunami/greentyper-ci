@@ -84,8 +84,9 @@ cargo run -p greentyper -- config get provider.model
 The core Agent Team policy, Config Runtime, recoverable single-Agent Runtime,
 and first Tool Runtime policy slice compile and run through interface-level and
 cross-process headless tests. Config currently includes versioned TOML, drafts,
-provenance, atomic replacement, repair, and typed Provider Profile snapshots,
-but not the eventual TUI/App Server editors or catalogs. The product CLI can
+provenance, atomic replacement, repair, typed Provider Profile snapshots, and a
+terminal-neutral schema-driven editor session, but not rendered TUI/App Server
+editors or catalogs. The product CLI can
 bind, replace, test, and forget origin-bound credential references without
 putting secret material in arguments, Config, or Ledgers. Windows stores values
 in the current user's Credential Manager; other platforms currently fail
@@ -127,8 +128,12 @@ Slash Panel, configured-preset selector, adaptive status summary, and explicit
 Runtime, Team, Tool, and Config blockers from core snapshots. Config Schema
 metadata supplies every field-level editor route and the Config Runtime exposes
 provenanced, credential-safe field views for existing Provider Profiles, Model
-Presets, and Usage Windows. This is a read-only presentation model and private
-smoke tracer, not a terminal backend or interactive Config Center.
+Presets, and Usage Windows. Config Runtime can now open a selected field route as
+one revision-bound draft, preview the normalized diff through the real validation
+and locking path, reset it, and commit it atomically. Credential routes expose
+binding state and require the separate secure credential operation. The product
+projection remains read-only; this is not a terminal backend or rendered Config
+Center.
 Live-provider validation, configurable proxy policy, reconnect/retry, richer
 approval presentation, broader Provider and Tool adapters, Workspace, TUI, and
 App Server work remain. The loopback Provider tracer remains an internal

@@ -211,8 +211,12 @@ token-prefix/fuzzy resolution, raw query limits, schema-to-editor-route
 completeness, and credential binding-status-only readback. Terminal-neutral
 presentation tests cover bounded Slash results, configured-preset search and
 unknown compatibility, recovery/blocker projection, Config repair redaction,
-and a pure in-memory subprocess smoke with no filesystem path input. These
-tests do not constitute a TUI or ConPTY terminal claim.
+and a pure in-memory subprocess smoke with no filesystem path input. Config
+editor tests route `/config pro url` to one concrete Profile field, exercise
+staged preview/reset/commit, retain an invalid draft for correction, reject
+generic credential mutation and read-back, and prove a stale revision cannot
+overwrite the winning commit. These tests do not constitute a rendered TUI or
+ConPTY terminal claim.
 
 Golden terminal tests cover root Slash Panel size, hierarchical Command Path completion, scoped fuzzy matching, Config Center navigation, narrow-width statusline degradation, expanded status details, model selector states, approval/blocker visibility, and text-fit constraints.
 

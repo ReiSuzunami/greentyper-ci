@@ -484,8 +484,7 @@ impl Error for PresentationError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Command(source) => Some(source),
-            Self::InvalidContextPressure => None,
-            Self::InvalidModelQuery => None,
+            Self::InvalidContextPressure | Self::InvalidModelQuery => None,
         }
     }
 }
@@ -525,15 +524,20 @@ impl From<PresentationError> for PresentationSmokeError {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     use greentyper_core::agent_team::{
         EventSeq, TaskId, TaskScope, TaskStatus, TaskView, TeamOperationId, TeamOperationRecord,
         TeamOperationStatus, TeamSnapshot, TransactionId,
     };
     use greentyper_core::config::{
-        CommandMatchKind, CommandTarget, ConfigErrorCategory, ConfigRepairIssue,
-        ConfigRuntimeStatus, ConfigScope, ModelPresetView,
+        CommandMatchKind, CommandTarget, ConfigDocument, ConfigEditorError, ConfigEditorSession,
+        ConfigErrorCategory, ConfigFieldContents, ConfigObjectKind, ConfigObjectRef, ConfigPaths,
+        ConfigRepairIssue, ConfigRuntime, ConfigRuntimeError, ConfigRuntimeStatus, ConfigScope,
+        ConfigValue, ModelPresetView,
     };
     use greentyper_core::ledger::LedgerHead;
     use greentyper_core::model::{DeliveryId, ThreadId, TurnId};
@@ -543,6 +547,60 @@ mod tests {
     use super::{
         Availability, BlockerView, PresentationSources, RecoveryBadge, SlashPanelView, TuiViewModel,
     };
+
+    static NEXT_TEMP: AtomicU64 = AtomicU64::new(1);
+
+    struct TempTree {
+        root: PathBuf,
+    }
+
+    impl TempTree {
+        fn new(name: &str) -> Self {
+            let nonce = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("time after epoch")
+                .as_nanos();
+            let root = std::env::temp_dir().join(format!(
+                "greentyper-presentation-{name}-{}-{nonce}-{}",
+                std::process::id(),
+                NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
+            ));
+            fs::create_dir_all(&root).expect("create presentation test directory");
+            Self { root }
+        }
+
+        fn paths(&self) -> ConfigPaths {
+            ConfigPaths::new(self.root.join("user.toml"), self.root.join("project.toml"))
+        }
+
+        fn open_provider_runtime(&self) -> ConfigRuntime {
+            fs::write(
+                self.paths().project(),
+                r#"schema_version = 1
+
+[providers.edge]
+template = "openai-compatible"
+credential = "synthetic-edge-credential-reference"
+base_url = "https://gateway.example.com/v1"
+dialects = ["responses"]
+
+[providers.edge.routes]
+responses = "/responses"
+
+[providers.edge.pricing]
+source = "unknown"
+"#,
+            )
+            .expect("write provider fixture");
+            ConfigRuntime::open(self.paths(), ConfigDocument::empty()).expect("open Config Runtime")
+        }
+    }
+
+    impl Drop for TempTree {
+        fn drop(&mut self) {
+            fs::remove_dir_all(&self.root).expect("remove presentation test directory");
+        }
+    }
 
     fn runtime(status: RecoveryStatus) -> RuntimeSnapshot {
         RuntimeSnapshot {
@@ -571,6 +629,227 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn config_editor_focuses_provider_url_previews_and_commits_one_draft() {
+        let temp = TempTree::new("config-editor");
+        let mut runtime = temp.open_provider_runtime();
+        let object = ConfigObjectRef::new(ConfigObjectKind::ProviderProfile, "edge");
+        let mut editor = ConfigEditorSession::open_from_query(
+            &runtime,
+            ConfigScope::Project,
+            "/config pro url",
+            0,
+            Some(&object),
+        )
+        .expect("open focused provider URL editor");
+
+        let initial = editor.preview(&mut runtime).expect("initial preview");
+        assert_eq!(initial.field.path, "providers.edge.base_url");
+        assert_eq!(initial.field.command_path, "/config provider url");
+        assert!(initial.changes.is_empty());
+
+        editor
+            .stage_raw("https://new-gateway.example.com/v2")
+            .expect("stage provider URL");
+        let preview = editor.preview(&mut runtime).expect("validated preview");
+        assert_eq!(preview.changes.len(), 1);
+        assert_eq!(preview.changes[0].path, "providers.edge.base_url");
+        assert_eq!(
+            preview.field.contents,
+            ConfigFieldContents::Value {
+                effective: Some(ConfigValue::String("https://gateway.example.com/v1".into())),
+                source: Some(ConfigScope::Project),
+                target: Some(ConfigValue::String(
+                    "https://new-gateway.example.com/v2".into()
+                )),
+            }
+        );
+        editor.reset().expect("reset staged provider URL");
+        assert_eq!(
+            editor
+                .preview(&mut runtime)
+                .expect("reset preview")
+                .field
+                .contents,
+            ConfigFieldContents::Value {
+                effective: Some(ConfigValue::String("https://gateway.example.com/v1".into())),
+                source: Some(ConfigScope::Project),
+                target: None,
+            }
+        );
+        editor
+            .stage_raw("https://new-gateway.example.com/v2")
+            .expect("restage provider URL");
+
+        let commit = editor.commit(&mut runtime).expect("commit editor draft");
+        assert!(commit.written);
+        assert_eq!(commit.changes, preview.changes);
+        assert_eq!(
+            runtime
+                .inspect_field(ConfigScope::Project, "providers.edge.base_url")
+                .expect("inspect committed provider URL")
+                .contents,
+            ConfigFieldContents::Value {
+                effective: Some(ConfigValue::String(
+                    "https://new-gateway.example.com/v2".into()
+                )),
+                source: Some(ConfigScope::Project),
+                target: Some(ConfigValue::String(
+                    "https://new-gateway.example.com/v2".into()
+                )),
+            }
+        );
+    }
+
+    #[test]
+    fn config_editor_keeps_invalid_draft_recoverable_and_routes_credentials_safely() {
+        let temp = TempTree::new("config-editor-validation");
+        let mut runtime = temp.open_provider_runtime();
+        let object = ConfigObjectRef::new(ConfigObjectKind::ProviderProfile, "edge");
+        let mut editor = ConfigEditorSession::open_from_query(
+            &runtime,
+            ConfigScope::Project,
+            "/config provider url",
+            0,
+            Some(&object),
+        )
+        .expect("open provider URL editor");
+        editor
+            .stage_raw("http://provider.invalid/v1")
+            .expect("stage syntactically typed URL");
+        assert!(matches!(
+            editor.preview(&mut runtime),
+            Err(ConfigEditorError::Config(ConfigRuntimeError::InvalidValue { path, .. }))
+                if path == "providers.edge.base_url"
+        ));
+        assert!(matches!(
+            editor.preview(&mut runtime),
+            Err(ConfigEditorError::Config(ConfigRuntimeError::InvalidValue { path, .. }))
+                if path == "providers.edge.base_url"
+        ));
+        editor
+            .stage_raw("https://recovered.example.com/v1")
+            .expect("replace invalid staged URL");
+        assert_eq!(
+            editor
+                .preview(&mut runtime)
+                .expect("recovered preview")
+                .changes
+                .len(),
+            1
+        );
+
+        let mut credential = ConfigEditorSession::open_from_query(
+            &runtime,
+            ConfigScope::Project,
+            "/config provider credential",
+            0,
+            Some(&object),
+        )
+        .expect("open credential binding editor");
+        let encoded = serde_json::to_string(
+            &credential
+                .preview(&mut runtime)
+                .expect("credential binding preview"),
+        )
+        .expect("serialize credential binding preview");
+        assert!(!encoded.contains("synthetic-edge-credential-reference"));
+        assert!(!format!("{credential:?}").contains("synthetic-edge-credential-reference"));
+        assert!(matches!(
+            credential.stage_raw("synthetic-replacement-reference"),
+            Err(ConfigEditorError::CredentialOperationRequired)
+        ));
+        assert!(matches!(
+            credential.reset(),
+            Err(ConfigEditorError::CredentialOperationRequired)
+        ));
+        assert!(matches!(
+            credential.commit(&mut runtime),
+            Err(ConfigEditorError::CredentialOperationRequired)
+        ));
+        assert!(matches!(
+            ConfigEditorSession::open_from_query(
+                &runtime,
+                ConfigScope::Project,
+                "/config",
+                0,
+                None,
+            ),
+            Err(ConfigEditorError::CommandTargetNotEditor)
+        ));
+        assert!(matches!(
+            ConfigEditorSession::open_from_query(
+                &runtime,
+                ConfigScope::Project,
+                "/config provider url",
+                99,
+                Some(&object),
+            ),
+            Err(ConfigEditorError::NoCommandMatch)
+        ));
+        assert!(matches!(
+            ConfigEditorSession::open_from_query(
+                &runtime,
+                ConfigScope::Project,
+                "/config provider url",
+                0,
+                None,
+            ),
+            Err(ConfigEditorError::ConfigObjectRequired)
+        ));
+    }
+
+    #[test]
+    fn config_editor_commit_detects_a_stale_revision_without_overwriting_the_winner() {
+        let temp = TempTree::new("config-editor-race");
+        let mut winner_runtime = temp.open_provider_runtime();
+        let mut loser_runtime = ConfigRuntime::open(temp.paths(), ConfigDocument::empty())
+            .expect("open second runtime");
+        let object = ConfigObjectRef::new(ConfigObjectKind::ProviderProfile, "edge");
+        let mut winner = ConfigEditorSession::open_from_query(
+            &winner_runtime,
+            ConfigScope::Project,
+            "/config provider url",
+            0,
+            Some(&object),
+        )
+        .expect("open winner editor");
+        let mut loser = ConfigEditorSession::open_from_query(
+            &loser_runtime,
+            ConfigScope::Project,
+            "/config provider url",
+            0,
+            Some(&object),
+        )
+        .expect("open loser editor");
+        winner
+            .stage_raw("https://winner.example.com/v1")
+            .expect("stage winner");
+        loser
+            .stage_raw("https://loser.example.com/v1")
+            .expect("stage loser");
+        winner.commit(&mut winner_runtime).expect("commit winner");
+
+        assert!(matches!(
+            loser.commit(&mut loser_runtime),
+            Err(ConfigEditorError::Config(
+                ConfigRuntimeError::RevisionConflict { .. }
+            ))
+        ));
+        loser_runtime.reload().expect("reload winner state");
+        assert_eq!(
+            loser_runtime
+                .inspect_field(ConfigScope::Project, "providers.edge.base_url")
+                .expect("inspect winner")
+                .contents,
+            ConfigFieldContents::Value {
+                effective: Some(ConfigValue::String("https://winner.example.com/v1".into())),
+                source: Some(ConfigScope::Project),
+                target: Some(ConfigValue::String("https://winner.example.com/v1".into())),
+            }
+        );
     }
 
     #[test]

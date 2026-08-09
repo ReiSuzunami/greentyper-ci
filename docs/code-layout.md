@@ -24,7 +24,9 @@ The only library package. It contains the canonical model, Config Runtime,
 provisional file Ledger, deterministic Provider seam, bounded generic SSE and
 OpenAI Responses dialect decoding, recoverable single-Agent Runtime Kernel,
 Agent Team Runtime, durable Tool Runtime policy, and the immutable Usage
-Attempt/window/rollup projection. Later slices add Workspace
+Attempt/window/rollup projection. Config Runtime also owns the schema-derived
+Command Paths and terminal-neutral revision-bound editor session used by future
+presentation adapters. Later slices add Workspace
 Coordinator and Context Engine; concrete Provider and Tool integration stays
 behind the narrow core interfaces and is owned by the product package.
 
