@@ -1,0 +1,2840 @@
+//! Versioned schema, TOML layers, drafts, and atomic Config storage.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::error::Error;
+use std::fmt;
+use std::fs::{self, File, OpenOptions, TryLockError};
+use std::io::{self, Read, Write};
+use std::path::{Path, PathBuf};
+
+use jiff::tz::TimeZone;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use url::{Host, Url};
+
+use super::{ConfigLayer, ConfigLayers};
+use crate::schema::SchemaKind;
+
+pub const CONFIG_FILE_SCHEMA_VERSION: u16 = SchemaKind::ConfigFile.current().get();
+pub const MAX_CONFIG_FILE_BYTES: usize = 1024 * 1024;
+const MAX_CONFIG_ID_BYTES: usize = 64;
+const MAX_CONFIG_LIST_ITEMS: usize = 128;
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigScope {
+    BuiltIn,
+    User,
+    Project,
+    Cli,
+}
+
+impl ConfigScope {
+    #[must_use]
+    pub const fn is_writable(self) -> bool {
+        matches!(self, Self::User | Self::Project)
+    }
+}
+
+impl fmt::Display for ConfigScope {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::BuiltIn => "built_in",
+            Self::User => "user",
+            Self::Project => "project",
+            Self::Cli => "cli",
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigApplicationTiming {
+    Immediate,
+    NextConfigEpoch,
+    NextTurn,
+    NextProviderEpoch,
+    NextTurnAndProviderEpoch,
+    Restart,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigValueKind {
+    String,
+    PositiveInteger,
+    Boolean,
+    StringList,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub struct ConfigSchemaEntry {
+    pub path_pattern: &'static str,
+    pub value_kind: ConfigValueKind,
+    pub scopes: &'static [ConfigScope],
+    pub timing: ConfigApplicationTiming,
+    pub credential_reference: bool,
+    pub editor: &'static str,
+}
+
+const ALL_SCOPES: &[ConfigScope] = &[
+    ConfigScope::BuiltIn,
+    ConfigScope::User,
+    ConfigScope::Project,
+    ConfigScope::Cli,
+];
+const FILE_SCOPES: &[ConfigScope] = &[ConfigScope::User, ConfigScope::Project];
+
+const CONFIG_SCHEMA: &[ConfigSchemaEntry] = &[
+    schema_entry(
+        "provider.profile",
+        ConfigValueKind::String,
+        ALL_SCOPES,
+        ConfigApplicationTiming::NextProviderEpoch,
+        false,
+        "provider_selector",
+    ),
+    schema_entry(
+        "provider.model",
+        ConfigValueKind::String,
+        ALL_SCOPES,
+        ConfigApplicationTiming::NextProviderEpoch,
+        false,
+        "model_selector",
+    ),
+    schema_entry(
+        "runtime.max_output_bytes",
+        ConfigValueKind::PositiveInteger,
+        ALL_SCOPES,
+        ConfigApplicationTiming::NextTurn,
+        false,
+        "integer",
+    ),
+    schema_entry(
+        "providers.<id>.template",
+        ConfigValueKind::String,
+        FILE_SCOPES,
+        ConfigApplicationTiming::NextProviderEpoch,
+        false,
+        "provider_template",
+    ),
+    schema_entry(
+        "providers.<id>.credential",
+        ConfigValueKind::String,
+        FILE_SCOPES,
+        ConfigApplicationTiming::NextProviderEpoch,
+        true,
+        "credential_binding",
+    ),
+    schema_entry(
+        "providers.<id>.base_url",
+        ConfigValueKind::String,
+        FILE_SCOPES,
+        ConfigApplicationTiming::NextProviderEpoch,
+        false,
+        "url",
+    ),
+    schema_entry(
+        "providers.<id>.routes.responses",
+        ConfigValueKind::String,
+        FILE_SCOPES,
+        ConfigApplicationTiming::NextProviderEpoch,
+        false,
+        "route",
+    ),
+    schema_entry(
+        "providers.<id>.routes.chat_completions",
+        ConfigValueKind::String,
+        FILE_SCOPES,
+        ConfigApplicationTiming::NextProviderEpoch,
+        false,
+        "route",
+    ),
+    schema_entry(
+        "providers.<id>.routes.messages",
+        ConfigValueKind::String,
+        FILE_SCOPES,
+        ConfigApplicationTiming::NextProviderEpoch,
+        false,
+        "route",
+    ),
+    schema_entry(
+        "providers.<id>.routes.models",
+        ConfigValueKind::String,
+        FILE_SCOPES,
+        ConfigApplicationTiming::NextProviderEpoch,
+        false,
+        "route",
+    ),
+    schema_entry(
+        "providers.<id>.dialects",
+        ConfigValueKind::StringList,
+        FILE_SCOPES,
+        ConfigApplicationTiming::NextProviderEpoch,
+        false,
+        "dialect_list",
+    ),
+    schema_entry(
+        "providers.<id>.catalog.mode",
+        ConfigValueKind::String,
+        FILE_SCOPES,
+        ConfigApplicationTiming::NextProviderEpoch,
+        false,
+        "catalog_mode",
+    ),
+    schema_entry(
+        "providers.<id>.pricing.source",
+        ConfigValueKind::String,
+        FILE_SCOPES,
+        ConfigApplicationTiming::NextProviderEpoch,
+        false,
+        "pricing_source",
+    ),
+    schema_entry(
+        "providers.<id>.allow_insecure_loopback",
+        ConfigValueKind::Boolean,
+        FILE_SCOPES,
+        ConfigApplicationTiming::NextProviderEpoch,
+        false,
+        "toggle",
+    ),
+    schema_entry(
+        "model_presets.<id>.provider",
+        ConfigValueKind::String,
+        FILE_SCOPES,
+        ConfigApplicationTiming::NextTurnAndProviderEpoch,
+        false,
+        "provider_selector",
+    ),
+    schema_entry(
+        "model_presets.<id>.model",
+        ConfigValueKind::String,
+        FILE_SCOPES,
+        ConfigApplicationTiming::NextTurnAndProviderEpoch,
+        false,
+        "model_selector",
+    ),
+    schema_entry(
+        "model_presets.<id>.dialect",
+        ConfigValueKind::String,
+        FILE_SCOPES,
+        ConfigApplicationTiming::NextTurnAndProviderEpoch,
+        false,
+        "dialect",
+    ),
+    schema_entry(
+        "model_presets.<id>.reasoning_effort",
+        ConfigValueKind::String,
+        FILE_SCOPES,
+        ConfigApplicationTiming::NextTurn,
+        false,
+        "reasoning_effort",
+    ),
+    schema_entry(
+        "model_presets.<id>.service_tier",
+        ConfigValueKind::String,
+        FILE_SCOPES,
+        ConfigApplicationTiming::NextTurn,
+        false,
+        "service_tier",
+    ),
+    schema_entry(
+        "model_presets.<id>.max_output_tokens",
+        ConfigValueKind::PositiveInteger,
+        FILE_SCOPES,
+        ConfigApplicationTiming::NextTurn,
+        false,
+        "integer",
+    ),
+    schema_entry(
+        "model_presets.<id>.context_mode",
+        ConfigValueKind::String,
+        FILE_SCOPES,
+        ConfigApplicationTiming::NextTurn,
+        false,
+        "context_mode",
+    ),
+    schema_entry(
+        "model_presets.<id>.favorite",
+        ConfigValueKind::Boolean,
+        FILE_SCOPES,
+        ConfigApplicationTiming::NextConfigEpoch,
+        false,
+        "toggle",
+    ),
+    schema_entry(
+        "model_presets.<id>.fallback",
+        ConfigValueKind::StringList,
+        FILE_SCOPES,
+        ConfigApplicationTiming::NextTurn,
+        false,
+        "preset_list",
+    ),
+    schema_entry(
+        "ui.statusline.preset",
+        ConfigValueKind::String,
+        FILE_SCOPES,
+        ConfigApplicationTiming::Immediate,
+        false,
+        "statusline_preset",
+    ),
+    schema_entry(
+        "ui.statusline.expand",
+        ConfigValueKind::String,
+        FILE_SCOPES,
+        ConfigApplicationTiming::Immediate,
+        false,
+        "expansion_policy",
+    ),
+    schema_entry(
+        "ui.statusline.primary_usage_window",
+        ConfigValueKind::String,
+        FILE_SCOPES,
+        ConfigApplicationTiming::Immediate,
+        false,
+        "usage_window_selector",
+    ),
+    schema_entry(
+        "ui.statusline.custom.left",
+        ConfigValueKind::StringList,
+        FILE_SCOPES,
+        ConfigApplicationTiming::Immediate,
+        false,
+        "segment_list",
+    ),
+    schema_entry(
+        "ui.statusline.custom.right",
+        ConfigValueKind::StringList,
+        FILE_SCOPES,
+        ConfigApplicationTiming::Immediate,
+        false,
+        "segment_list",
+    ),
+    schema_entry(
+        "stats.windows.<id>.start",
+        ConfigValueKind::String,
+        FILE_SCOPES,
+        ConfigApplicationTiming::NextConfigEpoch,
+        false,
+        "local_time",
+    ),
+    schema_entry(
+        "stats.windows.<id>.end",
+        ConfigValueKind::String,
+        FILE_SCOPES,
+        ConfigApplicationTiming::NextConfigEpoch,
+        false,
+        "local_time",
+    ),
+    schema_entry(
+        "stats.windows.<id>.days",
+        ConfigValueKind::StringList,
+        FILE_SCOPES,
+        ConfigApplicationTiming::NextConfigEpoch,
+        false,
+        "weekday_list",
+    ),
+    schema_entry(
+        "stats.windows.<id>.timezone",
+        ConfigValueKind::String,
+        FILE_SCOPES,
+        ConfigApplicationTiming::NextConfigEpoch,
+        false,
+        "timezone",
+    ),
+];
+
+const fn schema_entry(
+    path_pattern: &'static str,
+    value_kind: ConfigValueKind,
+    scopes: &'static [ConfigScope],
+    timing: ConfigApplicationTiming,
+    credential_reference: bool,
+    editor: &'static str,
+) -> ConfigSchemaEntry {
+    ConfigSchemaEntry {
+        path_pattern,
+        value_kind,
+        scopes,
+        timing,
+        credential_reference,
+        editor,
+    }
+}
+
+#[must_use]
+pub const fn config_schema() -> &'static [ConfigSchemaEntry] {
+    CONFIG_SCHEMA
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(tag = "type", content = "value", rename_all = "snake_case")]
+pub enum ConfigValue {
+    String(String),
+    PositiveInteger(u32),
+    Boolean(bool),
+    StringList(Vec<String>),
+}
+
+impl ConfigValue {
+    fn kind(&self) -> ConfigValueKind {
+        match self {
+            Self::String(_) => ConfigValueKind::String,
+            Self::PositiveInteger(_) => ConfigValueKind::PositiveInteger,
+            Self::Boolean(_) => ConfigValueKind::Boolean,
+            Self::StringList(_) => ConfigValueKind::StringList,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct EffectiveConfigEntry {
+    pub path: String,
+    pub value: ConfigValue,
+    pub source: ConfigScope,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct ConfigChange {
+    pub path: String,
+    pub before: Option<ConfigValue>,
+    pub after: Option<ConfigValue>,
+    pub timing: ConfigApplicationTiming,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize)]
+pub struct ConfigRevision([u8; 32]);
+
+impl ConfigRevision {
+    #[must_use]
+    pub const fn bytes(self) -> [u8; 32] {
+        self.0
+    }
+}
+
+impl fmt::Display for ConfigRevision {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for byte in self.0 {
+            write!(formatter, "{byte:02x}")?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct ConfigCommit {
+    pub scope: ConfigScope,
+    pub base_revision: ConfigRevision,
+    pub revision: ConfigRevision,
+    pub changes: Vec<ConfigChange>,
+    pub written: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct ConfigRepairIssue {
+    pub scope: ConfigScope,
+    pub path: PathBuf,
+    pub category: ConfigErrorCategory,
+    pub detail: String,
+    pub backup_available: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct ConfigRuntimeStatus {
+    pub ready: bool,
+    pub issues: Vec<ConfigRepairIssue>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConfigPaths {
+    user: PathBuf,
+    project: PathBuf,
+}
+
+impl ConfigPaths {
+    #[must_use]
+    pub fn new(user: impl Into<PathBuf>, project: impl Into<PathBuf>) -> Self {
+        Self {
+            user: user.into(),
+            project: project.into(),
+        }
+    }
+
+    #[must_use]
+    pub fn user(&self) -> &Path {
+        &self.user
+    }
+
+    #[must_use]
+    pub fn project(&self) -> &Path {
+        &self.project
+    }
+
+    fn for_scope(&self, scope: ConfigScope) -> Result<&Path, ConfigRuntimeError> {
+        match scope {
+            ConfigScope::User => Ok(&self.user),
+            ConfigScope::Project => Ok(&self.project),
+            ConfigScope::BuiltIn | ConfigScope::Cli => {
+                Err(ConfigRuntimeError::ReadOnlyScope(scope))
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConfigDocument {
+    schema_version: u16,
+    #[serde(default, skip_serializing_if = "BootstrapProviderLayer::is_empty")]
+    provider: BootstrapProviderLayer,
+    #[serde(default, skip_serializing_if = "RuntimeLayer::is_empty")]
+    runtime: RuntimeLayer,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    providers: BTreeMap<String, ProviderProfileLayer>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    model_presets: BTreeMap<String, ModelPresetLayer>,
+    #[serde(default, skip_serializing_if = "UiLayer::is_empty")]
+    ui: UiLayer,
+    #[serde(default, skip_serializing_if = "StatsLayer::is_empty")]
+    stats: StatsLayer,
+}
+
+impl Default for ConfigDocument {
+    fn default() -> Self {
+        Self::empty()
+    }
+}
+
+impl ConfigDocument {
+    #[must_use]
+    pub fn empty() -> Self {
+        Self {
+            schema_version: CONFIG_FILE_SCHEMA_VERSION,
+            provider: BootstrapProviderLayer::default(),
+            runtime: RuntimeLayer::default(),
+            providers: BTreeMap::new(),
+            model_presets: BTreeMap::new(),
+            ui: UiLayer::default(),
+            stats: StatsLayer::default(),
+        }
+    }
+
+    #[must_use]
+    pub fn built_in() -> Self {
+        let mut document = Self::empty();
+        document.provider.profile = Some("simulator".to_owned());
+        document.provider.model = Some("deterministic-v1".to_owned());
+        document.runtime.max_output_bytes = Some(super::DEFAULT_MAX_OUTPUT_BYTES);
+        document.ui.statusline.preset = Some(StatuslinePreset::Balanced);
+        document.ui.statusline.expand = Some(StatuslineExpansion::Auto);
+        document
+    }
+
+    #[must_use]
+    pub const fn schema_version(&self) -> u16 {
+        self.schema_version
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+struct BootstrapProviderLayer {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    profile: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model: Option<String>,
+}
+
+impl BootstrapProviderLayer {
+    fn is_empty(&self) -> bool {
+        self.profile.is_none() && self.model.is_none()
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+struct RuntimeLayer {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_output_bytes: Option<u32>,
+}
+
+impl RuntimeLayer {
+    fn is_empty(&self) -> bool {
+        self.max_output_bytes.is_none()
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+struct ProviderProfileLayer {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    template: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    credential: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    base_url: Option<String>,
+    #[serde(skip_serializing_if = "ProviderRoutesLayer::is_empty")]
+    routes: ProviderRoutesLayer,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dialects: Option<Vec<ProviderDialect>>,
+    #[serde(skip_serializing_if = "CatalogLayer::is_empty")]
+    catalog: CatalogLayer,
+    #[serde(skip_serializing_if = "PricingLayer::is_empty")]
+    pricing: PricingLayer,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    allow_insecure_loopback: Option<bool>,
+}
+
+impl ProviderProfileLayer {
+    fn is_empty(&self) -> bool {
+        self.template.is_none()
+            && self.credential.is_none()
+            && self.base_url.is_none()
+            && self.routes.is_empty()
+            && self.dialects.is_none()
+            && self.catalog.is_empty()
+            && self.pricing.is_empty()
+            && self.allow_insecure_loopback.is_none()
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+struct ProviderRoutesLayer {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    responses: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    chat_completions: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    messages: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    models: Option<String>,
+}
+
+impl ProviderRoutesLayer {
+    fn is_empty(&self) -> bool {
+        self.responses.is_none()
+            && self.chat_completions.is_none()
+            && self.messages.is_none()
+            && self.models.is_none()
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+struct CatalogLayer {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mode: Option<CatalogMode>,
+}
+
+impl CatalogLayer {
+    fn is_empty(&self) -> bool {
+        self.mode.is_none()
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+struct PricingLayer {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source: Option<PricingSource>,
+}
+
+impl PricingLayer {
+    fn is_empty(&self) -> bool {
+        self.source.is_none()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum ProviderDialect {
+    Responses,
+    ChatCompletions,
+    Messages,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum CatalogMode {
+    Template,
+    Discovery,
+    TemplateAndDiscovery,
+    Manual,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum PricingSource {
+    Unknown,
+    Template,
+    Manual,
+    ProviderReported,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+struct ModelPresetLayer {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provider: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dialect: Option<ProviderDialect>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_effort: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    service_tier: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_output_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    context_mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    favorite: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fallback: Option<Vec<String>>,
+}
+
+impl ModelPresetLayer {
+    fn is_empty(&self) -> bool {
+        self.provider.is_none()
+            && self.model.is_none()
+            && self.dialect.is_none()
+            && self.reasoning_effort.is_none()
+            && self.service_tier.is_none()
+            && self.max_output_tokens.is_none()
+            && self.context_mode.is_none()
+            && self.favorite.is_none()
+            && self.fallback.is_none()
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+struct UiLayer {
+    #[serde(skip_serializing_if = "StatuslineLayer::is_empty")]
+    statusline: StatuslineLayer,
+}
+
+impl UiLayer {
+    fn is_empty(&self) -> bool {
+        self.statusline.is_empty()
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct ConfigDraft {
+    scope: ConfigScope,
+    base_revision: ConfigRevision,
+    document: ConfigDocument,
+}
+
+impl ConfigDraft {
+    #[must_use]
+    pub const fn scope(&self) -> ConfigScope {
+        self.scope
+    }
+
+    #[must_use]
+    pub const fn base_revision(&self) -> ConfigRevision {
+        self.base_revision
+    }
+
+    pub fn get(&self, path: &str) -> Result<Option<ConfigValue>, ConfigRuntimeError> {
+        self.document.get(path)
+    }
+
+    pub fn set(&mut self, path: &str, value: ConfigValue) -> Result<(), ConfigRuntimeError> {
+        self.document.set(self.scope, path, value)
+    }
+
+    pub fn set_raw(&mut self, path: &str, raw: &str) -> Result<(), ConfigRuntimeError> {
+        self.set(path, parse_config_value(path, raw)?)
+    }
+
+    pub fn reset(&mut self, path: &str) -> Result<(), ConfigRuntimeError> {
+        self.document.reset(self.scope, path)
+    }
+}
+
+#[derive(Clone, Debug)]
+struct LoadedLayer {
+    document: ConfigDocument,
+    revision: ConfigRevision,
+    bytes: Vec<u8>,
+    exists: bool,
+}
+
+#[derive(Debug)]
+struct LayerState {
+    current: Option<LoadedLayer>,
+    issue: Option<ConfigRepairIssue>,
+}
+
+impl LayerState {
+    fn valid(layer: LoadedLayer) -> Self {
+        Self {
+            current: Some(layer),
+            issue: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct ResolvedState {
+    document: ConfigDocument,
+    entries: Vec<EffectiveConfigEntry>,
+    layers: ConfigLayers,
+}
+
+#[derive(Debug)]
+pub struct ConfigRuntime {
+    paths: ConfigPaths,
+    built_in: ConfigDocument,
+    cli: ConfigDocument,
+    user: LayerState,
+    project: LayerState,
+    last_valid: Option<ResolvedState>,
+}
+
+impl ConfigRuntime {
+    pub fn open(paths: ConfigPaths, cli: ConfigDocument) -> Result<Self, ConfigRuntimeError> {
+        let built_in = ConfigDocument::built_in();
+        built_in.validate_layer()?;
+        cli.validate_layer()?;
+        let mut user = load_layer_state(ConfigScope::User, paths.user())?;
+        let mut project = load_layer_state(ConfigScope::Project, paths.project())?;
+        let last_valid = resolve_if_valid(&built_in, &paths, &mut user, &mut project, &cli)?;
+        Ok(Self {
+            paths,
+            built_in,
+            cli,
+            user,
+            project,
+            last_valid,
+        })
+    }
+
+    #[must_use]
+    pub fn paths(&self) -> &ConfigPaths {
+        &self.paths
+    }
+
+    #[must_use]
+    pub fn status(&self) -> ConfigRuntimeStatus {
+        let issues = [self.user.issue.as_ref(), self.project.issue.as_ref()]
+            .into_iter()
+            .flatten()
+            .cloned()
+            .collect::<Vec<_>>();
+        ConfigRuntimeStatus {
+            ready: issues.is_empty() && self.last_valid.is_some(),
+            issues,
+        }
+    }
+
+    pub fn reload(&mut self) -> Result<ConfigRuntimeStatus, ConfigRuntimeError> {
+        let mut user = load_layer_state(ConfigScope::User, self.paths.user())?;
+        let mut project = load_layer_state(ConfigScope::Project, self.paths.project())?;
+        if let Some(resolved) = resolve_if_valid(
+            &self.built_in,
+            &self.paths,
+            &mut user,
+            &mut project,
+            &self.cli,
+        )? {
+            self.last_valid = Some(resolved);
+        }
+        self.user = user;
+        self.project = project;
+        Ok(self.status())
+    }
+
+    pub fn effective_entries(&self) -> Result<&[EffectiveConfigEntry], ConfigRuntimeError> {
+        self.last_valid
+            .as_ref()
+            .map(|resolved| resolved.entries.as_slice())
+            .ok_or_else(|| ConfigRuntimeError::RepairRequired(self.status().issues))
+    }
+
+    pub fn get_effective(
+        &self,
+        path: &str,
+    ) -> Result<Option<&EffectiveConfigEntry>, ConfigRuntimeError> {
+        require_schema_entry(path)?;
+        Ok(self
+            .effective_entries()?
+            .iter()
+            .find(|entry| entry.path == path))
+    }
+
+    pub fn config_layers(&self) -> Result<&ConfigLayers, ConfigRuntimeError> {
+        self.last_valid
+            .as_ref()
+            .map(|resolved| &resolved.layers)
+            .ok_or_else(|| ConfigRuntimeError::RepairRequired(self.status().issues))
+    }
+
+    pub fn begin_draft(&self, scope: ConfigScope) -> Result<ConfigDraft, ConfigRuntimeError> {
+        if !scope.is_writable() {
+            return Err(ConfigRuntimeError::ReadOnlyScope(scope));
+        }
+        let state = self.state(scope)?;
+        let layer = state
+            .current
+            .as_ref()
+            .ok_or_else(|| ConfigRuntimeError::RepairRequired(self.status().issues))?;
+        Ok(ConfigDraft {
+            scope,
+            base_revision: layer.revision,
+            document: layer.document.clone(),
+        })
+    }
+
+    pub fn validate_draft(
+        &self,
+        draft: &ConfigDraft,
+    ) -> Result<Vec<ConfigChange>, ConfigRuntimeError> {
+        let current = self
+            .state(draft.scope)?
+            .current
+            .as_ref()
+            .ok_or_else(|| ConfigRuntimeError::RepairRequired(self.status().issues))?;
+        if current.revision != draft.base_revision {
+            return Err(ConfigRuntimeError::RevisionConflict {
+                expected: draft.base_revision,
+                actual: current.revision,
+            });
+        }
+        draft.document.validate_layer()?;
+        let (user, project) = match draft.scope {
+            ConfigScope::User => (
+                &draft.document,
+                &self
+                    .project
+                    .current
+                    .as_ref()
+                    .ok_or_else(|| ConfigRuntimeError::RepairRequired(self.status().issues))?
+                    .document,
+            ),
+            ConfigScope::Project => (
+                &self
+                    .user
+                    .current
+                    .as_ref()
+                    .ok_or_else(|| ConfigRuntimeError::RepairRequired(self.status().issues))?
+                    .document,
+                &draft.document,
+            ),
+            ConfigScope::BuiltIn | ConfigScope::Cli => {
+                return Err(ConfigRuntimeError::ReadOnlyScope(draft.scope));
+            }
+        };
+        resolve_documents(&self.built_in, user, project, &self.cli)?;
+        Ok(diff_documents(&current.document, &draft.document))
+    }
+
+    pub fn commit(
+        &mut self,
+        draft: ConfigDraft,
+        dry_run: bool,
+    ) -> Result<ConfigCommit, ConfigRuntimeError> {
+        if !draft.scope.is_writable() {
+            return Err(ConfigRuntimeError::ReadOnlyScope(draft.scope));
+        }
+        let _locks = lock_config_paths(&self.paths)?;
+        let user = read_layer(self.paths.user())?;
+        let project = read_layer(self.paths.project())?;
+        let current = match draft.scope {
+            ConfigScope::User => &user,
+            ConfigScope::Project => &project,
+            ConfigScope::BuiltIn | ConfigScope::Cli => {
+                return Err(ConfigRuntimeError::ReadOnlyScope(draft.scope));
+            }
+        };
+        if current.revision != draft.base_revision {
+            return Err(ConfigRuntimeError::RevisionConflict {
+                expected: draft.base_revision,
+                actual: current.revision,
+            });
+        }
+        draft.document.validate_layer()?;
+        let (resolved_user, resolved_project) = match draft.scope {
+            ConfigScope::User => (&draft.document, &project.document),
+            ConfigScope::Project => (&user.document, &draft.document),
+            ConfigScope::BuiltIn | ConfigScope::Cli => unreachable!("checked above"),
+        };
+        resolve_documents(&self.built_in, resolved_user, resolved_project, &self.cli)?;
+        let changes = diff_documents(&current.document, &draft.document);
+        let bytes = draft.document.to_toml()?.into_bytes();
+        let revision = revision(&bytes);
+        if !dry_run {
+            let path = self.paths.for_scope(draft.scope)?;
+            if current.exists {
+                atomic_write(&backup_path(path), &current.bytes)?;
+            }
+            atomic_write(path, &bytes)?;
+            self.reload()?;
+        }
+        Ok(ConfigCommit {
+            scope: draft.scope,
+            base_revision: draft.base_revision,
+            revision,
+            changes,
+            written: !dry_run,
+        })
+    }
+
+    pub fn restore_backup(
+        &mut self,
+        scope: ConfigScope,
+    ) -> Result<ConfigCommit, ConfigRuntimeError> {
+        if !scope.is_writable() {
+            return Err(ConfigRuntimeError::ReadOnlyScope(scope));
+        }
+        let _locks = lock_config_paths(&self.paths)?;
+        let path = self.paths.for_scope(scope)?;
+        let current = read_layer_unvalidated(path)?;
+        let backup = read_layer(&backup_path(path)).map_err(|source| {
+            ConfigRuntimeError::BackupUnavailable {
+                scope,
+                detail: source.to_string(),
+            }
+        })?;
+        if !backup.exists {
+            return Err(ConfigRuntimeError::BackupUnavailable {
+                scope,
+                detail: "backup file does not exist".to_owned(),
+            });
+        }
+        let user = if scope == ConfigScope::User {
+            backup.clone()
+        } else {
+            read_layer(self.paths.user())?
+        };
+        let project = if scope == ConfigScope::Project {
+            backup.clone()
+        } else {
+            read_layer(self.paths.project())?
+        };
+        resolve_documents(&self.built_in, &user.document, &project.document, &self.cli)?;
+        atomic_write(path, &backup.bytes)?;
+        self.reload()?;
+        Ok(ConfigCommit {
+            scope,
+            base_revision: current.revision,
+            revision: backup.revision,
+            changes: diff_documents(&current.document, &backup.document),
+            written: true,
+        })
+    }
+
+    fn state(&self, scope: ConfigScope) -> Result<&LayerState, ConfigRuntimeError> {
+        match scope {
+            ConfigScope::User => Ok(&self.user),
+            ConfigScope::Project => Ok(&self.project),
+            ConfigScope::BuiltIn | ConfigScope::Cli => {
+                Err(ConfigRuntimeError::ReadOnlyScope(scope))
+            }
+        }
+    }
+
+    #[must_use]
+    pub fn effective_document(&self) -> Option<&ConfigDocument> {
+        self.last_valid.as_ref().map(|resolved| &resolved.document)
+    }
+}
+
+fn resolve_if_valid(
+    built_in: &ConfigDocument,
+    paths: &ConfigPaths,
+    user: &mut LayerState,
+    project: &mut LayerState,
+    cli: &ConfigDocument,
+) -> Result<Option<ResolvedState>, ConfigRuntimeError> {
+    let (Some(user_layer), Some(project_layer)) = (&user.current, &project.current) else {
+        return Ok(None);
+    };
+    let user_document = user_layer.document.clone();
+    let project_document = project_layer.document.clone();
+    match resolve_documents(built_in, &user_document, &project_document, cli) {
+        Ok(resolved) => Ok(Some(resolved)),
+        Err(source) => {
+            let empty = ConfigDocument::empty();
+            let user_is_invalid = resolve_documents(built_in, &user_document, &empty, cli).is_err();
+            let (scope, path, state) = if user_is_invalid {
+                (ConfigScope::User, paths.user(), user)
+            } else {
+                (ConfigScope::Project, paths.project(), project)
+            };
+            state.issue = Some(ConfigRepairIssue {
+                scope,
+                path: path.to_owned(),
+                category: source.category(),
+                detail: source.to_string(),
+                backup_available: read_layer(&backup_path(path)).is_ok_and(|layer| layer.exists),
+            });
+            Ok(None)
+        }
+    }
+}
+
+fn resolve_documents(
+    built_in: &ConfigDocument,
+    user: &ConfigDocument,
+    project: &ConfigDocument,
+    cli: &ConfigDocument,
+) -> Result<ResolvedState, ConfigRuntimeError> {
+    for document in [built_in, user, project, cli] {
+        document.validate_layer()?;
+    }
+    let mut document = built_in.clone();
+    document.merge_from(user);
+    document.merge_from(project);
+    document.merge_from(cli);
+    validate_effective(&document)?;
+
+    let mut effective = BTreeMap::<String, EffectiveConfigEntry>::new();
+    for (source, layer) in [
+        (ConfigScope::BuiltIn, built_in),
+        (ConfigScope::User, user),
+        (ConfigScope::Project, project),
+        (ConfigScope::Cli, cli),
+    ] {
+        for (path, value) in layer.flatten() {
+            effective.insert(
+                path.clone(),
+                EffectiveConfigEntry {
+                    path,
+                    value,
+                    source,
+                },
+            );
+        }
+    }
+    let layers = ConfigLayers {
+        built_in: built_in.bootstrap_layer(),
+        user: user.bootstrap_layer(),
+        project: project.bootstrap_layer(),
+        cli: cli.bootstrap_layer(),
+    };
+    layers
+        .resolve()
+        .map_err(|source| invalid("<effective>", source.to_string()))?;
+    Ok(ResolvedState {
+        document,
+        entries: effective.into_values().collect(),
+        layers,
+    })
+}
+
+fn diff_documents(before: &ConfigDocument, after: &ConfigDocument) -> Vec<ConfigChange> {
+    let before = before.flatten();
+    let after = after.flatten();
+    let paths = before
+        .keys()
+        .chain(after.keys())
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    paths
+        .into_iter()
+        .filter_map(|path| {
+            let old = before.get(&path).cloned();
+            let new = after.get(&path).cloned();
+            if old == new {
+                None
+            } else {
+                Some(ConfigChange {
+                    timing: require_schema_entry(&path)
+                        .expect("flatten emits only schema-owned paths")
+                        .timing,
+                    path,
+                    before: old,
+                    after: new,
+                })
+            }
+        })
+        .collect()
+}
+
+fn load_layer_state(scope: ConfigScope, path: &Path) -> Result<LayerState, ConfigRuntimeError> {
+    match read_layer(path) {
+        Ok(layer) => Ok(LayerState::valid(layer)),
+        Err(source) => {
+            let backup = read_layer(&backup_path(path))
+                .ok()
+                .filter(|layer| layer.exists);
+            Ok(LayerState {
+                current: None,
+                issue: Some(ConfigRepairIssue {
+                    scope,
+                    path: path.to_owned(),
+                    category: source.category(),
+                    detail: source.to_string(),
+                    backup_available: backup.is_some(),
+                }),
+            })
+        }
+    }
+}
+
+fn read_layer(path: &Path) -> Result<LoadedLayer, ConfigRuntimeError> {
+    let mut layer = read_layer_unvalidated(path)?;
+    if layer.exists {
+        let text = std::str::from_utf8(&layer.bytes).map_err(|_| ConfigRuntimeError::Parse {
+            path: Some(path.to_owned()),
+            detail: "config file is not UTF-8".to_owned(),
+        })?;
+        layer.document = ConfigDocument::parse(text).map_err(|source| source.with_path(path))?;
+    }
+    Ok(layer)
+}
+
+fn read_layer_unvalidated(path: &Path) -> Result<LoadedLayer, ConfigRuntimeError> {
+    let Some(mut file) = open_existing_no_follow(path)? else {
+        return Ok(LoadedLayer {
+            document: ConfigDocument::empty(),
+            revision: revision(b"<missing-config-layer>"),
+            bytes: Vec::new(),
+            exists: false,
+        });
+    };
+    let mut bytes = Vec::new();
+    Read::by_ref(&mut file)
+        .take((MAX_CONFIG_FILE_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(ConfigRuntimeError::Io)?;
+    if bytes.len() > MAX_CONFIG_FILE_BYTES {
+        return Err(invalid(
+            "<document>",
+            "config file exceeds the supported size",
+        ));
+    }
+    Ok(LoadedLayer {
+        document: ConfigDocument::empty(),
+        revision: revision(&bytes),
+        bytes,
+        exists: true,
+    })
+}
+
+fn open_existing_no_follow(path: &Path) -> Result<Option<File>, ConfigRuntimeError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() {
+                return Err(ConfigRuntimeError::SymlinkPath(path.to_owned()));
+            }
+            if !metadata.is_file() {
+                return Err(ConfigRuntimeError::NotRegularFile(path.to_owned()));
+            }
+        }
+        Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => return Err(ConfigRuntimeError::Io(source)),
+    }
+    let mut options = OpenOptions::new();
+    options.read(true);
+    configure_no_follow(&mut options);
+    let file = options.open(path).map_err(ConfigRuntimeError::Io)?;
+    if !file.metadata().map_err(ConfigRuntimeError::Io)?.is_file() {
+        return Err(ConfigRuntimeError::NotRegularFile(path.to_owned()));
+    }
+    Ok(Some(file))
+}
+
+struct ConfigLocks {
+    _first: File,
+    _second: Option<File>,
+}
+
+fn lock_config_paths(paths: &ConfigPaths) -> Result<ConfigLocks, ConfigRuntimeError> {
+    let mut lock_paths = [lock_path(paths.user()), lock_path(paths.project())];
+    lock_paths.sort();
+    let first = lock_one(&lock_paths[0])?;
+    let second = if lock_paths[0] == lock_paths[1] {
+        None
+    } else {
+        Some(lock_one(&lock_paths[1])?)
+    };
+    Ok(ConfigLocks {
+        _first: first,
+        _second: second,
+    })
+}
+
+fn lock_one(path: &Path) -> Result<File, ConfigRuntimeError> {
+    let parent = path.parent().ok_or_else(|| {
+        ConfigRuntimeError::Io(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "config lock path has no parent",
+        ))
+    })?;
+    fs::create_dir_all(parent).map_err(ConfigRuntimeError::Io)?;
+    let mut options = OpenOptions::new();
+    options.create(true).read(true).write(true).truncate(false);
+    configure_no_follow(&mut options);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = options.open(path).map_err(ConfigRuntimeError::Io)?;
+    file.try_lock().map_err(|error| match error {
+        TryLockError::WouldBlock => ConfigRuntimeError::Locked(path.to_owned()),
+        TryLockError::Error(source) => ConfigRuntimeError::Io(source),
+    })?;
+    Ok(file)
+}
+
+fn configure_no_follow(options: &mut OpenOptions) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+}
+
+fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), ConfigRuntimeError> {
+    let parent = path.parent().ok_or_else(|| {
+        ConfigRuntimeError::Io(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "config path has no parent",
+        ))
+    })?;
+    fs::create_dir_all(parent).map_err(ConfigRuntimeError::Io)?;
+    reject_non_regular_write_target(path)?;
+    #[cfg(unix)]
+    let mut options = atomic_write_file::OpenOptions::new();
+    #[cfg(not(unix))]
+    let options = atomic_write_file::OpenOptions::new();
+    #[cfg(unix)]
+    {
+        use atomic_write_file::unix::OpenOptionsExt as AtomicOpenOptionsExt;
+        use std::os::unix::fs::OpenOptionsExt as StdOpenOptionsExt;
+
+        AtomicOpenOptionsExt::preserve_mode(&mut options, false);
+        StdOpenOptionsExt::mode(&mut options, 0o600);
+    }
+    let mut file = options.open(path).map_err(ConfigRuntimeError::Io)?;
+    file.write_all(bytes).map_err(ConfigRuntimeError::Io)?;
+    file.flush().map_err(ConfigRuntimeError::Io)?;
+    file.commit().map_err(ConfigRuntimeError::Io)?;
+    Ok(())
+}
+
+fn reject_non_regular_write_target(path: &Path) -> Result<(), ConfigRuntimeError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            Err(ConfigRuntimeError::SymlinkPath(path.to_owned()))
+        }
+        Ok(metadata) if !metadata.is_file() => {
+            Err(ConfigRuntimeError::NotRegularFile(path.to_owned()))
+        }
+        Ok(_) => Ok(()),
+        Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(ConfigRuntimeError::Io(source)),
+    }
+}
+
+fn revision(bytes: &[u8]) -> ConfigRevision {
+    let digest = Sha256::digest(bytes);
+    ConfigRevision(digest.into())
+}
+
+fn backup_path(path: &Path) -> PathBuf {
+    let mut value = path.as_os_str().to_owned();
+    value.push(".bak");
+    PathBuf::from(value)
+}
+
+fn lock_path(path: &Path) -> PathBuf {
+    let mut value = path.as_os_str().to_owned();
+    value.push(".lock");
+    PathBuf::from(value)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigErrorCategory {
+    UnknownObject,
+    WrongType,
+    InvalidValue,
+    ReadOnlyScope,
+    RevisionConflict,
+    SecretReadForbidden,
+    RepairRequired,
+    ResourceBusy,
+    Io,
+}
+
+#[derive(Debug)]
+pub enum ConfigRuntimeError {
+    UnknownObject(String),
+    WrongType {
+        path: String,
+        expected: ConfigValueKind,
+        actual: ConfigValueKind,
+    },
+    InvalidValue {
+        path: String,
+        reason: String,
+    },
+    ReadOnlyScope(ConfigScope),
+    RevisionConflict {
+        expected: ConfigRevision,
+        actual: ConfigRevision,
+    },
+    SecretReadForbidden(String),
+    RepairRequired(Vec<ConfigRepairIssue>),
+    BackupUnavailable {
+        scope: ConfigScope,
+        detail: String,
+    },
+    UnsupportedSchema {
+        supported: u16,
+        actual: u16,
+    },
+    Parse {
+        path: Option<PathBuf>,
+        detail: String,
+    },
+    SymlinkPath(PathBuf),
+    NotRegularFile(PathBuf),
+    Locked(PathBuf),
+    Io(io::Error),
+}
+
+impl ConfigRuntimeError {
+    #[must_use]
+    pub const fn category(&self) -> ConfigErrorCategory {
+        match self {
+            Self::UnknownObject(_) => ConfigErrorCategory::UnknownObject,
+            Self::WrongType { .. } => ConfigErrorCategory::WrongType,
+            Self::InvalidValue { .. }
+            | Self::BackupUnavailable { .. }
+            | Self::UnsupportedSchema { .. }
+            | Self::Parse { .. }
+            | Self::SymlinkPath(_)
+            | Self::NotRegularFile(_) => ConfigErrorCategory::InvalidValue,
+            Self::ReadOnlyScope(_) => ConfigErrorCategory::ReadOnlyScope,
+            Self::RevisionConflict { .. } => ConfigErrorCategory::RevisionConflict,
+            Self::SecretReadForbidden(_) => ConfigErrorCategory::SecretReadForbidden,
+            Self::RepairRequired(_) => ConfigErrorCategory::RepairRequired,
+            Self::Locked(_) => ConfigErrorCategory::ResourceBusy,
+            Self::Io(_) => ConfigErrorCategory::Io,
+        }
+    }
+
+    fn with_path(self, path: &Path) -> Self {
+        match self {
+            Self::Parse { detail, .. } => Self::Parse {
+                path: Some(path.to_owned()),
+                detail,
+            },
+            other => other,
+        }
+    }
+}
+
+impl fmt::Display for ConfigRuntimeError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnknownObject(path) => write!(formatter, "unknown config object {path}"),
+            Self::WrongType {
+                path,
+                expected,
+                actual,
+            } => write!(
+                formatter,
+                "config object {path} expects {expected:?}, got {actual:?}"
+            ),
+            Self::InvalidValue { path, reason } => {
+                write!(formatter, "invalid config value at {path}: {reason}")
+            }
+            Self::ReadOnlyScope(scope) => write!(formatter, "config scope {scope} is read-only"),
+            Self::RevisionConflict { expected, actual } => write!(
+                formatter,
+                "config revision conflict: expected {expected}, found {actual}"
+            ),
+            Self::SecretReadForbidden(path) => {
+                write!(formatter, "secret config value cannot be read at {path}")
+            }
+            Self::RepairRequired(issues) => write!(
+                formatter,
+                "config repair required for {} layer(s)",
+                issues.len()
+            ),
+            Self::BackupUnavailable { scope, detail } => {
+                write!(formatter, "config backup unavailable for {scope}: {detail}")
+            }
+            Self::UnsupportedSchema { supported, actual } => write!(
+                formatter,
+                "unsupported config schema version {actual}; expected {supported}"
+            ),
+            Self::Parse { path, detail } => {
+                if let Some(path) = path {
+                    write!(
+                        formatter,
+                        "cannot parse config {}: {detail}",
+                        path.display()
+                    )
+                } else {
+                    write!(formatter, "cannot parse config: {detail}")
+                }
+            }
+            Self::SymlinkPath(path) => {
+                write!(
+                    formatter,
+                    "config path is a symbolic link: {}",
+                    path.display()
+                )
+            }
+            Self::NotRegularFile(path) => {
+                write!(
+                    formatter,
+                    "config path is not a regular file: {}",
+                    path.display()
+                )
+            }
+            Self::Locked(path) => {
+                write!(
+                    formatter,
+                    "config is locked by another writer: {}",
+                    path.display()
+                )
+            }
+            Self::Io(source) => write!(formatter, "config I/O failed: {source}"),
+        }
+    }
+}
+
+impl Error for ConfigRuntimeError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Io(source) => Some(source),
+            _ => None,
+        }
+    }
+}
+
+impl ProviderDialect {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Responses => "responses",
+            Self::ChatCompletions => "chat_completions",
+            Self::Messages => "messages",
+        }
+    }
+}
+
+impl CatalogMode {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Template => "template",
+            Self::Discovery => "discovery",
+            Self::TemplateAndDiscovery => "template_and_discovery",
+            Self::Manual => "manual",
+        }
+    }
+}
+
+impl PricingSource {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Unknown => "unknown",
+            Self::Template => "template",
+            Self::Manual => "manual",
+            Self::ProviderReported => "provider_reported",
+        }
+    }
+}
+
+impl StatuslinePreset {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Minimal => "minimal",
+            Self::Balanced => "balanced",
+            Self::Diagnostic => "diagnostic",
+            Self::Custom => "custom",
+        }
+    }
+}
+
+impl StatuslineExpansion {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Compact => "compact",
+            Self::Expanded => "expanded",
+        }
+    }
+}
+
+impl Weekday {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Mon => "mon",
+            Self::Tue => "tue",
+            Self::Wed => "wed",
+            Self::Thu => "thu",
+            Self::Fri => "fri",
+            Self::Sat => "sat",
+            Self::Sun => "sun",
+        }
+    }
+}
+
+fn parse_dialect(path: &str, value: &str) -> Result<ProviderDialect, ConfigRuntimeError> {
+    match value {
+        "responses" => Ok(ProviderDialect::Responses),
+        "chat_completions" => Ok(ProviderDialect::ChatCompletions),
+        "messages" => Ok(ProviderDialect::Messages),
+        _ => Err(invalid(path, "unknown provider dialect")),
+    }
+}
+
+fn parse_catalog_mode(path: &str, value: &str) -> Result<CatalogMode, ConfigRuntimeError> {
+    match value {
+        "template" => Ok(CatalogMode::Template),
+        "discovery" => Ok(CatalogMode::Discovery),
+        "template_and_discovery" => Ok(CatalogMode::TemplateAndDiscovery),
+        "manual" => Ok(CatalogMode::Manual),
+        _ => Err(invalid(path, "unknown catalog mode")),
+    }
+}
+
+fn parse_pricing_source(path: &str, value: &str) -> Result<PricingSource, ConfigRuntimeError> {
+    match value {
+        "unknown" => Ok(PricingSource::Unknown),
+        "template" => Ok(PricingSource::Template),
+        "manual" => Ok(PricingSource::Manual),
+        "provider_reported" => Ok(PricingSource::ProviderReported),
+        _ => Err(invalid(path, "unknown pricing source")),
+    }
+}
+
+fn parse_statusline_preset(
+    path: &str,
+    value: &str,
+) -> Result<StatuslinePreset, ConfigRuntimeError> {
+    match value {
+        "minimal" => Ok(StatuslinePreset::Minimal),
+        "balanced" => Ok(StatuslinePreset::Balanced),
+        "diagnostic" => Ok(StatuslinePreset::Diagnostic),
+        "custom" => Ok(StatuslinePreset::Custom),
+        _ => Err(invalid(path, "unknown statusline preset")),
+    }
+}
+
+fn parse_statusline_expansion(
+    path: &str,
+    value: &str,
+) -> Result<StatuslineExpansion, ConfigRuntimeError> {
+    match value {
+        "auto" => Ok(StatuslineExpansion::Auto),
+        "compact" => Ok(StatuslineExpansion::Compact),
+        "expanded" => Ok(StatuslineExpansion::Expanded),
+        _ => Err(invalid(path, "unknown statusline expansion policy")),
+    }
+}
+
+fn parse_weekday(path: &str, value: &str) -> Result<Weekday, ConfigRuntimeError> {
+    match value {
+        "mon" => Ok(Weekday::Mon),
+        "tue" => Ok(Weekday::Tue),
+        "wed" => Ok(Weekday::Wed),
+        "thu" => Ok(Weekday::Thu),
+        "fri" => Ok(Weekday::Fri),
+        "sat" => Ok(Weekday::Sat),
+        "sun" => Ok(Weekday::Sun),
+        _ => Err(invalid(path, "unknown weekday")),
+    }
+}
+
+fn take_string(value: ConfigValue) -> String {
+    match value {
+        ConfigValue::String(value) => value,
+        _ => unreachable!("value kind checked before mutation"),
+    }
+}
+
+fn take_positive_integer(value: ConfigValue) -> u32 {
+    match value {
+        ConfigValue::PositiveInteger(value) => value,
+        _ => unreachable!("value kind checked before mutation"),
+    }
+}
+
+fn take_boolean(value: ConfigValue) -> bool {
+    match value {
+        ConfigValue::Boolean(value) => value,
+        _ => unreachable!("value kind checked before mutation"),
+    }
+}
+
+fn take_string_list(value: ConfigValue) -> Vec<String> {
+    match value {
+        ConfigValue::StringList(value) => value,
+        _ => unreachable!("value kind checked before mutation"),
+    }
+}
+
+fn merge_option<T: Clone>(base: &mut Option<T>, overlay: &Option<T>) {
+    if let Some(value) = overlay {
+        *base = Some(value.clone());
+    }
+}
+
+fn insert_string(values: &mut BTreeMap<String, ConfigValue>, path: &str, value: &Option<String>) {
+    if let Some(value) = value {
+        values.insert(path.to_owned(), ConfigValue::String(value.clone()));
+    }
+}
+
+fn split_path(path: &str) -> Result<Vec<&str>, ConfigRuntimeError> {
+    let segments: Vec<_> = path.split('.').collect();
+    if segments.iter().any(|segment| segment.is_empty()) {
+        Err(ConfigRuntimeError::UnknownObject(path.to_owned()))
+    } else {
+        Ok(segments)
+    }
+}
+
+fn require_schema_entry(path: &str) -> Result<&'static ConfigSchemaEntry, ConfigRuntimeError> {
+    if path.starts_with("credentials.") || path.starts_with("credential_values.") {
+        return Err(ConfigRuntimeError::SecretReadForbidden(path.to_owned()));
+    }
+    let entry = CONFIG_SCHEMA
+        .iter()
+        .find(|entry| path_matches(entry.path_pattern, path))
+        .ok_or_else(|| ConfigRuntimeError::UnknownObject(path.to_owned()))?;
+    for (pattern_segment, path_segment) in entry.path_pattern.split('.').zip(path.split('.')) {
+        if pattern_segment == "<id>" {
+            validate_id(path, path_segment)?;
+        }
+    }
+    Ok(entry)
+}
+
+fn path_matches(pattern: &str, path: &str) -> bool {
+    let pattern_segments: Vec<_> = pattern.split('.').collect();
+    let path_segments: Vec<_> = path.split('.').collect();
+    pattern_segments.len() == path_segments.len()
+        && pattern_segments
+            .iter()
+            .zip(path_segments)
+            .all(|(expected, actual)| *expected == "<id>" || *expected == actual)
+}
+
+fn require_scope(
+    descriptor: &ConfigSchemaEntry,
+    scope: ConfigScope,
+) -> Result<(), ConfigRuntimeError> {
+    if !scope.is_writable() || !descriptor.scopes.contains(&scope) {
+        Err(ConfigRuntimeError::ReadOnlyScope(scope))
+    } else {
+        Ok(())
+    }
+}
+
+pub fn parse_config_value(path: &str, raw: &str) -> Result<ConfigValue, ConfigRuntimeError> {
+    let descriptor = require_schema_entry(path)?;
+    match descriptor.value_kind {
+        ConfigValueKind::String => Ok(ConfigValue::String(raw.to_owned())),
+        ConfigValueKind::PositiveInteger => raw
+            .parse::<u32>()
+            .ok()
+            .filter(|value| *value > 0)
+            .map(ConfigValue::PositiveInteger)
+            .ok_or_else(|| invalid(path, "expected a positive 32-bit integer")),
+        ConfigValueKind::Boolean => match raw {
+            "true" => Ok(ConfigValue::Boolean(true)),
+            "false" => Ok(ConfigValue::Boolean(false)),
+            _ => Err(invalid(path, "expected true or false")),
+        },
+        ConfigValueKind::StringList => {
+            #[derive(Deserialize)]
+            struct ListLiteral {
+                value: Vec<String>,
+            }
+            let literal = format!("value = {raw}");
+            let parsed: ListLiteral = toml::from_str(&literal)
+                .map_err(|_| invalid(path, "expected a TOML array of strings"))?;
+            Ok(ConfigValue::StringList(parsed.value))
+        }
+    }
+}
+
+fn validate_value(path: &str, value: &ConfigValue) -> Result<(), ConfigRuntimeError> {
+    match value {
+        ConfigValue::String(value) => validate_string(path, value),
+        ConfigValue::PositiveInteger(value) => {
+            if *value == 0 {
+                Err(invalid(path, "value must be greater than zero"))
+            } else if path == "runtime.max_output_bytes" && *value > super::MAX_OUTPUT_BYTES {
+                Err(invalid(path, "value exceeds the supported output limit"))
+            } else {
+                Ok(())
+            }
+        }
+        ConfigValue::Boolean(_) => Ok(()),
+        ConfigValue::StringList(values) => {
+            if values.len() > MAX_CONFIG_LIST_ITEMS {
+                return Err(invalid(path, "list exceeds the supported item count"));
+            }
+            let mut unique = BTreeSet::new();
+            for value in values {
+                validate_string(path, value)?;
+                if !unique.insert(value) {
+                    return Err(invalid(path, "list items must be unique"));
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
+fn validate_string(path: &str, value: &str) -> Result<(), ConfigRuntimeError> {
+    if value.trim().is_empty() {
+        Err(invalid(path, "value cannot be empty"))
+    } else if value.trim() != value {
+        Err(invalid(path, "value has surrounding whitespace"))
+    } else if value.len() > super::MAX_CONFIG_STRING_BYTES {
+        Err(invalid(path, "value exceeds the supported size"))
+    } else if value.chars().any(char::is_control) {
+        Err(invalid(path, "value contains control characters"))
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_id(path: &str, id: &str) -> Result<(), ConfigRuntimeError> {
+    if id.is_empty()
+        || id.len() > MAX_CONFIG_ID_BYTES
+        || !id
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        || !id.as_bytes().first().is_some_and(u8::is_ascii_alphanumeric)
+    {
+        Err(invalid(
+            path,
+            "ID must start with a lowercase letter or digit and contain only lowercase ASCII letters, digits, or hyphens",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn normalize_route(path: &str, route: &str) -> Result<String, ConfigRuntimeError> {
+    validate_string(path, route)?;
+    if route.contains('?')
+        || route.contains('#')
+        || route.contains("://")
+        || route
+            .split('/')
+            .any(|segment| matches!(segment, "." | ".."))
+    {
+        return Err(invalid(
+            path,
+            "route must be a path without authority, dot segments, query, or fragment",
+        ));
+    }
+    let trimmed = route.trim_start_matches('/');
+    if trimmed.is_empty() {
+        return Err(invalid(path, "route cannot be the origin root"));
+    }
+    Ok(format!("/{trimmed}"))
+}
+
+fn validate_effective(document: &ConfigDocument) -> Result<(), ConfigRuntimeError> {
+    document.validate_layer()?;
+    let bootstrap = ConfigLayers {
+        built_in: document.bootstrap_layer(),
+        user: ConfigLayer::default(),
+        project: ConfigLayer::default(),
+        cli: ConfigLayer::default(),
+    };
+    bootstrap
+        .resolve()
+        .map_err(|source| invalid("<effective>", source.to_string()))?;
+
+    for (id, profile) in &document.providers {
+        let prefix = format!("providers.{id}");
+        if profile.template.is_none() {
+            return Err(invalid(
+                format!("{prefix}.template"),
+                "provider profile requires a template",
+            ));
+        }
+        if let Some(base_url) = &profile.base_url {
+            validate_provider_origin(&prefix, base_url, profile)?;
+            if profile.credential.is_none() {
+                return Err(invalid(
+                    format!("{prefix}.credential"),
+                    "custom origin requires an explicit credential binding",
+                ));
+            }
+            if profile.pricing.source.is_none() {
+                return Err(invalid(
+                    format!("{prefix}.pricing.source"),
+                    "custom origin requires an explicit pricing decision",
+                ));
+            }
+        }
+        if profile.base_url.is_none() && profile.allow_insecure_loopback == Some(true) {
+            return Err(invalid(
+                format!("{prefix}.allow_insecure_loopback"),
+                "insecure-loopback opt-in requires an explicit loopback base URL",
+            ));
+        }
+        if profile.dialects.as_ref().is_some_and(Vec::is_empty) {
+            return Err(invalid(
+                format!("{prefix}.dialects"),
+                "dialect set cannot be empty",
+            ));
+        }
+    }
+
+    for (id, preset) in &document.model_presets {
+        let prefix = format!("model_presets.{id}");
+        let provider = preset.provider.as_ref().ok_or_else(|| {
+            invalid(
+                format!("{prefix}.provider"),
+                "model preset requires a provider",
+            )
+        })?;
+        if !document.providers.contains_key(provider) && provider != "simulator" {
+            return Err(invalid(
+                format!("{prefix}.provider"),
+                "model preset references an unknown provider profile",
+            ));
+        }
+        if preset.model.is_none() {
+            return Err(invalid(
+                format!("{prefix}.model"),
+                "model preset requires a model",
+            ));
+        }
+        if preset.dialect.is_none() {
+            return Err(invalid(
+                format!("{prefix}.dialect"),
+                "model preset requires an explicit dialect",
+            ));
+        }
+        for fallback in preset.fallback.iter().flatten() {
+            if fallback == id {
+                return Err(invalid(
+                    format!("{prefix}.fallback"),
+                    "model preset cannot fall back to itself",
+                ));
+            }
+            if !document.model_presets.contains_key(fallback) {
+                return Err(invalid(
+                    format!("{prefix}.fallback"),
+                    "fallback references an unknown model preset",
+                ));
+            }
+        }
+    }
+    validate_fallback_cycles(document)?;
+
+    let windows: BTreeSet<_> = document
+        .stats
+        .windows
+        .iter()
+        .flatten()
+        .map(|window| window.id.as_str())
+        .collect();
+    for window in document.stats.windows.iter().flatten() {
+        validate_usage_window(window)?;
+    }
+    if let Some(primary) = &document.ui.statusline.primary_usage_window
+        && !windows.contains(primary.as_str())
+    {
+        return Err(invalid(
+            "ui.statusline.primary_usage_window",
+            "primary usage window does not exist",
+        ));
+    }
+    let has_custom_segment = document
+        .ui
+        .statusline
+        .custom
+        .left
+        .as_ref()
+        .is_some_and(|segments| !segments.is_empty())
+        || document
+            .ui
+            .statusline
+            .custom
+            .right
+            .as_ref()
+            .is_some_and(|segments| !segments.is_empty());
+    if document.ui.statusline.preset == Some(StatuslinePreset::Custom) && !has_custom_segment {
+        return Err(invalid(
+            "ui.statusline.custom",
+            "custom statusline requires at least one segment list",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_provider_origin(
+    profile_path: &str,
+    value: &str,
+    profile: &ProviderProfileLayer,
+) -> Result<(), ConfigRuntimeError> {
+    let path = format!("{profile_path}.base_url");
+    let url = Url::parse(value).map_err(|_| invalid(&path, "invalid absolute HTTP(S) URL"))?;
+    if !matches!(url.scheme(), "http" | "https")
+        || url.host().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(invalid(
+            &path,
+            "base URL must be absolute HTTP(S) with no user info, query, or fragment",
+        ));
+    }
+    let loopback = match url.host() {
+        Some(Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
+        Some(Host::Ipv4(address)) => address.is_loopback(),
+        Some(Host::Ipv6(address)) => address.is_loopback(),
+        None => false,
+    };
+    if url.scheme() == "http" && (!loopback || profile.allow_insecure_loopback != Some(true)) {
+        return Err(invalid(
+            &path,
+            "plain HTTP requires a loopback host and explicit insecure-loopback opt-in",
+        ));
+    }
+    if !loopback && profile.allow_insecure_loopback == Some(true) {
+        return Err(invalid(
+            format!("{profile_path}.allow_insecure_loopback"),
+            "insecure-loopback opt-in is invalid for a remote origin",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_usage_window(window: &UsageWindowLayer) -> Result<(), ConfigRuntimeError> {
+    let prefix = format!("stats.windows.{}", window.id);
+    let start = window
+        .start
+        .as_deref()
+        .ok_or_else(|| invalid(format!("{prefix}.start"), "usage window requires a start"))?;
+    let end = window
+        .end
+        .as_deref()
+        .ok_or_else(|| invalid(format!("{prefix}.end"), "usage window requires an end"))?;
+    validate_local_time(&format!("{prefix}.start"), start)?;
+    validate_local_time(&format!("{prefix}.end"), end)?;
+    if window.days.as_ref().is_none_or(Vec::is_empty) {
+        return Err(invalid(
+            format!("{prefix}.days"),
+            "usage window requires at least one day",
+        ));
+    }
+    let timezone = window.timezone.as_deref().ok_or_else(|| {
+        invalid(
+            format!("{prefix}.timezone"),
+            "usage window requires a time zone",
+        )
+    })?;
+    if timezone != "local" && TimeZone::get(timezone).is_err() {
+        return Err(invalid(
+            format!("{prefix}.timezone"),
+            "unknown IANA time-zone ID",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_local_time(path: &str, value: &str) -> Result<(), ConfigRuntimeError> {
+    let Some((hour, minute)) = value.split_once(':') else {
+        return Err(invalid(path, "local time must use HH:MM"));
+    };
+    if hour.len() != 2
+        || minute.len() != 2
+        || hour.parse::<u8>().map_or(true, |hour| hour > 23)
+        || minute.parse::<u8>().map_or(true, |minute| minute > 59)
+    {
+        Err(invalid(path, "local time must use valid 24-hour HH:MM"))
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_fallback_cycles(document: &ConfigDocument) -> Result<(), ConfigRuntimeError> {
+    fn visit<'a>(
+        current: &'a str,
+        root: &str,
+        document: &'a ConfigDocument,
+        active: &mut BTreeSet<&'a str>,
+        complete: &mut BTreeSet<&'a str>,
+    ) -> Result<(), ConfigRuntimeError> {
+        if complete.contains(current) {
+            return Ok(());
+        }
+        if !active.insert(current) {
+            return Err(invalid(
+                format!("model_presets.{root}.fallback"),
+                "fallback chain contains a cycle",
+            ));
+        }
+        if let Some(preset) = document.model_presets.get(current) {
+            for fallback in preset.fallback.iter().flatten() {
+                visit(fallback, root, document, active, complete)?;
+            }
+        }
+        active.remove(current);
+        complete.insert(current);
+        Ok(())
+    }
+
+    let mut complete = BTreeSet::new();
+    for root in document.model_presets.keys() {
+        visit(root, root, document, &mut BTreeSet::new(), &mut complete)?;
+    }
+    Ok(())
+}
+
+fn invalid(path: impl Into<String>, reason: impl Into<String>) -> ConfigRuntimeError {
+    ConfigRuntimeError::InvalidValue {
+        path: path.into(),
+        reason: reason.into(),
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+struct StatuslineLayer {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    preset: Option<StatuslinePreset>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    expand: Option<StatuslineExpansion>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    primary_usage_window: Option<String>,
+    #[serde(skip_serializing_if = "StatuslineCustomLayer::is_empty")]
+    custom: StatuslineCustomLayer,
+}
+
+impl StatuslineLayer {
+    fn is_empty(&self) -> bool {
+        self.preset.is_none()
+            && self.expand.is_none()
+            && self.primary_usage_window.is_none()
+            && self.custom.is_empty()
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+struct StatuslineCustomLayer {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    left: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    right: Option<Vec<String>>,
+}
+
+impl StatuslineCustomLayer {
+    fn is_empty(&self) -> bool {
+        self.left.is_none() && self.right.is_none()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum StatuslinePreset {
+    Minimal,
+    Balanced,
+    Diagnostic,
+    Custom,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum StatuslineExpansion {
+    Auto,
+    Compact,
+    Expanded,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+struct StatsLayer {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    windows: Option<Vec<UsageWindowLayer>>,
+}
+
+impl StatsLayer {
+    fn is_empty(&self) -> bool {
+        self.windows.is_none()
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct UsageWindowLayer {
+    id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    start: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    end: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    days: Option<Vec<Weekday>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    timezone: Option<String>,
+}
+
+impl UsageWindowLayer {
+    fn is_empty_except_id(&self) -> bool {
+        self.start.is_none() && self.end.is_none() && self.days.is_none() && self.timezone.is_none()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum Weekday {
+    Mon,
+    Tue,
+    Wed,
+    Thu,
+    Fri,
+    Sat,
+    Sun,
+}
+
+impl ConfigDocument {
+    pub fn parse(input: &str) -> Result<Self, ConfigRuntimeError> {
+        if input.len() > MAX_CONFIG_FILE_BYTES {
+            return Err(ConfigRuntimeError::InvalidValue {
+                path: "<document>".to_owned(),
+                reason: "config file exceeds the supported size".to_owned(),
+            });
+        }
+        let mut document: Self =
+            toml::from_str(input).map_err(|source| ConfigRuntimeError::Parse {
+                path: None,
+                detail: source.to_string(),
+            })?;
+        document.normalize_routes()?;
+        document.validate_layer()?;
+        Ok(document)
+    }
+
+    pub fn to_toml(&self) -> Result<String, ConfigRuntimeError> {
+        let mut normalized = self.clone();
+        normalized.normalize_routes()?;
+        normalized.validate_layer()?;
+        let mut output =
+            toml::to_string_pretty(&normalized).map_err(|source| ConfigRuntimeError::Parse {
+                path: None,
+                detail: source.to_string(),
+            })?;
+        if !output.ends_with('\n') {
+            output.push('\n');
+        }
+        Ok(output)
+    }
+
+    pub fn get(&self, path: &str) -> Result<Option<ConfigValue>, ConfigRuntimeError> {
+        require_schema_entry(path)?;
+        Ok(self.flatten().remove(path))
+    }
+
+    fn set(
+        &mut self,
+        scope: ConfigScope,
+        path: &str,
+        value: ConfigValue,
+    ) -> Result<(), ConfigRuntimeError> {
+        let descriptor = require_schema_entry(path)?;
+        require_scope(descriptor, scope)?;
+        if descriptor.value_kind != value.kind() {
+            return Err(ConfigRuntimeError::WrongType {
+                path: path.to_owned(),
+                expected: descriptor.value_kind,
+                actual: value.kind(),
+            });
+        }
+        let segments = split_path(path)?;
+        match segments.as_slice() {
+            ["provider", "profile"] => self.provider.profile = Some(take_string(value)),
+            ["provider", "model"] => self.provider.model = Some(take_string(value)),
+            ["runtime", "max_output_bytes"] => {
+                self.runtime.max_output_bytes = Some(take_positive_integer(value))
+            }
+            ["providers", id, field] => {
+                validate_id("providers.<id>", id)?;
+                let profile = self.providers.entry((*id).to_owned()).or_default();
+                match *field {
+                    "template" => profile.template = Some(take_string(value)),
+                    "credential" => profile.credential = Some(take_string(value)),
+                    "base_url" => profile.base_url = Some(take_string(value)),
+                    "dialects" => {
+                        profile.dialects = Some(
+                            take_string_list(value)
+                                .into_iter()
+                                .map(|value| parse_dialect(path, &value))
+                                .collect::<Result<_, _>>()?,
+                        );
+                    }
+                    "allow_insecure_loopback" => {
+                        profile.allow_insecure_loopback = Some(take_boolean(value));
+                    }
+                    _ => return Err(ConfigRuntimeError::UnknownObject(path.to_owned())),
+                }
+            }
+            ["providers", id, "routes", route] => {
+                validate_id("providers.<id>", id)?;
+                let route_value = normalize_route(path, &take_string(value))?;
+                let routes = &mut self.providers.entry((*id).to_owned()).or_default().routes;
+                match *route {
+                    "responses" => routes.responses = Some(route_value),
+                    "chat_completions" => routes.chat_completions = Some(route_value),
+                    "messages" => routes.messages = Some(route_value),
+                    "models" => routes.models = Some(route_value),
+                    _ => return Err(ConfigRuntimeError::UnknownObject(path.to_owned())),
+                }
+            }
+            ["providers", id, "catalog", "mode"] => {
+                validate_id("providers.<id>", id)?;
+                self.providers
+                    .entry((*id).to_owned())
+                    .or_default()
+                    .catalog
+                    .mode = Some(parse_catalog_mode(path, &take_string(value))?);
+            }
+            ["providers", id, "pricing", "source"] => {
+                validate_id("providers.<id>", id)?;
+                self.providers
+                    .entry((*id).to_owned())
+                    .or_default()
+                    .pricing
+                    .source = Some(parse_pricing_source(path, &take_string(value))?);
+            }
+            ["model_presets", id, field] => {
+                validate_id("model_presets.<id>", id)?;
+                let preset = self.model_presets.entry((*id).to_owned()).or_default();
+                match *field {
+                    "provider" => preset.provider = Some(take_string(value)),
+                    "model" => preset.model = Some(take_string(value)),
+                    "dialect" => preset.dialect = Some(parse_dialect(path, &take_string(value))?),
+                    "reasoning_effort" => {
+                        preset.reasoning_effort = Some(take_string(value));
+                    }
+                    "service_tier" => preset.service_tier = Some(take_string(value)),
+                    "max_output_tokens" => {
+                        preset.max_output_tokens = Some(take_positive_integer(value));
+                    }
+                    "context_mode" => preset.context_mode = Some(take_string(value)),
+                    "favorite" => preset.favorite = Some(take_boolean(value)),
+                    "fallback" => preset.fallback = Some(take_string_list(value)),
+                    _ => return Err(ConfigRuntimeError::UnknownObject(path.to_owned())),
+                }
+            }
+            ["ui", "statusline", field] => match *field {
+                "preset" => {
+                    self.ui.statusline.preset =
+                        Some(parse_statusline_preset(path, &take_string(value))?);
+                }
+                "expand" => {
+                    self.ui.statusline.expand =
+                        Some(parse_statusline_expansion(path, &take_string(value))?);
+                }
+                "primary_usage_window" => {
+                    self.ui.statusline.primary_usage_window = Some(take_string(value));
+                }
+                _ => return Err(ConfigRuntimeError::UnknownObject(path.to_owned())),
+            },
+            ["ui", "statusline", "custom", side] => match *side {
+                "left" => self.ui.statusline.custom.left = Some(take_string_list(value)),
+                "right" => self.ui.statusline.custom.right = Some(take_string_list(value)),
+                _ => return Err(ConfigRuntimeError::UnknownObject(path.to_owned())),
+            },
+            ["stats", "windows", id, field] => {
+                validate_id("stats.windows.<id>", id)?;
+                let window = self.window_mut(id);
+                match *field {
+                    "start" => window.start = Some(take_string(value)),
+                    "end" => window.end = Some(take_string(value)),
+                    "days" => {
+                        window.days = Some(
+                            take_string_list(value)
+                                .into_iter()
+                                .map(|value| parse_weekday(path, &value))
+                                .collect::<Result<_, _>>()?,
+                        );
+                    }
+                    "timezone" => window.timezone = Some(take_string(value)),
+                    _ => return Err(ConfigRuntimeError::UnknownObject(path.to_owned())),
+                }
+            }
+            _ => return Err(ConfigRuntimeError::UnknownObject(path.to_owned())),
+        }
+        self.normalize_routes()?;
+        self.validate_layer()
+    }
+
+    fn reset(&mut self, scope: ConfigScope, path: &str) -> Result<(), ConfigRuntimeError> {
+        let descriptor = require_schema_entry(path)?;
+        require_scope(descriptor, scope)?;
+        let segments = split_path(path)?;
+        match segments.as_slice() {
+            ["provider", "profile"] => self.provider.profile = None,
+            ["provider", "model"] => self.provider.model = None,
+            ["runtime", "max_output_bytes"] => self.runtime.max_output_bytes = None,
+            ["providers", id, field] => {
+                let Some(profile) = self.providers.get_mut(*id) else {
+                    return Ok(());
+                };
+                match *field {
+                    "template" => profile.template = None,
+                    "credential" => profile.credential = None,
+                    "base_url" => profile.base_url = None,
+                    "dialects" => profile.dialects = None,
+                    "allow_insecure_loopback" => profile.allow_insecure_loopback = None,
+                    _ => return Err(ConfigRuntimeError::UnknownObject(path.to_owned())),
+                }
+            }
+            ["providers", id, "routes", route] => {
+                let Some(profile) = self.providers.get_mut(*id) else {
+                    return Ok(());
+                };
+                match *route {
+                    "responses" => profile.routes.responses = None,
+                    "chat_completions" => profile.routes.chat_completions = None,
+                    "messages" => profile.routes.messages = None,
+                    "models" => profile.routes.models = None,
+                    _ => return Err(ConfigRuntimeError::UnknownObject(path.to_owned())),
+                }
+            }
+            ["providers", id, "catalog", "mode"] => {
+                if let Some(profile) = self.providers.get_mut(*id) {
+                    profile.catalog.mode = None;
+                }
+            }
+            ["providers", id, "pricing", "source"] => {
+                if let Some(profile) = self.providers.get_mut(*id) {
+                    profile.pricing.source = None;
+                }
+            }
+            ["model_presets", id, field] => {
+                let Some(preset) = self.model_presets.get_mut(*id) else {
+                    return Ok(());
+                };
+                match *field {
+                    "provider" => preset.provider = None,
+                    "model" => preset.model = None,
+                    "dialect" => preset.dialect = None,
+                    "reasoning_effort" => preset.reasoning_effort = None,
+                    "service_tier" => preset.service_tier = None,
+                    "max_output_tokens" => preset.max_output_tokens = None,
+                    "context_mode" => preset.context_mode = None,
+                    "favorite" => preset.favorite = None,
+                    "fallback" => preset.fallback = None,
+                    _ => return Err(ConfigRuntimeError::UnknownObject(path.to_owned())),
+                }
+            }
+            ["ui", "statusline", field] => match *field {
+                "preset" => self.ui.statusline.preset = None,
+                "expand" => self.ui.statusline.expand = None,
+                "primary_usage_window" => self.ui.statusline.primary_usage_window = None,
+                _ => return Err(ConfigRuntimeError::UnknownObject(path.to_owned())),
+            },
+            ["ui", "statusline", "custom", side] => match *side {
+                "left" => self.ui.statusline.custom.left = None,
+                "right" => self.ui.statusline.custom.right = None,
+                _ => return Err(ConfigRuntimeError::UnknownObject(path.to_owned())),
+            },
+            ["stats", "windows", id, field] => {
+                let Some(window) = self
+                    .stats
+                    .windows
+                    .as_mut()
+                    .and_then(|windows| windows.iter_mut().find(|window| window.id == *id))
+                else {
+                    return Ok(());
+                };
+                match *field {
+                    "start" => window.start = None,
+                    "end" => window.end = None,
+                    "days" => window.days = None,
+                    "timezone" => window.timezone = None,
+                    _ => return Err(ConfigRuntimeError::UnknownObject(path.to_owned())),
+                }
+            }
+            _ => return Err(ConfigRuntimeError::UnknownObject(path.to_owned())),
+        }
+        self.prune_empty();
+        self.validate_layer()
+    }
+
+    fn window_mut(&mut self, id: &str) -> &mut UsageWindowLayer {
+        let windows = self.stats.windows.get_or_insert_with(Vec::new);
+        let index = windows
+            .iter()
+            .position(|window| window.id == id)
+            .unwrap_or_else(|| {
+                windows.push(UsageWindowLayer {
+                    id: id.to_owned(),
+                    start: None,
+                    end: None,
+                    days: None,
+                    timezone: None,
+                });
+                windows.len() - 1
+            });
+        &mut windows[index]
+    }
+
+    fn prune_empty(&mut self) {
+        self.providers.retain(|_, profile| !profile.is_empty());
+        self.model_presets.retain(|_, preset| !preset.is_empty());
+        if let Some(windows) = &mut self.stats.windows {
+            windows.retain(|window| !window.is_empty_except_id());
+            if windows.is_empty() {
+                self.stats.windows = None;
+            }
+        }
+    }
+
+    fn normalize_routes(&mut self) -> Result<(), ConfigRuntimeError> {
+        for (id, profile) in &mut self.providers {
+            for (name, route) in [
+                ("responses", &mut profile.routes.responses),
+                ("chat_completions", &mut profile.routes.chat_completions),
+                ("messages", &mut profile.routes.messages),
+                ("models", &mut profile.routes.models),
+            ] {
+                if let Some(value) = route {
+                    *value = normalize_route(&format!("providers.{id}.routes.{name}"), value)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_layer(&self) -> Result<(), ConfigRuntimeError> {
+        SchemaKind::ConfigFile
+            .require_current(self.schema_version)
+            .map_err(|source| ConfigRuntimeError::UnsupportedSchema {
+                supported: CONFIG_FILE_SCHEMA_VERSION,
+                actual: match source {
+                    crate::schema::SchemaError::Unsupported { actual, .. } => actual.get(),
+                    crate::schema::SchemaError::ZeroVersion => 0,
+                },
+            })?;
+        for (path, value) in self.flatten() {
+            let descriptor = require_schema_entry(&path)?;
+            if descriptor.value_kind != value.kind() {
+                return Err(ConfigRuntimeError::WrongType {
+                    path,
+                    expected: descriptor.value_kind,
+                    actual: value.kind(),
+                });
+            }
+            validate_value(&path, &value)?;
+            if descriptor.credential_reference {
+                let ConfigValue::String(reference) = &value else {
+                    unreachable!("credential-reference schema requires a string")
+                };
+                validate_id(&path, reference)?;
+            }
+        }
+        for id in self.providers.keys() {
+            validate_id("providers.<id>", id)?;
+        }
+        for id in self.model_presets.keys() {
+            validate_id("model_presets.<id>", id)?;
+        }
+        let mut window_ids = BTreeSet::new();
+        for window in self.stats.windows.iter().flatten() {
+            validate_id("stats.windows.<id>", &window.id)?;
+            if !window_ids.insert(window.id.clone()) {
+                return Err(invalid(
+                    format!("stats.windows.{}", window.id),
+                    "usage window IDs must be unique",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn merge_from(&mut self, overlay: &Self) {
+        merge_option(&mut self.provider.profile, &overlay.provider.profile);
+        merge_option(&mut self.provider.model, &overlay.provider.model);
+        merge_option(
+            &mut self.runtime.max_output_bytes,
+            &overlay.runtime.max_output_bytes,
+        );
+        for (id, overlay_profile) in &overlay.providers {
+            self.providers
+                .entry(id.clone())
+                .or_default()
+                .merge_from(overlay_profile);
+        }
+        for (id, overlay_preset) in &overlay.model_presets {
+            self.model_presets
+                .entry(id.clone())
+                .or_default()
+                .merge_from(overlay_preset);
+        }
+        self.ui.merge_from(&overlay.ui);
+        self.stats.merge_from(&overlay.stats);
+    }
+
+    fn bootstrap_layer(&self) -> ConfigLayer {
+        ConfigLayer {
+            provider_profile: self.provider.profile.clone(),
+            provider_model: self.provider.model.clone(),
+            max_output_bytes: self.runtime.max_output_bytes,
+        }
+    }
+
+    fn flatten(&self) -> BTreeMap<String, ConfigValue> {
+        let mut values = BTreeMap::new();
+        insert_string(&mut values, "provider.profile", &self.provider.profile);
+        insert_string(&mut values, "provider.model", &self.provider.model);
+        if let Some(value) = self.runtime.max_output_bytes {
+            values.insert(
+                "runtime.max_output_bytes".to_owned(),
+                ConfigValue::PositiveInteger(value),
+            );
+        }
+        for (id, profile) in &self.providers {
+            let prefix = format!("providers.{id}");
+            insert_string(
+                &mut values,
+                &format!("{prefix}.template"),
+                &profile.template,
+            );
+            insert_string(
+                &mut values,
+                &format!("{prefix}.credential"),
+                &profile.credential,
+            );
+            insert_string(
+                &mut values,
+                &format!("{prefix}.base_url"),
+                &profile.base_url,
+            );
+            for (name, route) in [
+                ("responses", &profile.routes.responses),
+                ("chat_completions", &profile.routes.chat_completions),
+                ("messages", &profile.routes.messages),
+                ("models", &profile.routes.models),
+            ] {
+                insert_string(&mut values, &format!("{prefix}.routes.{name}"), route);
+            }
+            if let Some(dialects) = &profile.dialects {
+                values.insert(
+                    format!("{prefix}.dialects"),
+                    ConfigValue::StringList(
+                        dialects
+                            .iter()
+                            .map(|dialect| dialect.as_str().to_owned())
+                            .collect(),
+                    ),
+                );
+            }
+            if let Some(mode) = profile.catalog.mode {
+                values.insert(
+                    format!("{prefix}.catalog.mode"),
+                    ConfigValue::String(mode.as_str().to_owned()),
+                );
+            }
+            if let Some(source) = profile.pricing.source {
+                values.insert(
+                    format!("{prefix}.pricing.source"),
+                    ConfigValue::String(source.as_str().to_owned()),
+                );
+            }
+            if let Some(value) = profile.allow_insecure_loopback {
+                values.insert(
+                    format!("{prefix}.allow_insecure_loopback"),
+                    ConfigValue::Boolean(value),
+                );
+            }
+        }
+        for (id, preset) in &self.model_presets {
+            let prefix = format!("model_presets.{id}");
+            insert_string(&mut values, &format!("{prefix}.provider"), &preset.provider);
+            insert_string(&mut values, &format!("{prefix}.model"), &preset.model);
+            if let Some(dialect) = preset.dialect {
+                values.insert(
+                    format!("{prefix}.dialect"),
+                    ConfigValue::String(dialect.as_str().to_owned()),
+                );
+            }
+            insert_string(
+                &mut values,
+                &format!("{prefix}.reasoning_effort"),
+                &preset.reasoning_effort,
+            );
+            insert_string(
+                &mut values,
+                &format!("{prefix}.service_tier"),
+                &preset.service_tier,
+            );
+            if let Some(value) = preset.max_output_tokens {
+                values.insert(
+                    format!("{prefix}.max_output_tokens"),
+                    ConfigValue::PositiveInteger(value),
+                );
+            }
+            insert_string(
+                &mut values,
+                &format!("{prefix}.context_mode"),
+                &preset.context_mode,
+            );
+            if let Some(value) = preset.favorite {
+                values.insert(format!("{prefix}.favorite"), ConfigValue::Boolean(value));
+            }
+            if let Some(value) = &preset.fallback {
+                values.insert(
+                    format!("{prefix}.fallback"),
+                    ConfigValue::StringList(value.clone()),
+                );
+            }
+        }
+        if let Some(preset) = self.ui.statusline.preset {
+            values.insert(
+                "ui.statusline.preset".to_owned(),
+                ConfigValue::String(preset.as_str().to_owned()),
+            );
+        }
+        if let Some(expand) = self.ui.statusline.expand {
+            values.insert(
+                "ui.statusline.expand".to_owned(),
+                ConfigValue::String(expand.as_str().to_owned()),
+            );
+        }
+        insert_string(
+            &mut values,
+            "ui.statusline.primary_usage_window",
+            &self.ui.statusline.primary_usage_window,
+        );
+        if let Some(value) = &self.ui.statusline.custom.left {
+            values.insert(
+                "ui.statusline.custom.left".to_owned(),
+                ConfigValue::StringList(value.clone()),
+            );
+        }
+        if let Some(value) = &self.ui.statusline.custom.right {
+            values.insert(
+                "ui.statusline.custom.right".to_owned(),
+                ConfigValue::StringList(value.clone()),
+            );
+        }
+        for window in self.stats.windows.iter().flatten() {
+            let prefix = format!("stats.windows.{}", window.id);
+            insert_string(&mut values, &format!("{prefix}.start"), &window.start);
+            insert_string(&mut values, &format!("{prefix}.end"), &window.end);
+            if let Some(days) = &window.days {
+                values.insert(
+                    format!("{prefix}.days"),
+                    ConfigValue::StringList(
+                        days.iter().map(|day| day.as_str().to_owned()).collect(),
+                    ),
+                );
+            }
+            insert_string(&mut values, &format!("{prefix}.timezone"), &window.timezone);
+        }
+        values
+    }
+}
+
+impl ProviderProfileLayer {
+    fn merge_from(&mut self, overlay: &Self) {
+        merge_option(&mut self.template, &overlay.template);
+        merge_option(&mut self.credential, &overlay.credential);
+        merge_option(&mut self.base_url, &overlay.base_url);
+        self.routes.merge_from(&overlay.routes);
+        merge_option(&mut self.dialects, &overlay.dialects);
+        merge_option(&mut self.catalog.mode, &overlay.catalog.mode);
+        merge_option(&mut self.pricing.source, &overlay.pricing.source);
+        merge_option(
+            &mut self.allow_insecure_loopback,
+            &overlay.allow_insecure_loopback,
+        );
+    }
+}
+
+impl ProviderRoutesLayer {
+    fn merge_from(&mut self, overlay: &Self) {
+        merge_option(&mut self.responses, &overlay.responses);
+        merge_option(&mut self.chat_completions, &overlay.chat_completions);
+        merge_option(&mut self.messages, &overlay.messages);
+        merge_option(&mut self.models, &overlay.models);
+    }
+}
+
+impl ModelPresetLayer {
+    fn merge_from(&mut self, overlay: &Self) {
+        merge_option(&mut self.provider, &overlay.provider);
+        merge_option(&mut self.model, &overlay.model);
+        merge_option(&mut self.dialect, &overlay.dialect);
+        merge_option(&mut self.reasoning_effort, &overlay.reasoning_effort);
+        merge_option(&mut self.service_tier, &overlay.service_tier);
+        merge_option(&mut self.max_output_tokens, &overlay.max_output_tokens);
+        merge_option(&mut self.context_mode, &overlay.context_mode);
+        merge_option(&mut self.favorite, &overlay.favorite);
+        merge_option(&mut self.fallback, &overlay.fallback);
+    }
+}
+
+impl UiLayer {
+    fn merge_from(&mut self, overlay: &Self) {
+        merge_option(&mut self.statusline.preset, &overlay.statusline.preset);
+        merge_option(&mut self.statusline.expand, &overlay.statusline.expand);
+        merge_option(
+            &mut self.statusline.primary_usage_window,
+            &overlay.statusline.primary_usage_window,
+        );
+        merge_option(
+            &mut self.statusline.custom.left,
+            &overlay.statusline.custom.left,
+        );
+        merge_option(
+            &mut self.statusline.custom.right,
+            &overlay.statusline.custom.right,
+        );
+    }
+}
+
+impl StatsLayer {
+    fn merge_from(&mut self, overlay: &Self) {
+        let Some(overlay_windows) = &overlay.windows else {
+            return;
+        };
+        let windows = self.windows.get_or_insert_with(Vec::new);
+        for overlay_window in overlay_windows {
+            if let Some(window) = windows
+                .iter_mut()
+                .find(|window| window.id == overlay_window.id)
+            {
+                window.merge_from(overlay_window);
+            } else {
+                windows.push(overlay_window.clone());
+            }
+        }
+    }
+}
+
+impl UsageWindowLayer {
+    fn merge_from(&mut self, overlay: &Self) {
+        merge_option(&mut self.start, &overlay.start);
+        merge_option(&mut self.end, &overlay.end);
+        merge_option(&mut self.days, &overlay.days);
+        merge_option(&mut self.timezone, &overlay.timezone);
+    }
+}

@@ -8,6 +8,14 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[dependencies]
+atomic-write-file = "0.3.0"
+jiff = { version = "0.2.35", default-features = false, features = ["std", "tz-fat", "tz-system", "tzdb-bundle-platform", "tzdb-zoneinfo"] }
+serde = { version = "1.0.229", features = ["derive"] }
+sha2 = "0.11.0"
+toml = "1.1.4"
+url = "2.5.8"
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2.189"
 

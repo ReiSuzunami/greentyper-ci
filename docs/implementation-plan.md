@@ -35,10 +35,18 @@ tests prove admission recovery, prepared-but-unacknowledged output blocking,
 idempotent acknowledgement, malformed Provider blocking, corruption failure,
 unsupported format failure, torn-tail reporting/repair, and writer exclusion.
 
-This does not complete Phase 1. The full machine-readable Config Schema and
-TOML surfaces, Agent Team-to-persistent-Ledger integration, exhaustive
-byte-offset Runtime crash/fault matrix, and headless FMDev/Target idle resource
-evidence remain pending. See [Recoverable Single-Agent Runtime](runtime-kernel.md).
+The Config Runtime now adds versioned user/project TOML, addressable Provider
+Profile/Model Preset/statusline/Usage Window fields, effective provenance,
+typed single-operation drafts, dry-run, revision conflict detection, atomic
+replacement, backup repair, and last-valid behavior for invalid external
+edits. It is wired into new headless Turn admission through the immutable
+bootstrap projection.
+
+This does not complete Phase 1. Complete schema metadata and generated editor
+surfaces, Provider Templates/catalogs, credential storage, Agent
+Team-to-persistent-Ledger integration, the exhaustive byte-offset Runtime
+crash/fault matrix, and headless FMDev/Target idle resource evidence remain
+pending. See [Recoverable Single-Agent Runtime](runtime-kernel.md).
 
 Exit criteria:
 

@@ -46,7 +46,10 @@ Each deep module is tested through its Interface:
 True external dependencies use mock adapters. Windows facilities use focused integration tests around audited wrappers rather than exposing platform details through every module.
 
 The current Phase 1 spine covers a strict subset of these end-state contracts:
-typed Config precedence and immutable epochs; canonical ID and Item bounds;
+versioned Config TOML, schema/path/type validation, precedence/provenance,
+dry-run drafts, revision conflicts, atomic writes, backup repair, last-valid
+external-edit behavior, symlink rejection, and immutable Runtime epochs;
+canonical ID and Item bounds;
 Ledger append/sync/replay, single-writer exclusion, expected-Head conflict,
 torn-tail read-only inspection and writer repair, checksum/length/schema
 tampering, and symlink rejection; deterministic Provider success and malformed

@@ -69,14 +69,18 @@ cargo run -p greentyper-acceptance -- verify-cpu
 cargo run -p greentyper-acceptance -- bench list
 cargo run -p greentyper -- headless --ledger ./target/dev-runtime.ledger --input "hello"
 cargo run -p greentyper -- status --ledger ./target/dev-runtime.ledger
+cargo run -p greentyper -- config schema
+cargo run -p greentyper -- config get provider.model
 ```
 
-The core Agent Team policy and recoverable single-Agent Runtime compile and run
-through interface-level and cross-process headless tests. The current Provider
-is a deterministic simulator and the file Ledger is a provisional Phase 1
-adapter; real Provider, Tool, Workspace, full Config, TUI, and App Server work
-remains. The acceptance runner can emit bound raw evidence, but is not yet a
-full Target Acceptance Run. Follow the
+The core Agent Team policy, Config Runtime, and recoverable single-Agent
+Runtime compile and run through interface-level and cross-process headless
+tests. Config currently includes versioned TOML, drafts, provenance, atomic
+replacement, and repair, but not the eventual TUI/App Server editors,
+catalogs, or credential store. The current Provider is a deterministic
+simulator and the file Ledger is a provisional Phase 1 adapter; real Provider,
+Tool, Workspace, TUI, and App Server work remains. The acceptance runner can
+emit bound raw evidence, but is not yet a full Target Acceptance Run. Follow the
 [implementation plan](docs/implementation-plan.md).
 
 ## License

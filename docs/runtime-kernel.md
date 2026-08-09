@@ -88,18 +88,21 @@ platform paths may contain them.
 
 ## Frozen Snapshots
 
-The bootstrap Config schema is version 1 and contains only:
+The Runtime Event projection currently freezes these Config values into each
+new Turn:
 
 - `provider.profile`;
 - `provider.model`;
 - `runtime.max_output_bytes`.
 
-Layers resolve in `built-in < user < project < CLI` order. Effective values
-retain provenance, reject invalid values in every layer, and freeze into a
-read-only `ConfigEpoch` with a deterministic fingerprint that binds schema,
-value, and source. `ProviderEpoch` separately freezes the selected profile and
-model. The full schema-driven Config Runtime in
-[Configuration and Command Surface](configuration.md) remains pending.
+The Config Runtime also owns versioned TOML and addressable Provider Profile,
+Model Preset, statusline, and Usage Window fields. Layers resolve in
+`built-in < user < project < CLI` order. Effective values retain provenance,
+reject invalid values, and the Runtime projection freezes into a read-only
+`ConfigEpoch` with a deterministic fingerprint that binds schema, value, and
+source. `ProviderEpoch` separately freezes the selected profile and model.
+Invalid external edits retain the running process's last valid projection;
+startup without one enters repair instead of silently dropping a layer.
 
 ## Current Commands
 
@@ -108,6 +111,11 @@ greentyper headless [--ledger PATH] --input TEXT
 greentyper resume [--ledger PATH]
 greentyper status [--ledger PATH]
 greentyper reconcile [--ledger PATH] --delivery ID
+greentyper config schema
+greentyper config get PATH
+greentyper config set PATH VALUE --scope user|project [--dry-run]
+greentyper config reset PATH --scope user|project [--dry-run]
+greentyper config repair --scope user|project
 ```
 
 Without `--ledger`, the product uses `%LOCALAPPDATA%\GreenTyper` on Windows,
@@ -121,7 +129,8 @@ protocol.
 ## Still Pending
 
 - Persisting `Agent Team Runtime` transactions through this Ledger seam.
-- Full versioned Config Schema, TOML layers, atomic edits, and repair surfaces.
+- Complete Config Schema default/constraint/normalization/migration metadata,
+  TUI/App Server editors, Provider Templates/catalogs, and credential storage.
 - Real provider dialects, transport, reconnect policy, credentials, and usage
   normalization.
 - Tool effects, Approval Grants, workspaces, checkpoints, and migrations.

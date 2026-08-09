@@ -25,7 +25,13 @@ fn temp_path(name: &str) -> PathBuf {
 }
 
 fn binary() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_greentyper"))
+    let config_root = temp_path("empty-config-root");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_greentyper"));
+    command
+        .env("HOME", &config_root)
+        .env("APPDATA", &config_root)
+        .env("XDG_CONFIG_HOME", &config_root);
+    command
 }
 
 #[test]

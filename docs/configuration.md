@@ -13,7 +13,10 @@
 Configuration resolves in this order, with later layers winning:
 
 1. Release-bundled defaults
-2. User configuration: `%APPDATA%\GreenTyper\config.toml`
+2. User configuration: `%APPDATA%\GreenTyper\config.toml` on Windows,
+   `~/Library/Application Support/GreenTyper/config.toml` on macOS, and
+   `$XDG_CONFIG_HOME/greentyper/config.toml` (falling back to
+   `~/.config/greentyper/config.toml`) on other Unix systems
 3. Project configuration: `.greentyper/config.toml`
 4. Command-line overrides
 
@@ -37,16 +40,23 @@ The Config Runtime stages edits, presents a diff, validates the complete affecte
 
 Before implementation, the following names and types are the normative v1 design contract for the fields used in this document. Phase 1 materializes this contract as the versioned machine-readable Config Schema; generated reference documentation may extend it but may not change these meanings without an ADR.
 
-Implementation status: the first Phase 1 Runtime slice currently freezes a
-typed schema-version-1 bootstrap subset (`provider.profile`,
-`provider.model`, and `runtime.max_output_bytes`) with layer provenance and
-bounded validation. It deliberately does not claim the full machine-readable
-schema, TOML parsing/editing, Provider Profile objects, generic editors, or
-migration behavior below; those remain Phase 1 work.
+Implementation status: the current Phase 1 Config Runtime parses and emits
+schema-version-1 TOML for user and project layers, resolves effective values
+with provenance, and exposes the addressable Provider Profile, Model Preset,
+statusline, and Usage Window fields listed below. Typed drafts support dry-run,
+revision compare-and-swap, atomic replacement, one recoverable backup, and a
+last-valid repair state. The headless Runtime freezes the bootstrap projection
+(`provider.profile`, `provider.model`, and `runtime.max_output_bytes`) for each
+new Turn. The schema registry currently exposes identity, type, writable
+scopes, application timing, credential-reference status, and editor identity;
+default/constraint/normalization/migration metadata, TUI and App Server
+surfaces, Provider Templates/catalogs, and the credential store remain Phase 1
+or later work.
 
 | Config Object | Type and constraint | Application timing |
 | --- | --- | --- |
 | `providers.<id>.template` | Provider Template ID | Next Provider Epoch |
+| `providers.<id>.credential` | Lowercase secure-store reference ID; never credential material | Next Provider Epoch |
 | `providers.<id>.base_url` | Absolute HTTP(S) URL with no user info, query, or fragment | Next Provider Epoch |
 | `providers.<id>.routes.<name>` | Path-only suffix for `responses`, `chat_completions`, `messages`, or `models` | Next Provider Epoch |
 | `providers.<id>.dialects` | Non-empty set of `responses`, `chat_completions`, and `messages` supported by that profile | Next Provider Epoch |
@@ -82,7 +92,14 @@ Prefix and fuzzy matching work token by token. `/con` finds `/config`; `/config 
 
 `/config stats-window` edits named Usage Windows. The separate root command `/stats` displays usage reports and never mutates configuration. Likewise, `/model` selects a runnable Model Preset while `/config model` edits preset definitions.
 
-Slash commands navigate and select scope; mutation occurs in a validated dialog. Headless users get typed `config get`, `config set`, and `config reset`; `set` and `reset` are single-operation Config Drafts, and `--dry-run` returns the validated diff without committing.
+Slash commands navigate and select scope; mutation occurs in a validated
+dialog. The current headless CLI provides `config schema`, `config get`,
+`config set`, `config reset`, and backup-based `config repair`. `set` and
+`reset` require an explicit `user` or `project` scope, are single-operation
+Config Drafts, and accept `--dry-run` to return the normalized diff without
+committing. `--user-config` and `--project-config` select explicit absolute
+paths for tests and controlled automation; normal execution uses the platform
+user path and `.greentyper/config.toml` in the current project.
 
 The App Server exposes the same Config Runtime operations, independent of its eventual wire encoding:
 
