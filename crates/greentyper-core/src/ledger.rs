@@ -4,6 +4,7 @@ use std::error::Error;
 use std::fmt;
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::ops::{Deref, DerefMut};
 use std::path::Path;
 
 use crate::schema::SchemaKind;
@@ -58,8 +59,30 @@ pub struct ReplayReport {
     pub truncated_tail_bytes: u64,
 }
 
+struct LockedFile(File);
+
+impl Deref for LockedFile {
+    type Target = File;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl DerefMut for LockedFile {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl Drop for LockedFile {
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
+}
+
 pub struct FileLedger {
-    file: File,
+    file: LockedFile,
     head: LedgerHead,
     events: Vec<StoredEvent>,
     payload_bytes: usize,
@@ -78,8 +101,9 @@ impl FileLedger {
             use std::os::unix::fs::OpenOptionsExt;
             options.mode(0o600);
         }
-        let mut file = options.open(path).map_err(LedgerError::Io)?;
+        let file = options.open(path).map_err(LedgerError::Io)?;
         file.try_lock().map_err(map_lock_error)?;
+        let mut file = LockedFile(file);
         ensure_regular_file(&file)?;
         tighten_private_permissions(&file)?;
         let length = file.metadata().map_err(LedgerError::Io)?.len();
@@ -128,8 +152,9 @@ impl FileLedger {
         let mut options = OpenOptions::new();
         options.read(true);
         configure_no_follow(&mut options);
-        let mut file = options.open(path).map_err(LedgerError::Io)?;
+        let file = options.open(path).map_err(LedgerError::Io)?;
         file.try_lock_shared().map_err(map_lock_error)?;
+        let mut file = LockedFile(file);
         ensure_regular_file(&file)?;
         let length = file.metadata().map_err(LedgerError::Io)?.len();
         validate_header(&mut file, length)?;
@@ -827,6 +852,36 @@ impl Error for LedgerError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    static NEXT_TEST_PATH: AtomicU64 = AtomicU64::new(1);
+
+    fn test_path(name: &str) -> std::path::PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock after Unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "greentyper-ledger-{name}-{}-{nonce}-{}",
+            std::process::id(),
+            NEXT_TEST_PATH.fetch_add(1, Ordering::Relaxed)
+        ))
+    }
+
+    #[test]
+    fn dropping_writer_unlocks_before_closing_duplicated_handle() {
+        let path = test_path("drop-unlocks-duplicate");
+        let (ledger, _) = FileLedger::open(&path).expect("create locked ledger");
+        let inherited_handle = ledger.file.try_clone().expect("duplicate ledger handle");
+
+        drop(ledger);
+        let (reopened, _) = FileLedger::open(&path).expect("reopen after explicit unlock");
+
+        drop(reopened);
+        drop(inherited_handle);
+        fs::remove_file(path).expect("remove test ledger");
+    }
 
     #[test]
     fn replay_payload_limit_is_cumulative() {
