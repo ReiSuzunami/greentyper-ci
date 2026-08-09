@@ -7,9 +7,10 @@ use std::fmt;
 use greentyper_core::agent_team::{TaskStatus, TeamOperationStatus};
 use greentyper_core::config::{
     CommandMatchKind, CommandQueryError, CommandTarget, ConfigCommit, ConfigEditorError,
-    ConfigEditorSession, ConfigEditorView, ConfigErrorCategory, ConfigFieldContents,
-    ConfigObjectKind, ConfigObjectRef, ConfigRuntime, ConfigRuntimeError, ConfigRuntimeStatus,
-    ConfigScope, ConfigSection, ConfigValue, ModelPresetView, match_command_paths,
+    ConfigEditorOperation, ConfigEditorSession, ConfigEditorView, ConfigErrorCategory,
+    ConfigFieldContents, ConfigObjectKind, ConfigObjectRef, ConfigRuntime, ConfigRuntimeError,
+    ConfigRuntimeStatus, ConfigScope, ConfigSection, ConfigValue, ModelPresetView,
+    match_command_paths,
 };
 use greentyper_core::ledger::LedgerHead;
 use greentyper_core::runtime::{KernelTeamSnapshot, RecoveryStatus, RuntimeSnapshot};
@@ -483,6 +484,38 @@ impl PresentationController {
                     section: Some(section),
                 };
             }
+            CommandTarget::ConfigObjectCreate { kind } => {
+                let object = object.ok_or(ConfigEditorError::ConfigObjectRequired)?;
+                if object.kind() != kind {
+                    return Err(ConfigEditorError::ConfigObjectMismatch.into());
+                }
+                let session = ConfigEditorSession::create_object(runtime, scope, object.clone())?;
+                let view = session.current_view(runtime)?;
+                self.editor = Some(ActiveConfigEditor {
+                    object: Some(object.clone()),
+                    session,
+                    view,
+                    dirty: false,
+                    validated: false,
+                });
+                self.state = PresentationState::ConfigEditor;
+            }
+            CommandTarget::ConfigObjectDelete { kind } => {
+                let object = object.ok_or(ConfigEditorError::ConfigObjectRequired)?;
+                if object.kind() != kind {
+                    return Err(ConfigEditorError::ConfigObjectMismatch.into());
+                }
+                let session = ConfigEditorSession::delete_object(runtime, scope, object.clone())?;
+                let view = session.current_view(runtime)?;
+                self.editor = Some(ActiveConfigEditor {
+                    object: Some(object.clone()),
+                    session,
+                    view,
+                    dirty: true,
+                    validated: false,
+                });
+                self.state = PresentationState::ConfigEditor;
+            }
             CommandTarget::ConfigEditor { .. } => {
                 let session = ConfigEditorSession::open_from_query(
                     runtime,
@@ -557,6 +590,18 @@ impl PresentationController {
         Ok(())
     }
 
+    pub(crate) fn focus_config_field(
+        &mut self,
+        runtime: &ConfigRuntime,
+        query: &str,
+        selected: usize,
+    ) -> Result<(), PresentationControllerError> {
+        let editor = self.active_editor_mut()?;
+        editor.session.focus_from_query(runtime, query, selected)?;
+        editor.view.field = editor.session.field(runtime)?;
+        Ok(())
+    }
+
     pub(crate) fn preview_config(
         &mut self,
         runtime: &mut ConfigRuntime,
@@ -600,6 +645,7 @@ impl PresentationController {
                 let editor = self.active_editor()?;
                 Ok(PresentationScreenView::ConfigEditor {
                     object: editor.object.clone(),
+                    operation: editor.session.operation(),
                     editor: editor.view.clone(),
                     dirty: editor.dirty,
                     validated: editor.validated,
@@ -675,6 +721,7 @@ pub(crate) enum PresentationScreenView {
     },
     ConfigEditor {
         object: Option<ConfigObjectRef>,
+        operation: ConfigEditorOperation,
         editor: ConfigEditorView,
         dirty: bool,
         validated: bool,
@@ -906,13 +953,18 @@ fn screen_rows(screen: &PresentationScreenView, view: &TuiViewModel) -> Vec<Layo
             rows
         }
         PresentationScreenView::ConfigEditor {
+            operation,
             editor,
             dirty,
             validated,
             ..
         } => {
             let mut rows = vec![LayoutRowView::new(
-                format!("Config / {}", editor.field.path),
+                format!(
+                    "Config {} / {}",
+                    config_editor_operation_label(*operation),
+                    editor.field.path
+                ),
                 false,
             )];
             match &editor.field.contents {
@@ -984,6 +1036,14 @@ fn config_value_label(value: Option<&ConfigValue>) -> String {
         Some(ConfigValue::Boolean(value)) => value.to_string(),
         Some(ConfigValue::StringList(value)) => value.join(", "),
         None => "inherited".to_owned(),
+    }
+}
+
+fn config_editor_operation_label(operation: ConfigEditorOperation) -> &'static str {
+    match operation {
+        ConfigEditorOperation::Edit => "edit",
+        ConfigEditorOperation::Create => "create",
+        ConfigEditorOperation::Delete => "delete",
     }
 }
 
@@ -1358,10 +1418,11 @@ mod tests {
         TeamOperationStatus, TeamSnapshot, TransactionId,
     };
     use greentyper_core::config::{
-        CommandMatchKind, CommandTarget, ConfigDocument, ConfigEditorError, ConfigEditorSession,
-        ConfigEditorView, ConfigErrorCategory, ConfigFieldContents, ConfigFieldView,
-        ConfigObjectKind, ConfigObjectRef, ConfigPaths, ConfigRepairIssue, ConfigRuntime,
-        ConfigRuntimeError, ConfigRuntimeStatus, ConfigScope, ConfigValue, ModelPresetView,
+        CommandMatchKind, CommandTarget, ConfigDocument, ConfigEditorError, ConfigEditorOperation,
+        ConfigEditorSession, ConfigEditorView, ConfigErrorCategory, ConfigFieldContents,
+        ConfigFieldView, ConfigObjectKind, ConfigObjectRef, ConfigPaths, ConfigRepairIssue,
+        ConfigRuntime, ConfigRuntimeError, ConfigRuntimeStatus, ConfigScope, ConfigValue,
+        ModelPresetView,
     };
     use greentyper_core::ledger::LedgerHead;
     use greentyper_core::model::{DeliveryId, ThreadId, TurnId};
@@ -1880,6 +1941,124 @@ source = "unknown"
         assert_eq!(selector.recent, Availability::Unknown);
         assert_eq!(selector.compatible, Availability::Unknown);
         assert_eq!(selector.all[0].compatibility, Availability::Unknown);
+    }
+
+    #[test]
+    fn controller_creates_and_deletes_a_config_object_through_typed_routes() {
+        let temp = TempTree::new("controller-object-lifecycle");
+        let mut runtime = ConfigRuntime::open(temp.paths(), ConfigDocument::empty())
+            .expect("open Config Runtime");
+        let object = ConfigObjectRef::new(ConfigObjectKind::ProviderProfile, "edge");
+        let mut controller = PresentationController::new();
+
+        controller
+            .set_slash_query("/config provider add")
+            .expect("set create route");
+        controller
+            .activate(&mut runtime, ConfigScope::Project, Some(&object))
+            .expect("activate create route");
+        assert!(matches!(
+            controller.screen(Some(&runtime)).expect("create screen"),
+            PresentationScreenView::ConfigEditor {
+                operation: ConfigEditorOperation::Create,
+                dirty: false,
+                validated: false,
+                ..
+            }
+        ));
+        controller
+            .stage_config(&runtime, "openai-compatible")
+            .expect("stage provider template");
+        controller
+            .preview_config(&mut runtime)
+            .expect("preview creation");
+        controller
+            .commit_config(&mut runtime)
+            .expect("commit creation");
+        assert!(runtime.addressable_objects().unwrap().contains(&object));
+
+        controller
+            .set_slash_query("/config provider remove")
+            .expect("set delete route");
+        controller
+            .activate(&mut runtime, ConfigScope::Project, Some(&object))
+            .expect("activate delete route");
+        assert!(matches!(
+            controller.screen(Some(&runtime)).expect("delete screen"),
+            PresentationScreenView::ConfigEditor {
+                operation: ConfigEditorOperation::Delete,
+                dirty: true,
+                validated: false,
+                ..
+            }
+        ));
+        controller
+            .preview_config(&mut runtime)
+            .expect("preview deletion");
+        controller
+            .commit_config(&mut runtime)
+            .expect("commit deletion");
+        assert!(!runtime.addressable_objects().unwrap().contains(&object));
+    }
+
+    #[test]
+    fn controller_keeps_one_draft_while_focusing_each_new_object_field() {
+        let temp = TempTree::new("controller-multi-field-create");
+        let mut runtime = temp.open_provider_runtime();
+        let object = ConfigObjectRef::new(ConfigObjectKind::ModelPreset, "fast");
+        let mut controller = PresentationController::new();
+        controller
+            .set_slash_query("/config model add")
+            .expect("set model create route");
+        controller
+            .activate(&mut runtime, ConfigScope::Project, Some(&object))
+            .expect("activate model create route");
+
+        controller
+            .stage_config(&runtime, "edge")
+            .expect("stage provider");
+        controller
+            .focus_config_field(&runtime, "/config model model", 0)
+            .expect("focus model");
+        controller
+            .stage_config(&runtime, "fixture-model")
+            .expect("stage model");
+        controller
+            .focus_config_field(&runtime, "/config model dialect", 0)
+            .expect("focus dialect");
+        controller
+            .stage_config(&runtime, "responses")
+            .expect("stage dialect");
+
+        assert!(matches!(
+            controller.screen(Some(&runtime)).expect("dialect screen"),
+            PresentationScreenView::ConfigEditor {
+                editor: ConfigEditorView {
+                    field: ConfigFieldView {
+                        ref path,
+                        contents: ConfigFieldContents::Value {
+                            target: Some(ConfigValue::String(ref value)),
+                            ..
+                        },
+                        ..
+                    },
+                    ..
+                },
+                ..
+            } if path == "model_presets.fast.dialect" && value == "responses"
+        ));
+        assert_eq!(
+            controller
+                .preview_config(&mut runtime)
+                .expect("preview model preset")
+                .changes
+                .len(),
+            3
+        );
+        controller
+            .commit_config(&mut runtime)
+            .expect("commit model preset");
+        assert_eq!(runtime.model_presets().unwrap()[0].id, "fast");
     }
 
     #[test]

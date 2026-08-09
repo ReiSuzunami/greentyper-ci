@@ -6,7 +6,7 @@ use std::sync::LazyLock;
 
 use serde::Serialize;
 
-use super::runtime::config_schema;
+use super::runtime::{ConfigObjectKind, config_schema};
 
 pub const MAX_COMMAND_QUERY_BYTES: usize = 256;
 pub const MAX_COMMAND_QUERY_TOKENS: usize = 16;
@@ -37,6 +37,12 @@ pub enum CommandTarget {
     ConfigCenter,
     ConfigSection {
         section: ConfigSection,
+    },
+    ConfigObjectCreate {
+        kind: ConfigObjectKind,
+    },
+    ConfigObjectDelete {
+        kind: ConfigObjectKind,
     },
     ConfigEditor {
         path_pattern: &'static str,
@@ -148,9 +154,45 @@ const NAVIGATION_PATHS: &[CommandPath] = &[
     root("/stats", CommandTarget::Stats),
     root("/agent", CommandTarget::AgentCenter),
     section("/config provider", ConfigSection::Provider),
+    nested(
+        "/config provider add",
+        CommandTarget::ConfigObjectCreate {
+            kind: ConfigObjectKind::ProviderProfile,
+        },
+    ),
+    nested(
+        "/config provider remove",
+        CommandTarget::ConfigObjectDelete {
+            kind: ConfigObjectKind::ProviderProfile,
+        },
+    ),
     section("/config model", ConfigSection::Model),
+    nested(
+        "/config model add",
+        CommandTarget::ConfigObjectCreate {
+            kind: ConfigObjectKind::ModelPreset,
+        },
+    ),
+    nested(
+        "/config model remove",
+        CommandTarget::ConfigObjectDelete {
+            kind: ConfigObjectKind::ModelPreset,
+        },
+    ),
     section("/config statusline", ConfigSection::Statusline),
     section("/config stats-window", ConfigSection::StatsWindow),
+    nested(
+        "/config stats-window add",
+        CommandTarget::ConfigObjectCreate {
+            kind: ConfigObjectKind::UsageWindow,
+        },
+    ),
+    nested(
+        "/config stats-window remove",
+        CommandTarget::ConfigObjectDelete {
+            kind: ConfigObjectKind::UsageWindow,
+        },
+    ),
     section("/config agent", ConfigSection::Agent),
     section("/config skills", ConfigSection::Skills),
     section("/config mcp", ConfigSection::Mcp),

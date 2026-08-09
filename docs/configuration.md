@@ -54,7 +54,12 @@ status, and editor identity. A terminal-neutral Config editor session resolves
 a Command Path plus selected object into one revision-bound Config Draft,
 exposes the focused field without credential read-back, previews the normalized
 diff through full validation and locking, and commits through the existing
-atomic compare-and-swap path. Default/constraint/normalization/migration
+atomic compare-and-swap path. The same session now creates Provider Profiles,
+Model Presets, and Usage Windows through schema-owned multi-field drafts, and
+deletes whole target-layer objects only after full reference validation. Typed
+`add` and `remove` Command Paths stay nested beneath their Config sections;
+failed validation or revision compare-and-swap leaves the draft live.
+Default/constraint/normalization/migration
 metadata, rendered TUI and App Server surfaces, and Provider Templates/catalogs
 remain later work. The
 product now provides origin-bound credential bind, replace, test, and forget
@@ -81,11 +86,13 @@ Unknown keys fail validation unless their owning schema version explicitly reser
 
 This section defines the target interaction contract. The current product has
 a terminal-neutral hierarchical Command Path registry generated from Config
-Schema metadata, read-only provenance-aware field views for existing Provider
-Profiles, Model Presets, and Usage Windows, and a reusable Config Runtime editor
-session for focused draft validation and commit. It does not yet ship the
-rendered interactive Config Center, terminal editor dialogs, or App Server
-surface described below.
+Schema metadata, provenance-aware field views, typed nested object lifecycle
+actions, and a reusable Config Runtime editor session for focused multi-field
+draft validation, atomic create/edit/delete, and commit. Object deletion is
+target-layer explicit and fails when the resulting effective configuration has
+dangling references. It does not yet ship the rendered interactive Config
+Center, terminal editor dialogs, object-name input form, purpose-built Provider
+wizard, or App Server surface described below.
 
 The root Slash Panel exposes `/config` as one Command Path. It does not register one flat command for every field.
 

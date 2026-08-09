@@ -4,9 +4,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use greentyper_core::config::{
-    ConfigApplicationTiming, ConfigDocument, ConfigErrorCategory, ConfigFieldContents,
-    ConfigObjectKind, ConfigObjectRef, ConfigPaths, ConfigRuntime, ConfigRuntimeError, ConfigScope,
-    ConfigValue, ConfigValueKind, config_schema, parse_config_value,
+    ConfigApplicationTiming, ConfigDocument, ConfigEditorError, ConfigEditorOperation,
+    ConfigEditorSession, ConfigErrorCategory, ConfigFieldContents, ConfigObjectKind,
+    ConfigObjectRef, ConfigPaths, ConfigRuntime, ConfigRuntimeError, ConfigScope, ConfigValue,
+    ConfigValueKind, config_schema, parse_config_value,
 };
 use greentyper_core::provider::{ProviderDialect, ProviderPricingSource};
 
@@ -278,6 +279,293 @@ timezone = "Asia/Hong_Kong"
     assert_eq!(presets[0].dialect, ProviderDialect::Responses);
     assert!(!presets[0].favorite);
     assert!(presets[0].fallback.is_empty());
+}
+
+#[test]
+fn config_editor_creates_a_provider_profile_through_one_atomic_draft() {
+    let temp = TempTree::new("create-provider-profile");
+    let paths = temp.paths();
+    let mut runtime =
+        ConfigRuntime::open(paths.clone(), ConfigDocument::empty()).expect("open config runtime");
+    let object = ConfigObjectRef::new(ConfigObjectKind::ProviderProfile, "edge");
+
+    let mut editor =
+        ConfigEditorSession::create_object(&runtime, ConfigScope::Project, object.clone())
+            .expect("begin provider profile creation");
+    assert_eq!(editor.operation(), ConfigEditorOperation::Create);
+    assert_eq!(editor.object(), Some(&object));
+    assert_eq!(
+        editor.field(&runtime).expect("initial field").path,
+        "providers.edge.template"
+    );
+
+    editor
+        .stage_raw("openai-compatible")
+        .expect("stage provider template");
+    let preview = editor.preview(&mut runtime).expect("preview creation");
+    assert_eq!(preview.changes.len(), 1);
+    assert_eq!(preview.changes[0].path, "providers.edge.template");
+    assert!(!paths.project().exists(), "dry-run must not write config");
+
+    let commit = editor.commit(&mut runtime).expect("commit creation");
+    assert!(commit.written);
+    assert_eq!(
+        runtime.addressable_objects().expect("addressable objects"),
+        vec![object]
+    );
+}
+
+#[test]
+fn config_editor_create_checks_the_target_layer_instead_of_the_effective_union() {
+    let temp = TempTree::new("create-layer-overlay");
+    let paths = temp.paths();
+    write(
+        paths.user(),
+        r#"
+schema_version = 1
+
+[providers.edge]
+template = "openai-compatible"
+"#,
+    );
+    let mut runtime =
+        ConfigRuntime::open(paths, ConfigDocument::empty()).expect("open config runtime");
+    let object = ConfigObjectRef::new(ConfigObjectKind::ProviderProfile, "edge");
+
+    assert!(matches!(
+        ConfigEditorSession::create_object(&runtime, ConfigScope::BuiltIn, object.clone(),),
+        Err(ConfigEditorError::Config(
+            ConfigRuntimeError::ReadOnlyScope(ConfigScope::BuiltIn)
+        ))
+    ));
+
+    let mut editor = ConfigEditorSession::create_object(&runtime, ConfigScope::Project, object)
+        .expect("begin project-layer overlay");
+    assert!(matches!(
+        editor.field(&runtime).expect("overlay field").contents,
+        ConfigFieldContents::Value {
+            effective: Some(ConfigValue::String(ref effective)),
+            source: Some(ConfigScope::User),
+            target: None,
+        } if effective == "openai-compatible"
+    ));
+    editor
+        .stage_raw("openai-compatible")
+        .expect("stage project-layer value");
+    editor.commit(&mut runtime).expect("commit overlay");
+    assert!(matches!(
+        runtime
+            .inspect_field(ConfigScope::Project, "providers.edge.template")
+            .expect("inspect project overlay")
+            .contents,
+        ConfigFieldContents::Value {
+            source: Some(ConfigScope::Project),
+            target: Some(ConfigValue::String(ref target)),
+            ..
+        } if target == "openai-compatible"
+    ));
+    assert!(matches!(
+        ConfigEditorSession::create_object(
+            &runtime,
+            ConfigScope::Project,
+            ConfigObjectRef::new(ConfigObjectKind::ProviderProfile, "edge"),
+        ),
+        Err(ConfigEditorError::ConfigObjectAlreadyExists)
+    ));
+}
+
+#[test]
+fn config_editor_builds_a_multi_field_model_preset_without_losing_invalid_draft_state() {
+    let temp = TempTree::new("create-model-preset");
+    let paths = temp.paths();
+    write(
+        paths.project(),
+        r#"
+schema_version = 1
+
+[providers.edge]
+template = "openai-compatible"
+"#,
+    );
+    let mut runtime =
+        ConfigRuntime::open(paths, ConfigDocument::empty()).expect("open config runtime");
+    let object = ConfigObjectRef::new(ConfigObjectKind::ModelPreset, "fast");
+    let mut editor =
+        ConfigEditorSession::create_object(&runtime, ConfigScope::Project, object.clone())
+            .expect("begin model preset creation");
+
+    editor.stage_raw("edge").expect("stage provider");
+    assert!(matches!(
+        editor.preview(&mut runtime),
+        Err(ConfigEditorError::Config(ConfigRuntimeError::InvalidValue { path, .. }))
+            if path == "model_presets.fast.model"
+    ));
+
+    editor
+        .focus_from_query(&runtime, "/config model model", 0)
+        .expect("focus model field");
+    editor.stage_raw("fixture-model").expect("stage model");
+    editor
+        .focus_from_query(&runtime, "/config model dialect", 0)
+        .expect("focus dialect field");
+    editor.stage_raw("responses").expect("stage dialect");
+
+    let preview = editor
+        .preview(&mut runtime)
+        .expect("preview complete preset");
+    assert_eq!(preview.changes.len(), 3);
+    editor.commit(&mut runtime).expect("commit model preset");
+    assert_eq!(
+        runtime.model_presets().expect("model presets")[0].id,
+        object.id()
+    );
+}
+
+#[test]
+fn config_editor_deletes_one_target_layer_object_atomically_with_backup() {
+    let temp = TempTree::new("delete-provider-profile");
+    let paths = temp.paths();
+    write(
+        paths.project(),
+        r#"
+schema_version = 1
+
+[providers.edge]
+template = "openai-compatible"
+"#,
+    );
+    let mut runtime =
+        ConfigRuntime::open(paths.clone(), ConfigDocument::empty()).expect("open config runtime");
+    let object = ConfigObjectRef::new(ConfigObjectKind::ProviderProfile, "edge");
+    let mut editor =
+        ConfigEditorSession::delete_object(&runtime, ConfigScope::Project, object.clone())
+            .expect("stage object deletion");
+
+    assert_eq!(editor.operation(), ConfigEditorOperation::Delete);
+    assert_eq!(editor.object(), Some(&object));
+    assert!(matches!(
+        editor.stage_raw("replacement"),
+        Err(ConfigEditorError::ObjectDeletionStaged)
+    ));
+    let preview = editor.preview(&mut runtime).expect("preview deletion");
+    assert_eq!(preview.changes.len(), 1);
+    assert_eq!(preview.changes[0].path, "providers.edge.template");
+    assert_eq!(preview.changes[0].after, None);
+
+    editor.commit(&mut runtime).expect("commit deletion");
+    assert!(
+        runtime
+            .addressable_objects()
+            .expect("addressable objects")
+            .is_empty()
+    );
+    assert!(backup_path(paths.project()).exists());
+}
+
+#[test]
+fn config_editor_creates_and_deletes_a_usage_window_as_one_object() {
+    let temp = TempTree::new("usage-window-lifecycle");
+    let paths = temp.paths();
+    let mut runtime =
+        ConfigRuntime::open(paths, ConfigDocument::empty()).expect("open config runtime");
+    let object = ConfigObjectRef::new(ConfigObjectKind::UsageWindow, "work");
+    let mut create =
+        ConfigEditorSession::create_object(&runtime, ConfigScope::Project, object.clone())
+            .expect("begin usage window creation");
+
+    create.stage_raw("09:00").expect("stage start");
+    for (query, value) in [
+        ("/config stats-window end", "17:00"),
+        (
+            "/config stats-window days",
+            "[\"mon\", \"tue\", \"wed\", \"thu\", \"fri\"]",
+        ),
+        ("/config stats-window timezone", "Asia/Hong_Kong"),
+    ] {
+        create
+            .focus_from_query(&runtime, query, 0)
+            .expect("focus usage window field");
+        create.stage_raw(value).expect("stage usage window field");
+    }
+    assert_eq!(
+        create
+            .preview(&mut runtime)
+            .expect("preview usage window")
+            .changes
+            .len(),
+        4
+    );
+    create.commit(&mut runtime).expect("commit usage window");
+
+    let delete = ConfigEditorSession::delete_object(&runtime, ConfigScope::Project, object.clone())
+        .expect("stage usage window deletion");
+    assert_eq!(
+        delete
+            .preview(&mut runtime)
+            .expect("preview usage window deletion")
+            .changes
+            .len(),
+        4
+    );
+    delete
+        .commit(&mut runtime)
+        .expect("commit usage window deletion");
+    assert!(!runtime.addressable_objects().unwrap().contains(&object));
+}
+
+#[test]
+fn config_object_deletion_is_reference_safe_and_target_layer_explicit() {
+    let temp = TempTree::new("delete-reference-safety");
+    let paths = temp.paths();
+    write(
+        paths.user(),
+        r#"
+schema_version = 1
+
+[providers.inherited]
+template = "openai-compatible"
+"#,
+    );
+    write(
+        paths.project(),
+        r#"
+schema_version = 1
+
+[provider]
+profile = "edge"
+
+[providers.edge]
+template = "openai-compatible"
+"#,
+    );
+    let original = fs::read(paths.project()).expect("read original project config");
+    let mut runtime =
+        ConfigRuntime::open(paths.clone(), ConfigDocument::empty()).expect("open config runtime");
+
+    assert!(matches!(
+        ConfigEditorSession::delete_object(
+            &runtime,
+            ConfigScope::Project,
+            ConfigObjectRef::new(ConfigObjectKind::ProviderProfile, "inherited"),
+        ),
+        Err(ConfigEditorError::ConfigObjectNotInTargetScope)
+    ));
+
+    let deletion = ConfigEditorSession::delete_object(
+        &runtime,
+        ConfigScope::Project,
+        ConfigObjectRef::new(ConfigObjectKind::ProviderProfile, "edge"),
+    )
+    .expect("stage selected provider deletion");
+    assert!(matches!(
+        deletion.preview(&mut runtime),
+        Err(ConfigEditorError::Config(ConfigRuntimeError::InvalidValue { path, .. }))
+            if path == "provider.profile"
+    ));
+    assert_eq!(
+        fs::read(paths.project()).expect("read project config after failed preview"),
+        original
+    );
 }
 
 #[test]

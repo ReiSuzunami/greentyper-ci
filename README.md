@@ -132,11 +132,16 @@ Presets, and Usage Windows. Config Runtime can now open a selected field route a
 one revision-bound draft, preview the normalized diff through the real validation
 and locking path, reset it, and commit it atomically. Credential routes expose
 binding state and require the separate secure credential operation. The product
-now also has a terminal-neutral interaction controller and deterministic 40/80/160
-column row layouts with Unicode-safe fitting and adaptive status degradation.
+now also has typed nested Config Object add/remove routes. One schema-driven
+Draft can create a Profile, Preset, or Usage Window across multiple focused
+fields; whole-object deletion is target-layer explicit and reference validated.
+The terminal-neutral interaction controller projects these operations alongside
+deterministic 40/80/160 column row layouts with Unicode-safe fitting and adaptive
+status degradation.
 Dirty drafts cannot be discarded implicitly, and failed validation or revision
 conflicts leave the editor live. This is not an ANSI/VT backend, live keyboard
-loop, ConPTY integration, or rendered Config Center.
+loop, ConPTY integration, rendered Config Center, object-name dialog, or Provider
+wizard.
 Live-provider validation, configurable proxy policy, reconnect/retry, richer
 approval presentation, broader Provider and Tool adapters, Workspace, TUI, and
 App Server work remain. The loopback Provider tracer remains an internal

@@ -193,13 +193,17 @@ validation or revision-conflict failure. Its deterministic row layout freezes
 Unicode-safe text fitting, prioritized compact status segments, a wide detail
 row, and exact 40x12, 80x24, and 160x50 snapshots. No ANSI/VT backend, keyboard
 event loop, rendered terminal dialog, ConPTY integration, or App Server surface
-is claimed by these slices.
+is claimed by these slices. Typed nested `add` and `remove` paths now open
+revision-bound create/delete sessions for Provider Profiles, Model Presets, and
+Usage Windows. Creation keeps one schema-driven Draft across focused fields;
+deletion removes only a target-layer object, passes through reference validation,
+and preserves backup and compare-and-swap behavior.
 
 This does not complete Phase 3. VT/ConPTY rendering and input, the keyboard event
-loop and terminal-backed schema editors, new Config Object creation/deletion,
-Provider wizard, catalog-backed Recent/Compatible model views, Context Pressure,
-Price Schedules/cost calculation, richer observed Provider metadata, and the
-P0/P1/P2/P6 performance evidence remain pending.
+loop and terminal-backed schema editors, rendered object-name and confirmation
+dialogs, Provider wizard, catalog-backed Recent/Compatible model views, Context
+Pressure, Price Schedules/cost calculation, richer observed Provider metadata,
+and the P0/P1/P2/P6 performance evidence remain pending.
 Large-history statistics pagination and summary-only rendering also remain
 pending; the current command emits the complete replayed attempt projection.
 

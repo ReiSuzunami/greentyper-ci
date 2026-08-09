@@ -40,7 +40,7 @@ The shipped product executable. It owns composition and the target TUI, CLI,
 App Server, and concrete production adapters. Its current private modules
 include configured Responses HTTP/SSE, origin-bound Windows Credential Manager
 access, the fixed `local.echo` process executor, a terminal-neutral presentation
-projection, interaction controller, deterministic viewport-row layout, and a
+projection, Config Object lifecycle controller, deterministic viewport-row layout, and a
 ProductDriver that composes the Kernel-owned Team, Tool, Provider, approval, and
 delivery seams. A real ANSI/VT TUI, keyboard event loop, App Server, and audited
 Windows terminal wrapper remain pending. Platform wrappers for process,

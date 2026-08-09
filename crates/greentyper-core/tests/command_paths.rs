@@ -88,6 +88,56 @@ fn root_actions_and_config_sections_remain_semantically_distinct() {
 }
 
 #[test]
+fn config_object_lifecycle_actions_remain_nested_and_typed() {
+    let actions = [
+        (
+            "/config provider add",
+            CommandTarget::ConfigObjectCreate {
+                kind: greentyper_core::config::ConfigObjectKind::ProviderProfile,
+            },
+        ),
+        (
+            "/config provider remove",
+            CommandTarget::ConfigObjectDelete {
+                kind: greentyper_core::config::ConfigObjectKind::ProviderProfile,
+            },
+        ),
+        (
+            "/config model add",
+            CommandTarget::ConfigObjectCreate {
+                kind: greentyper_core::config::ConfigObjectKind::ModelPreset,
+            },
+        ),
+        (
+            "/config model remove",
+            CommandTarget::ConfigObjectDelete {
+                kind: greentyper_core::config::ConfigObjectKind::ModelPreset,
+            },
+        ),
+        (
+            "/config stats-window add",
+            CommandTarget::ConfigObjectCreate {
+                kind: greentyper_core::config::ConfigObjectKind::UsageWindow,
+            },
+        ),
+        (
+            "/config stats-window remove",
+            CommandTarget::ConfigObjectDelete {
+                kind: greentyper_core::config::ConfigObjectKind::UsageWindow,
+            },
+        ),
+    ];
+
+    for (query, target) in actions {
+        let matched = match_command_paths(query).expect("lifecycle action match");
+        assert_eq!(matched[0].path().canonical(), query);
+        assert_eq!(matched[0].path().target(), target);
+        assert_eq!(matched[0].kind(), CommandMatchKind::Exact);
+        assert!(!matched[0].path().root_visible());
+    }
+}
+
+#[test]
 fn every_config_schema_field_has_exactly_one_editor_route() {
     let routed = command_paths()
         .iter()

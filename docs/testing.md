@@ -217,7 +217,10 @@ staged preview/reset/commit, retain an invalid draft for correction, reject
 generic credential mutation and read-back, and prove a stale revision cannot
 overwrite the winning commit. Controller tests cover Config Center and focused
 editor navigation, explicit dirty-draft discard, credential-safe screens, and
-failure-preserving commits. Terminal-neutral golden tests freeze exact 40x12,
+failure-preserving commits. Object lifecycle tests freeze typed nested add/remove
+routes, schema-driven multi-field Profile/Preset/Usage-Window creation, whole
+target-layer deletion, reference-safe failure, backup creation, and Controller
+create/delete projection. Terminal-neutral golden tests freeze exact 40x12,
 80x24, and 160x50 status rows, deterministic hidden-segment order, layout height,
 and grapheme-safe CJK/emoji/combining-mark text fitting. The subprocess smoke
 emits the same three layouts without accepting a filesystem path. These tests do

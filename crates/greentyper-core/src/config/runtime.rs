@@ -446,6 +446,10 @@ impl ConfigObjectKind {
             Self::UsageWindow => "stats.windows.<id>.",
         }
     }
+
+    fn object_path(self, id: &str) -> String {
+        self.path_prefix().replace("<id>.", id)
+    }
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
@@ -870,6 +874,14 @@ impl ConfigDraft {
     pub fn reset(&mut self, path: &str) -> Result<(), ConfigRuntimeError> {
         self.document.reset(self.scope, path)
     }
+
+    pub fn contains_object(&self, object: &ConfigObjectRef) -> Result<bool, ConfigRuntimeError> {
+        self.document.contains_object(object)
+    }
+
+    pub fn delete_object(&mut self, object: &ConfigObjectRef) -> Result<(), ConfigRuntimeError> {
+        self.document.delete_object(object)
+    }
 }
 
 impl fmt::Debug for ConfigDraft {
@@ -1156,6 +1168,23 @@ impl ConfigRuntime {
             .map(|entry| {
                 let path = entry.path_pattern.replacen("<id>", id, 1);
                 self.inspect_field(target_scope, &path)
+            })
+            .collect()
+    }
+
+    pub fn draft_object_fields(
+        &self,
+        draft: &ConfigDraft,
+        kind: ConfigObjectKind,
+        id: &str,
+    ) -> Result<Vec<ConfigFieldView>, ConfigRuntimeError> {
+        validate_id("<id>", id)?;
+        config_schema()
+            .iter()
+            .filter(|entry| entry.path_pattern.starts_with(kind.path_prefix()))
+            .map(|entry| {
+                let path = entry.path_pattern.replacen("<id>", id, 1);
+                self.inspect_draft_field(draft, &path)
             })
             .collect()
     }
@@ -2670,6 +2699,50 @@ impl ConfigDocument {
     pub fn get(&self, path: &str) -> Result<Option<ConfigValue>, ConfigRuntimeError> {
         require_schema_entry(path)?;
         Ok(self.flatten().remove(path))
+    }
+
+    fn contains_object(&self, object: &ConfigObjectRef) -> Result<bool, ConfigRuntimeError> {
+        validate_id("<id>", object.id())?;
+        Ok(match object.kind() {
+            ConfigObjectKind::ProviderProfile => self.providers.contains_key(object.id()),
+            ConfigObjectKind::ModelPreset => self.model_presets.contains_key(object.id()),
+            ConfigObjectKind::UsageWindow => self
+                .stats
+                .windows
+                .as_ref()
+                .is_some_and(|windows| windows.iter().any(|window| window.id == object.id())),
+        })
+    }
+
+    fn delete_object(&mut self, object: &ConfigObjectRef) -> Result<(), ConfigRuntimeError> {
+        validate_id("<id>", object.id())?;
+        let removed = match object.kind() {
+            ConfigObjectKind::ProviderProfile => self.providers.remove(object.id()).is_some(),
+            ConfigObjectKind::ModelPreset => self.model_presets.remove(object.id()).is_some(),
+            ConfigObjectKind::UsageWindow => {
+                let Some(windows) = self.stats.windows.as_mut() else {
+                    return Err(ConfigRuntimeError::UnknownObject(
+                        object.kind().object_path(object.id()),
+                    ));
+                };
+                let Some(index) = windows.iter().position(|window| window.id == object.id()) else {
+                    return Err(ConfigRuntimeError::UnknownObject(
+                        object.kind().object_path(object.id()),
+                    ));
+                };
+                windows.remove(index);
+                if windows.is_empty() {
+                    self.stats.windows = None;
+                }
+                true
+            }
+        };
+        if !removed {
+            return Err(ConfigRuntimeError::UnknownObject(
+                object.kind().object_path(object.id()),
+            ));
+        }
+        self.validate_layer()
     }
 
     fn set(

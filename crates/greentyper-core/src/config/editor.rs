@@ -18,10 +18,20 @@ pub struct ConfigEditorView {
     pub changes: Vec<ConfigChange>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigEditorOperation {
+    Edit,
+    Create,
+    Delete,
+}
+
 pub struct ConfigEditorSession {
     draft: ConfigDraft,
     field_path: String,
     credential_binding: bool,
+    operation: ConfigEditorOperation,
+    object: Option<ConfigObjectRef>,
 }
 
 impl fmt::Debug for ConfigEditorSession {
@@ -32,6 +42,8 @@ impl fmt::Debug for ConfigEditorSession {
             .field("base_revision", &self.draft.base_revision())
             .field("field_path", &self.field_path)
             .field("credential_binding", &self.credential_binding)
+            .field("operation", &self.operation)
+            .field("object", &self.object)
             .finish_non_exhaustive()
     }
 }
@@ -69,12 +81,110 @@ impl ConfigEditorSession {
             draft: runtime.begin_draft(scope)?,
             field_path: field.path,
             credential_binding,
+            operation: ConfigEditorOperation::Edit,
+            object: object.cloned(),
         })
+    }
+
+    pub fn create_object(
+        runtime: &ConfigRuntime,
+        scope: ConfigScope,
+        object: ConfigObjectRef,
+    ) -> Result<Self, ConfigEditorError> {
+        let draft = runtime.begin_draft(scope)?;
+        if draft.contains_object(&object)? {
+            return Err(ConfigEditorError::ConfigObjectAlreadyExists);
+        }
+        let field = runtime
+            .draft_object_fields(&draft, object.kind(), object.id())?
+            .into_iter()
+            .next()
+            .ok_or(ConfigEditorError::ConfigObjectMismatch)?;
+        let credential_binding = matches!(
+            field.contents,
+            ConfigFieldContents::CredentialBinding { .. }
+        );
+        Ok(Self {
+            draft,
+            field_path: field.path,
+            credential_binding,
+            operation: ConfigEditorOperation::Create,
+            object: Some(object),
+        })
+    }
+
+    pub fn delete_object(
+        runtime: &ConfigRuntime,
+        scope: ConfigScope,
+        object: ConfigObjectRef,
+    ) -> Result<Self, ConfigEditorError> {
+        let mut draft = runtime.begin_draft(scope)?;
+        if !draft.contains_object(&object)? {
+            return Err(ConfigEditorError::ConfigObjectNotInTargetScope);
+        }
+        let field = runtime
+            .draft_object_fields(&draft, object.kind(), object.id())?
+            .into_iter()
+            .next()
+            .ok_or(ConfigEditorError::ConfigObjectMismatch)?;
+        draft.delete_object(&object)?;
+        Ok(Self {
+            draft,
+            field_path: field.path,
+            credential_binding: false,
+            operation: ConfigEditorOperation::Delete,
+            object: Some(object),
+        })
+    }
+
+    #[must_use]
+    pub const fn operation(&self) -> ConfigEditorOperation {
+        self.operation
+    }
+
+    #[must_use]
+    pub fn object(&self) -> Option<&ConfigObjectRef> {
+        self.object.as_ref()
     }
 
     pub fn stage_raw(&mut self, raw: &str) -> Result<(), ConfigEditorError> {
         self.require_value_editor()?;
         self.draft.set_raw(&self.field_path, raw)?;
+        Ok(())
+    }
+
+    pub fn focus_from_query(
+        &mut self,
+        runtime: &ConfigRuntime,
+        query: &str,
+        selected: usize,
+    ) -> Result<(), ConfigEditorError> {
+        if self.operation == ConfigEditorOperation::Delete {
+            return Err(ConfigEditorError::ObjectDeletionStaged);
+        }
+        let matches = match_command_paths(query)?;
+        let matched = matches
+            .get(selected)
+            .ok_or(ConfigEditorError::NoCommandMatch)?;
+        let CommandTarget::ConfigEditor { path_pattern, .. } = matched.path().target() else {
+            return Err(ConfigEditorError::CommandTargetNotEditor);
+        };
+        let field = match &self.object {
+            Some(object) => runtime
+                .draft_object_fields(&self.draft, object.kind(), object.id())?
+                .into_iter()
+                .find(|field| field.path_pattern == path_pattern)
+                .ok_or(ConfigEditorError::ConfigObjectMismatch)?,
+            None if !path_pattern.contains("<id>") => {
+                runtime.inspect_draft_field(&self.draft, path_pattern)?
+            }
+            None => return Err(ConfigEditorError::ConfigObjectRequired),
+        };
+        self.credential_binding = matches!(
+            field.contents,
+            ConfigFieldContents::CredentialBinding { .. }
+        );
+        self.field_path = field.path;
         Ok(())
     }
 
@@ -96,6 +206,17 @@ impl ConfigEditorSession {
         })
     }
 
+    pub fn current_view(
+        &self,
+        runtime: &ConfigRuntime,
+    ) -> Result<ConfigEditorView, ConfigEditorError> {
+        Ok(ConfigEditorView {
+            base_revision: self.draft.base_revision(),
+            field: runtime.inspect_draft_field(&self.draft, &self.field_path)?,
+            changes: Vec::new(),
+        })
+    }
+
     pub fn field(&self, runtime: &ConfigRuntime) -> Result<ConfigFieldView, ConfigEditorError> {
         runtime
             .inspect_draft_field(&self.draft, &self.field_path)
@@ -103,7 +224,7 @@ impl ConfigEditorSession {
     }
 
     pub fn commit(self, runtime: &mut ConfigRuntime) -> Result<ConfigCommit, ConfigEditorError> {
-        self.require_value_editor()?;
+        self.require_commit_allowed()?;
         runtime.commit(self.draft, false).map_err(Into::into)
     }
 
@@ -112,17 +233,27 @@ impl ConfigEditorSession {
         &self,
         runtime: &mut ConfigRuntime,
     ) -> Result<ConfigCommit, ConfigEditorError> {
-        self.require_value_editor()?;
+        self.require_commit_allowed()?;
         runtime
             .commit(self.draft.clone(), false)
             .map_err(Into::into)
     }
 
     fn require_value_editor(&self) -> Result<(), ConfigEditorError> {
-        if self.credential_binding {
+        if self.operation == ConfigEditorOperation::Delete {
+            Err(ConfigEditorError::ObjectDeletionStaged)
+        } else if self.credential_binding {
             Err(ConfigEditorError::CredentialOperationRequired)
         } else {
             Ok(())
+        }
+    }
+
+    fn require_commit_allowed(&self) -> Result<(), ConfigEditorError> {
+        if self.operation == ConfigEditorOperation::Delete {
+            Ok(())
+        } else {
+            self.require_value_editor()
         }
     }
 }
@@ -135,6 +266,9 @@ pub enum ConfigEditorError {
     CommandTargetNotEditor,
     ConfigObjectRequired,
     ConfigObjectMismatch,
+    ConfigObjectAlreadyExists,
+    ConfigObjectNotInTargetScope,
+    ObjectDeletionStaged,
     CredentialOperationRequired,
 }
 
@@ -153,6 +287,13 @@ impl fmt::Display for ConfigEditorError {
             Self::ConfigObjectMismatch => {
                 formatter.write_str("selected Config object does not own this field")
             }
+            Self::ConfigObjectAlreadyExists => formatter.write_str("Config object already exists"),
+            Self::ConfigObjectNotInTargetScope => {
+                formatter.write_str("Config object does not exist in the target layer")
+            }
+            Self::ObjectDeletionStaged => {
+                formatter.write_str("Config object deletion does not accept field mutations")
+            }
             Self::CredentialOperationRequired => {
                 formatter.write_str("credential binding requires a secure credential operation")
             }
@@ -169,6 +310,9 @@ impl Error for ConfigEditorError {
             | Self::CommandTargetNotEditor
             | Self::ConfigObjectRequired
             | Self::ConfigObjectMismatch
+            | Self::ConfigObjectAlreadyExists
+            | Self::ConfigObjectNotInTargetScope
+            | Self::ObjectDeletionStaged
             | Self::CredentialOperationRequired => None,
         }
     }
