@@ -1,7 +1,7 @@
 use std::error::Error;
 use std::fmt;
 use std::io::{self, Read, Write};
-use std::net::{IpAddr, TcpListener};
+use std::net::{IpAddr, TcpListener, TcpStream};
 use std::path::Path;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -641,8 +641,7 @@ fn serve_fixture(
             Err(error) => return Err(error.into()),
         }
     };
-    stream.set_read_timeout(Some(SERVER_TIMEOUT))?;
-    stream.set_write_timeout(Some(SERVER_TIMEOUT))?;
+    configure_fixture_stream(&stream)?;
     validate_fixture_request(&mut stream, expected_input)?;
     match scenario {
         ProviderHttpSmokeScenario::Success => write_fixture_response(
@@ -671,6 +670,12 @@ fn serve_fixture(
             Ok(())
         }
     }
+}
+
+fn configure_fixture_stream(stream: &TcpStream) -> io::Result<()> {
+    stream.set_nonblocking(false)?;
+    stream.set_read_timeout(Some(SERVER_TIMEOUT))?;
+    stream.set_write_timeout(Some(SERVER_TIMEOUT))
 }
 
 fn validate_fixture_request(
@@ -944,6 +949,29 @@ mod tests {
             .expect("Provider Epoch"),
             input: input.to_owned(),
         }
+    }
+
+    #[test]
+    fn fixture_socket_configuration_restores_blocking_reads() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("loopback listener");
+        let address = listener.local_addr().expect("listener address");
+        let writer = thread::spawn(move || {
+            let mut client = TcpStream::connect(address).expect("connect fixture client");
+            thread::sleep(Duration::from_millis(50));
+            client.write_all(b"x").expect("write delayed request byte");
+        });
+        let (mut server, _) = listener.accept().expect("accept fixture client");
+        server
+            .set_nonblocking(true)
+            .expect("simulate inherited nonblocking socket");
+        configure_fixture_stream(&server).expect("configure fixture socket");
+
+        let mut byte = [0_u8; 1];
+        server
+            .read_exact(&mut byte)
+            .expect("fixture read must wait for delayed client data");
+        writer.join().expect("join fixture client");
+        assert_eq!(byte, *b"x");
     }
 
     #[test]
