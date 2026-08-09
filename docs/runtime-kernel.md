@@ -9,9 +9,12 @@ Ledger, calls only a provider-neutral `ProviderRuntime`, and separates durable
 output preparation from user-visible output acknowledgement.
 
 This slice is deliberately smaller than the full Config Runtime, Provider
-Runtime, and Agent Team integration. The deterministic simulator is not a
-provider wire adapter. The provisional checksummed file Ledger is not yet the
-recorded SQLite-versus-append-log technology choice.
+Runtime, and product Agent Team execution path. The core Kernel can own the
+durable Team adapter, gate root admission, and rebind non-terminal Sessions,
+but the CLI and Provider/Tool drivers do not yet consume that seam. The
+deterministic simulator is not a provider wire adapter. The provisional
+checksummed file Ledger is not yet the recorded SQLite-versus-append-log
+technology choice.
 
 ## Interface
 
@@ -21,6 +24,20 @@ let prepared = runtime.execute(&layers, input, &mut provider)?;
 
 write_and_flush(prepared.text())?;
 runtime.acknowledge(prepared.delivery())?;
+
+let (mut runtime, recovered_team) = RuntimeKernel::open_with_team(
+    runtime_ledger_path,
+    team_ledger_path,
+    max_active_agents,
+)?;
+runtime.dispatch_team(TeamCommand::AdmitRoot {
+    task,
+    budget,
+    capabilities,
+})?;
+for session in recovered_team.into_sessions() {
+    // Kernel-derived authority; no AgentId-to-session conversion exists.
+}
 ```
 
 `execute` returns only after admission and the complete prepared output are
@@ -60,6 +77,14 @@ as durability-ambiguous; callers must close and recover instead of retrying.
 The headless CLI exposes these states through `status`. `headless` refuses every
 non-ready state. `resume` and `reconcile` are explicit commands so restart
 cannot silently repeat provider work or visible output.
+
+Agent Team recovery is separate from Turn output recovery. `open_with_team`
+holds both dedicated writers, validates the Team replay, and returns one
+`KernelTeamRecovery` containing every non-terminal process-local Session.
+Terminal Agents are omitted; old Sessions remain invalid. The same typed Kernel
+dispatch interface admits the single root and rejects duplicates without
+mutation. This is core authority/recovery evidence, not yet a product scheduling
+or output protocol.
 
 ## Ledger Adapter
 
@@ -128,10 +153,11 @@ protocol.
 
 ## Still Pending
 
-- Owning the standalone durable Agent Team adapter from the Runtime Kernel,
-  including trusted root admission and non-terminal session rebind after
-  recovery. The adapter already persists Team transactions synchronously, but
-  it intentionally exposes no caller-selected ID-to-session conversion.
+- Product CLI and Provider/Tool driving over the Kernel-owned Agent Team seam,
+  including user-visible Team acknowledgement. Core already owns the dedicated
+  adapter, gates root admission, and issues one consumable complete
+  non-terminal Session bundle per validated open without an ID-to-session
+  conversion.
 - Complete Config Schema default/constraint/normalization/migration metadata,
   TUI/App Server editors, Provider Templates/catalogs, and credential storage.
 - Real provider dialects, transport, reconnect policy, credentials, and usage

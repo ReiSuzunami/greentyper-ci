@@ -79,6 +79,10 @@ impl DurableTeamRuntime {
         self.recovered_tail_bytes
     }
 
+    pub(crate) fn trusted_rebind_nonterminal_sessions(&self) -> Vec<AgentSession> {
+        self.runtime.trusted_rebind_nonterminal_sessions()
+    }
+
     pub fn dispatch(&mut self, command: TeamCommand) -> Result<TeamCommit, DurableTeamError> {
         let prepared = self
             .runtime

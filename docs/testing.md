@@ -59,10 +59,14 @@ status, resume, and reconcile behavior. The standalone durable Agent Team
 adapter additionally covers synchronous receipt-before-publish ordering,
 planning failure atomicity, exclusive writer ownership, every Team Event kind
 through a complete lifecycle and restart, old-session rejection, torn-tail
-complete-prefix recovery, and checksum/schema/kind failure. Runtime Kernel Team
-ownership/rebind, byte-offset process crash injection, and ambiguous Team
-durability reconciliation remain pending. Migration/backup remains in the
-candidate storage harness rather than this provisional product adapter.
+complete-prefix recovery, and checksum/schema/kind failure. Runtime Kernel
+integration tests cover dedicated writer ownership, Kernel-owned root admission
+and duplicate rejection, per-open complete non-terminal Session rebind after replay,
+Active/Dormant/Blocked recovery, terminal exclusion, stale-session rejection,
+and the absence of an ID-to-session conversion. Byte-offset process crash
+injection and ambiguous Team durability reconciliation remain pending.
+Migration/backup remains in the candidate storage harness rather than this
+provisional product adapter.
 
 ### Crash and Recovery Tests
 

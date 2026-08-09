@@ -1424,6 +1424,15 @@ impl TeamRuntime {
         Ok(session.agent)
     }
 
+    fn trusted_rebind_nonterminal_sessions(&self) -> Vec<AgentSession> {
+        self.state
+            .agents
+            .values()
+            .filter(|agent| !agent.status.is_terminal())
+            .map(|agent| self.session(agent.id))
+            .collect()
+    }
+
     const fn session(&self, agent: AgentId) -> AgentSession {
         AgentSession {
             agent,

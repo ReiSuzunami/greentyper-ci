@@ -17,16 +17,30 @@ let recovered = TeamRuntime::recover(max_active_agents, events.iter().cloned())?
 
 let mut durable = DurableTeamRuntime::open(team_ledger_path, max_active_agents)?;
 let commit = durable.dispatch(command)?; // CommitDurability::Synchronous
+
+let (mut kernel, recovered) = RuntimeKernel::open_with_team(
+    runtime_ledger_path,
+    team_ledger_path,
+    max_active_agents,
+)?;
+let root = kernel.dispatch_team(TeamCommand::AdmitRoot {
+    task,
+    budget,
+    capabilities,
+})?;
+let rebound = recovered.into_sessions(); // complete per-open set; no ID lookup
+let commit = kernel.dispatch_team(command)?;
 ```
 
 - `TeamRuntime::dispatch` validates one typed `TeamCommand`, constructs one atomic in-memory event transaction, appends it, and only then replaces the Runtime Fold.
 - `DurableTeamRuntime::dispatch` prepares the same validated transaction, checks the locked Ledger Head, synchronously appends it, receives a checksum-bound receipt, and only then publishes the Runtime Fold. Planning, encoding, Head, or append failure leaves the projection and identifiers unchanged; ambiguous durability poisons the writer and requires reopen rather than blind retry.
-- `AgentSession` is process-local execution authority issued by this Runtime. Canonical Agent IDs remain inspectable but cannot authorize commands, old sessions fail after recovery, and the public Team interface intentionally exposes no ID-to-session rebind. The later Runtime Kernel recovery seam must rebind non-terminal owners without accepting model- or user-selected IDs.
+- `AgentSession` is process-local execution authority issued by this Runtime. Canonical Agent IDs remain inspectable but cannot authorize commands, old sessions fail after recovery, and the public Team interface intentionally exposes no ID-to-session rebind. `RuntimeKernel::open_with_team` owns the adapter writer and returns one `KernelTeamRecovery` containing the complete non-terminal Session set derived from validated replay; it never accepts an Agent ID to mint authority.
+- `RuntimeKernel::dispatch_team` is the Kernel's single Team write interface, including typed root admission. It forwards to the owned durable adapter and does not publish a Team Fold before its synchronous receipt; duplicate root admission fails without mutation.
 - `snapshot` returns an immutable, deterministic projection ordered by canonical identifiers.
 - `event_log` exposes the current canonical events for tests and projection inspection.
 - `recover` accepts only contiguous, complete transactions and rebuilds the same projection or fails closed.
 
-Plain `TeamRuntime` commits remain `CommitDurability::Volatile` and cannot drive a user-visible acknowledgement. `DurableTeamRuntime` returns `CommitDurability::Synchronous` only after the dedicated Team Ledger has flushed a complete checksummed transaction. This adapter is still standalone core evidence: the product Runtime Kernel does not yet admit or resume Teams, and reopening deliberately invalidates every process-local `AgentSession`. Until the trusted Kernel rebind seam exists, a recovered non-empty Team can be inspected but cannot resume Agent commands through caller-selected IDs.
+Plain `TeamRuntime` commits remain `CommitDurability::Volatile` and cannot drive a user-visible acknowledgement. `DurableTeamRuntime` returns `CommitDurability::Synchronous` only after the dedicated Team Ledger has flushed a complete checksummed transaction. The core Runtime Kernel now owns that adapter when opened with a dedicated Team Ledger, gates root admission, and issues one consumable recovery bundle per open for Active, Dormant, and Blocked owners while excluding terminal Agents. Sessions inside the bundle remain ordinary copyable process-local capabilities. Standalone adapter recovery still invalidates every old Session. No caller-selected ID conversion exists. Product CLI, Provider/Tool driving, and user-visible Team acknowledgement remain outside this slice.
 
 ## Command Flow
 
@@ -79,14 +93,14 @@ Provider output, tool effects, approvals, Workspace Leases, Read Sets, merge out
 - Canonical Task, Agent, budget, capability, Event, and fold logic is in-process and uses only the Rust standard library.
 - The in-memory Event Ledger remains the volatile policy-test implementation.
 - `DurableTeamRuntime` is an external adapter over the provisional Phase 1 file Ledger. It uses a dedicated Team Ledger, a versioned bounded codec for all 17 Team Event kinds, exclusive writer ownership, synchronous receipts, complete-prefix replay, and fail-closed schema/checksum/state validation.
-- The adapter is not the final storage choice or migration contract; candidate selection and the Runtime Kernel ownership seam remain separate decisions.
+- The adapter is not the final storage choice or migration contract. The Kernel ownership seam is implemented in core, while candidate selection and production migration remain separate decisions.
 - Provider Runtime, Tool Runtime, and Workspace Coordinator retain separate interfaces because their retry, authority, and effect-ordering rules differ.
 - The product and acceptance binaries continue to depend inward on `greentyper-core`; the core never depends on them.
 
 ## Next Slices
 
-1. Let trusted Runtime Kernel admission own `DurableTeamRuntime`, create the root Agent, and rebind non-terminal owners after recovery without exposing an ID-to-session authority seam.
-2. Add byte-offset/cross-process crash injection around Team append and receipt boundaries, including ambiguous durability reconciliation.
-3. Add Workspace Coordinator facts, then exclusive Workspace Lease and Read Set adapters when the first writable Task lands.
-4. Add Tool and Provider effect preparation/outcome records only after their own idempotency and recovery contracts exist.
+1. Add byte-offset/cross-process crash injection around Team append and receipt boundaries, including ambiguous durability reconciliation.
+2. Add Workspace Coordinator facts, then exclusive Workspace Lease and Read Set adapters when the first writable Task lands.
+3. Add Tool and Provider effect preparation/outcome records only after their own idempotency and recovery contracts exist.
+4. Connect the Kernel-owned Team seam to product driving and user-visible acknowledgement only after those effect contracts exist.
 5. Exercise Performance Contract workload P3 with two Active Agents on the Target Machine and four on FMDev; measure Dormant increment rather than assuming it.

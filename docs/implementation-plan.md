@@ -4,7 +4,7 @@
 
 Implementation proceeds as runnable vertical slices. Each phase must preserve Ledger recovery, authority boundaries, and measured resource behavior; no phase may defer all testing or performance work to the end.
 
-Feature implementation was authorized on 2026-08-09. The first core slice fixes the Agent Team command/event interface, process-local Agent Sessions, and pure orchestration policy early; it does not claim Phase 7 completion. Plain `TeamRuntime` remains volatile. A separate durable Team adapter now proves synchronous persistence, but trusted Runtime Kernel ownership/rebind is still required before any product-facing Team acknowledgement.
+Feature implementation was authorized on 2026-08-09. The first core slice fixes the Agent Team command/event interface, process-local Agent Sessions, and pure orchestration policy early; it does not claim Phase 7 completion. Plain `TeamRuntime` remains volatile. A separate durable Team adapter proves synchronous persistence, and the core Runtime Kernel now owns it, gates root admission, and rebinds the complete non-terminal Session set after recovery. Product driving and acknowledgement remain pending.
 
 ## Phase 0: Repository and Measurement Foundation
 
@@ -41,6 +41,11 @@ synchronous checksum-bound receipts, exclusive writer ownership, complete-
 prefix recovery, stale-session rejection, and fail-closed checksum/schema/state
 replay. End-to-end tests persist and recover Delegation, messaging, failure and
 Blocked propagation, cancellation, Completion Capsules, and terminal states.
+`RuntimeKernel::open_with_team` owns the dedicated writer and issues one
+consumable complete non-terminal Session bundle per validated open. It excludes
+terminal Agents and exposes no Agent-ID-to-Session conversion. Root admission
+uses the same typed Kernel dispatch interface; duplicate admission fails without
+mutation.
 
 The Config Runtime now adds versioned user/project TOML, addressable Provider
 Profile/Model Preset/statusline/Usage Window fields, effective provenance,
@@ -50,10 +55,10 @@ edits. It is wired into new headless Turn admission through the immutable
 bootstrap projection.
 
 This does not complete Phase 1. Complete schema metadata and generated editor
-surfaces, Provider Templates/catalogs, credential storage, Agent
-Team ownership and trusted session rebind in the Runtime Kernel, the exhaustive
-byte-offset Runtime/Team crash-fault matrix, storage migration, and headless
-FMDev/Target idle resource evidence remain pending. See
+surfaces, Provider Templates/catalogs, credential storage, product Team
+Provider/Tool driving and acknowledgement, the exhaustive byte-offset
+Runtime/Team crash-fault matrix, storage migration, and headless FMDev/Target
+idle resource evidence remain pending. See
 [Recoverable Single-Agent Runtime](runtime-kernel.md).
 
 Exit criteria:

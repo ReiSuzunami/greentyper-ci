@@ -5,6 +5,10 @@ use std::error::Error;
 use std::fmt;
 use std::path::Path;
 
+use crate::agent_team::{
+    AgentSession, DurableTeamError, DurableTeamRuntime, TeamCommand, TeamCommit, TeamError,
+    TeamSnapshot,
+};
 use crate::config::{ConfigEpoch, ConfigError, ConfigLayer, ConfigLayers, ConfigSource};
 use crate::ledger::{
     DurabilityReceipt, EventData, FileLedger, LedgerError, LedgerHead, StoredEvent,
@@ -60,6 +64,35 @@ pub struct RuntimeSnapshot {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct KernelTeamSnapshot {
+    pub projection: TeamSnapshot,
+    pub ledger_head: LedgerHead,
+    pub recovered_tail_bytes: u64,
+}
+
+/// Per-open execution authority rebound from a validated Agent Team replay.
+///
+/// The Runtime Kernel returns the complete non-terminal set at open. The
+/// interface deliberately offers no caller-selected Agent ID conversion and no
+/// later session-minting lookup.
+pub struct KernelTeamRecovery {
+    snapshot: KernelTeamSnapshot,
+    sessions: Vec<AgentSession>,
+}
+
+impl KernelTeamRecovery {
+    #[must_use]
+    pub const fn snapshot(&self) -> &KernelTeamSnapshot {
+        &self.snapshot
+    }
+
+    #[must_use]
+    pub fn into_sessions(self) -> Vec<AgentSession> {
+        self.sessions
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PreparedOutput {
     delivery: DeliveryId,
     turn: TurnId,
@@ -105,6 +138,38 @@ pub struct RuntimeKernel {
     ledger: FileLedger,
     state: RuntimeState,
     recovered_tail_bytes: u64,
+    team: Option<KernelTeam>,
+}
+
+struct KernelTeam {
+    runtime: DurableTeamRuntime,
+}
+
+impl KernelTeam {
+    fn open(
+        path: impl AsRef<Path>,
+        max_active_agents: usize,
+    ) -> Result<(Self, KernelTeamRecovery), DurableTeamError> {
+        let runtime = DurableTeamRuntime::open(path, max_active_agents)?;
+        let sessions = runtime.trusted_rebind_nonterminal_sessions();
+        let recovery = KernelTeamRecovery {
+            snapshot: Self::snapshot_runtime(&runtime),
+            sessions,
+        };
+        Ok((Self { runtime }, recovery))
+    }
+
+    fn snapshot(&self) -> KernelTeamSnapshot {
+        Self::snapshot_runtime(&self.runtime)
+    }
+
+    fn snapshot_runtime(runtime: &DurableTeamRuntime) -> KernelTeamSnapshot {
+        KernelTeamSnapshot {
+            projection: runtime.snapshot(),
+            ledger_head: runtime.ledger_head(),
+            recovered_tail_bytes: runtime.recovered_tail_bytes(),
+        }
+    }
 }
 
 impl RuntimeKernel {
@@ -115,7 +180,33 @@ impl RuntimeKernel {
             ledger,
             state,
             recovered_tail_bytes: report.truncated_tail_bytes,
+            team: None,
         })
+    }
+
+    pub fn open_with_team(
+        runtime_path: impl AsRef<Path>,
+        team_path: impl AsRef<Path>,
+        max_active_agents: usize,
+    ) -> Result<(Self, KernelTeamRecovery), RuntimeError> {
+        let runtime_path = runtime_path.as_ref();
+        let team_path = team_path.as_ref();
+        if runtime_path == team_path {
+            return Err(RuntimeError::InvalidTeamConfiguration(
+                "Runtime and Team Ledgers must use different paths",
+            ));
+        }
+        if max_active_agents == 0 {
+            return Err(RuntimeError::Team(DurableTeamError::Team(
+                TeamError::InvalidActiveAgentLimit,
+            )));
+        }
+
+        let mut kernel = Self::open(runtime_path)?;
+        let (team, recovery) =
+            KernelTeam::open(team_path, max_active_agents).map_err(RuntimeError::Team)?;
+        kernel.team = Some(team);
+        Ok((kernel, recovery))
     }
 
     pub fn inspect(path: impl AsRef<Path>) -> Result<RuntimeSnapshot, RuntimeError> {
@@ -152,6 +243,15 @@ impl RuntimeKernel {
             status: self.state.status(),
             recovered_tail_bytes: self.recovered_tail_bytes,
         }
+    }
+
+    #[must_use]
+    pub fn team_snapshot(&self) -> Option<KernelTeamSnapshot> {
+        self.team.as_ref().map(KernelTeam::snapshot)
+    }
+
+    pub fn dispatch_team(&mut self, command: TeamCommand) -> Result<TeamCommit, RuntimeError> {
+        self.dispatch_team_command(command)
     }
 
     pub fn execute(
@@ -247,6 +347,11 @@ impl RuntimeKernel {
             RecoveryStatus::Ready => Ok(()),
             status => Err(RuntimeError::Busy(status)),
         }
+    }
+
+    fn dispatch_team_command(&mut self, command: TeamCommand) -> Result<TeamCommit, RuntimeError> {
+        let team = self.team.as_mut().ok_or(RuntimeError::TeamUnavailable)?;
+        team.runtime.dispatch(command).map_err(RuntimeError::Team)
     }
 
     fn drive_pending(
@@ -1184,6 +1289,7 @@ impl<'a> Decoder<'a> {
 #[derive(Debug)]
 pub enum RuntimeError {
     Ledger(LedgerError),
+    Team(DurableTeamError),
     Config(ConfigError),
     Model(ModelError),
     Provider(ProviderError),
@@ -1191,6 +1297,8 @@ pub enum RuntimeError {
     UnknownDelivery(DeliveryId),
     InvalidInput(&'static str),
     InvalidProviderOutput(&'static str),
+    TeamUnavailable,
+    InvalidTeamConfiguration(&'static str),
     UnsupportedRuntimeEventSchema { supported: u16, actual: u16 },
     CorruptEvent(&'static str),
     CorruptState(&'static str),
@@ -1201,6 +1309,7 @@ impl fmt::Display for RuntimeError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Ledger(source) => write!(formatter, "{source}"),
+            Self::Team(source) => write!(formatter, "{source}"),
             Self::Config(source) => write!(formatter, "{source}"),
             Self::Model(source) => write!(formatter, "{source}"),
             Self::Provider(source) => write!(formatter, "{source}"),
@@ -1211,6 +1320,10 @@ impl fmt::Display for RuntimeError {
             Self::InvalidInput(reason) => write!(formatter, "invalid input: {reason}"),
             Self::InvalidProviderOutput(reason) => {
                 write!(formatter, "invalid provider output: {reason}")
+            }
+            Self::TeamUnavailable => write!(formatter, "Runtime Kernel has no Agent Team"),
+            Self::InvalidTeamConfiguration(reason) => {
+                write!(formatter, "invalid Agent Team configuration: {reason}")
             }
             Self::UnsupportedRuntimeEventSchema { supported, actual } => write!(
                 formatter,
@@ -1227,6 +1340,7 @@ impl Error for RuntimeError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Ledger(source) => Some(source),
+            Self::Team(source) => Some(source),
             Self::Config(source) => Some(source),
             Self::Model(source) => Some(source),
             Self::Provider(source) => Some(source),
