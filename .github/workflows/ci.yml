@@ -41,12 +41,16 @@ jobs:
         run: cargo test -p greentyper-acceptance --all-targets --features bench-storage --locked
       - name: Test terminal candidates
         run: cargo test -p greentyper-acceptance --all-targets --features bench-terminal --locked
+      - name: Test transport candidates
+        run: cargo test -p greentyper-acceptance --all-targets --features bench-transport --locked
       - name: Lint workspace
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Lint storage candidates
         run: cargo clippy -p greentyper-acceptance --all-targets --features bench-storage --locked -- -D warnings
       - name: Lint terminal candidates
         run: cargo clippy -p greentyper-acceptance --all-targets --features bench-terminal --locked -- -D warnings
+      - name: Lint transport candidates
+        run: cargo clippy -p greentyper-acceptance --all-targets --features bench-transport --locked -- -D warnings
 
   windows:
     if: github.repository == 'ReiSuzunami/greentyper-ci'
@@ -71,18 +75,26 @@ jobs:
         run: cargo test -p greentyper-acceptance --all-targets --features bench-storage --locked
       - name: Test terminal candidates
         run: cargo test -p greentyper-acceptance --all-targets --features bench-terminal --locked
+      - name: Test transport candidates
+        run: cargo test -p greentyper-acceptance --all-targets --features bench-transport --locked
       - name: Lint workspace
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Lint storage candidates
         run: cargo clippy -p greentyper-acceptance --all-targets --features bench-storage --locked -- -D warnings
       - name: Lint terminal candidates
         run: cargo clippy -p greentyper-acceptance --all-targets --features bench-terminal --locked -- -D warnings
+      - name: Lint transport candidates
+        run: cargo clippy -p greentyper-acceptance --all-targets --features bench-transport --locked -- -D warnings
       - name: Build release binaries
         run: cargo build --workspace --release --locked
       - name: Build storage candidate runner
         run: cargo build -p greentyper-acceptance --release --features bench-storage --target-dir target/bench-storage --locked
       - name: Build terminal candidate runner
         run: cargo build -p greentyper-acceptance --release --features bench-terminal --target-dir target/bench-terminal --locked
+      - name: Build WinHTTP candidate runner
+        run: cargo build -p greentyper-acceptance --release --features bench-transport-winhttp --target-dir target/bench-transport-winhttp --locked
+      - name: Build Reqwest candidate runner
+        run: cargo build -p greentyper-acceptance --release --features bench-transport-reqwest --target-dir target/bench-transport-reqwest --locked
       - name: Verify CPU baseline and acceptance harness
         shell: pwsh
         run: |
@@ -205,6 +217,34 @@ jobs:
             --warmup-runs 1 `
             --expect-baseline x86-64-v3 `
             --machine-identifiers redacted
+      - name: Verify transport candidate pipeline
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force transport-smoke | Out-Null
+          target/bench-transport-winhttp/release/greentyper-acceptance.exe verify-cpu --expect-baseline x86-64-v3
+          target/bench-transport-winhttp/release/greentyper-acceptance.exe bench `
+            --comparison transport `
+            --implementation winhttp-wrest `
+            --workload loopback-sse `
+            --candidate-id "ci-$env:GITHUB_SHA" `
+            --source-revision "$env:GITHUB_SHA" `
+            --output transport-smoke/transport-winhttp-wrest.json `
+            --runs 1 `
+            --warmup-runs 1 `
+            --expect-baseline x86-64-v3 `
+            --machine-identifiers redacted
+          target/bench-transport-reqwest/release/greentyper-acceptance.exe verify-cpu --expect-baseline x86-64-v3
+          target/bench-transport-reqwest/release/greentyper-acceptance.exe bench `
+            --comparison transport `
+            --implementation reqwest-rustls `
+            --workload loopback-sse `
+            --candidate-id "ci-$env:GITHUB_SHA" `
+            --source-revision "$env:GITHUB_SHA" `
+            --output transport-smoke/transport-reqwest-rustls.json `
+            --runs 1 `
+            --warmup-runs 1 `
+            --expect-baseline x86-64-v3 `
+            --machine-identifiers redacted
       - name: Package portable build
         id: package
         shell: pwsh
@@ -234,5 +274,12 @@ jobs:
         with:
           name: greentyper-terminal-candidate-smoke-${{ github.sha }}
           path: terminal-smoke/*.json
+          if-no-files-found: error
+          retention-days: 14
+      - name: Upload transport candidate smoke
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: greentyper-transport-candidate-smoke-${{ github.sha }}
+          path: transport-smoke/*.json
           if-no-files-found: error
           retention-days: 14

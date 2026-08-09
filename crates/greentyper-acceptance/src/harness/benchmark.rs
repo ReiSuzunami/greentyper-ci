@@ -7,6 +7,11 @@ use std::collections::BTreeMap;
 mod storage;
 #[cfg(feature = "bench-terminal")]
 mod terminal;
+#[cfg(any(
+    feature = "bench-transport-reqwest",
+    all(windows, feature = "bench-transport-winhttp")
+))]
+mod transport;
 
 const HARNESS_FIXTURE_JSON: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -213,6 +218,15 @@ fn candidate_catalog_entries() -> Vec<serde_json::Value> {
     let entries = {
         let mut entries = entries;
         entries.push(terminal::catalog_entry());
+        entries
+    };
+    #[cfg(any(
+        feature = "bench-transport-reqwest",
+        all(windows, feature = "bench-transport-winhttp")
+    ))]
+    let entries = {
+        let mut entries = entries;
+        entries.push(transport::catalog_entry());
         entries
     };
     entries
@@ -448,6 +462,11 @@ fn target_for(options: &Options) -> AppResult<Box<dyn BenchmarkTarget>> {
         ("storage", implementation, workload) => storage::target(implementation, workload),
         #[cfg(feature = "bench-terminal")]
         ("terminal", implementation, workload) => terminal::target(implementation, workload),
+        #[cfg(any(
+            feature = "bench-transport-reqwest",
+            all(windows, feature = "bench-transport-winhttp")
+        ))]
+        ("transport", implementation, workload) => transport::target(implementation, workload),
         (comparison, implementation, workload) => Err(cli_error(format!(
             "benchmark target {comparison}/{implementation}/{workload} is not compiled into this runner"
         ))),

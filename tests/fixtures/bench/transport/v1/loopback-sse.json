@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "comparison_id": "transport",
+  "workload_id": "loopback-sse",
+  "workload_version": 1,
+  "request_count": 7,
+  "request_timeout_ms": 40,
+  "slow_response_delay_ms": 120,
+  "success_fragments_hex": [
+    "3a206865617274626561740d",
+    "0a6576656e743a206d6573736167650d0a646174613a20616c",
+    "7068610d0a0d",
+    "0a6576656e743a2064656c74610a646174613a20e4",
+    "b8ad206575726f20e2",
+    "82ac0a646174613a206c696e652074776f0d",
+    "0a0d0a6576656e743a20646f6e650d0a646174613a205b444f4e455d0d0a0d0a"
+  ],
+  "cancel_fragments_hex": [
+    "6576656e743a206d6573736167650d0a646174613a20616c7068610d0a0d0a",
+    "6576656e743a206c6174650d0a646174613a2073686f756c642d6e6f742d6172726976650d0a0d0a"
+  ],
+  "expected_events": [
+    {"event": "message", "data": "alpha"},
+    {"event": "delta", "data": "中 euro €\nline two"},
+    {"event": "done", "data": "[DONE]"}
+  ],
+  "expected_digest": "d2f35c39f65eadbe7e81926501465114e193bd5e8bd8b66c02ec650a0d4791e9"
+}

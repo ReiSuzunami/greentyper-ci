@@ -11,18 +11,27 @@ publish.workspace = true
 [dependencies]
 crc32c = { version = "0.6.8", optional = true }
 crossterm = { version = "0.29.0", default-features = false, optional = true }
+futures-util = { version = "0.3.31", optional = true }
 greentyper-core = { path = "../greentyper-core" }
+reqwest = { version = "0.13.4", default-features = false, features = ["http2", "rustls", "stream", "system-proxy"], optional = true }
 rusqlite = { version = "0.40.2", default-features = false, features = ["backup", "bundled"], optional = true }
 ratatui = { version = "0.30.2", default-features = false, features = ["crossterm_0_29"], optional = true }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 sha2 = "0.11.0"
+tokio = { version = "1.48.0", features = ["rt", "time"], optional = true }
 unicode-width = { version = "0.2.2", optional = true }
 vt100 = { version = "0.16.2", optional = true }
+
+[target.'cfg(windows)'.dependencies]
+wrest = { version = "0.5.7", default-features = false, features = ["http2", "stream", "system-proxy"], optional = true }
 
 [features]
 bench-storage = ["dep:crc32c", "dep:rusqlite"]
 bench-terminal = ["dep:crossterm", "dep:ratatui", "dep:unicode-width", "dep:vt100"]
+bench-transport = ["bench-transport-reqwest", "bench-transport-winhttp"]
+bench-transport-reqwest = ["dep:futures-util", "dep:reqwest", "dep:tokio"]
+bench-transport-winhttp = ["dep:futures-util", "dep:tokio", "dep:wrest"]
 
 [lints]
 workspace = true
