@@ -2050,13 +2050,13 @@ mod tests {
             recovered.snapshot().calls[0].status,
             ToolCallStatus::AwaitingApproval
         );
+        drop(recovered);
         let bytes = fs::read(&path).expect("read Tool Ledger");
         assert!(
             !bytes
                 .windows(b"confidential-input-marker".len())
                 .any(|window| window == b"confidential-input-marker")
         );
-        drop(recovered);
         fs::remove_file(path).expect("cleanup Tool Ledger");
     }
 
