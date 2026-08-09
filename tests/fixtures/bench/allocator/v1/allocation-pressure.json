@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "comparison_id": "allocator",
+  "workload_id": "allocation-pressure",
+  "workload_version": 1,
+  "rounds": 24,
+  "live_allocations": 192,
+  "minimum_allocation_bytes": 64,
+  "allocation_span_bytes": 32768,
+  "grow_every": 3,
+  "growth_bytes": 257,
+  "expected_digest": "cc7fa5d58ecec3bde194f364ebe7ab03bc453cd9d38dc4b7ebfe2c606609c184"
+}

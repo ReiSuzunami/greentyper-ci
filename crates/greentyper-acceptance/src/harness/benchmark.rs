@@ -3,6 +3,12 @@
 use super::*;
 use std::collections::BTreeMap;
 
+#[cfg(any(
+    feature = "bench-allocator-system",
+    feature = "bench-allocator-mimalloc",
+    feature = "bench-allocator-snmalloc"
+))]
+mod allocator;
 #[cfg(feature = "bench-storage")]
 mod storage;
 #[cfg(feature = "bench-terminal")]
@@ -208,6 +214,18 @@ fn benchmark_catalog() -> serde_json::Value {
 
 fn candidate_catalog_entries() -> Vec<serde_json::Value> {
     let entries = Vec::new();
+    #[cfg(any(
+        feature = "bench-allocator-system",
+        feature = "bench-allocator-mimalloc",
+        feature = "bench-allocator-snmalloc"
+    ))]
+    let entries = {
+        let mut entries = entries;
+        if let Some(entry) = allocator::catalog_entry() {
+            entries.push(entry);
+        }
+        entries
+    };
     #[cfg(feature = "bench-storage")]
     let entries = {
         let mut entries = entries;
@@ -458,6 +476,12 @@ fn target_for(options: &Options) -> AppResult<Box<dyn BenchmarkTarget>> {
             validate_fixture(&fixture)?;
             Ok(Box::new(Sha256LoopTarget { fixture }))
         }
+        #[cfg(any(
+            feature = "bench-allocator-system",
+            feature = "bench-allocator-mimalloc",
+            feature = "bench-allocator-snmalloc"
+        ))]
+        ("allocator", implementation, workload) => allocator::target(implementation, workload),
         #[cfg(feature = "bench-storage")]
         ("storage", implementation, workload) => storage::target(implementation, workload),
         #[cfg(feature = "bench-terminal")]

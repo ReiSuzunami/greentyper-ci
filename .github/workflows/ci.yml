@@ -22,7 +22,7 @@ jobs:
     if: github.repository == 'ReiSuzunami/greentyper-ci'
     name: Quality / macOS ARM
     runs-on: macos-15
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -43,6 +43,12 @@ jobs:
         run: cargo test -p greentyper-acceptance --all-targets --features bench-terminal --locked
       - name: Test transport candidates
         run: cargo test -p greentyper-acceptance --all-targets --features bench-transport --locked
+      - name: Test system allocator candidate
+        run: cargo test -p greentyper-acceptance --all-targets --features bench-allocator-system --locked
+      - name: Test Mimalloc candidate
+        run: cargo test -p greentyper-acceptance --all-targets --features bench-allocator-mimalloc --locked
+      - name: Test Snmalloc candidate
+        run: cargo test -p greentyper-acceptance --all-targets --features bench-allocator-snmalloc --locked
       - name: Lint workspace
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Lint storage candidates
@@ -51,12 +57,18 @@ jobs:
         run: cargo clippy -p greentyper-acceptance --all-targets --features bench-terminal --locked -- -D warnings
       - name: Lint transport candidates
         run: cargo clippy -p greentyper-acceptance --all-targets --features bench-transport --locked -- -D warnings
+      - name: Lint system allocator candidate
+        run: cargo clippy -p greentyper-acceptance --all-targets --features bench-allocator-system --locked -- -D warnings
+      - name: Lint Mimalloc candidate
+        run: cargo clippy -p greentyper-acceptance --all-targets --features bench-allocator-mimalloc --locked -- -D warnings
+      - name: Lint Snmalloc candidate
+        run: cargo clippy -p greentyper-acceptance --all-targets --features bench-allocator-snmalloc --locked -- -D warnings
 
   windows:
     if: github.repository == 'ReiSuzunami/greentyper-ci'
     name: Windows x64 build
     runs-on: windows-2025
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -77,6 +89,12 @@ jobs:
         run: cargo test -p greentyper-acceptance --all-targets --features bench-terminal --locked
       - name: Test transport candidates
         run: cargo test -p greentyper-acceptance --all-targets --features bench-transport --locked
+      - name: Test system allocator candidate
+        run: cargo test -p greentyper-acceptance --all-targets --features bench-allocator-system --locked
+      - name: Test Mimalloc candidate
+        run: cargo test -p greentyper-acceptance --all-targets --features bench-allocator-mimalloc --locked
+      - name: Test Snmalloc candidate
+        run: cargo test -p greentyper-acceptance --all-targets --features bench-allocator-snmalloc --locked
       - name: Lint workspace
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Lint storage candidates
@@ -85,6 +103,12 @@ jobs:
         run: cargo clippy -p greentyper-acceptance --all-targets --features bench-terminal --locked -- -D warnings
       - name: Lint transport candidates
         run: cargo clippy -p greentyper-acceptance --all-targets --features bench-transport --locked -- -D warnings
+      - name: Lint system allocator candidate
+        run: cargo clippy -p greentyper-acceptance --all-targets --features bench-allocator-system --locked -- -D warnings
+      - name: Lint Mimalloc candidate
+        run: cargo clippy -p greentyper-acceptance --all-targets --features bench-allocator-mimalloc --locked -- -D warnings
+      - name: Lint Snmalloc candidate
+        run: cargo clippy -p greentyper-acceptance --all-targets --features bench-allocator-snmalloc --locked -- -D warnings
       - name: Build release binaries
         run: cargo build --workspace --release --locked
       - name: Build storage candidate runner
@@ -95,6 +119,12 @@ jobs:
         run: cargo build -p greentyper-acceptance --release --features bench-transport-winhttp --target-dir target/bench-transport-winhttp --locked
       - name: Build Reqwest candidate runner
         run: cargo build -p greentyper-acceptance --release --features bench-transport-reqwest --target-dir target/bench-transport-reqwest --locked
+      - name: Build system allocator candidate runner
+        run: cargo build -p greentyper-acceptance --release --features bench-allocator-system --target-dir target/bench-allocator-system --locked
+      - name: Build Mimalloc candidate runner
+        run: cargo build -p greentyper-acceptance --release --features bench-allocator-mimalloc --target-dir target/bench-allocator-mimalloc --locked
+      - name: Build Snmalloc candidate runner
+        run: cargo build -p greentyper-acceptance --release --features bench-allocator-snmalloc --target-dir target/bench-allocator-snmalloc --locked
       - name: Verify CPU baseline and acceptance harness
         shell: pwsh
         run: |
@@ -245,6 +275,58 @@ jobs:
             --warmup-runs 1 `
             --expect-baseline x86-64-v3 `
             --machine-identifiers redacted
+      - name: Verify allocator candidate pipeline
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force allocator-smoke | Out-Null
+          target/bench-allocator-system/release/greentyper-acceptance.exe verify-cpu --expect-baseline x86-64-v3
+          target/bench-allocator-system/release/greentyper-acceptance.exe bench `
+            --comparison allocator `
+            --implementation system `
+            --workload allocation-pressure `
+            --candidate-id "ci-$env:GITHUB_SHA" `
+            --source-revision "$env:GITHUB_SHA" `
+            --output allocator-smoke/allocator-system.json `
+            --runs 1 `
+            --warmup-runs 1 `
+            --expect-baseline x86-64-v3 `
+            --machine-identifiers redacted
+          target/bench-allocator-mimalloc/release/greentyper-acceptance.exe verify-cpu --expect-baseline x86-64-v3
+          target/bench-allocator-mimalloc/release/greentyper-acceptance.exe bench `
+            --comparison allocator `
+            --implementation mimalloc `
+            --workload allocation-pressure `
+            --candidate-id "ci-$env:GITHUB_SHA" `
+            --source-revision "$env:GITHUB_SHA" `
+            --output allocator-smoke/allocator-mimalloc.json `
+            --runs 1 `
+            --warmup-runs 1 `
+            --expect-baseline x86-64-v3 `
+            --machine-identifiers redacted
+          target/bench-allocator-snmalloc/release/greentyper-acceptance.exe verify-cpu --expect-baseline x86-64-v3
+          target/bench-allocator-snmalloc/release/greentyper-acceptance.exe bench `
+            --comparison allocator `
+            --implementation snmalloc `
+            --workload allocation-pressure `
+            --candidate-id "ci-$env:GITHUB_SHA" `
+            --source-revision "$env:GITHUB_SHA" `
+            --output allocator-smoke/allocator-snmalloc.json `
+            --runs 1 `
+            --warmup-runs 1 `
+            --expect-baseline x86-64-v3 `
+            --machine-identifiers redacted
+          $files = @(Get-ChildItem allocator-smoke/*.json)
+          if ($files.Count -ne 3) { throw "allocator smoke did not produce exactly three evidence files" }
+          $evidence = $files | ForEach-Object { Get-Content $_ -Raw | ConvertFrom-Json }
+          $implementations = @($evidence | ForEach-Object { $_.implementation.name } | Sort-Object -Unique)
+          $digests = @($evidence | ForEach-Object { $_.samples[0].output_digest } | Select-Object -Unique)
+          $executables = @($evidence | ForEach-Object { $_.executable_sha256 } | Select-Object -Unique)
+          $dependencies = @($evidence | ForEach-Object { $_.implementation.dependency_fingerprint } | Select-Object -Unique)
+          if (($implementations -join ",") -ne "mimalloc,snmalloc,system") { throw "allocator evidence identities are incomplete" }
+          if ($digests.Count -ne 1) { throw "allocator candidates produced different correctness digests" }
+          if ($digests[0] -ne "cc7fa5d58ecec3bde194f364ebe7ab03bc453cd9d38dc4b7ebfe2c606609c184") { throw "allocator correctness digest does not match the frozen fixture" }
+          if ($executables.Count -ne 3) { throw "allocator candidates did not produce three distinct executables" }
+          if ($dependencies.Count -ne 3) { throw "allocator candidates did not produce three distinct dependency identities" }
       - name: Package portable build
         id: package
         shell: pwsh
@@ -281,5 +363,12 @@ jobs:
         with:
           name: greentyper-transport-candidate-smoke-${{ github.sha }}
           path: transport-smoke/*.json
+          if-no-files-found: error
+          retention-days: 14
+      - name: Upload allocator candidate smoke
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: greentyper-allocator-candidate-smoke-${{ github.sha }}
+          path: allocator-smoke/*.json
           if-no-files-found: error
           retention-days: 14
