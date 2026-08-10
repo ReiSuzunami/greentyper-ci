@@ -5,7 +5,7 @@ released schema references it; upstream or workload changes add a new fixture
 version and a reviewed explanation instead of rewriting prior evidence.
 
 The Phase 0 acceptance, benchmark-pipeline, storage comparison, cross-process
-storage-crash, terminal render-matrix, loopback SSE transport, and allocator
+storage CAS and crash, terminal render-matrix, loopback SSE transport, and allocator
 pressure fixtures are compiled into candidate-specific acceptance runners. The
 Phase 1 deterministic Provider success fixture is compiled into the core
 simulator test. Versioned Responses, Chat Completions, and Messages fixtures now

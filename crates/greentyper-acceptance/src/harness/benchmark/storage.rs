@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+mod cas;
 mod crash;
 
 const STORAGE_FIXTURE_JSON: &str = include_str!(concat!(
@@ -25,7 +26,7 @@ const TIMER_STREAMING_FIXTURE_JSON: &str = include_str!(concat!(
 ));
 const CAS_FIXTURE_JSON: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../../tests/fixtures/bench/storage/v1/cas-one-winner.json"
+    "/../../tests/fixtures/bench/storage/v2/cas-one-winner.json"
 ));
 const BACKUP_FIXTURE_JSON: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -56,7 +57,7 @@ pub(super) fn catalog_entry() -> serde_json::Value {
             {"id": "critical-append-replay", "version": 1},
             {"id": "bounded-streaming-replay", "version": 1},
             {"id": "timer-expiry-streaming-replay", "version": 1},
-            {"id": "cas-one-winner", "version": 1},
+            {"id": "cas-one-winner", "version": 2},
             {"id": "backup-restore", "version": 1},
             {"id": "interrupted-migration", "version": 1},
             {"id": "cross-process-crash-replay", "version": 1}
@@ -110,6 +111,10 @@ pub(super) fn target(implementation: &str, workload: &str) -> AppResult<Box<dyn 
 
 pub(super) fn run_crash_child(options: StorageCrashChildOptions) -> AppResult<()> {
     crash::run_child(options)
+}
+
+pub(super) fn run_cas_child(options: StorageCasChildOptions) -> AppResult<()> {
+    cas::run_child(options)
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -233,7 +238,14 @@ fn validate_fixture(fixture: &StorageFixture, workload: StorageWorkload) -> AppR
                 && fixture.crash_cases == Some(6)
         }
     };
-    if fixture.comparison_id != "storage" || fixture.workload_version != 1 || !shape_is_valid {
+    let expected_workload_version = match workload {
+        StorageWorkload::CasOneWinner => 2,
+        _ => 1,
+    };
+    if fixture.comparison_id != "storage"
+        || fixture.workload_version != expected_workload_version
+        || !shape_is_valid
+    {
         return Err(cli_error("storage benchmark fixture is invalid"));
     }
     Ok(())
@@ -433,7 +445,7 @@ impl BenchmarkTarget for StorageTarget {
             comparison_id: "storage",
             comparison_version: 1,
             implementation: self.engine.implementation(),
-            implementation_revision: "4",
+            implementation_revision: "5",
             dependencies: self.engine.dependencies(),
             workload_id: self.workload.id(),
             workload_version: self.fixture.workload_version,
@@ -441,7 +453,9 @@ impl BenchmarkTarget for StorageTarget {
             unit: self.workload.unit(),
             boundary: self.workload.boundary(),
             process_mode: match self.workload {
-                StorageWorkload::CrossProcessCrashReplay => "cross-process",
+                StorageWorkload::CasOneWinner | StorageWorkload::CrossProcessCrashReplay => {
+                    "cross-process"
+                }
                 _ => "in-process",
             },
             fixture_bytes: self.fixture_bytes,
@@ -472,7 +486,7 @@ impl BenchmarkTarget for StorageTarget {
             .ok_or_else(|| cli_error("storage benchmark run directory was not prepared"))?;
         match self.workload {
             StorageWorkload::CasOneWinner => {
-                return run_cas_workload(
+                return cas::run_workload(
                     self.engine,
                     run_dir,
                     &self.events,
@@ -584,6 +598,7 @@ impl BenchmarkTarget for StorageTarget {
             .run_dir
             .as_deref()
             .ok_or_else(|| cli_error("storage benchmark run directory was not active"))?;
+        cas::require_no_active_children(path)?;
         crash::require_no_active_children(path)?;
         let path = self
             .run_dir
@@ -601,140 +616,6 @@ struct StorageObservation {
     replay_ns: u64,
     post_append_storage_bytes: u64,
     final_storage_bytes: u64,
-}
-
-fn run_cas_workload(
-    engine: StorageEngine,
-    run_dir: &Path,
-    events: &[EventRecord],
-    contenders: u32,
-) -> AppResult<BenchmarkObservation> {
-    if contenders < 2 {
-        return Err(cli_error("CAS workload requires at least two contenders"));
-    }
-    let candidate = cas_event(events)?;
-    let expected_head = candidate
-        .sequence
-        .checked_sub(1)
-        .ok_or_else(|| cli_error("CAS candidate sequence starts at zero"))?;
-    let (replayed, prepare_ns, cas_ns, replay_ns, winners, storage_bytes) = match engine {
-        StorageEngine::SqliteWal => {
-            let path = run_dir.join("ledger.sqlite3");
-            let prepare_started = Instant::now();
-            let mut connection = create_sqlite_store(&path)?;
-            append_sqlite_events(&mut connection, events)?;
-            let prepare_ns = elapsed_ns(prepare_started)?;
-
-            let cas_started = Instant::now();
-            let mut winners = 0_u32;
-            for _ in 0..contenders {
-                let transaction =
-                    connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-                let changed = transaction.execute(
-                    "UPDATE ledger_state SET head_sequence = ?1
-                     WHERE singleton = 1 AND head_sequence = ?2",
-                    params![
-                        i64::try_from(candidate.sequence)?,
-                        i64::try_from(expected_head)?
-                    ],
-                )?;
-                if changed == 1 {
-                    transaction.execute(
-                        "INSERT INTO events
-                         (sequence, transaction_id, event_index, payload)
-                         VALUES (?1, ?2, ?3, ?4)",
-                        params![
-                            i64::try_from(candidate.sequence)?,
-                            i64::try_from(candidate.transaction)?,
-                            i64::from(candidate.index),
-                            &candidate.payload,
-                        ],
-                    )?;
-                    winners = winners
-                        .checked_add(1)
-                        .ok_or_else(|| cli_error("CAS winner count overflow"))?;
-                }
-                transaction.commit()?;
-            }
-            let cas_ns = elapsed_ns(cas_started)?;
-            drop(connection);
-
-            let replay_started = Instant::now();
-            let replayed = replay_sqlite(&path)?;
-            let replay_ns = elapsed_ns(replay_started)?;
-            let storage_bytes = directory_size(run_dir)?;
-            (
-                replayed,
-                prepare_ns,
-                cas_ns,
-                replay_ns,
-                winners,
-                storage_bytes,
-            )
-        }
-        StorageEngine::AppendLog => {
-            let path = run_dir.join("ledger.gtlog");
-            let prepare_started = Instant::now();
-            let mut file = create_append_log(&path)?;
-            append_log_events(&mut file, events)?;
-            let prepare_ns = elapsed_ns(prepare_started)?;
-
-            let cas_started = Instant::now();
-            let mut winners = 0_u32;
-            let mut current_head = expected_head;
-            for _ in 0..contenders {
-                if current_head == expected_head {
-                    write_transaction(&mut file, std::slice::from_ref(&candidate))?;
-                    file.flush()?;
-                    file.sync_data()?;
-                    current_head = candidate.sequence;
-                    winners = winners
-                        .checked_add(1)
-                        .ok_or_else(|| cli_error("CAS winner count overflow"))?;
-                }
-            }
-            let cas_ns = elapsed_ns(cas_started)?;
-            drop(file);
-
-            let replay_started = Instant::now();
-            let outcome = replay_log(&path)?;
-            if outcome.incomplete_tail {
-                return Err(cli_error("CAS append log has an incomplete tail"));
-            }
-            let replay_ns = elapsed_ns(replay_started)?;
-            let storage_bytes = directory_size(run_dir)?;
-            (
-                outcome.events,
-                prepare_ns,
-                cas_ns,
-                replay_ns,
-                winners,
-                storage_bytes,
-            )
-        }
-    };
-
-    let mut expected = events.to_vec();
-    expected.push(candidate);
-    if winners != 1 || replayed != expected {
-        return Err(cli_error(
-            "storage CAS did not produce exactly one canonical winner",
-        ));
-    }
-    Ok(BenchmarkObservation {
-        operation_units: u64::from(contenders),
-        output_digest: canonical_digest(&replayed)?,
-        timings_ns: BTreeMap::from([
-            ("cas".into(), cas_ns),
-            ("prepare".into(), prepare_ns),
-            ("replay".into(), replay_ns),
-        ]),
-        gauges: BTreeMap::from([
-            ("cas_losers".into(), u64::from(contenders - winners)),
-            ("cas_winners".into(), u64::from(winners)),
-            ("final_storage_bytes".into(), storage_bytes),
-        ]),
-    })
 }
 
 fn cas_event(events: &[EventRecord]) -> AppResult<EventRecord> {
@@ -2207,7 +2088,7 @@ mod tests {
     }
 
     #[test]
-    fn cas_workload_has_one_winner_for_both_candidates() {
+    fn cas_workload_descriptor_is_cross_process_for_both_candidates() {
         let options = |implementation: &str| Options {
             comparison: "storage".into(),
             implementation: implementation.into(),
@@ -2220,17 +2101,12 @@ mod tests {
             expect_baseline: None,
             machine_identifiers: MachineIdentifierPolicy::Redacted,
         };
-        let mut sqlite = target_for(&options("sqlite-wal")).expect("SQLite target");
-        let mut append = target_for(&options("append-log")).expect("append target");
-        let (_, sqlite_observation) = execute_once(sqlite.as_mut()).expect("SQLite CAS");
-        let (_, append_observation) = execute_once(append.as_mut()).expect("append CAS");
-        assert_eq!(sqlite_observation.gauges["cas_winners"], 1);
-        assert_eq!(append_observation.gauges["cas_winners"], 1);
-        assert_eq!(sqlite_observation.gauges["cas_losers"], 7);
-        assert_eq!(
-            sqlite_observation.output_digest,
-            append_observation.output_digest
-        );
+        let sqlite = target_for(&options("sqlite-wal")).expect("SQLite target");
+        let append = target_for(&options("append-log")).expect("append target");
+        assert_eq!(sqlite.descriptor().process_mode, "cross-process");
+        assert_eq!(append.descriptor().process_mode, "cross-process");
+        assert_eq!(sqlite.descriptor().implementation_revision, "5");
+        assert_eq!(append.descriptor().implementation_revision, "5");
     }
 
     #[test]

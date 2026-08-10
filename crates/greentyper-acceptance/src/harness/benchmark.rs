@@ -29,6 +29,7 @@ const CARGO_LOCK: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../.
 pub(super) enum Command {
     List,
     Run(Options),
+    StorageCasChild(StorageCasChildOptions),
     StorageCrashChild(StorageCrashChildOptions),
 }
 
@@ -54,12 +55,23 @@ pub(super) struct StorageCrashChildOptions {
     pub(super) supervisor_token: String,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct StorageCasChildOptions {
+    pub(super) implementation: String,
+    pub(super) contender: u32,
+    pub(super) run_dir: PathBuf,
+    pub(super) supervisor_token: String,
+}
+
 pub(super) fn parse(arguments: &[String]) -> AppResult<Command> {
     if arguments == ["list"] {
         return Ok(Command::List);
     }
     if arguments.first().map(String::as_str) == Some("__storage-crash-child") {
         return parse_storage_crash_child(&arguments[1..]);
+    }
+    if arguments.first().map(String::as_str) == Some("__storage-cas-child") {
+        return parse_storage_cas_child(&arguments[1..]);
     }
 
     let mut comparison = None;
@@ -119,6 +131,41 @@ pub(super) fn parse(arguments: &[String]) -> AppResult<Command> {
     }))
 }
 
+fn parse_storage_cas_child(arguments: &[String]) -> AppResult<Command> {
+    let mut implementation = None;
+    let mut contender = None;
+    let mut run_dir = None;
+    let mut supervisor_token = None;
+    parse_options(arguments, |name, value| match name {
+        "--implementation" => set_once(&mut implementation, name, value),
+        "--contender" => set_once(&mut contender, name, value),
+        "--run-dir" => set_once(&mut run_dir, name, value),
+        "--supervisor-token" => set_once(&mut supervisor_token, name, value),
+        _ => Err(cli_error(format!(
+            "unknown storage CAS child option {name}"
+        ))),
+    })?;
+    let implementation = required(implementation, "--implementation")?;
+    let contender = required(contender, "--contender")?
+        .parse::<u32>()
+        .map_err(|_| cli_error("storage CAS contender must be an unsigned integer"))?;
+    let run_dir = PathBuf::from(required(run_dir, "--run-dir")?);
+    let supervisor_token = required(supervisor_token, "--supervisor-token")?;
+    validate_benchmark_label("implementation", &implementation)?;
+    validate_storage_supervisor_token("CAS", &supervisor_token)?;
+    if !run_dir.is_absolute() {
+        return Err(cli_error(
+            "storage CAS child run directory must be absolute",
+        ));
+    }
+    Ok(Command::StorageCasChild(StorageCasChildOptions {
+        implementation,
+        contender,
+        run_dir,
+        supervisor_token,
+    }))
+}
+
 fn parse_storage_crash_child(arguments: &[String]) -> AppResult<Command> {
     let mut implementation = None;
     let mut case_name = None;
@@ -161,6 +208,19 @@ fn parse_storage_crash_child(arguments: &[String]) -> AppResult<Command> {
     }))
 }
 
+fn validate_storage_supervisor_token(kind: &str, token: &str) -> AppResult<()> {
+    if token.len() != 64
+        || !token
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        return Err(cli_error(format!(
+            "storage {kind} supervisor token must be 64 lowercase hexadecimal characters"
+        )));
+    }
+    Ok(())
+}
+
 fn validate_benchmark_label(name: &str, value: &str) -> AppResult<()> {
     if value.is_empty()
         || value.len() > 64
@@ -182,7 +242,22 @@ pub(super) fn run(command: Command) -> AppResult<()> {
             Ok(())
         }
         Command::Run(options) => run_benchmark(options),
+        Command::StorageCasChild(options) => run_storage_cas_child(options),
         Command::StorageCrashChild(options) => run_storage_crash_child(options),
+    }
+}
+
+fn run_storage_cas_child(options: StorageCasChildOptions) -> AppResult<()> {
+    #[cfg(feature = "bench-storage")]
+    {
+        storage::run_cas_child(options)
+    }
+    #[cfg(not(feature = "bench-storage"))]
+    {
+        let _ = options;
+        Err(cli_error(
+            "storage CAS child is not compiled into this runner",
+        ))
     }
 }
 
@@ -724,6 +799,43 @@ mod tests {
         assert!(matches!(command, Command::StorageCrashChild(_)));
         let catalog = benchmark_catalog().to_string();
         assert!(!catalog.contains("__storage-crash-child"));
+    }
+
+    #[test]
+    fn storage_cas_child_is_hidden_and_requires_an_absolute_directory() {
+        assert!(
+            parse(&strings(&[
+                "__storage-cas-child",
+                "--implementation",
+                "append-log",
+                "--contender",
+                "0",
+                "--run-dir",
+                "relative",
+                "--supervisor-token",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ]))
+            .is_err()
+        );
+        let run_dir = std::env::temp_dir().join("greentyper-hidden-cas-child-parse");
+        let command = parse(&[
+            "__storage-cas-child".into(),
+            "--implementation".into(),
+            "sqlite-wal".into(),
+            "--contender".into(),
+            "7".into(),
+            "--run-dir".into(),
+            run_dir.to_string_lossy().into_owned(),
+            "--supervisor-token".into(),
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+        ])
+        .expect("hidden CAS child");
+        assert!(matches!(
+            command,
+            Command::StorageCasChild(StorageCasChildOptions { contender: 7, .. })
+        ));
+        let catalog = benchmark_catalog().to_string();
+        assert!(!catalog.contains("__storage-cas-child"));
     }
 
     #[test]
