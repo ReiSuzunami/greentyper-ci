@@ -317,7 +317,11 @@ blocks dirty quit, rejects a stale CAS preview, explicitly discards, and
 preserves the winning Config. Controller tests also prove non-Provider `add`
 routes do not enter a partial rendered prompt and that an existing Profile's
 credential reference can be replaced without serialized readback or generic raw
-credential mutation. These tests assert that dirty
+credential mutation. A real-key loop now opens a Provider wizard, maps F5 to an
+injected connection tester, renders success, and proves the Config bytes,
+credential reference, and Ledger remain untouched. Recovery tests retain a valid
+dirty Draft across a retryable failure, reset the observation after the next
+edit, and reject a stale revision before invoking the tester. These tests assert that dirty
 Escape/quit is blocked, a failed preview
 is rendered without ending the loop, and a no-change commit creates no file.
 They do not constitute real ConPTY, panic-abort cleanup, secret-store UI,

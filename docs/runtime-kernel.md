@@ -336,8 +336,10 @@ charges still require a future dedicated authority path.
   The Direct VT tracer carries no approval authority; its mutable surface is
   limited to the user-scope statusline-preset, statusline-expansion, and
   existing-Provider base-URL/opaque-credential-reference Config Drafts plus the
-  bounded Provider Profile creation workflow described below. It never reads
-  back a credential reference or mutates a secret store.
+  bounded Provider Profile creation workflow described below. F5 can run the
+  existing bounded connection/model-list tester against that revision-bound
+  candidate and render its ephemeral status. It never reads back a credential
+  reference, commits through that action, or mutates a secret store.
 - Complete Config Schema default/constraint/normalization/migration metadata,
   remaining mutable rendered TUI/App Server editors, live catalog discovery, and the rendered
   template-picker/starter-preset workflow. Release Provider Template defaults

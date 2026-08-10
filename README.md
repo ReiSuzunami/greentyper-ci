@@ -279,11 +279,17 @@ never rendered or read back. Enter previews a text-field Draft and a second
 Enter commits it, while a template choice uses Enter to preview and `c` to
 commit. The same status-only credential-reference interaction is available for
 an existing Profile. Real-key tests commit and reopen a created Profile, and
-invalid IDs or revision conflicts leave the wizard recoverable. Outside these
-narrow workflows the tracer remains snapshot-based and read-only. It is not a
+invalid IDs or revision conflicts leave the wizard recoverable. Within rendered
+Provider wizard fields, F5 runs the existing bounded connection and model-list
+test against the current revision-bound candidate. The rendered status is
+ephemeral, a staged change resets it, and a stale revision stops before the
+tester. The action does not commit Config, mutate a Provider Epoch, merge a
+catalog, expose the credential reference, or grant execution authority. The
+current terminal action runs synchronously under the tester's 10-second timeout.
+Outside these narrow workflows the tracer remains snapshot-based and read-only. It is not a
 general mutable terminal editor, approval surface, live refresh loop, audited
 ConPTY integration, non-Provider object-creation or deletion-confirmation
-dialog, secret-entry/bind surface, connection-test control, starter-preset
+dialog, secret-entry/bind surface, starter-preset
 workflow, or persistent live catalog discovery. Live inference conformance,
 reconnect/retry, OpenCode Go Messages execution,
 Messages reasoning blocks, Preset context/fallback execution, richer approval

@@ -590,6 +590,10 @@ impl PresentationController {
         matches!(self.state, PresentationState::SlashPanel)
     }
 
+    pub(crate) const fn is_provider_wizard(&self) -> bool {
+        matches!(self.state, PresentationState::ProviderWizard)
+    }
+
     pub(crate) const fn is_config_object_selector(&self) -> bool {
         matches!(
             self.state,
@@ -991,10 +995,10 @@ impl PresentationController {
         Ok(preview)
     }
 
-    pub(crate) fn test_provider_connection(
+    pub(crate) fn test_provider_connection<T: ProviderConnectionTester + ?Sized>(
         &mut self,
         runtime: &ConfigRuntime,
-        tester: &mut impl ProviderConnectionTester,
+        tester: &mut T,
     ) -> Result<ProviderConnectionTestStatus, PresentationControllerError> {
         if self.state != PresentationState::ProviderWizard {
             return Err(PresentationControllerError::NotProviderWizard);

@@ -17,10 +17,12 @@ use greentyper_core::config::{
 use greentyper_core::runtime::{RuntimeError, RuntimeKernel};
 use greentyper_core::usage::{UsageError, UsageTimestamp};
 
+use crate::credential_vault::PlatformCredentialVault;
 use crate::presentation::{
     PresentationController, PresentationControllerError, PresentationError, PresentationLayoutView,
     PresentationSources, TuiViewModel, Viewport, ViewportError,
 };
+use crate::provider_connection::{ModelsHttpConnectionTester, ProviderConnectionTester};
 
 pub(crate) fn require_interactive() -> Result<(), TerminalError> {
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
@@ -413,6 +415,7 @@ enum TerminalInputEvent {
     Down,
     Enter,
     Escape,
+    TestProviderConnection,
     Resize(u16, u16),
     Quit,
     Ignore,
@@ -446,6 +449,7 @@ fn map_crossterm_event(event: Event) -> TerminalInputEvent {
             KeyCode::Down => TerminalInputEvent::Down,
             KeyCode::Enter => TerminalInputEvent::Enter,
             KeyCode::Esc => TerminalInputEvent::Escape,
+            KeyCode::F(5) if key.modifiers.is_empty() => TerminalInputEvent::TestProviderConnection,
             _ => TerminalInputEvent::Ignore,
         },
         _ => TerminalInputEvent::Ignore,
@@ -465,6 +469,7 @@ enum TerminalIntent {
     ActivateConfigObject,
     MoveConfigField(isize),
     MoveConfigChoice(isize),
+    TestProviderConnection,
     PreviewConfig,
     CommitConfig,
     DiscardConfig,
@@ -514,6 +519,7 @@ impl TerminalInputState {
         context: TerminalInputContext,
     ) -> TerminalIntent {
         match event {
+            TerminalInputEvent::TestProviderConnection => TerminalIntent::TestProviderConnection,
             TerminalInputEvent::Character(character)
                 if context == TerminalInputContext::SlashPanel
                     && !character.is_control()
@@ -701,10 +707,20 @@ impl TerminalSession {
         })
     }
 
+    #[cfg(test)]
     fn handle(
         &mut self,
         event: TerminalInputEvent,
         runtime: Option<&mut ConfigRuntime>,
+    ) -> Result<TerminalLoopOutcome, TerminalError> {
+        self.handle_with_connection_tester(event, runtime, None)
+    }
+
+    fn handle_with_connection_tester(
+        &mut self,
+        event: TerminalInputEvent,
+        runtime: Option<&mut ConfigRuntime>,
+        tester: Option<&mut dyn ProviderConnectionTester>,
     ) -> Result<TerminalLoopOutcome, TerminalError> {
         let intent = self.input.apply(event, self.input_context());
         match intent {
@@ -805,6 +821,21 @@ impl TerminalSession {
                         self.validated_config_choice = None;
                         self.notice = None;
                     }
+                    Err(source) => self.notice = Some(presentation_notice(&source)),
+                }
+                Ok(TerminalLoopOutcome::Redraw)
+            }
+            TerminalIntent::TestProviderConnection => {
+                if !self.controller.is_provider_wizard() {
+                    return Ok(TerminalLoopOutcome::Noop);
+                }
+                let runtime = runtime.ok_or(TerminalError::ConfigRuntimeRequired)?;
+                let Some(tester) = tester else {
+                    self.notice = Some("Provider connection test unavailable".to_owned());
+                    return Ok(TerminalLoopOutcome::Redraw);
+                };
+                match self.controller.test_provider_connection(runtime, tester) {
+                    Ok(_) => self.notice = None,
                     Err(source) => self.notice = Some(presentation_notice(&source)),
                 }
                 Ok(TerminalLoopOutcome::Redraw)
@@ -1260,13 +1291,44 @@ fn run_terminal_loop<W, M, F>(
     view: &TuiViewModel,
     width: u16,
     height: u16,
-    mut read_event: F,
+    read_event: F,
 ) -> Result<W, TerminalError>
 where
     W: Write,
     M: TerminalMode,
     F: FnMut() -> io::Result<Event>,
 {
+    let vault = PlatformCredentialVault;
+    let mut tester = ModelsHttpConnectionTester::new(&vault);
+    let viewport = Viewport::new(width, height)?;
+    run_terminal_loop_with_connection_tester(
+        writer,
+        mode,
+        config,
+        view,
+        viewport,
+        &mut tester,
+        read_event,
+    )
+}
+
+fn run_terminal_loop_with_connection_tester<W, M, T, F>(
+    writer: W,
+    mode: M,
+    config: &mut ConfigRuntime,
+    view: &TuiViewModel,
+    viewport: Viewport,
+    tester: &mut T,
+    mut read_event: F,
+) -> Result<W, TerminalError>
+where
+    W: Write,
+    M: TerminalMode,
+    T: ProviderConnectionTester,
+    F: FnMut() -> io::Result<Event>,
+{
+    let width = viewport.width();
+    let height = viewport.height();
     let mut surface = TerminalSurface::enter(writer, mode)?;
     let mut renderer = DirectVtRenderer::new(width, height)?;
     let mut session = TerminalSession::new("/", width, height)?;
@@ -1275,7 +1337,11 @@ where
     surface.write_frame(&renderer.draw(&frame)?)?;
 
     loop {
-        match session.handle(map_crossterm_event(read_event()?), Some(config))? {
+        match session.handle_with_connection_tester(
+            map_crossterm_event(read_event()?),
+            Some(config),
+            Some(tester),
+        )? {
             TerminalLoopOutcome::Quit => break,
             TerminalLoopOutcome::Resize(width, height) => {
                 surface.write_frame(&renderer.resize(width, height)?)?;
@@ -1414,14 +1480,18 @@ mod tests {
         ConfigObjectRef, ConfigPaths, ConfigRuntime, ConfigScope, ConfigValue,
         MAX_CONFIG_STRING_BYTES,
     };
+    use greentyper_core::provider::ProviderProfileSnapshot;
 
     use crate::presentation::{PresentationScreenView, build_smoke_view};
+    use crate::provider_connection::{
+        ProviderConnectionFailureCategory, ProviderConnectionTestStatus, ProviderConnectionTester,
+    };
 
     use super::{
         DirectVtRenderer, ENTER_TERMINAL, LEAVE_TERMINAL, TerminalFrame, TerminalInputContext,
         TerminalInputEvent, TerminalInputState, TerminalIntent, TerminalLoopOutcome, TerminalMode,
-        TerminalSession, TerminalSurface, build_terminal_view, map_crossterm_event,
-        run_terminal_loop,
+        TerminalSession, TerminalSurface, Viewport, build_terminal_view, map_crossterm_event,
+        run_terminal_loop, run_terminal_loop_with_connection_tester,
     };
 
     static NEXT_TEMP: AtomicU64 = AtomicU64::new(1);
@@ -2010,6 +2080,19 @@ mod tests {
             TerminalInputEvent::Delete
         );
         assert_eq!(
+            map_crossterm_event(Event::Key(
+                KeyEvent::new(KeyCode::F(5), KeyModifiers::NONE,)
+            )),
+            TerminalInputEvent::TestProviderConnection
+        );
+        assert_eq!(
+            map_crossterm_event(Event::Key(KeyEvent::new(
+                KeyCode::F(5),
+                KeyModifiers::CONTROL,
+            ))),
+            TerminalInputEvent::Ignore
+        );
+        assert_eq!(
             map_crossterm_event(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE,))),
             TerminalInputEvent::Tab
         );
@@ -2038,6 +2121,175 @@ mod tests {
             map_crossterm_event(Event::Resize(120, 40)),
             TerminalInputEvent::Resize(120, 40)
         );
+    }
+
+    struct RecordingConnectionTester {
+        calls: Vec<(String, u64)>,
+    }
+
+    impl ProviderConnectionTester for RecordingConnectionTester {
+        fn test(&mut self, profile: &ProviderProfileSnapshot) -> ProviderConnectionTestStatus {
+            self.calls
+                .push((profile.profile().to_owned(), profile.fingerprint()));
+            ProviderConnectionTestStatus::Succeeded {
+                profile: profile.profile().to_owned(),
+                fingerprint: profile.fingerprint(),
+                models: Vec::new(),
+            }
+        }
+    }
+
+    struct FailingConnectionTester {
+        calls: usize,
+    }
+
+    impl ProviderConnectionTester for FailingConnectionTester {
+        fn test(&mut self, _profile: &ProviderProfileSnapshot) -> ProviderConnectionTestStatus {
+            self.calls += 1;
+            ProviderConnectionTestStatus::Failed {
+                category: ProviderConnectionFailureCategory::Unavailable,
+                retryable: true,
+            }
+        }
+    }
+
+    #[test]
+    fn terminal_provider_connection_f5_is_scoped_to_the_provider_wizard() {
+        let mut session = TerminalSession::new("/", 80, 24).expect("terminal session");
+        let mut tester = FailingConnectionTester { calls: 0 };
+
+        assert_eq!(
+            session
+                .handle_with_connection_tester(
+                    TerminalInputEvent::TestProviderConnection,
+                    None,
+                    Some(&mut tester),
+                )
+                .expect("unrelated F5 is ignored"),
+            TerminalLoopOutcome::Noop
+        );
+        assert_eq!(tester.calls, 0);
+        assert!(session.notice.is_none());
+    }
+
+    #[test]
+    fn terminal_loop_tests_provider_connection_from_f5_without_mutating_config() {
+        let root = terminal_test_root("provider-connection-loop");
+        std::fs::create_dir_all(&root).expect("create provider config directory");
+        let ledger = root.join("runtime.ledger");
+        let paths = ConfigPaths::new(root.join("user.toml"), root.join("project.toml"));
+        write_terminal_provider_config(&paths);
+        let before = std::fs::read(paths.user()).expect("read provider config before test");
+        let mut config =
+            ConfigRuntime::open(paths.clone(), ConfigDocument::empty()).expect("config runtime");
+        let view = build_terminal_view(&ledger, &config, "/").expect("terminal view");
+        let mut tester = RecordingConnectionTester { calls: Vec::new() };
+        let mut events: VecDeque<_> = "config provider url"
+            .chars()
+            .map(|character| {
+                Event::Key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
+            })
+            .collect();
+        events.extend([
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::F(5), KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL)),
+        ]);
+
+        let output = run_terminal_loop_with_connection_tester(
+            Vec::new(),
+            FakeTerminalMode::default(),
+            &mut config,
+            &view,
+            Viewport::new(80, 24).expect("viewport"),
+            &mut tester,
+            move || Ok(events.pop_front().expect("bounded event sequence")),
+        )
+        .expect("terminal loop");
+
+        assert_eq!(tester.calls.len(), 1);
+        assert_eq!(tester.calls[0].0, "edge");
+        assert!(String::from_utf8_lossy(&output).contains("succeeded"));
+        assert!(!String::from_utf8_lossy(&output).contains("synthetic-edge-credential-reference"));
+        assert_eq!(
+            std::fs::read(paths.user()).expect("read provider config after test"),
+            before
+        );
+        assert!(!ledger.exists());
+        std::fs::remove_dir_all(root).expect("remove test config");
+    }
+
+    #[test]
+    fn terminal_provider_connection_failure_keeps_draft_and_edit_resets_status() {
+        let root = terminal_test_root("provider-connection-recovery");
+        let paths = ConfigPaths::new(root.join("user.toml"), root.join("project.toml"));
+        write_terminal_provider_config(&paths);
+        let before = std::fs::read(paths.user()).expect("read provider config before test");
+        let mut config =
+            ConfigRuntime::open(paths.clone(), ConfigDocument::empty()).expect("config runtime");
+        let mut session =
+            TerminalSession::new("/config provider url", 80, 24).expect("terminal session");
+        session
+            .handle(TerminalInputEvent::Enter, Some(&mut config))
+            .expect("open provider selector");
+        session
+            .handle(TerminalInputEvent::Enter, Some(&mut config))
+            .expect("open provider URL editor");
+        for character in "https://candidate.example.com/v1".chars() {
+            session
+                .handle(TerminalInputEvent::Character(character), Some(&mut config))
+                .expect("stage candidate URL");
+        }
+
+        let mut tester = FailingConnectionTester { calls: 0 };
+        session
+            .handle_with_connection_tester(
+                TerminalInputEvent::TestProviderConnection,
+                Some(&mut config),
+                Some(&mut tester),
+            )
+            .expect("test candidate connection");
+
+        assert_eq!(tester.calls, 1);
+        assert!(matches!(
+            session.controller.screen(Some(&config)).expect("screen"),
+            PresentationScreenView::ProviderWizard {
+                dirty: true,
+                connection: ProviderConnectionTestStatus::Failed {
+                    category: ProviderConnectionFailureCategory::Unavailable,
+                    retryable: true,
+                },
+                ..
+            }
+        ));
+        let smoke = build_smoke_view("/").expect("view");
+        let layout = session
+            .layout(Some(&config), smoke.view())
+            .expect("failed connection layout");
+        assert!(
+            layout
+                .body()
+                .iter()
+                .any(|row| row.text() == "connection failed (retryable)")
+        );
+        assert_eq!(
+            std::fs::read(paths.user()).expect("read provider config after test"),
+            before
+        );
+
+        session
+            .handle(TerminalInputEvent::Character('x'), Some(&mut config))
+            .expect("continue editing candidate");
+        assert!(matches!(
+            session.controller.screen(Some(&config)).expect("screen"),
+            PresentationScreenView::ProviderWizard {
+                dirty: true,
+                connection: ProviderConnectionTestStatus::Untested,
+                ..
+            }
+        ));
+        std::fs::remove_dir_all(root).expect("remove test config");
     }
 
     #[test]
@@ -2501,9 +2753,15 @@ mod tests {
             .expect("stage winning URL");
         winner.commit(&mut config).expect("commit winning URL");
 
+        let mut tester = RecordingConnectionTester { calls: Vec::new() };
         conflict
-            .handle(TerminalInputEvent::Enter, Some(&mut config))
-            .expect("conflict remains live");
+            .handle_with_connection_tester(
+                TerminalInputEvent::TestProviderConnection,
+                Some(&mut config),
+                Some(&mut tester),
+            )
+            .expect("stale connection test remains live");
+        assert!(tester.calls.is_empty());
         assert_eq!(
             conflict.notice.as_deref(),
             Some("Config changed; discard and reopen the editor")

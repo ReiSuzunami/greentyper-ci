@@ -119,6 +119,12 @@ separate credential command. `/config provider add` prompts for a bounded
 lowercase Profile ID, opens a release-template choice, and uses Tab/Shift-Tab to
 move among the rendered template, credential-reference, and base-URL fields.
 The same dry-run and CAS rules apply before the Profile is committed.
+F5 runs the bounded Provider connection and model-list test against the current
+revision-bound Provider candidate. Success and fixed retryable/non-retryable
+failure states render in the wizard; any staged change resets the observation
+to untested. A stale revision is rejected before the tester runs, and the action
+does not commit Config or grant Provider authority. The current Direct VT action
+runs synchronously under the tester's 10-second timeout.
 Validation and revision-conflict failures stay visible without consuming the
 Draft; Escape and quit keys cannot discard a dirty Draft, and a no-change commit
 does not create a Config file. The committed value is verified by reopening the
@@ -129,7 +135,7 @@ dangling references. The snapshot-based `tui` tracer renders controller screens
 reachable from the Slash Panel, including the top-level Config Center; only the
 workflows above mutate a Draft. It does not yet ship remaining schema-driven
 terminal editor dialogs, non-Provider object-name or deletion-confirmation
-forms, secret-entry/bind UI, connection-test control, or the App Server surface
+forms, secret-entry/bind UI, or the App Server surface
 described below. The current
 terminal-neutral Provider Profile wizard resolves release template defaults into
 user-configured Profile Drafts and supports the explicit bounded connection and
@@ -273,9 +279,9 @@ other than `id` are ignored and never enter the result. The check returns a
 fixed failure category for an invalid response, never exposes response bodies,
 does not commit Config or mutate a Provider Epoch, and is not yet a commit gate.
 The rendered TUI now supplies the narrow release-template and opaque
-credential-reference creation flow described above. Secure credential secret
-binding, a rendered connection-test control, custom template editing, and the
-starter preset workflow remain pending.
+credential-reference creation flow plus the explicit F5 connection-test control
+described above. Secure credential secret binding, custom template editing, and
+the starter preset workflow remain pending.
 
 ## Model Catalog and Presets
 
