@@ -275,7 +275,14 @@ create/delete projection. Terminal-neutral golden tests freeze exact 40x12,
 80x24, and 160x50 status rows, deterministic hidden-segment order, layout height,
 and grapheme-safe CJK/emoji/combining-mark text fitting. The subprocess smoke
 emits the same three layouts without accepting a filesystem path. These tests do
-not constitute an ANSI/VT backend, live terminal input, or ConPTY terminal claim.
+not by themselves constitute an ANSI/VT backend, live terminal input, or ConPTY
+terminal claim. Product terminal tests now additionally freeze Direct VT stale-cell
+clearing, wide-cell geometry, zero-byte identical frames, resize clearing,
+controller input mapping, blocking event delivery, 512x256/131,072-cell viewport
+and 256-byte Slash-query bounds, alternate-screen/raw-mode restoration,
+read-only missing-Ledger inspection, and non-terminal rejection before state
+creation or stdout output. They do not constitute real ConPTY,
+panic-abort cleanup, mutable editor/approval, live-refresh, or resource evidence.
 Context Pressure tests freeze exact 65%/90% threshold transitions, estimated and
 missing-fact propagation, invalid policy/limit and arithmetic failure, and the
 no-side-effect hard admission gate. Product presentation tests assert estimated
@@ -298,9 +305,10 @@ decision, and release models bind only under template-enabled catalog modes. The
 read-only `config catalog` integration test proves the snapshot contains no
 local path or credential reference.
 
-Remaining terminal-backend goldens cover real resize and stale-cell clearing,
-hierarchical input events, rendered Config dialogs, model selector states,
-approval/blocker visibility, styles, and final cell geometry.
+Remaining terminal-backend evidence covers real terminal/ConPTY resize and input,
+rendered mutable Config dialogs, interactive model selector states,
+approval/blocker actions, panic-abort cleanup, final host cell geometry, and
+input-ready/idle resource budgets.
 
 Tests assert that `/config pro url` resolves to the focused Provider editor without registering a flat root command. Every Config Object must have a generic or purpose-built editor route. Credential fields must never support read-back.
 

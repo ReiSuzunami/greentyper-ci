@@ -500,6 +500,14 @@ impl Viewport {
         }
         Ok(Self { width, height })
     }
+
+    pub(crate) const fn width(self) -> u16 {
+        self.width
+    }
+
+    pub(crate) const fn height(self) -> u16 {
+        self.height
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -564,6 +572,10 @@ impl PresentationController {
             selected: 0,
             editor: None,
         }
+    }
+
+    pub(crate) const fn is_slash_panel(&self) -> bool {
+        matches!(self.state, PresentationState::SlashPanel)
     }
 
     pub(crate) fn set_slash_query(
@@ -968,6 +980,14 @@ impl LayoutRowView {
             selected,
         }
     }
+
+    pub(crate) fn text(&self) -> &str {
+        &self.text
+    }
+
+    pub(crate) const fn is_selected(&self) -> bool {
+        self.selected
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -1019,6 +1039,20 @@ pub(crate) struct PresentationLayoutView {
     screen: PresentationScreenView,
     body: Vec<LayoutRowView>,
     statusline: StatuslineLayoutView,
+}
+
+impl PresentationLayoutView {
+    pub(crate) const fn viewport(&self) -> Viewport {
+        self.viewport
+    }
+
+    pub(crate) fn body(&self) -> &[LayoutRowView] {
+        &self.body
+    }
+
+    pub(crate) fn statusline_rows(&self) -> &[LayoutRowView] {
+        &self.statusline.rows
+    }
 }
 
 struct StatusSegment {
@@ -1537,6 +1571,17 @@ pub(crate) struct PresentationSmokeView {
     #[serde(flatten)]
     view: TuiViewModel,
     layouts: Vec<PresentationLayoutView>,
+}
+
+#[cfg(test)]
+impl PresentationSmokeView {
+    pub(crate) const fn view(&self) -> &TuiViewModel {
+        &self.view
+    }
+
+    pub(crate) fn layouts(&self) -> &[PresentationLayoutView] {
+        &self.layouts
+    }
 }
 
 pub(crate) fn build_smoke_view(

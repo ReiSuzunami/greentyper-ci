@@ -226,9 +226,10 @@ revision-bound editors, the configured-preset selector, Stats, and Agent views.
 It refuses to discard dirty drafts implicitly and retains the editor after
 validation or revision-conflict failure. Its deterministic row layout freezes
 Unicode-safe text fitting, prioritized compact status segments, a wide detail
-row, and exact 40x12, 80x24, and 160x50 snapshots. No ANSI/VT backend, keyboard
-event loop, rendered terminal dialog, ConPTY integration, or App Server surface
-is claimed by these slices. Typed nested `add` and `remove` paths now open
+row, and exact 40x12, 80x24, and 160x50 snapshots. Those terminal-neutral slices
+did not by themselves claim an ANSI/VT backend, keyboard event loop, rendered
+terminal dialog, ConPTY integration, or App Server surface. Typed nested `add`
+and `remove` paths now open
 revision-bound create/delete sessions for Provider Profiles, Model Presets, and
 Usage Windows. Creation keeps one schema-driven Draft across focused fields;
 deletion removes only a target-layer object, passes through reference validation,
@@ -287,8 +288,18 @@ Ledger or Provider effects; soft and unknown facts preserve existing admission.
 The terminal-neutral status projection carries the immutable snapshot and marks
 estimated occupancy with `~`. No reduction or compaction is performed.
 
-This does not complete Phase 3. VT/ConPTY rendering and input, the keyboard event
-loop and terminal-backed schema editors, rendered object-name and confirmation
+A first read-only product terminal tracer is now implemented. `greentyper tui`
+inspects the selected Ledger without creating it, renders the existing
+Presentation Controller through a Unicode-aware Direct VT cell diff, maps
+blocking Crossterm key and resize events, suppresses model-equality redraws,
+clears stale cells, bounds the viewport and Slash query before allocation, and
+restores raw mode, cursor visibility, and the alternate screen on normal and
+error returns. Windows startup explicitly requires VT output support. It is
+snapshot-based and carries no new
+Runtime, Tool, credential, Config mutation, or approval authority.
+
+This does not complete Phase 3. Audited Windows ConPTY behavior, terminal-backed
+schema editing and approval interaction, live snapshot refresh, rendered object-name and confirmation
 dialogs, rendered credential binding and template-picker/starter-preset workflow,
 live catalog discovery and Recent evidence, automatic Context View/token-source
 projection, provider-reported
@@ -300,7 +311,7 @@ Exit criteria:
 
 - Every Config Object has an interactive editor route.
 - `/config pro url` reaches a focused validated gateway editor.
-- Narrow and wide terminal-backend golden tests pass; terminal-neutral row goldens already pass.
+- Narrow and wide Direct VT unit goldens pass; real Windows/ConPTY and final backend evidence remain.
 - Context, cost, cache, effort, tier, rolling, and workday values preserve exact/estimated/unknown states.
 - TUI input-ready, idle memory, and idle CPU budgets pass on FMDev.
 

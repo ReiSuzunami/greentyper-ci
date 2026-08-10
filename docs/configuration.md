@@ -101,8 +101,10 @@ Schema metadata, provenance-aware field views, typed nested object lifecycle
 actions, and a reusable Config Runtime editor session for focused multi-field
 draft validation, atomic create/edit/delete, and commit. Object deletion is
 target-layer explicit and fails when the resulting effective configuration has
-dangling references. It does not yet ship the rendered interactive Config
-Center, terminal editor dialogs, object-name input form, rendered Provider
+dangling references. The read-only `tui` tracer renders controller screens
+reachable from the Slash Panel, including the top-level Config Center, but it
+does not mutate drafts. It does not yet ship mutable terminal editor dialogs,
+object-name input form, rendered Provider
 template picker, or App Server surface described below. The current
 terminal-neutral Provider Profile wizard resolves release template defaults into
 user-configured Profile Drafts and supports the explicit status-only connection
@@ -345,7 +347,10 @@ projector. Estimated occupancy renders with `~`; a missing limit, used-token
 fact, reserve, or accuracy marker stays unknown. Its compact row now applies
 a deterministic priority and Unicode-safe truncation at 40, 80, and 160 columns,
 and adds a detail row from 120 columns. This is a terminal-neutral layout
-contract, not an ANSI/VT renderer or live resize/input loop. The target has four
+contract. The first read-only product `tui` tracer now renders it through a
+Direct VT diff and reacts to blocking key and resize events; it does not refresh
+the underlying snapshot, provide mutable actions, or establish ConPTY/resource
+evidence. The target has four
 presets:
 
 - `minimal`: model, Context Pressure, blocker/approval

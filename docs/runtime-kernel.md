@@ -322,21 +322,22 @@ charges still require a future dedicated authority path.
   `local.echo` CLI. The current product driver already delivers the persisted
   operation receipt before acknowledgement and consumes only the complete
   Kernel-rebound Session bundle; it exposes no Agent-ID-to-session conversion.
+  The read-only Direct VT tracer carries no approval authority.
 - Complete Config Schema default/constraint/normalization/migration metadata,
-  rendered TUI/App Server editors, live catalog discovery, and the rendered
+  mutable rendered TUI/App Server editors, live catalog discovery, and the rendered
   template-picker/starter-preset workflow. Release Provider Template defaults
   and seed catalog facts are present. The
   terminal-neutral schema route, field view, revision-bound editor session,
   dry-run validation, atomic commit path, interaction controller, Provider
   Profile candidate/connection-test flow, and deterministic viewport-row
   projection are present.
-- Terminal-backed TUI/statusline Usage presentation, automatic Context View
+- Live terminal-backed Usage refresh and interaction, automatic Context View
   construction/compaction, provider-reported charge
   and subscription-quota values, richer observed model/effort/tier
   metadata, and FMDev P6 measurements. The durable attempts, cached rollups,
   pinned Usage Windows, revision-bound summary/page `stats` projections, and
   terminal-neutral width-degradation and Context Pressure projection contracts
-  are present.
+  are present. The first read-only Direct VT tracer renders those frozen rows.
 - Live-provider validation, non-Windows credential backends, configurable proxy
   policy, broader TLS platform evidence, reconnect policy, multiple or parallel
   Tool calls, resumable result references, broader canonical Items, and the

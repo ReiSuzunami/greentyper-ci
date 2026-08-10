@@ -665,6 +665,7 @@ dependencies = [
 name = "greentyper"
 version = "0.0.0"
 dependencies = [
+ "crossterm",
  "greentyper-core",
  "libc",
  "rcgen",

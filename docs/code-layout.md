@@ -48,8 +48,11 @@ Manager access, the fixed
 `local.echo` process executor, a terminal-neutral presentation projection, Config
 Object lifecycle/Provider-wizard controller, deterministic viewport-row layout, and a
 ProductDriver that composes the Kernel-owned Team, Tool, Provider, approval, and
-delivery seams. A real ANSI/VT TUI, keyboard event loop, App Server, and audited
-Windows terminal wrapper remain pending. Platform wrappers for process,
+delivery seams. Its first read-only product terminal tracer privately owns a
+Direct VT cell-diff renderer, blocking Crossterm event adapter, alternate-screen
+and raw-mode lifecycle, and the public `tui` command. Mutable terminal editors,
+approval interaction, live refresh, the App Server, and an audited Windows
+ConPTY wrapper remain pending. Platform wrappers for process,
 credential, transport, and eventually terminal facilities remain private to
 this package unless a second real caller proves a smaller shared package is
 needed.

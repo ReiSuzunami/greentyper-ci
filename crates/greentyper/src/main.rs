@@ -8,6 +8,7 @@ mod product_driver;
 mod provider_connection;
 mod provider_http;
 mod provider_http_policy;
+mod terminal;
 
 use std::process::ExitCode;
 

@@ -42,6 +42,12 @@ use crate::provider_http::{
 
 pub fn run(arguments: impl Iterator<Item = String>) -> Result<(), CliError> {
     match parse(arguments)? {
+        Command::Tui { ledger } => {
+            crate::terminal::require_interactive()?;
+            let mut config = open_config_runtime(default_config_paths()?)?;
+            crate::terminal::run(&ledger, &mut config)?;
+            Ok(())
+        }
         Command::Headless {
             ledger,
             input,
@@ -483,6 +489,9 @@ fn open_runtime(path: &Path) -> Result<RuntimeKernel, CliError> {
 
 #[derive(Debug, Eq, PartialEq)]
 enum Command {
+    Tui {
+        ledger: PathBuf,
+    },
     Headless {
         ledger: PathBuf,
         input: String,
@@ -709,6 +718,15 @@ fn parse(mut arguments: impl Iterator<Item = String>) -> Result<Command, CliErro
         None => false,
     };
     match command.as_str() {
+        "tui" => {
+            reject_option(&input, "--input is not valid for tui")?;
+            reject_option(&delivery, "--delivery is not valid for tui")?;
+            reject_option(&tool, "--tool is not valid for tui")?;
+            reject_option(&at, "--at is not valid for tui")?;
+            reject_option(&dialect, "--dialect is not valid for tui")?;
+            reject_option(&preset, "--preset is not valid for tui")?;
+            Ok(Command::Tui { ledger })
+        }
         "headless" => {
             reject_option(&delivery, "--delivery is not valid for headless")?;
             reject_option(&at, "--at is not valid for headless")?;
@@ -1362,9 +1380,10 @@ fn optional_absolute_env_path(name: &'static str) -> Result<Option<PathBuf>, Cli
 }
 
 const USAGE: &str = "\
-GreenTyper headless Runtime\n\
+GreenTyper Runtime\n\
 \n\
 Usage:\n\
+  greentyper tui [--ledger PATH]\n\
   greentyper headless [--ledger PATH] [--preset ID | --dialect DIALECT] [--tool local.echo] --input TEXT\n\
   greentyper resume [--ledger PATH] [--tool local.echo]\n\
   greentyper status [--ledger PATH]\n\
@@ -1396,6 +1415,7 @@ pub enum CliError {
     Credential(CredentialVaultError),
     ProductDriver(ProductDriverError),
     Presentation(PresentationSmokeError),
+    Terminal(crate::terminal::TerminalError),
 }
 
 impl fmt::Display for CliError {
@@ -1421,6 +1441,7 @@ impl fmt::Display for CliError {
             Self::Credential(source) => write!(formatter, "{source}"),
             Self::ProductDriver(source) => write!(formatter, "{source}"),
             Self::Presentation(source) => write!(formatter, "{source}"),
+            Self::Terminal(source) => write!(formatter, "{source}"),
         }
     }
 }
@@ -1438,6 +1459,7 @@ impl Error for CliError {
             Self::Credential(source) => Some(source),
             Self::ProductDriver(source) => Some(source),
             Self::Presentation(source) => Some(source),
+            Self::Terminal(source) => Some(source),
             Self::UsageRuntime(source) => Some(source),
             Self::Usage(_) => None,
         }
@@ -1504,6 +1526,12 @@ impl From<PresentationSmokeError> for CliError {
     }
 }
 
+impl From<crate::terminal::TerminalError> for CliError {
+    fn from(source: crate::terminal::TerminalError) -> Self {
+        Self::Terminal(source)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::ffi::OsString;
@@ -1544,6 +1572,28 @@ mod tests {
 
     #[test]
     fn parser_requires_command_specific_options() {
+        assert!(matches!(
+            parse(
+                [
+                    "tui".to_owned(),
+                    "--ledger".to_owned(),
+                    "runtime.ledger".to_owned(),
+                ]
+                .into_iter()
+            ),
+            Ok(Command::Tui { ledger }) if ledger == Path::new("runtime.ledger")
+        ));
+        assert!(
+            parse(
+                [
+                    "tui".to_owned(),
+                    "--input".to_owned(),
+                    "not-headless".to_owned(),
+                ]
+                .into_iter()
+            )
+            .is_err()
+        );
         assert!(parse(["headless".to_owned()].into_iter()).is_err());
         assert!(parse(["reconcile".to_owned()].into_iter()).is_err());
         assert!(matches!(

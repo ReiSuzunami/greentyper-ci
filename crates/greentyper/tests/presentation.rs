@@ -1,4 +1,7 @@
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static NEXT_TEMP: AtomicU64 = AtomicU64::new(1);
 
 #[test]
 fn presentation_smoke_emits_a_read_only_terminal_neutral_snapshot() {
@@ -72,4 +75,26 @@ fn presentation_smoke_has_no_filesystem_path_option() {
             .windows(27)
             .any(|value| value == b"presentation-private-marker")
     );
+}
+
+#[test]
+fn tui_rejects_non_terminal_io_before_writing_or_creating_state() {
+    let ledger = std::env::temp_dir().join(format!(
+        "greentyper-tui-non-terminal-{}-{}",
+        std::process::id(),
+        NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
+    ));
+    let output = Command::new(env!("CARGO_BIN_EXE_greentyper"))
+        .args(["tui", "--ledger"])
+        .arg(&ledger)
+        .output()
+        .expect("run TUI without a terminal");
+
+    assert!(!output.status.success(), "{output:?}");
+    assert!(output.stdout.is_empty(), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("TUI requires an interactive terminal"),
+        "{output:?}"
+    );
+    assert!(!ledger.exists());
 }

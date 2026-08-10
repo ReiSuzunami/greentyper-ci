@@ -73,6 +73,7 @@ cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo run -p greentyper-acceptance -- verify-cpu
 cargo run -p greentyper-acceptance -- bench list
+cargo run -p greentyper -- tui --ledger ./target/dev-runtime.ledger
 cargo run -p greentyper -- headless --ledger ./target/dev-runtime.ledger --input "hello"
 cargo run -p greentyper -- headless --preset frontier --ledger ./target/dev-runtime.ledger --input "hello"
 cargo run -p greentyper -- headless --ledger ./target/tool-runtime.ledger --tool local.echo --input "echo this"
@@ -107,8 +108,10 @@ terminal-neutral schema-driven editor session and Provider Profile wizard. A
 release-bundled Provider Catalog now supplies versioned OpenAI, DeepSeek, and
 OpenCode Go template defaults plus seed model facts with field provenance. The
 selector exposes compatible release candidates while keeping unverified live
-availability explicit. Rendered TUI/App Server editors remain pending. The product
-CLI can bind, replace, test, and forget origin-bound credential references without
+availability explicit. A first read-only Direct VT product tracer now renders the
+Slash Panel, controller screens, and adaptive status rows through `greentyper tui`;
+rendered mutable TUI/App Server editors remain pending. The product CLI can bind,
+replace, test, and forget origin-bound credential references without
 putting secret material in arguments, Config, or Ledgers. Windows stores values
 in the current user's Credential Manager; other platforms currently fail
 closed. Tool call identity, argument hashing, approval binding, independent
@@ -224,14 +227,19 @@ Draft, read a response body, or return endpoint or credential data. The CLI
 offers the same status-only check for the currently selected committed Profile
 through `config test-provider`.
 Dirty drafts cannot be discarded implicitly, and failed validation or revision
-conflicts leave the editor live. This is not an ANSI/VT backend, live keyboard
-loop, ConPTY integration, rendered Config Center, object-name dialog, or
+conflicts leave the editor live. The public `tui` command is the first real
+product terminal adapter: it enters the alternate screen and raw mode, maps
+blocking Crossterm key and resize events into the existing controller, emits a
+Unicode-aware Direct VT cell diff, suppresses identical frames, clears stale
+cells, and restores the terminal on normal and error returns. This tracer is
+read-only and snapshot-based. It is not a mutable terminal editor, approval
+surface, live refresh loop, audited ConPTY integration, object-name dialog,
 rendered template picker, starter-preset workflow, or live catalog discovery.
 Live credential-gated provider validation, configurable proxy policy,
 reconnect/retry, all OpenCode Go execution,
 Messages reasoning blocks, Preset context/fallback execution, richer approval
 presentation, broader Provider and Tool adapters,
-Workspace, TUI, and App Server work remain. The loopback Provider tracer remains
+Workspace, remaining TUI, and App Server work remain. The loopback Provider tracer remains
 an internal harness; `local.echo` is intentionally a fixed opt-in command rather
 than a general process runner. The file Ledger remains
 provisional. The acceptance runner can emit bound raw evidence,
