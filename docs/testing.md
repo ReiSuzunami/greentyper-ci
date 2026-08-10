@@ -175,6 +175,13 @@ reasoning text, rejects service tier or unsupported effort before network I/O,
 resolves a Pro Responses preference to Chat before admission, and proves one
 stateless Tool continuation with the effective Responses dialect frozen in the
 Provider Epoch.
+OpenCode Go Chat coverage binds the exact template, release-catalog model, and
+Chat dialect before credential lookup; asserts the Bearer-authenticated
+`/chat/completions` request and `max_completion_tokens`; normalizes the shared
+bounded Chat fixture; reconstructs the frozen Provider Epoch; and proves unknown
+models or unsupported reasoning/service-tier policy cause no network request.
+The public `headless --preset` test proves an exact OpenCode Go Chat preset
+reaches the credential boundary before Turn admission.
 Messages coverage binds the exact DeepSeek template and frozen Messages route,
 uses a sensitive `x-api-key` plus pinned compatibility-version header without
 an `Authorization` header, disables unsupported thinking, and sends the frozen
@@ -359,11 +366,13 @@ and explicit openai-compatible identities, plus the exact DeepSeek/V4-Flash
 pair. The Chat Completions adapter admits the OpenAI and explicit
 openai-compatible template identities plus the exact
 official DeepSeek identity with its DeepSeek-specific request policy. The
+Chat adapter also admits exact release-catalog OpenCode Go Chat model/dialect
+pairs with the OpenCode-specific request policy. The
 Messages adapter admits only the official DeepSeek template identity and its
 explicit Messages route. V4 Pro resolves a preferred Responses dialect to Chat
 before admission; this bounded capability resolution is not a network retry or
-general Preset fallback. All OpenCode Go execution remains outside this slice;
-a declared route or dialect is not treated as proof of wire compatibility.
+general Preset fallback. OpenCode Go Responses and Messages remain outside this
+slice; a declared route or dialect is not treated as proof of wire compatibility.
 
 Live provider integration tests are not implemented yet. Planned opt-in,
 credential-gated tests will verify OpenAI, DeepSeek, and OpenCode Go without

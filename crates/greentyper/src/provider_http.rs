@@ -40,6 +40,7 @@ const FIXTURE_ROUTE: &str = "/v1/responses";
 const OPENAI_TEMPLATE: &str = "openai";
 const OPENAI_COMPATIBLE_TEMPLATE: &str = "openai-compatible";
 const DEEPSEEK_TEMPLATE: &str = "deepseek";
+const OPENCODE_GO_TEMPLATE: &str = "opencode-go";
 const FIXTURE_CREDENTIAL_REFERENCE: &str = "responses-loopback-synthetic";
 const SYNTHETIC_AUTHORIZATION: &str = "Bearer greentyper-synthetic-provider-token-v1";
 const SYNTHETIC_SECRET: &[u8] = b"greentyper-synthetic-provider-token-v1";
@@ -102,12 +103,14 @@ fn responses_adapter(template: &str) -> Option<ResponsesAdapter> {
 enum ChatCompletionsAdapter {
     OpenAi,
     DeepSeek,
+    OpenCodeGo,
 }
 
 fn chat_completions_adapter(template: &str) -> Option<ChatCompletionsAdapter> {
     match template {
         OPENAI_TEMPLATE | OPENAI_COMPATIBLE_TEMPLATE => Some(ChatCompletionsAdapter::OpenAi),
         DEEPSEEK_TEMPLATE => Some(ChatCompletionsAdapter::DeepSeek),
+        OPENCODE_GO_TEMPLATE => Some(ChatCompletionsAdapter::OpenCodeGo),
         _ => None,
     }
 }
@@ -185,6 +188,17 @@ fn require_deepseek_chat_request_policy(request: &ProviderRequest) -> Result<(),
     {
         return Err(ProviderError::InvalidRequest(
             "DeepSeek Chat output token limit exceeds the documented maximum",
+        ));
+    }
+    Ok(())
+}
+
+fn require_opencode_go_chat_request_policy(request: &ProviderRequest) -> Result<(), ProviderError> {
+    if request.config.resolved().reasoning_effort().is_some()
+        || request.config.resolved().service_tier().is_some()
+    {
+        return Err(ProviderError::InvalidRequest(
+            "OpenCode Go Chat adapter does not support preset reasoning effort or service tier",
         ));
     }
     Ok(())
@@ -801,6 +815,7 @@ impl<V: CredentialVault> ChatCompletionsHttpProvider<V> {
         match self.adapter {
             ChatCompletionsAdapter::OpenAi => Ok(()),
             ChatCompletionsAdapter::DeepSeek => require_deepseek_chat_request_policy(request),
+            ChatCompletionsAdapter::OpenCodeGo => require_opencode_go_chat_request_policy(request),
         }
     }
 
@@ -816,6 +831,11 @@ impl<V: CredentialVault> ChatCompletionsHttpProvider<V> {
                 Ok(())
             }
             ChatCompletionsAdapter::DeepSeek => insert_deepseek_chat_request_policy(body, request),
+            ChatCompletionsAdapter::OpenCodeGo => {
+                require_opencode_go_chat_request_policy(request)?;
+                insert_output_token_limit(body, "max_completion_tokens", request);
+                Ok(())
+            }
         }
     }
 }
@@ -1323,6 +1343,29 @@ pub(crate) enum ConfiguredProvider<V> {
     Messages(Box<MessagesHttpProvider<V>>),
 }
 
+fn require_verified_model_dialect(
+    profile: &ProviderProfileSnapshot,
+    model: &str,
+    dialect: ProviderDialect,
+) -> Result<(), ProviderError> {
+    if profile.template() != OPENCODE_GO_TEMPLATE {
+        return Ok(());
+    }
+    let key = format!("{OPENCODE_GO_TEMPLATE}/{model}");
+    let verified = ProviderCatalog::release()
+        .model(&key)
+        .is_some_and(|record| {
+            record.provider_template() == OPENCODE_GO_TEMPLATE
+                && record.supported_dialects().value().contains(&dialect)
+        });
+    if !verified {
+        return Err(ProviderError::InvalidConfiguration(
+            "OpenCode Go model and dialect are not verified by the release catalog",
+        ));
+    }
+    Ok(())
+}
+
 fn resolve_preferred_dialect(
     profile: &ProviderProfileSnapshot,
     model: &str,
@@ -1375,7 +1418,7 @@ impl<V: CredentialVault> ConfiguredProvider<V> {
     ) -> Result<Self, ProviderError> {
         match profile {
             Some(profile) => {
-                Self::for_new_turn_with_dialect(profile, ProviderDialect::Responses, vault)
+                Self::for_new_turn_with_dialect(profile, "", ProviderDialect::Responses, vault)
             }
             None => Ok(Self::Simulator(DeterministicProvider::default())),
         }
@@ -1383,9 +1426,11 @@ impl<V: CredentialVault> ConfiguredProvider<V> {
 
     pub(crate) fn for_new_turn_with_dialect(
         profile: ProviderProfileSnapshot,
+        model: &str,
         dialect: ProviderDialect,
         vault: V,
     ) -> Result<Self, ProviderError> {
+        require_verified_model_dialect(&profile, model, dialect)?;
         match dialect {
             ProviderDialect::Responses => ResponsesHttpProvider::new(profile, vault)
                 .map(Box::new)
@@ -1406,7 +1451,7 @@ impl<V: CredentialVault> ConfiguredProvider<V> {
         vault: V,
     ) -> Result<Self, ProviderError> {
         let dialect = resolve_preferred_dialect(&profile, model, preferred)?;
-        Self::for_new_turn_with_dialect(profile, dialect, vault)
+        Self::for_new_turn_with_dialect(profile, model, dialect, vault)
     }
 
     pub(crate) fn from_epoch(epoch: &ProviderEpoch, vault: V) -> Result<Self, ProviderError> {
@@ -1415,19 +1460,12 @@ impl<V: CredentialVault> ConfiguredProvider<V> {
             ("simulator", Some(_)) => Err(ProviderError::InvalidConfiguration(
                 "simulator Provider Epoch cannot carry a Profile snapshot",
             )),
-            (_, Some(profile)) => match epoch.dialect().unwrap_or(ProviderDialect::Responses) {
-                ProviderDialect::Responses => ResponsesHttpProvider::new(profile.clone(), vault)
-                    .map(Box::new)
-                    .map(Self::Responses),
-                ProviderDialect::ChatCompletions => {
-                    ChatCompletionsHttpProvider::new(profile.clone(), vault)
-                        .map(Box::new)
-                        .map(Self::ChatCompletions)
-                }
-                ProviderDialect::Messages => MessagesHttpProvider::new(profile.clone(), vault)
-                    .map(Box::new)
-                    .map(Self::Messages),
-            },
+            (_, Some(profile)) => Self::for_new_turn_with_dialect(
+                profile.clone(),
+                epoch.model(),
+                epoch.dialect().unwrap_or(ProviderDialect::Responses),
+                vault,
+            ),
             (_, None) => Err(ProviderError::InvalidConfiguration(
                 "non-simulator Provider Epoch has no frozen Profile",
             )),
@@ -2341,6 +2379,44 @@ source = "unknown"
             .expect("external DeepSeek Chat Profile")
     }
 
+    fn opencode_go_chat_fixture_profile(
+        base_url: &str,
+        name: &str,
+        model: &str,
+    ) -> ProviderProfileSnapshot {
+        let encoded_base_url = serde_json::to_string(base_url).expect("encode OpenCode Go origin");
+        let encoded_model = serde_json::to_string(model).expect("encode OpenCode Go model");
+        let document = ConfigDocument::parse(&format!(
+            r#"
+schema_version = 1
+
+[provider]
+profile = "opencode-go-loopback"
+model = {encoded_model}
+
+[providers.opencode-go-loopback]
+template = "opencode-go"
+credential = "opencode-go-loopback-synthetic"
+base_url = {encoded_base_url}
+dialects = ["chat_completions"]
+allow_insecure_loopback = true
+
+[providers.opencode-go-loopback.routes]
+chat_completions = "/chat/completions"
+models = "/models"
+
+[providers.opencode-go-loopback.pricing]
+source = "unknown"
+"#,
+        ))
+        .expect("parse OpenCode Go Chat fixture Config");
+        ConfigRuntime::open(test_config_paths(name), document)
+            .expect("resolve OpenCode Go Chat fixture Config")
+            .selected_provider_profile()
+            .expect("resolve OpenCode Go Chat Profile")
+            .expect("external OpenCode Go Chat Profile")
+    }
+
     fn deepseek_dual_fixture_profile(base_url: &str, name: &str) -> ProviderProfileSnapshot {
         let encoded_base_url = serde_json::to_string(base_url).expect("encode DeepSeek origin");
         let document = ConfigDocument::parse(&format!(
@@ -3123,12 +3199,13 @@ source = "unknown"
             DEEPSEEK_TEMPLATE,
             ProviderDialect::Responses
         ));
-        assert!(!has_provider_adapter(
+        assert!(has_provider_adapter(
             "opencode-go",
             ProviderDialect::ChatCompletions
         ));
         let mut provider = ConfiguredProvider::for_new_turn_with_dialect(
             profile.clone(),
+            FIXTURE_MODEL,
             ProviderDialect::ChatCompletions,
             vault,
         )
@@ -3149,6 +3226,136 @@ source = "unknown"
                     && usage.output_tokens() == Some(5)
         ));
         server.join().expect("join DeepSeek Chat server");
+    }
+
+    #[test]
+    fn opencode_go_chat_adapter_runs_a_documented_model_with_exact_request_shape() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("OpenCode Go Chat listener");
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let model = "deepseek-v4-pro";
+        let profile = opencode_go_chat_fixture_profile(&base_url, "opencode-go-chat", model);
+        let vault = bound_chat_vault(&profile);
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept OpenCode Go Chat request");
+            configure_fixture_stream(&stream).expect("configure OpenCode Go Chat request");
+            let body = read_test_request_body_for(&mut stream, "/chat/completions");
+            assert_eq!(
+                body,
+                serde_json::json!({
+                    "max_completion_tokens": 4096,
+                    "messages": [{"role": "user", "content": "hello OpenCode Go"}],
+                    "model": model,
+                    "stream": true,
+                    "stream_options": {"include_usage": true},
+                })
+            );
+            write_fixture_response(
+                &mut stream,
+                "200 OK",
+                "text/event-stream",
+                CHAT_TEXT_SSE,
+                true,
+            )
+            .expect("write OpenCode Go Chat response");
+        });
+
+        assert!(has_provider_adapter(
+            "opencode-go",
+            ProviderDialect::ChatCompletions
+        ));
+        let mut provider = ConfiguredProvider::for_new_turn_with_preferred_dialect(
+            profile.clone(),
+            model,
+            ProviderDialect::ChatCompletions,
+            vault,
+        )
+        .expect("configured OpenCode Go Chat provider");
+        let request = provider_request_with_model_policy(
+            profile.clone(),
+            model,
+            "hello OpenCode Go",
+            ProviderDialect::ChatCompletions,
+            4_096,
+            None,
+            None,
+        );
+        let events = provider.run(&request).expect("OpenCode Go Chat response");
+        assert!(matches!(
+            events.as_slice(),
+            [ProviderEvent::TextDelta(first), ProviderEvent::TextDelta(second), ProviderEvent::Completed(usage)]
+                if first == "Hello "
+                    && second == "Chat"
+                    && usage.input_tokens() == Some(4)
+                    && usage.output_tokens() == Some(2)
+        ));
+        let resumed = ConfiguredProvider::from_epoch(&request.provider, bound_chat_vault(&profile))
+            .expect("reconstruct frozen OpenCode Go provider");
+        assert_eq!(resumed.dialect(), Some(ProviderDialect::ChatCompletions));
+        server.join().expect("join OpenCode Go Chat server");
+    }
+
+    #[test]
+    fn opencode_go_chat_rejects_unverified_models_and_policy_before_credentials_or_network() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("OpenCode Go guard listener");
+        listener
+            .set_nonblocking(true)
+            .expect("make OpenCode Go guard listener nonblocking");
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let profile = opencode_go_chat_fixture_profile(
+            &base_url,
+            "opencode-go-chat-unknown-model",
+            "unverified-model",
+        );
+        let error = match ConfiguredProvider::for_new_turn_with_preferred_dialect(
+            profile,
+            "unverified-model",
+            ProviderDialect::ChatCompletions,
+            InMemoryCredentialVault::default(),
+        ) {
+            Ok(_) => panic!("unverified OpenCode Go model must fail closed"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error,
+            ProviderError::InvalidConfiguration(
+                "OpenCode Go model and dialect are not verified by the release catalog"
+            )
+        );
+        assert!(
+            matches!(listener.accept(), Err(error) if error.kind() == io::ErrorKind::WouldBlock)
+        );
+
+        let profile = opencode_go_chat_fixture_profile(
+            &base_url,
+            "opencode-go-chat-policy",
+            "deepseek-v4-pro",
+        );
+        let vault = bound_chat_vault(&profile);
+        let mut provider = ConfiguredProvider::for_new_turn_with_preferred_dialect(
+            profile.clone(),
+            "deepseek-v4-pro",
+            ProviderDialect::ChatCompletions,
+            vault,
+        )
+        .expect("configured OpenCode Go policy guard");
+        let request = provider_request_with_model_policy(
+            profile,
+            "deepseek-v4-pro",
+            "must not reach OpenCode Go",
+            ProviderDialect::ChatCompletions,
+            4_096,
+            Some(ReasoningEffort::High),
+            None,
+        );
+        assert_eq!(
+            provider.run(&request),
+            Err(ProviderError::InvalidRequest(
+                "OpenCode Go Chat adapter does not support preset reasoning effort or service tier"
+            ))
+        );
+        assert!(
+            matches!(listener.accept(), Err(error) if error.kind() == io::ErrorKind::WouldBlock)
+        );
     }
 
     #[test]
@@ -3809,6 +4016,7 @@ source = "unknown"
         ));
         let mut provider = ConfiguredProvider::for_new_turn_with_dialect(
             profile.clone(),
+            FIXTURE_MODEL,
             ProviderDialect::Messages,
             vault,
         )

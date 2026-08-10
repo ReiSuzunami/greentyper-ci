@@ -262,9 +262,10 @@ through a Price Schedule rather than becoming an unversioned catalog number.
 The installed execution matrix is deliberately closed: adapters accept
 `openai` and explicit `openai-compatible` Profiles for Responses and Chat
 Completions, and official `deepseek` Profiles for Responses, Chat Completions,
-and Messages.
+and Messages. `opencode-go` Profiles admit Chat Completions only when the
+selected model has an exact release-catalog Chat record.
 A Provider Template may still declare additional routes and dialect support as
-Config/catalog facts; every OpenCode Go pair and OpenAI Messages
+Config/catalog facts; OpenCode Go Responses and Messages plus OpenAI Messages
 remain unavailable until an exact adapter is installed. A catalog route or
 declared dialect alone never proves wire compatibility. Release-candidate
 compatibility remains tied to each record's primary dialect. DeepSeek V4 Pro is
@@ -300,9 +301,10 @@ fallback = []
 ```
 
 A runnable preset must name its Provider Profile, model, and preferred Provider
-Dialect. Its route is resolved from that profile; the only current
-model-capability resolution is official DeepSeek Responses preference: V4 Flash
-stays Responses and V4 Pro resolves to Chat Completions before admission. The
+Dialect. Its route is resolved from that profile. Official DeepSeek Responses
+preference keeps V4 Flash on Responses and resolves V4 Pro to Chat Completions
+before admission. OpenCode Go admission separately requires the exact model and
+dialect pair from the release catalog; it does not infer another dialect. The
 effective dialect is frozen in the Provider Epoch. This is not transport retry
 or general fallback-chain execution. Presets may also define reasoning effort,
 reasoning mode where supported, service tier, output limit, context policy, and
@@ -318,7 +320,9 @@ reasoning to `reasoning.effort`; OpenAI Chat Completions uses
 `reasoning_effort`; both OpenAI adapters send `service_tier`. DeepSeek Responses
 maps `max_output_tokens` and supported `reasoning.effort`, but rejects service
 tier. DeepSeek Chat and Messages map only the output limit and fail before
-network I/O when either unsupported policy field is selected. Initial requests and one
+network I/O when either unsupported policy field is selected. OpenCode Go Chat
+maps the output limit to `max_completion_tokens` and likewise rejects both
+unsupported policy fields. Initial requests and one
 in-process Tool continuation retain the same frozen values; restart replay
 reconstructs them without making Tool continuation resumable. Requested Usage
 metadata records the same policy. The accepted reasoning values are `none`,

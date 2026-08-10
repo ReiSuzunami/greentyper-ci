@@ -167,10 +167,14 @@ authorization. Tests cover fragmented success, canonical replay, exact
 dialect-specific request and one-Tool continuation bodies, HTTP failure-body
 redaction, timeout, endpoint/status policy, trusted and untrusted TLS, and
 missing credential failure before network access.
+The first OpenCode Go adapter admits only release-catalog-verified Chat
+Completions models, uses the frozen Chat route and Bearer credential, maps the
+frozen output limit, rejects unsupported reasoning/service-tier policy before
+network I/O, and reconstructs the same frozen dialect from the Provider Epoch.
 
 The remaining slices are still policy, protocol, and fault-adapter work:
 live-provider validation, non-Windows credential backends, configurable proxy
-policy, live catalog discovery, all OpenCode Go execution, DeepSeek
+policy, live catalog discovery, OpenCode Go Responses/Messages execution, DeepSeek
 Chat/Messages reasoning blocks, general Preset
 context/fallback execution, broader canonical Items, multiple
 Tool calls,
@@ -326,8 +330,9 @@ Continue the release templates and seed catalog with OpenCode Go adapter
 execution, lazy discovery,
 starter-preset acceptance, provider capability probes, explicit fallback
 chains, observed availability, and provider/model epoch switching. The
-OpenAI/openai-compatible Responses and Chat Completions adapters plus official
-DeepSeek Responses, Chat Completions, and Messages pairs are implemented; custom gateway routes and
+OpenAI/openai-compatible Responses and Chat Completions adapters, official
+DeepSeek Responses, Chat Completions, and Messages pairs, and release-verified
+OpenCode Go Chat Completions pairs are implemented; custom gateway routes and
 user-owned Model Presets can be selected explicitly by ID for headless Turns.
 Their Profile/model/dialect, optional output-token limit, typed reasoning effort,
 and typed service tier resolve through the frozen Config/Provider Epoch boundary.

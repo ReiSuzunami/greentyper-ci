@@ -138,8 +138,9 @@ effect. A same-binary crash test kills the product after `EffectPrepared` is
 durable and executor entry is observed, then proves restart blocking, explicit
 reconciliation, and later Turn admission.
 
-Configured OpenAI-compatible Responses and Chat Completions profiles plus the
-official DeepSeek Responses, Chat Completions, and Anthropic-compatible Messages profiles now run through
+Configured OpenAI-compatible Responses and Chat Completions profiles, the
+official DeepSeek Responses, Chat Completions, and Anthropic-compatible Messages
+profiles, plus release-catalog OpenCode Go Chat Completions models now run through
 no-proxy, no-redirect HTTPS clients, origin-bound credential lookup, bounded
 streaming decode, and a fixed deadline. DeepSeek Chat uses Bearer authorization,
 the explicit `/chat/completions` route, `max_tokens`, and non-thinking mode; it
@@ -147,7 +148,12 @@ caps an explicit output limit at 384K and rejects preset reasoning effort or
 service tier before network I/O. Messages uses `x-api-key`, pins the
 Anthropic API version header, explicitly disables DeepSeek's default thinking
 mode, and sends the selected Model Preset output limit as `max_tokens`, with a
-conservative 4096 fallback when no limit is selected. Config Runtime freezes the
+conservative 4096 fallback when no limit is selected. OpenCode Go Chat uses
+Bearer authorization, the frozen Chat route (template default
+`/chat/completions`), and
+`max_completion_tokens`. It admits only release-catalog-verified Chat models
+before credential lookup and rejects preset reasoning effort or service tier
+before network I/O. Config Runtime freezes the
 normalized origin, selected-dialect route, dialect, pricing decision, and opaque
 credential reference in the Provider Epoch; adapter reconstruction uses that
 snapshot without changing an explicit dialect. Private loopback fixtures retain
@@ -244,7 +250,7 @@ read-only and snapshot-based. It is not a mutable terminal editor, approval
 surface, live refresh loop, audited ConPTY integration, object-name dialog,
 rendered template picker, starter-preset workflow, or live catalog discovery.
 Live credential-gated provider validation, configurable proxy policy,
-reconnect/retry, all OpenCode Go execution,
+reconnect/retry, OpenCode Go Responses and Messages execution,
 Messages reasoning blocks, Preset context/fallback execution, richer approval
 presentation, broader Provider and Tool adapters,
 Workspace, remaining TUI, and App Server work remain. The loopback Provider tracer remains
