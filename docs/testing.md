@@ -131,11 +131,12 @@ continues the Provider once, and replays the acknowledged canonical output plus
 two Usage Records. Companion tests prove stale Sessions invoke no Provider,
 ambiguous effects never reach continuation, non-UTF-8 Tool output is blocked,
 and process death after a durable Tool success cannot repeat the effect.
-Migration tests replay a historical schema-1 Ledger before appending schema-4
+Migration tests replay a historical schema-1 Ledger before appending current
 events, decode historical schema-2 and schema-3 Provider Epoch shapes
-separately, and round-trip schema-4 Provider Profile, dialect, Config Usage
-Window, and Usage Attempt data while rejecting fingerprint, outcome, timestamp,
-and transition tampering.
+separately, and round-trip current Provider Profile, dialect, Config Usage
+Window, Usage Attempt, Price Schedule, and selected output-token data while
+rejecting fingerprint, outcome, timestamp, and transition tampering. A schema-5
+Config Epoch without the new optional token field remains replayable.
 
 Product integration tests also run the configured Responses, Chat Completions,
 and Messages adapters against concrete loopback HTTP tracers. They resolve and
@@ -152,8 +153,11 @@ advertised `local_echo`, streamed call, canonical `local.echo` mapping,
 correlated assistant/Tool messages, final text, and two Usage Records.
 Messages coverage binds the exact DeepSeek template and frozen Messages route,
 uses a sensitive `x-api-key` plus pinned compatibility-version header without
-an `Authorization` header, disables unsupported thinking, and sends the fixed
-bounded output-token limit. It covers canonical text/usage, missing credential
+an `Authorization` header, disables unsupported thinking, and sends the frozen
+selected-Preset output-token limit or a bounded 4096 fallback. Responses and
+Chat request fixtures assert their dialect-specific fields, and all three Tool
+continuation fixtures assert the initial and continuation requests retain one
+frozen value. Coverage also includes canonical text/usage, missing credential
 and unsupported-template rejection before network access, HTTP 503, wrong
 content type, provider error SSE redaction, and one exact `tool_use`/
 `tool_result` continuation with two Usage Records.

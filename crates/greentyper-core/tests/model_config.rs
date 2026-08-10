@@ -1,4 +1,6 @@
-use greentyper_core::config::{ConfigEpoch, ConfigError, ConfigLayer, ConfigLayers, ConfigSource};
+use greentyper_core::config::{
+    ConfigEpoch, ConfigError, ConfigLayer, ConfigLayers, ConfigSource, MAX_OUTPUT_TOKENS,
+};
 use greentyper_core::model::{
     CanonicalItem, ConfigEpochId, ItemId, ItemRole, MAX_ITEM_TEXT_BYTES, ThreadId, TurnId,
 };
@@ -34,15 +36,18 @@ fn config_precedence_and_provenance_are_deterministic() {
         user: ConfigLayer {
             provider_profile: Some("user-profile".to_owned()),
             max_output_bytes: Some(1_024),
+            max_output_tokens: Some(1_000),
             ..ConfigLayer::default()
         },
         project: ConfigLayer {
             provider_model: Some("project-model".to_owned()),
             max_output_bytes: Some(2_048),
+            max_output_tokens: Some(2_000),
             ..ConfigLayer::default()
         },
         cli: ConfigLayer {
             max_output_bytes: Some(4_096),
+            max_output_tokens: Some(3_000),
             ..ConfigLayer::default()
         },
     };
@@ -54,21 +59,38 @@ fn config_precedence_and_provenance_are_deterministic() {
     assert_eq!(resolved.provider_model().source(), ConfigSource::Project);
     assert_eq!(*resolved.max_output_bytes().value(), 4_096);
     assert_eq!(resolved.max_output_bytes().source(), ConfigSource::Cli);
+    assert_eq!(
+        resolved.max_output_tokens().map(|value| *value.value()),
+        Some(3_000)
+    );
+    assert_eq!(
+        resolved.max_output_tokens().map(|value| value.source()),
+        Some(ConfigSource::Cli)
+    );
 }
 
 #[test]
 fn frozen_epoch_is_immutable_when_layers_change() {
     let mut layers = ConfigLayers::default();
+    layers.cli.max_output_tokens = Some(4_096);
     let id = ConfigEpochId::new(1).expect("nonzero epoch");
     let frozen = ConfigEpoch::freeze(id, &layers).expect("valid epoch");
 
     layers.cli.provider_model = Some("changed-after-freeze".to_owned());
+    layers.cli.max_output_tokens = Some(8_192);
     let newer = ConfigEpoch::freeze(ConfigEpochId::new(2).expect("nonzero epoch"), &layers)
         .expect("valid newer epoch");
 
     assert_eq!(
         frozen.resolved().provider_model().value(),
         "deterministic-v1"
+    );
+    assert_eq!(
+        frozen
+            .resolved()
+            .max_output_tokens()
+            .map(|value| *value.value()),
+        Some(4_096)
     );
     assert_ne!(frozen.fingerprint(), newer.fingerprint());
 }
@@ -85,6 +107,17 @@ fn config_validation_fails_closed() {
     let mut zero = ConfigLayers::default();
     zero.cli.max_output_bytes = Some(0);
     assert_eq!(zero.resolve(), Err(ConfigError::ZeroMaxOutputBytes));
+
+    let mut zero_tokens = ConfigLayers::default();
+    zero_tokens.cli.max_output_tokens = Some(0);
+    assert_eq!(zero_tokens.resolve(), Err(ConfigError::ZeroMaxOutputTokens));
+
+    let mut excessive_tokens = ConfigLayers::default();
+    excessive_tokens.cli.max_output_tokens = Some(MAX_OUTPUT_TOKENS + 1);
+    assert_eq!(
+        excessive_tokens.resolve(),
+        Err(ConfigError::MaxOutputTokensTooLarge)
+    );
 
     let mut spaced = ConfigLayers::default();
     spaced.cli.provider_model = Some(" model ".to_owned());

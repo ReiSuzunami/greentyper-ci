@@ -88,6 +88,19 @@ pub(crate) fn has_provider_adapter(template: &str, dialect: ProviderDialect) -> 
     )
 }
 
+fn insert_output_token_limit(
+    body: &mut serde_json::Value,
+    field: &'static str,
+    request: &ProviderRequest,
+) {
+    let Some(limit) = request.config.resolved().max_output_tokens() else {
+        return;
+    };
+    body.as_object_mut()
+        .expect("Provider request body must be an object")
+        .insert(field.to_owned(), serde_json::json!(*limit.value()));
+}
+
 pub(crate) struct ResponsesHttpProvider<V> {
     client: Client,
     endpoint: Url,
@@ -304,7 +317,7 @@ impl<V: CredentialVault> ProviderRuntime for ResponsesHttpProvider<V> {
             usize::try_from(*request.config.resolved().max_output_bytes().value())
                 .map_err(|_| ProviderError::InvalidConfiguration("output byte limit is invalid"))?;
         self.pending_continuation = None;
-        let body = if self.local_echo_enabled {
+        let mut body = if self.local_echo_enabled {
             serde_json::json!({
                 "input": request.input,
                 "model": request.provider.model(),
@@ -319,6 +332,7 @@ impl<V: CredentialVault> ProviderRuntime for ResponsesHttpProvider<V> {
                 "stream": true,
             })
         };
+        insert_output_token_limit(&mut body, "max_output_tokens", request);
         let (response_id, events) = self.send_request(body, max_output_bytes)?;
         let events = if self.local_echo_enabled {
             normalize_local_echo_calls(events)?
@@ -359,7 +373,7 @@ impl<V: CredentialVault> ProviderRuntime for ResponsesHttpProvider<V> {
         let max_output_bytes =
             usize::try_from(*request.config.resolved().max_output_bytes().value())
                 .map_err(|_| ProviderError::InvalidConfiguration("output byte limit is invalid"))?;
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "input": [{
                 "type": "function_call_output",
                 "call_id": output.call_id(),
@@ -371,6 +385,7 @@ impl<V: CredentialVault> ProviderRuntime for ResponsesHttpProvider<V> {
             "tool_choice": "none",
             "tools": [local_echo_tool_definition()],
         });
+        insert_output_token_limit(&mut body, "max_output_tokens", request);
         self.send_request(body, max_output_bytes)
             .map(|(_, events)| events)
     }
@@ -574,7 +589,7 @@ impl<V: CredentialVault> ProviderRuntime for ChatCompletionsHttpProvider<V> {
             usize::try_from(*request.config.resolved().max_output_bytes().value())
                 .map_err(|_| ProviderError::InvalidConfiguration("output byte limit is invalid"))?;
         self.pending_continuation = None;
-        let body = if self.local_echo_enabled {
+        let mut body = if self.local_echo_enabled {
             serde_json::json!({
                 "messages": [{"role": "user", "content": request.input}],
                 "model": request.provider.model(),
@@ -591,6 +606,7 @@ impl<V: CredentialVault> ProviderRuntime for ChatCompletionsHttpProvider<V> {
                 "stream_options": {"include_usage": true},
             })
         };
+        insert_output_token_limit(&mut body, "max_completion_tokens", request);
         let events = self.send_request(body, max_output_bytes)?;
         let events = if self.local_echo_enabled {
             normalize_local_echo_calls(events)?
@@ -629,7 +645,7 @@ impl<V: CredentialVault> ProviderRuntime for ChatCompletionsHttpProvider<V> {
         let max_output_bytes =
             usize::try_from(*request.config.resolved().max_output_bytes().value())
                 .map_err(|_| ProviderError::InvalidConfiguration("output byte limit is invalid"))?;
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "messages": [
                 {"role": "user", "content": pending.input},
                 {
@@ -656,6 +672,7 @@ impl<V: CredentialVault> ProviderRuntime for ChatCompletionsHttpProvider<V> {
             "tool_choice": "none",
             "tools": [chat_local_echo_tool_definition()],
         });
+        insert_output_token_limit(&mut body, "max_completion_tokens", request);
         let events = self.send_request(body, max_output_bytes)?;
         if events
             .iter()
@@ -870,10 +887,15 @@ impl<V: CredentialVault> ProviderRuntime for MessagesHttpProvider<V> {
         let max_output_bytes =
             usize::try_from(*request.config.resolved().max_output_bytes().value())
                 .map_err(|_| ProviderError::InvalidConfiguration("output byte limit is invalid"))?;
+        let max_output_tokens = request
+            .config
+            .resolved()
+            .max_output_tokens()
+            .map_or(MESSAGES_MAX_TOKENS, |limit| *limit.value());
         self.pending_continuation = None;
         let body = if self.local_echo_enabled {
             serde_json::json!({
-                "max_tokens": MESSAGES_MAX_TOKENS,
+                "max_tokens": max_output_tokens,
                 "messages": [{"role": "user", "content": request.input}],
                 "model": request.provider.model(),
                 "stream": true,
@@ -883,7 +905,7 @@ impl<V: CredentialVault> ProviderRuntime for MessagesHttpProvider<V> {
             })
         } else {
             serde_json::json!({
-                "max_tokens": MESSAGES_MAX_TOKENS,
+                "max_tokens": max_output_tokens,
                 "messages": [{"role": "user", "content": request.input}],
                 "model": request.provider.model(),
                 "stream": true,
@@ -930,8 +952,13 @@ impl<V: CredentialVault> ProviderRuntime for MessagesHttpProvider<V> {
         let max_output_bytes =
             usize::try_from(*request.config.resolved().max_output_bytes().value())
                 .map_err(|_| ProviderError::InvalidConfiguration("output byte limit is invalid"))?;
+        let max_output_tokens = request
+            .config
+            .resolved()
+            .max_output_tokens()
+            .map_or(MESSAGES_MAX_TOKENS, |limit| *limit.value());
         let body = serde_json::json!({
-            "max_tokens": MESSAGES_MAX_TOKENS,
+            "max_tokens": max_output_tokens,
             "messages": [
                 {"role": "user", "content": pending.input},
                 {
@@ -1883,14 +1910,22 @@ mod tests {
         input: &str,
         dialect: ProviderDialect,
     ) -> ProviderRequest {
+        provider_request_with_output_tokens(profile, input, dialect, None)
+    }
+
+    fn provider_request_with_output_tokens(
+        profile: ProviderProfileSnapshot,
+        input: &str,
+        dialect: ProviderDialect,
+        max_output_tokens: impl Into<Option<u32>>,
+    ) -> ProviderRequest {
+        let mut layers = ConfigLayers::default();
+        layers.cli.max_output_tokens = max_output_tokens.into();
         ProviderRequest {
             thread: ThreadId::new(1).expect("thread"),
             turn: TurnId::new(1).expect("turn"),
-            config: ConfigEpoch::freeze(
-                ConfigEpochId::new(1).expect("Config Epoch"),
-                &ConfigLayers::default(),
-            )
-            .expect("Config"),
+            config: ConfigEpoch::freeze(ConfigEpochId::new(1).expect("Config Epoch"), &layers)
+                .expect("Config"),
             provider: ProviderEpoch::with_profile_snapshot_and_dialect(
                 ProviderEpochId::new(1).expect("Provider Epoch"),
                 profile.profile(),
@@ -2241,6 +2276,7 @@ source = "unknown"
             assert_eq!(
                 body,
                 serde_json::json!({
+                    "max_completion_tokens": 2048,
                     "messages": [{"role": "user", "content": "hello Chat"}],
                     "model": FIXTURE_MODEL,
                     "stream": true,
@@ -2260,8 +2296,12 @@ source = "unknown"
         let mut provider =
             ChatCompletionsHttpProvider::with_timeout(profile.clone(), vault, HTTP_TIMEOUT)
                 .expect("Chat Completions provider");
-        let request =
-            provider_request_with_dialect(profile, "hello Chat", ProviderDialect::ChatCompletions);
+        let request = provider_request_with_output_tokens(
+            profile,
+            "hello Chat",
+            ProviderDialect::ChatCompletions,
+            2_048,
+        );
         let events = provider.run(&request).expect("Chat response");
         assert!(matches!(
             events.as_slice(),
@@ -2403,6 +2443,7 @@ source = "unknown"
             assert_eq!(
                 initial_body,
                 serde_json::json!({
+                    "max_completion_tokens": 6000,
                     "messages": [{
                         "role": "user",
                         "content": "echo through Chat",
@@ -2443,6 +2484,7 @@ source = "unknown"
             assert_eq!(
                 continuation_body,
                 serde_json::json!({
+                    "max_completion_tokens": 6000,
                     "messages": [
                         {"role": "user", "content": "echo through Chat"},
                         {
@@ -2537,6 +2579,8 @@ source = "unknown"
             ChatCompletionsHttpProvider::with_timeout(profile, vault, Duration::from_secs(2))
                 .expect("Chat Completions provider");
         provider.enable_local_echo();
+        let mut layers = runtime.config_layers().expect("Config layers").clone();
+        layers.cli.max_output_tokens = Some(6_000);
 
         let runtime_path = test_ledger_path("chat-tool-continuation", "runtime");
         let team_path = test_ledger_path("chat-tool-continuation", "team");
@@ -2566,13 +2610,9 @@ source = "unknown"
             other => panic!("unexpected root outcome: {other:?}"),
         };
         let outcome = kernel
-            .execute_provider_turn(
-                root,
-                runtime.config_layers().expect("Config layers"),
-                "echo through Chat",
-                &mut provider,
-                |_| Ok(ToolResources::default().with_process("greentyper.local.echo.v1")),
-            )
+            .execute_provider_turn(root, &layers, "echo through Chat", &mut provider, |_| {
+                Ok(ToolResources::default().with_process("greentyper.local.echo.v1"))
+            })
             .expect("prepare Chat Tool approval");
         let approval = match outcome {
             ProviderTurnOutcome::ApprovalRequired(approval) => approval,
@@ -2619,7 +2659,7 @@ source = "unknown"
             assert_eq!(
                 body,
                 serde_json::json!({
-                    "max_tokens": 4096,
+                    "max_tokens": 3072,
                     "messages": [{"role": "user", "content": "hello Messages"}],
                     "model": FIXTURE_MODEL,
                     "stream": true,
@@ -2654,8 +2694,12 @@ source = "unknown"
             vault,
         )
         .expect("configured Messages provider");
-        let request =
-            provider_request_with_dialect(profile, "hello Messages", ProviderDialect::Messages);
+        let request = provider_request_with_output_tokens(
+            profile,
+            "hello Messages",
+            ProviderDialect::Messages,
+            3_072,
+        );
         let events = provider.run(&request).expect("Messages response");
         assert!(matches!(
             events.as_slice(),
@@ -2822,7 +2866,7 @@ source = "unknown"
             assert_eq!(
                 initial_body,
                 serde_json::json!({
-                    "max_tokens": 4096,
+                    "max_tokens": 6001,
                     "messages": [{"role": "user", "content": "echo through Messages"}],
                     "model": FIXTURE_MODEL,
                     "stream": true,
@@ -2856,7 +2900,7 @@ source = "unknown"
             assert_eq!(
                 continuation_body,
                 serde_json::json!({
-                    "max_tokens": 4096,
+                    "max_tokens": 6001,
                     "messages": [
                         {"role": "user", "content": "echo through Messages"},
                         {
@@ -2915,6 +2959,7 @@ source = "unknown"
         let mut layers = ConfigLayers::default();
         layers.cli.provider_profile = Some(profile.profile().to_owned());
         layers.cli.provider_model = Some(FIXTURE_MODEL.to_owned());
+        layers.cli.max_output_tokens = Some(6_001);
 
         let runtime_path = test_ledger_path("messages-tool-continuation", "runtime");
         let team_path = test_ledger_path("messages-tool-continuation", "team");
@@ -3389,6 +3434,7 @@ credential = "synthetic-deepseek-reference"
                 initial_body,
                 serde_json::json!({
                     "input": "echo through the approved tool",
+                    "max_output_tokens": 6002,
                     "model": FIXTURE_MODEL,
                     "stream": true,
                     "tool_choice": "auto",
@@ -3426,6 +3472,7 @@ credential = "synthetic-deepseek-reference"
                         "call_id": "call_http_echo_1",
                         "output": "tool says hi",
                     }],
+                    "max_output_tokens": 6002,
                     "model": FIXTURE_MODEL,
                     "previous_response_id": "resp_http_tool_1",
                     "stream": true,
@@ -3499,10 +3546,12 @@ credential = "synthetic-deepseek-reference"
             CommandOutcome::RootAdmitted { session, .. } => session,
             other => panic!("unexpected root outcome: {other:?}"),
         };
+        let mut layers = runtime.config_layers().expect("Config layers").clone();
+        layers.cli.max_output_tokens = Some(6_002);
         let outcome = kernel
             .execute_provider_turn(
                 root,
-                runtime.config_layers().expect("Config layers"),
+                &layers,
                 "echo through the approved tool",
                 &mut provider,
                 |_| Ok(ToolResources::default().with_process("greentyper.local.echo.v1")),

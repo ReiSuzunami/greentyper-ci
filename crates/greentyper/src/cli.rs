@@ -47,10 +47,21 @@ pub fn run(arguments: impl Iterator<Item = String>) -> Result<(), CliError> {
             input,
             local_echo,
             dialect,
+            preset,
         } => {
             let config = open_config_runtime(default_config_paths()?)?;
-            let layers = config.config_layers()?.clone();
-            let profile = config.selected_provider_profile()?;
+            let mut layers = config.config_layers()?.clone();
+            let (profile, dialect) = match preset {
+                Some(id) => {
+                    let preset = config.model_preset(&id)?;
+                    let profile = config.provider_profile(&preset.provider)?;
+                    layers.cli.provider_profile = Some(preset.provider);
+                    layers.cli.provider_model = Some(preset.model);
+                    layers.cli.max_output_tokens = preset.max_output_tokens;
+                    (profile, Some(preset.dialect))
+                }
+                None => (config.selected_provider_profile()?, dialect),
+            };
             let usage_windows = config.resolved_usage_windows()?;
             let price_schedules = config.resolved_price_schedules()?;
             let mut provider = match (profile, dialect) {
@@ -464,6 +475,7 @@ enum Command {
         input: String,
         local_echo: bool,
         dialect: Option<ProviderDialect>,
+        preset: Option<String>,
     },
     Resume {
         ledger: PathBuf,
@@ -628,6 +640,7 @@ fn parse(mut arguments: impl Iterator<Item = String>) -> Result<Command, CliErro
     let mut delivery = None;
     let mut tool = None;
     let mut dialect = None;
+    let mut preset = None;
     let mut at = None;
     let mut summary_only = false;
     let mut limit = None;
@@ -646,6 +659,7 @@ fn parse(mut arguments: impl Iterator<Item = String>) -> Result<Command, CliErro
             "--delivery" => &mut delivery,
             "--tool" => &mut tool,
             "--dialect" => &mut dialect,
+            "--preset" => &mut preset,
             "--at" => &mut at,
             "--limit" => &mut limit,
             "--cursor" => &mut cursor,
@@ -685,12 +699,18 @@ fn parse(mut arguments: impl Iterator<Item = String>) -> Result<Command, CliErro
         "headless" => {
             reject_option(&delivery, "--delivery is not valid for headless")?;
             reject_option(&at, "--at is not valid for headless")?;
+            if preset.is_some() && dialect.is_some() {
+                return Err(CliError::Usage(
+                    "--preset cannot be combined with --dialect",
+                ));
+            }
             let dialect = dialect.as_deref().map(parse_provider_dialect).transpose()?;
             Ok(Command::Headless {
                 ledger,
                 input: input.ok_or(CliError::Usage("headless requires --input"))?,
                 local_echo,
                 dialect,
+                preset,
             })
         }
         "resume" => {
@@ -698,6 +718,7 @@ fn parse(mut arguments: impl Iterator<Item = String>) -> Result<Command, CliErro
             reject_option(&delivery, "--delivery is not valid for resume")?;
             reject_option(&at, "--at is not valid for resume")?;
             reject_option(&dialect, "--dialect is not valid for resume")?;
+            reject_option(&preset, "--preset is not valid for resume")?;
             Ok(Command::Resume { ledger, local_echo })
         }
         "status" => {
@@ -706,6 +727,7 @@ fn parse(mut arguments: impl Iterator<Item = String>) -> Result<Command, CliErro
             reject_option(&tool, "--tool is not valid for status")?;
             reject_option(&at, "--at is not valid for status")?;
             reject_option(&dialect, "--dialect is not valid for status")?;
+            reject_option(&preset, "--preset is not valid for status")?;
             Ok(Command::Status { ledger })
         }
         "stats" => {
@@ -713,6 +735,7 @@ fn parse(mut arguments: impl Iterator<Item = String>) -> Result<Command, CliErro
             reject_option(&delivery, "--delivery is not valid for stats")?;
             reject_option(&tool, "--tool is not valid for stats")?;
             reject_option(&dialect, "--dialect is not valid for stats")?;
+            reject_option(&preset, "--preset is not valid for stats")?;
             let at = at
                 .map(|value| {
                     value
@@ -752,6 +775,7 @@ fn parse(mut arguments: impl Iterator<Item = String>) -> Result<Command, CliErro
             reject_option(&tool, "--tool is not valid for reconcile")?;
             reject_option(&at, "--at is not valid for reconcile")?;
             reject_option(&dialect, "--dialect is not valid for reconcile")?;
+            reject_option(&preset, "--preset is not valid for reconcile")?;
             let delivery = delivery
                 .ok_or(CliError::Usage("reconcile requires --delivery"))?
                 .parse::<u64>()
@@ -1328,7 +1352,7 @@ const USAGE: &str = "\
 GreenTyper headless Runtime\n\
 \n\
 Usage:\n\
-  greentyper headless [--ledger PATH] [--dialect DIALECT] [--tool local.echo] --input TEXT\n\
+  greentyper headless [--ledger PATH] [--preset ID | --dialect DIALECT] [--tool local.echo] --input TEXT\n\
   greentyper resume [--ledger PATH] [--tool local.echo]\n\
   greentyper status [--ledger PATH]\n\
   greentyper stats [--ledger PATH] [--at UNIX_MS] [--summary-only | --limit N [--cursor CURSOR]]\n\
@@ -1576,6 +1600,37 @@ mod tests {
                 ..
             })
         ));
+        assert!(matches!(
+            parse(
+                [
+                    "headless".to_owned(),
+                    "--input".to_owned(),
+                    "hello".to_owned(),
+                    "--preset".to_owned(),
+                    "frontier".to_owned(),
+                ]
+                .into_iter()
+            ),
+            Ok(Command::Headless {
+                preset: Some(preset),
+                ..
+            }) if preset == "frontier"
+        ));
+        assert!(
+            parse(
+                [
+                    "headless".to_owned(),
+                    "--input".to_owned(),
+                    "hello".to_owned(),
+                    "--preset".to_owned(),
+                    "frontier".to_owned(),
+                    "--dialect".to_owned(),
+                    "responses".to_owned(),
+                ]
+                .into_iter()
+            )
+            .is_err()
+        );
         assert!(
             parse(
                 [

@@ -17,6 +17,7 @@ pub use runtime::*;
 
 pub const DEFAULT_MAX_OUTPUT_BYTES: u32 = 64 * 1024;
 pub const MAX_OUTPUT_BYTES: u32 = 512 * 1024;
+pub const MAX_OUTPUT_TOKENS: u32 = 1024 * 1024;
 pub const MAX_CONFIG_STRING_BYTES: usize = 512;
 pub const CONFIG_SCHEMA_VERSION: u16 = SchemaKind::ConfigEpoch.current().get();
 
@@ -33,6 +34,7 @@ pub struct ConfigLayer {
     pub provider_profile: Option<String>,
     pub provider_model: Option<String>,
     pub max_output_bytes: Option<u32>,
+    pub max_output_tokens: Option<u32>,
 }
 
 impl ConfigLayer {
@@ -42,6 +44,7 @@ impl ConfigLayer {
             provider_profile: Some("simulator".to_owned()),
             provider_model: Some("deterministic-v1".to_owned()),
             max_output_bytes: Some(DEFAULT_MAX_OUTPUT_BYTES),
+            max_output_tokens: None,
         }
     }
 }
@@ -88,6 +91,7 @@ pub struct ResolvedConfig {
     provider_profile: Sourced<String>,
     provider_model: Sourced<String>,
     max_output_bytes: Sourced<u32>,
+    max_output_tokens: Option<Sourced<u32>>,
 }
 
 impl ResolvedConfig {
@@ -104,6 +108,11 @@ impl ResolvedConfig {
     #[must_use]
     pub const fn max_output_bytes(&self) -> &Sourced<u32> {
         &self.max_output_bytes
+    }
+
+    #[must_use]
+    pub const fn max_output_tokens(&self) -> Option<&Sourced<u32>> {
+        self.max_output_tokens.as_ref()
     }
 }
 
@@ -222,11 +231,30 @@ impl ConfigLayers {
         if max_output_bytes.value > MAX_OUTPUT_BYTES {
             return Err(ConfigError::MaxOutputBytesTooLarge);
         }
+        let max_output_tokens = resolve_optional_u32([
+            (&self.built_in.max_output_tokens, ConfigSource::BuiltIn),
+            (&self.user.max_output_tokens, ConfigSource::User),
+            (&self.project.max_output_tokens, ConfigSource::Project),
+            (&self.cli.max_output_tokens, ConfigSource::Cli),
+        ]);
+        if max_output_tokens
+            .as_ref()
+            .is_some_and(|value| value.value == 0)
+        {
+            return Err(ConfigError::ZeroMaxOutputTokens);
+        }
+        if max_output_tokens
+            .as_ref()
+            .is_some_and(|value| value.value > MAX_OUTPUT_TOKENS)
+        {
+            return Err(ConfigError::MaxOutputTokensTooLarge);
+        }
 
         Ok(ResolvedConfig {
             provider_profile,
             provider_model,
             max_output_bytes,
+            max_output_tokens,
         })
     }
 }
@@ -254,6 +282,14 @@ fn validate_layer(layer: &ConfigLayer) -> Result<(), ConfigError> {
         }
         if max_output_bytes > MAX_OUTPUT_BYTES {
             return Err(ConfigError::MaxOutputBytesTooLarge);
+        }
+    }
+    if let Some(max_output_tokens) = layer.max_output_tokens {
+        if max_output_tokens == 0 {
+            return Err(ConfigError::ZeroMaxOutputTokens);
+        }
+        if max_output_tokens > MAX_OUTPUT_TOKENS {
+            return Err(ConfigError::MaxOutputTokensTooLarge);
         }
     }
     Ok(())
@@ -286,6 +322,16 @@ fn resolve_u32<const N: usize>(
         .ok_or(ConfigError::MissingRequired(key))
 }
 
+fn resolve_optional_u32<const N: usize>(
+    values: [(&Option<u32>, ConfigSource); N],
+) -> Option<Sourced<u32>> {
+    values
+        .into_iter()
+        .filter_map(|(value, source)| value.map(|value| (value, source)))
+        .next_back()
+        .map(|(value, source)| Sourced { value, source })
+}
+
 fn fingerprint(
     config: &ResolvedConfig,
     usage_windows: &[UsageWindow],
@@ -306,6 +352,19 @@ fn fingerprint(
         for byte in bytes {
             hash ^= u64::from(*byte);
             hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+    if let Some(max_output_tokens) = &config.max_output_tokens {
+        for bytes in [
+            max_output_tokens.value.to_le_bytes().as_slice(),
+            &[source_tag(max_output_tokens.source)],
+        ] {
+            hash ^= bytes.len() as u64;
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+            for byte in bytes {
+                hash ^= u64::from(*byte);
+                hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+            }
         }
     }
     for window in usage_windows {
@@ -376,7 +435,9 @@ pub enum ConfigError {
     SurroundingWhitespace(&'static str),
     StringTooLong(&'static str),
     ZeroMaxOutputBytes,
+    ZeroMaxOutputTokens,
     MaxOutputBytesTooLarge,
+    MaxOutputTokensTooLarge,
     TooManyUsageWindows,
     DuplicateUsageWindow,
 }
@@ -396,11 +457,17 @@ impl fmt::Display for ConfigError {
                     "runtime.max_output_bytes must be greater than zero"
                 )
             }
+            Self::ZeroMaxOutputTokens => {
+                write!(formatter, "max_output_tokens must be greater than zero")
+            }
             Self::MaxOutputBytesTooLarge => {
                 write!(
                     formatter,
                     "runtime.max_output_bytes exceeds the supported limit"
                 )
+            }
+            Self::MaxOutputTokensTooLarge => {
+                write!(formatter, "max_output_tokens exceeds the supported limit")
             }
             Self::TooManyUsageWindows => {
                 write!(formatter, "usage window count exceeds the supported limit")

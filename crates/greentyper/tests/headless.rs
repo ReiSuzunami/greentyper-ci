@@ -463,6 +463,72 @@ source = "unknown"
     fs::remove_dir_all(config_root).expect("cleanup config root");
 }
 
+#[test]
+fn headless_resolves_an_explicit_model_preset_without_model_name_inference() {
+    let ledger = temp_path("model-preset");
+    let config_root = temp_path("model-preset-config");
+    let config_path = user_config_path(&config_root);
+    fs::create_dir_all(config_path.parent().unwrap()).expect("create config parent");
+    fs::write(
+        &config_path,
+        r#"schema_version = 1
+
+[providers.edge]
+template = "openai-compatible"
+credential = "edge-credential"
+base_url = "https://provider.invalid/v1"
+dialects = ["responses"]
+
+[providers.edge.routes]
+responses = "/responses"
+
+[providers.edge.pricing]
+source = "unknown"
+
+[model_presets.frontier]
+provider = "edge"
+model = "fixture-model"
+dialect = "responses"
+max_output_tokens = 2048
+"#,
+    )
+    .expect("write Model Preset config");
+
+    let output = binary_with_config_root(&config_root)
+        .args(["headless", "--preset", "frontier", "--ledger"])
+        .arg(&ledger)
+        .args(["--input", "select the exact preset"])
+        .output()
+        .expect("run preset-selected headless command");
+    assert!(!output.status.success(), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Provider credential binding was not found")
+            || stderr.contains("provider unavailable"),
+        "{output:?}"
+    );
+    assert!(!stderr.contains("unknown option"), "{output:?}");
+    assert!(
+        !ledger.exists(),
+        "Preset failure must precede Turn admission"
+    );
+
+    let missing = binary_with_config_root(&config_root)
+        .args(["headless", "--preset", "missing", "--ledger"])
+        .arg(&ledger)
+        .args(["--input", "do not infer from model"])
+        .output()
+        .expect("run missing Preset command");
+    assert!(!missing.status.success(), "{missing:?}");
+    assert!(
+        String::from_utf8_lossy(&missing.stderr).contains("model_presets.missing"),
+        "{missing:?}"
+    );
+    assert!(!ledger.exists());
+
+    fs::remove_dir_all(config_root).expect("cleanup config root");
+}
+
 struct PanicProvider;
 
 impl ProviderRuntime for PanicProvider {

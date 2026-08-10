@@ -157,13 +157,14 @@ descriptors while Tool Runtime remains the authority gate. Approval and
 `EffectPrepared` are durable before the injected executor runs. A successful
 UTF-8 result may then enter one Provider continuation. The final
 `OutputPrepared` transaction stores the combined canonical text and one or two
-bounded Usage Records. Runtime Event schema 5 also durably brackets every
+bounded Usage Records. Runtime Event schema 6 also durably brackets every
 Provider request or continuation with Usage Attempt start/finish Events and
 carries the Agent scope, Provider dialect, frozen Usage Windows, UTC times,
 outcome, exact/estimated marker, optional token/cache classes, service tier, and
 frozen Provider Profile snapshot, then records one frozen Price Schedule cost
-evaluation. Historical schema-1 through schema-4 Runtime transactions replay and
-can be followed by schema-5 transactions;
+evaluation and an optional selected-Preset output-token limit in the Config
+Epoch. Historical schema-1 through schema-5 Runtime transactions replay and can
+be followed by schema-6 transactions;
 schema-1 token counts become explicitly estimated legacy attempts.
 
 This tracer bullet intentionally stores only the Tool result digest. If the
@@ -237,7 +238,7 @@ startup without one enters repair instead of silently dropping a layer.
 
 ```text
 greentyper headless [--ledger PATH] [--tool local.echo]
-  [--dialect responses|chat_completions|messages] --input TEXT
+  [--preset ID | --dialect responses|chat_completions|messages] --input TEXT
 greentyper resume [--ledger PATH] [--tool local.echo]
 greentyper status [--ledger PATH]
 greentyper stats [--ledger PATH] [--at UNIX_MS]
@@ -296,7 +297,7 @@ checkpoints, and stale-result CAS handling.
 
 Prompt/provider text and credential material are not part of the Usage domain.
 Requested or observed metadata not supplied by the current Provider remains
-unknown. Runtime Event schema 5 records `UsageAttemptFinished` before
+unknown. Runtime Event schema 6 records `UsageAttemptFinished` before
 `UsageAttemptCostEvaluated` in the same transaction. The Config Epoch freezes
 the resolved Price Schedule book; replay recomputes the cost claim from that
 book and the normalized Usage Record, rejecting a changed schedule fingerprint,

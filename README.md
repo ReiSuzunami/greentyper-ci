@@ -74,6 +74,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo run -p greentyper-acceptance -- verify-cpu
 cargo run -p greentyper-acceptance -- bench list
 cargo run -p greentyper -- headless --ledger ./target/dev-runtime.ledger --input "hello"
+cargo run -p greentyper -- headless --preset frontier --ledger ./target/dev-runtime.ledger --input "hello"
 cargo run -p greentyper -- headless --ledger ./target/tool-runtime.ledger --tool local.echo --input "echo this"
 cargo run -p greentyper -- status --ledger ./target/dev-runtime.ledger
 cargo run -p greentyper -- stats --ledger ./target/dev-runtime.ledger
@@ -89,6 +90,10 @@ For a configured OpenAI or openai-compatible Profile, `headless` accepts
 `--dialect responses` or `--dialect chat_completions`. A configured DeepSeek
 Profile accepts `--dialect messages`; every other template/dialect pair fails
 closed unless the product has an explicit adapter for that exact identity.
+`headless --preset ID` resolves one configured Model Preset by exact ID and
+freezes its Profile, model, dialect, and optional output-token limit for the
+Turn. It cannot be combined with `--dialect`; missing IDs fail rather than
+falling back to a model-name match.
 
 The core Agent Team policy, Config Runtime, recoverable single-Agent Runtime,
 and first Tool Runtime policy slice compile and run through interface-level and
@@ -123,8 +128,8 @@ official DeepSeek Anthropic-compatible Messages profile now run through
 no-proxy, no-redirect HTTPS clients, origin-bound credential lookup, bounded
 streaming decode, and a fixed deadline. Messages uses `x-api-key`, pins the
 Anthropic API version header, explicitly disables DeepSeek's default thinking
-mode, and currently sends a conservative fixed `max_tokens = 4096`; wiring the
-selected Model Preset output limit is still pending. Config Runtime freezes the
+mode, and sends the selected Model Preset output limit as `max_tokens`, with a
+conservative 4096 fallback when no limit is selected. Config Runtime freezes the
 normalized origin, selected-dialect route, dialect, pricing decision, and opaque
 credential reference in the Provider Epoch; adapter reconstruction uses that
 snapshot without changing an explicit dialect. Private loopback fixtures retain
@@ -138,7 +143,13 @@ keeps the deterministic simulator when no custom profile is selected.
 Current configured Provider Epochs freeze an explicit dialect. Historical
 pre-dialect Epochs retain their schema-compatible Responses default and still
 must pass the frozen Profile's adapter and capability checks during replay.
-Runtime Event schema 5 now brackets every Provider invocation with a durable
+Runtime Event schema 6 freezes an optional selected-Preset output-token limit in
+the Config Epoch. Responses sends it as `max_output_tokens`, Chat Completions as
+`max_completion_tokens`, and Messages as `max_tokens`; Responses and Chat omit
+the field when no limit is selected, while Messages retains its 4096 fallback.
+The same frozen value survives restart and Tool continuation. Schema 6 also
+preserves the schema-5 Usage and Cost contract, which brackets every Provider
+invocation with a durable
 Usage Attempt, records UTC start/completion and outcome, preserves exact,
 estimated, and unknown token classes, and rebuilds cached Turn, Thread, Agent,
 Team, rolling, and named-window rollups. Config Epochs freeze normalized Usage
@@ -193,7 +204,8 @@ loop, ConPTY integration, rendered Config Center, object-name dialog, or
 rendered template picker, starter-preset workflow, or live catalog discovery.
 Live credential-gated provider validation, configurable proxy policy,
 reconnect/retry, DeepSeek Responses/Chat Completions, all OpenCode Go execution,
-Messages reasoning blocks and preset-driven output limits, richer approval
+Messages reasoning blocks, Preset reasoning/service-tier/context/fallback
+execution, richer approval
 presentation, broader Provider and Tool adapters,
 Workspace, TUI, and App Server work remain. The loopback Provider tracer remains
 an internal harness; `local.echo` is intentionally a fixed opt-in command rather

@@ -294,6 +294,18 @@ fallback = []
 
 A runnable preset must name its Provider Profile, model, and Provider Dialect. Its route is then resolved from that profile; there is no hidden dialect auto-selection. Presets may also define reasoning effort, reasoning mode where supported, service tier, output limit, context policy, and an explicit fallback chain. They never grant tools, approvals, credentials, or workspace authority.
 
+The current headless execution surface accepts `--preset ID`. It resolves the
+exact configured ID, applies its Profile/model/dialect, and freezes its optional
+`max_output_tokens` in the next Turn's Config Epoch. `--preset` and `--dialect`
+are mutually exclusive, and an unknown ID fails rather than triggering model-name
+inference. Responses, Chat Completions, and Messages map the frozen value to
+their dialect-specific request fields and preserve it for one Tool continuation
+and restart recovery. The client rejects zero or more than 1,048,576 requested
+tokens as a cost and latency guard; a Provider or model may enforce a lower
+limit. Reasoning effort, service tier, context mode, fallback
+execution, current-Agent interactive selection, and project/default selection
+remain target behavior.
+
 The target model selector provides Favorites, Recent, Compatible, and All views
 with fuzzy search. Each entry shows provider, dialect, known context limit,
 capabilities, price freshness, and observed availability. Incompatible entries
@@ -404,7 +416,7 @@ reasoning_output_micros_per_million = 3000000
 ```
 
 The resolved schedule book rejects duplicate or overlapping selectors. Config
-Epoch creation freezes the book and its fingerprints. Runtime Event schema 5
+Epoch creation freezes the book and its fingerprints. Runtime Event schema 6
 appends normalized Usage first and its cost evaluation second in one transaction;
 replay recomputes the result from that frozen evidence. Missing token classes,
 missing selectors, inconsistent accounting, and arithmetic overflow remain

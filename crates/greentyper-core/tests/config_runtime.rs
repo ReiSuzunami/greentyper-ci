@@ -7,7 +7,7 @@ use greentyper_core::config::{
     ConfigApplicationTiming, ConfigDocument, ConfigEditorError, ConfigEditorOperation,
     ConfigEditorSession, ConfigErrorCategory, ConfigFieldContents, ConfigObjectKind,
     ConfigObjectRef, ConfigPaths, ConfigRuntime, ConfigRuntimeError, ConfigScope, ConfigValue,
-    ConfigValueKind, config_schema, parse_config_value,
+    ConfigValueKind, MAX_OUTPUT_TOKENS, config_schema, parse_config_value,
 };
 use greentyper_core::pricing::PriceScheduleSource;
 use greentyper_core::provider::{ProviderDialect, ProviderPricingSource};
@@ -314,6 +314,15 @@ fn schema_and_parser_are_versioned_typed_and_secret_safe() {
         Err(ConfigRuntimeError::InvalidValue { path, .. })
             if path == "providers.edge.routes.responses"
     ));
+    let excessive_output_tokens = format!(
+        "schema_version = 1\n[model_presets.big]\nmax_output_tokens = {}\n",
+        MAX_OUTPUT_TOKENS + 1
+    );
+    assert!(matches!(
+        ConfigDocument::parse(&excessive_output_tokens),
+        Err(ConfigRuntimeError::InvalidValue { path, .. })
+            if path == "model_presets.big.max_output_tokens"
+    ));
 
     let document = ConfigDocument::parse(
         r#"
@@ -379,6 +388,7 @@ source = "unknown"
 provider = "edge"
 model = "fixture-model"
 dialect = "responses"
+max_output_tokens = 2048
 
 [[stats.windows]]
 id = "work"
@@ -480,8 +490,25 @@ timezone = "Asia/Hong_Kong"
     assert_eq!(presets[0].provider, "edge");
     assert_eq!(presets[0].model, "fixture-model");
     assert_eq!(presets[0].dialect, ProviderDialect::Responses);
+    assert_eq!(presets[0].max_output_tokens, Some(2_048));
     assert!(!presets[0].favorite);
     assert!(presets[0].fallback.is_empty());
+    assert_eq!(
+        runtime.model_preset("fast").expect("exact model preset"),
+        presets[0]
+    );
+    assert!(matches!(
+        runtime.model_preset("missing"),
+        Err(ConfigRuntimeError::UnknownObject(path)) if path == "model_presets.missing"
+    ));
+    assert_eq!(
+        runtime
+            .provider_profile("edge")
+            .expect("resolve exact Provider Profile")
+            .expect("external Provider Profile")
+            .profile(),
+        "edge"
+    );
 }
 
 #[test]

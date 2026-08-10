@@ -121,11 +121,11 @@ existing durable Tool approval/effect state machine, feeds one successful UTF-8
 result into a Provider continuation, and durably prepares combined canonical
 output. Recovery tests prove stale Sessions cannot invoke the Provider,
 ambiguous effects cannot continue, and process death after a durable Tool
-success blocks rather than repeating the effect. Runtime Event schema 5 stores
+success blocks rather than repeating the effect. Runtime Event schema 6 stores
 durable Usage Attempt boundaries, frozen Usage Windows, Provider dialect, the
 expanded optional Usage Records, frozen Provider Profile snapshot, and the
-subsequent frozen Price Schedule cost evaluation while replaying historical
-schema 1, schema 2, schema 3, and schema 4.
+subsequent frozen Price Schedule cost evaluation plus an optional selected-Preset
+output-token limit while replaying historical schema 1 through schema 5.
 
 A product-private `local.echo` tracer now exercises the concrete process seam.
 It launches a fixed same-binary child without a shell, clears inherited
@@ -156,8 +156,8 @@ missing credential failure before network access.
 The remaining slices are still policy, protocol, and fault-adapter work:
 live-provider validation, non-Windows credential backends, configurable proxy
 policy, live catalog discovery, template-specific DeepSeek Responses/Chat
-Completions and all OpenCode Go execution, Messages reasoning
-blocks and preset-driven output-token limits, broader canonical Items, multiple
+Completions and all OpenCode Go execution, Messages reasoning blocks, Preset
+reasoning/service-tier/context/fallback execution, broader canonical Items, multiple
 Tool calls,
 durable resumable Tool result references, richer TUI/App Server
 approval/delivery, caller-selected process policy, complete Windows Job
@@ -176,7 +176,7 @@ Exit criteria:
 
 Add VT/ConPTY TUI, hierarchical Command Paths, global command palette, Config Schema-driven editors, Provider wizard, model selector, adaptive statusline, Context Pressure, Usage Records/Rollups, `/stats`, and named Usage Windows.
 
-The first observability slice is implemented. Runtime Event schema 5 durably
+The first observability slice is implemented. Runtime Event schema 6 durably
 brackets each Provider request and continuation with an immutable Usage Attempt,
 including UTC start/completion, outcome, Agent scope when present, frozen
 Provider Profile/model/dialect, exact or estimated Usage Records, and explicit
@@ -296,8 +296,10 @@ starter-preset acceptance, provider capability probes, explicit fallback
 chains, observed availability, and provider/model epoch switching. The
 OpenAI/openai-compatible Responses and Chat Completions adapters and the first
 official DeepSeek Messages adapter are implemented; custom gateway routes and
-user-owned Model Presets already resolve through the frozen Config/Provider
-Epoch boundary.
+user-owned Model Presets can be selected explicitly by ID for headless Turns.
+Their Profile/model/dialect and optional output-token limit resolve through the
+frozen Config/Provider Epoch boundary; rendered selection and the remaining
+Preset policy fields are still pending.
 
 Exit criteria:
 

@@ -1336,6 +1336,14 @@ impl ConfigRuntime {
             .collect()
     }
 
+    pub fn model_preset(&self, id: &str) -> Result<ModelPresetView, ConfigRuntimeError> {
+        validate_id("model preset", id)?;
+        self.model_presets()?
+            .into_iter()
+            .find(|preset| preset.id == id)
+            .ok_or_else(|| ConfigRuntimeError::UnknownObject(format!("model_presets.{id}")))
+    }
+
     pub fn catalog_models(&self) -> Result<Vec<ModelCatalogView>, ConfigRuntimeError> {
         let resolved = self
             .last_valid
@@ -1518,10 +1526,22 @@ impl ConfigRuntime {
             .provider_profile()
             .value()
             .clone();
+        self.provider_profile(&profile)
+    }
+
+    pub fn provider_profile(
+        &self,
+        profile: &str,
+    ) -> Result<Option<ProviderProfileSnapshot>, ConfigRuntimeError> {
+        validate_id("provider profile", profile)?;
         if profile == "simulator" {
             return Ok(None);
         }
-        provider_profile_snapshot(&resolved.document, &profile).map(Some)
+        let resolved = self
+            .last_valid
+            .as_ref()
+            .ok_or_else(|| ConfigRuntimeError::RepairRequired(self.status().issues))?;
+        provider_profile_snapshot(&resolved.document, profile).map(Some)
     }
 
     pub fn provider_profile_for_draft(
@@ -2678,6 +2698,13 @@ fn validate_value(path: &str, value: &ConfigValue) -> Result<(), ConfigRuntimeEr
                 Err(invalid(path, "value must be greater than zero"))
             } else if path == "runtime.max_output_bytes" && *value > super::MAX_OUTPUT_BYTES {
                 Err(invalid(path, "value exceeds the supported output limit"))
+            } else if path_matches("model_presets.<id>.max_output_tokens", path)
+                && *value > super::MAX_OUTPUT_TOKENS
+            {
+                Err(invalid(
+                    path,
+                    "value exceeds the supported output-token limit",
+                ))
             } else {
                 Ok(())
             }
@@ -3702,6 +3729,7 @@ impl ConfigDocument {
             provider_profile: self.provider.profile.clone(),
             provider_model: self.provider.model.clone(),
             max_output_bytes: self.runtime.max_output_bytes,
+            max_output_tokens: None,
         }
     }
 

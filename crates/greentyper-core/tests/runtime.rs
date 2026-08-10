@@ -211,6 +211,32 @@ fn crash_after_admission_requires_explicit_resume() {
 }
 
 #[test]
+fn output_token_limit_survives_admission_crash_and_resume() {
+    let path = temp_path("output-token-resume");
+    let mut layers = ConfigLayers::default();
+    layers.cli.max_output_tokens = Some(4_096);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut runtime = RuntimeKernel::open(&path).expect("open Runtime");
+        let mut provider = PanicProvider;
+        let _ = runtime.execute(&layers, "resume bounded", &mut provider);
+    }));
+    assert!(result.is_err());
+
+    layers.cli.max_output_tokens = Some(8_192);
+    let mut recovered = RuntimeKernel::open(&path).expect("recover Runtime");
+    let mut provider = OutputTokenProvider { seen: None };
+    let output = recovered
+        .resume(&mut provider)
+        .expect("resume with frozen output-token limit");
+    assert_eq!(provider.seen, Some(4_096));
+    recovered
+        .acknowledge(output.delivery())
+        .expect("acknowledge resumed output");
+    drop(recovered);
+    fs::remove_file(path).expect("cleanup Runtime ledger");
+}
+
+#[test]
 fn provider_profile_snapshot_survives_recovery_and_rejects_mismatched_resume() {
     const CREDENTIAL_MATERIAL: &str = "credential-material-must-never-enter-ledger";
     let path = temp_path("provider-profile-recovery");
@@ -367,7 +393,7 @@ fn unsupported_runtime_event_schema_fails_closed() {
         .append(
             LedgerHead::default(),
             &[EventData {
-                schema: 6,
+                schema: 7,
                 kind: 1,
                 payload: 1_u64.to_le_bytes().to_vec(),
             }],
@@ -377,8 +403,8 @@ fn unsupported_runtime_event_schema_fails_closed() {
     assert!(matches!(
         RuntimeKernel::open(&path),
         Err(RuntimeError::UnsupportedRuntimeEventSchema {
-            supported: 5,
-            actual: 6
+            supported: 6,
+            actual: 7
         })
     ));
     fs::remove_file(path).expect("cleanup Runtime ledger");
@@ -507,10 +533,10 @@ fn schema_one_runtime_turn_replays_and_can_continue_with_current_schema() {
     let mut provider = DeterministicProvider::default();
     let output = runtime
         .execute(&layers, "current input", &mut provider)
-        .expect("write schema four Turn");
+        .expect("write current-schema Turn");
     runtime
         .acknowledge(output.delivery())
-        .expect("acknowledge schema four Turn");
+        .expect("acknowledge current-schema Turn");
     drop(runtime);
 
     let recovered = RuntimeKernel::open(&path).expect("replay mixed schema Turns");
@@ -595,6 +621,21 @@ struct PanicProvider;
 impl ProviderRuntime for PanicProvider {
     fn run(&mut self, _request: &ProviderRequest) -> Result<Vec<ProviderEvent>, ProviderError> {
         panic!("injected crash after durable admission")
+    }
+}
+
+struct OutputTokenProvider {
+    seen: Option<u32>,
+}
+
+impl ProviderRuntime for OutputTokenProvider {
+    fn run(&mut self, request: &ProviderRequest) -> Result<Vec<ProviderEvent>, ProviderError> {
+        self.seen = request
+            .config
+            .resolved()
+            .max_output_tokens()
+            .map(|value| *value.value());
+        DeterministicProvider::default().run(request)
     }
 }
 

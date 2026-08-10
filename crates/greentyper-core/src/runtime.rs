@@ -3255,6 +3255,14 @@ fn encode_config_epoch(encoder: &mut Encoder, epoch: &ConfigEpoch) -> Result<(),
     for schedule in epoch.price_schedules().schedules() {
         encode_price_schedule(encoder, schedule)?;
     }
+    match resolved.max_output_tokens() {
+        None => encoder.u8(0),
+        Some(value) => {
+            encoder.u8(1);
+            encoder.u32(*value.value());
+            encoder.u8(source_tag(value.source()));
+        }
+    }
     Ok(())
 }
 
@@ -3308,6 +3316,21 @@ fn decode_config_epoch(
     } else {
         PriceScheduleBook::default()
     };
+    if schema >= 6 {
+        match decoder.u8()? {
+            0 => {}
+            1 => {
+                let value = decoder.u32()?;
+                let source = decode_source(decoder.u8()?)?;
+                layer_mut(&mut layers, source).max_output_tokens = Some(value);
+            }
+            _ => {
+                return Err(RuntimeError::CorruptEvent(
+                    "invalid Config Epoch output-token limit",
+                ));
+            }
+        }
+    }
     let epoch = ConfigEpoch::freeze_with_observability(id, &layers, usage_windows, price_schedules)
         .map_err(RuntimeError::Config)?;
     if epoch.fingerprint() != fingerprint {
@@ -3748,6 +3771,55 @@ mod tests {
     }
 
     #[test]
+    fn schema_six_config_epoch_freezes_output_tokens_and_schema_five_remains_replayable() {
+        let legacy_epoch = ConfigEpoch::freeze(
+            ConfigEpochId::new(1).expect("Config Epoch id"),
+            &ConfigLayers::default(),
+        )
+        .expect("legacy-compatible Config Epoch");
+        let mut schema_five = RuntimeEvent::ConfigFrozen {
+            epoch: legacy_epoch.clone(),
+        }
+        .encode()
+        .expect("encode Config Epoch");
+        assert_eq!(schema_five.schema, 6);
+        assert_eq!(schema_five.payload.pop(), Some(0));
+        schema_five.schema = 5;
+        assert_eq!(
+            RuntimeEvent::decode(&stored_runtime_event(schema_five))
+                .expect("decode schema-five Config Epoch"),
+            RuntimeEvent::ConfigFrozen {
+                epoch: legacy_epoch
+            }
+        );
+
+        let mut layers = ConfigLayers::default();
+        layers.cli.max_output_tokens = Some(8_192);
+        let epoch = ConfigEpoch::freeze(ConfigEpochId::new(2).expect("Config Epoch id"), &layers)
+            .expect("token-bounded Config Epoch");
+        let encoded = RuntimeEvent::ConfigFrozen {
+            epoch: epoch.clone(),
+        }
+        .encode()
+        .expect("encode token-bounded Config Epoch");
+        assert_eq!(
+            RuntimeEvent::decode(&stored_runtime_event(encoded.clone()))
+                .expect("decode token-bounded Config Epoch"),
+            RuntimeEvent::ConfigFrozen { epoch }
+        );
+
+        let mut tampered = encoded;
+        let token_low_byte = tampered.payload.len() - 5;
+        tampered.payload[token_low_byte] ^= 1;
+        assert!(matches!(
+            RuntimeEvent::decode(&stored_runtime_event(tampered)),
+            Err(RuntimeError::CorruptEvent(
+                "Config Epoch fingerprint mismatch"
+            ))
+        ));
+    }
+
+    #[test]
     fn schema_two_and_three_usage_records_replay_as_exact_legacy_usage() {
         for schema in [2, 3] {
             let mut payload = Encoder::default();
@@ -3796,7 +3868,7 @@ mod tests {
         }
         .encode()
         .expect("encode Provider Epoch");
-        assert_eq!(encoded.schema, 5);
+        assert_eq!(encoded.schema, RUNTIME_EVENT_SCHEMA);
         let mut schema_three = encoded.clone();
         schema_three.schema = 3;
         assert_eq!(schema_three.payload.pop(), Some(0));
@@ -3968,7 +4040,7 @@ mod tests {
             },
         };
         let encoded = tampered.clone().encode().expect("encode Cost Estimate");
-        assert_eq!(encoded.schema, 5);
+        assert_eq!(encoded.schema, RUNTIME_EVENT_SCHEMA);
         assert_eq!(encoded.kind, 13);
         assert_eq!(
             RuntimeEvent::decode(&stored_runtime_event(encoded)).expect("decode Cost Estimate"),

@@ -199,8 +199,13 @@ only the official `deepseek` template with an explicit frozen `messages`
 dialect and route, uses `x-api-key` plus `anthropic-version: 2023-06-01`, and
 disables proxy discovery and redirects. DeepSeek thinking is explicitly disabled
 because reasoning blocks are not yet canonicalized. Requests currently use the
-conservative fixed `max_tokens = 4096`; selected Model Preset output-limit
-wiring remains pending. OpenCode Go is not admitted from a route string alone.
+selected Model Preset output limit as `max_tokens`, with a conservative 4096
+fallback when the Turn has no selected limit. Responses maps the same frozen
+value to `max_output_tokens`, while Chat Completions maps it to
+`max_completion_tokens`; those two adapters omit the field when no limit is
+selected. Initial requests and Tool continuations use the same Config Epoch
+value, including after restart. OpenCode Go is not admitted from a route string
+alone.
 
 ## Tool Boundary
 
@@ -330,7 +335,8 @@ and [DeepSeek Anthropic compatibility guide](https://api-docs.deepseek.com/guide
 - Reasoning, refusal, annotation, hosted-tool, and other Responses event kinds
   not listed above.
 - DeepSeek Responses/Chat Completions, all OpenCode Go execution, Messages
-  thinking/signature/server-tool blocks and preset-driven output limits, Chat
+  thinking/signature/server-tool blocks, Preset reasoning/service-tier/context/
+  fallback execution, Chat
   Completions refusal/reasoning and other delta kinds, and non-streaming
   Provider responses.
 - Multiple Tool calls, parallel calls, persisted resumable Provider
