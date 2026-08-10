@@ -12,15 +12,15 @@ use unicode_width::UnicodeWidthStr;
 
 use greentyper_core::config::{
     ConfigEditorError, ConfigError, ConfigFieldContents, ConfigRuntime, ConfigRuntimeError,
-    ConfigScope, ConfigValue, MAX_COMMAND_QUERY_BYTES,
+    ConfigScope, ConfigValue, MAX_COMMAND_QUERY_BYTES, MAX_CONFIG_STRING_BYTES,
 };
 use greentyper_core::runtime::{RuntimeError, RuntimeKernel};
 use greentyper_core::usage::{UsageError, UsageTimestamp};
 
 use crate::presentation::{
-    PresentationController, PresentationControllerError, PresentationError, PresentationLayoutView,
-    PresentationSources, STATUSLINE_PRESET_CHOICES, STATUSLINE_PRESET_PATH, TuiViewModel, Viewport,
-    ViewportError,
+    PROVIDER_BASE_URL_PATH_PATTERN, PresentationController, PresentationControllerError,
+    PresentationError, PresentationLayoutView, PresentationSources, STATUSLINE_PRESET_CHOICES,
+    STATUSLINE_PRESET_PATH, TuiViewModel, Viewport, ViewportError,
 };
 
 pub(crate) fn require_interactive() -> Result<(), TerminalError> {
@@ -407,6 +407,7 @@ const fn terminal_style(style: TerminalStyle) -> &'static [u8] {
 enum TerminalInputEvent {
     Character(char),
     Backspace,
+    Delete,
     Up,
     Down,
     Enter,
@@ -434,6 +435,7 @@ fn map_crossterm_event(event: Event) -> TerminalInputEvent {
                 TerminalInputEvent::Character(character)
             }
             KeyCode::Backspace => TerminalInputEvent::Backspace,
+            KeyCode::Delete => TerminalInputEvent::Delete,
             KeyCode::Up => TerminalInputEvent::Up,
             KeyCode::Down => TerminalInputEvent::Down,
             KeyCode::Enter => TerminalInputEvent::Enter,
@@ -449,10 +451,17 @@ enum TerminalIntent {
     SetSlashQuery(String),
     MoveSelection(isize),
     Activate,
+    MoveConfigObjectSelection(isize),
+    ActivateConfigObject,
     MoveConfigChoice(isize),
     PreviewConfig,
     CommitConfig,
     DiscardConfig,
+    EditConfigText(char),
+    BackspaceConfigText,
+    ClearConfigText,
+    SubmitConfigText,
+    CancelDiscard,
     Back,
     Resize(u16, u16),
     Quit,
@@ -462,7 +471,10 @@ enum TerminalIntent {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum TerminalInputContext {
     SlashPanel,
+    ConfigObject,
     ConfigChoice,
+    ConfigText,
+    DiscardConfirmation,
     Other,
 }
 
@@ -517,6 +529,15 @@ impl TerminalInputState {
             TerminalInputEvent::Enter if context == TerminalInputContext::SlashPanel => {
                 TerminalIntent::Activate
             }
+            TerminalInputEvent::Up if context == TerminalInputContext::ConfigObject => {
+                TerminalIntent::MoveConfigObjectSelection(-1)
+            }
+            TerminalInputEvent::Down if context == TerminalInputContext::ConfigObject => {
+                TerminalIntent::MoveConfigObjectSelection(1)
+            }
+            TerminalInputEvent::Enter if context == TerminalInputContext::ConfigObject => {
+                TerminalIntent::ActivateConfigObject
+            }
             TerminalInputEvent::Up if context == TerminalInputContext::ConfigChoice => {
                 TerminalIntent::MoveConfigChoice(-1)
             }
@@ -532,6 +553,26 @@ impl TerminalInputState {
             TerminalInputEvent::Character('d') if context == TerminalInputContext::ConfigChoice => {
                 TerminalIntent::DiscardConfig
             }
+            TerminalInputEvent::Character(character)
+                if context == TerminalInputContext::ConfigText && !character.is_control() =>
+            {
+                TerminalIntent::EditConfigText(character)
+            }
+            TerminalInputEvent::Backspace if context == TerminalInputContext::ConfigText => {
+                TerminalIntent::BackspaceConfigText
+            }
+            TerminalInputEvent::Delete if context == TerminalInputContext::ConfigText => {
+                TerminalIntent::ClearConfigText
+            }
+            TerminalInputEvent::Enter if context == TerminalInputContext::ConfigText => {
+                TerminalIntent::SubmitConfigText
+            }
+            TerminalInputEvent::Enter if context == TerminalInputContext::DiscardConfirmation => {
+                TerminalIntent::DiscardConfig
+            }
+            TerminalInputEvent::Escape if context == TerminalInputContext::DiscardConfirmation => {
+                TerminalIntent::CancelDiscard
+            }
             TerminalInputEvent::Escape if context == TerminalInputContext::SlashPanel => {
                 TerminalIntent::Quit
             }
@@ -540,6 +581,7 @@ impl TerminalInputState {
             TerminalInputEvent::Quit => TerminalIntent::Quit,
             TerminalInputEvent::Character(_)
             | TerminalInputEvent::Backspace
+            | TerminalInputEvent::Delete
             | TerminalInputEvent::Up
             | TerminalInputEvent::Down
             | TerminalInputEvent::Enter
@@ -561,7 +603,15 @@ struct TerminalSession {
     input: TerminalInputState,
     viewport: Viewport,
     validated_config_choice: Option<String>,
+    config_text: Option<ConfigTextInput>,
+    validated_config_text: Option<String>,
+    confirming_discard: bool,
     notice: Option<String>,
+}
+
+struct ConfigTextInput {
+    value: String,
+    replace_on_edit: bool,
 }
 
 impl TerminalSession {
@@ -573,6 +623,9 @@ impl TerminalSession {
             input: TerminalInputState::new(query)?,
             viewport: Viewport::new(width, height)?,
             validated_config_choice: None,
+            config_text: None,
+            validated_config_text: None,
+            confirming_discard: false,
             notice: None,
         })
     }
@@ -599,6 +652,33 @@ impl TerminalSession {
                 match self.controller.activate(runtime, ConfigScope::User, None) {
                     Ok(()) => {
                         self.validated_config_choice = None;
+                        self.clear_config_text();
+                        self.notice = None;
+                    }
+                    Err(source) => self.notice = Some(presentation_notice(&source)),
+                }
+                Ok(TerminalLoopOutcome::Redraw)
+            }
+            TerminalIntent::MoveConfigObjectSelection(offset) => {
+                let runtime = runtime.ok_or(TerminalError::ConfigRuntimeRequired)?;
+                match self
+                    .controller
+                    .move_config_object_selection(runtime, offset)
+                {
+                    Ok(()) => self.notice = None,
+                    Err(source) => self.notice = Some(presentation_notice(&source)),
+                }
+                Ok(TerminalLoopOutcome::Redraw)
+            }
+            TerminalIntent::ActivateConfigObject => {
+                let runtime = runtime.ok_or(TerminalError::ConfigRuntimeRequired)?;
+                match self
+                    .controller
+                    .activate_config_object(runtime, ConfigScope::User)
+                {
+                    Ok(()) => {
+                        self.validated_config_choice = None;
+                        self.sync_config_text();
                         self.notice = None;
                     }
                     Err(source) => self.notice = Some(presentation_notice(&source)),
@@ -651,13 +731,45 @@ impl TerminalSession {
             TerminalIntent::DiscardConfig => {
                 self.controller.discard_config()?;
                 self.validated_config_choice = None;
+                self.clear_config_text();
+                self.notice = None;
+                Ok(TerminalLoopOutcome::Redraw)
+            }
+            TerminalIntent::EditConfigText(character) => {
+                let runtime = runtime.ok_or(TerminalError::ConfigRuntimeRequired)?;
+                self.edit_config_text(runtime, Some(character))?;
+                Ok(TerminalLoopOutcome::Redraw)
+            }
+            TerminalIntent::BackspaceConfigText => {
+                let runtime = runtime.ok_or(TerminalError::ConfigRuntimeRequired)?;
+                self.edit_config_text(runtime, None)?;
+                Ok(TerminalLoopOutcome::Redraw)
+            }
+            TerminalIntent::ClearConfigText => {
+                let runtime = runtime.ok_or(TerminalError::ConfigRuntimeRequired)?;
+                self.reset_config_text(runtime);
+                Ok(TerminalLoopOutcome::Redraw)
+            }
+            TerminalIntent::SubmitConfigText => {
+                let runtime = runtime.ok_or(TerminalError::ConfigRuntimeRequired)?;
+                self.submit_config_text(runtime);
+                Ok(TerminalLoopOutcome::Redraw)
+            }
+            TerminalIntent::CancelDiscard => {
+                self.confirming_discard = false;
                 self.notice = None;
                 Ok(TerminalLoopOutcome::Redraw)
             }
             TerminalIntent::Back => {
+                if self.config_text.is_some() && self.controller.has_unsaved_config_draft() {
+                    self.confirming_discard = true;
+                    self.notice = Some("Discard Config draft?".to_owned());
+                    return Ok(TerminalLoopOutcome::Redraw);
+                }
                 match self.controller.back() {
                     Ok(()) => {
                         self.validated_config_choice = None;
+                        self.clear_config_text();
                         self.notice = None;
                     }
                     Err(PresentationControllerError::UnsavedConfigDraft) => {
@@ -682,15 +794,156 @@ impl TerminalSession {
     }
 
     fn input_context(&self) -> TerminalInputContext {
-        if self.controller.is_slash_panel() {
+        if self.confirming_discard {
+            TerminalInputContext::DiscardConfirmation
+        } else if self.controller.is_slash_panel() {
             TerminalInputContext::SlashPanel
+        } else if self.controller.is_config_object_selector() {
+            TerminalInputContext::ConfigObject
         } else if self.controller.config_editor_field().is_some_and(|field| {
             field.path == STATUSLINE_PRESET_PATH
                 && matches!(field.contents, ConfigFieldContents::Value { .. })
         }) {
             TerminalInputContext::ConfigChoice
+        } else if self.controller.config_editor_field().is_some_and(|field| {
+            field.path_pattern == PROVIDER_BASE_URL_PATH_PATTERN
+                && matches!(field.contents, ConfigFieldContents::Value { .. })
+        }) {
+            TerminalInputContext::ConfigText
         } else {
             TerminalInputContext::Other
+        }
+    }
+
+    fn sync_config_text(&mut self) {
+        let Some(field) = self.controller.config_editor_field() else {
+            self.clear_config_text();
+            return;
+        };
+        if field.path_pattern != PROVIDER_BASE_URL_PATH_PATTERN {
+            self.clear_config_text();
+            return;
+        }
+        let ConfigFieldContents::Value {
+            effective, target, ..
+        } = &field.contents
+        else {
+            self.clear_config_text();
+            return;
+        };
+        let value = target
+            .as_ref()
+            .or(effective.as_ref())
+            .and_then(|value| match value {
+                ConfigValue::String(value) => Some(value.clone()),
+                _ => None,
+            })
+            .unwrap_or_default();
+        self.config_text = Some(ConfigTextInput {
+            value,
+            replace_on_edit: true,
+        });
+        self.validated_config_text = None;
+        self.confirming_discard = false;
+    }
+
+    fn clear_config_text(&mut self) {
+        self.config_text = None;
+        self.validated_config_text = None;
+        self.confirming_discard = false;
+    }
+
+    fn edit_config_text(
+        &mut self,
+        runtime: &ConfigRuntime,
+        character: Option<char>,
+    ) -> Result<(), TerminalError> {
+        let Some(current) = self.config_text.as_ref() else {
+            return Ok(());
+        };
+        let mut next = if current.replace_on_edit {
+            String::new()
+        } else {
+            current.value.clone()
+        };
+        if let Some(character) = character {
+            if character.is_control()
+                || next.len().saturating_add(character.len_utf8()) > MAX_CONFIG_STRING_BYTES
+            {
+                self.notice = Some("Config value exceeds its input limit".to_owned());
+                return Ok(());
+            }
+            next.push(character);
+        } else if current.replace_on_edit {
+            self.reset_config_text(runtime);
+            return Ok(());
+        } else {
+            let last = UnicodeSegmentation::grapheme_indices(next.as_str(), true)
+                .next_back()
+                .map_or(0, |(index, _)| index);
+            next.truncate(last);
+            if next.is_empty() {
+                self.reset_config_text(runtime);
+                return Ok(());
+            }
+        }
+        self.stage_config_text(runtime, next);
+        Ok(())
+    }
+
+    fn stage_config_text(&mut self, runtime: &ConfigRuntime, next: String) {
+        match self.controller.stage_config(runtime, &next) {
+            Ok(()) => {
+                self.config_text = Some(ConfigTextInput {
+                    value: next,
+                    replace_on_edit: false,
+                });
+                self.validated_config_text = None;
+                self.confirming_discard = false;
+                self.notice = None;
+            }
+            Err(source) => self.notice = Some(presentation_notice(&source)),
+        }
+    }
+
+    fn reset_config_text(&mut self, runtime: &ConfigRuntime) {
+        match self.controller.reset_config(runtime) {
+            Ok(()) => {
+                self.config_text = Some(ConfigTextInput {
+                    value: String::new(),
+                    replace_on_edit: true,
+                });
+                self.validated_config_text = None;
+                self.confirming_discard = false;
+                self.notice = None;
+            }
+            Err(source) => self.notice = Some(presentation_notice(&source)),
+        }
+    }
+
+    fn submit_config_text(&mut self, runtime: &mut ConfigRuntime) {
+        let current = self.config_text.as_ref().map(|input| input.value.clone());
+        if !self.controller.has_unsaved_config_draft() {
+            self.notice = Some("No Config changes to commit".to_owned());
+        } else if current != self.validated_config_text {
+            match self.controller.preview_config(runtime) {
+                Ok(_) => {
+                    self.validated_config_text = current;
+                    self.notice = Some("Config draft validated".to_owned());
+                }
+                Err(source) => {
+                    self.validated_config_text = None;
+                    self.notice = Some(presentation_notice(&source));
+                }
+            }
+        } else {
+            match self.controller.commit_config(runtime) {
+                Ok(_) => {
+                    self.clear_config_text();
+                    self.notice = None;
+                }
+                Err(source) => self.notice = Some(presentation_notice(&source)),
+            }
         }
     }
 
@@ -763,10 +1016,17 @@ fn presentation_notice(source: &PresentationControllerError) -> String {
         }
         PresentationControllerError::NoCommandSelection => "No command is selected".to_owned(),
         PresentationControllerError::NotSlashPanel
+        | PresentationControllerError::NotConfigCenter
         | PresentationControllerError::NotConfigEditor
         | PresentationControllerError::NotProviderWizard
         | PresentationControllerError::ConfigRuntimeRequired => {
             "Config action is unavailable in this view".to_owned()
+        }
+        PresentationControllerError::NoConfigObjectSelection => {
+            "No Config Objects are available in this section".to_owned()
+        }
+        PresentationControllerError::ConfigObjectRouteUnavailable => {
+            "Config Object editor is not available in the terminal".to_owned()
         }
         PresentationControllerError::Command(_) | PresentationControllerError::ConfigEditor(_) => {
             "Config action failed".to_owned()
@@ -954,8 +1214,9 @@ mod tests {
 
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
     use greentyper_core::config::{
-        ConfigDocument, ConfigEditorSession, ConfigFieldContents, ConfigPaths, ConfigRuntime,
-        ConfigScope, ConfigValue,
+        ConfigDocument, ConfigEditorSession, ConfigFieldContents, ConfigObjectKind,
+        ConfigObjectRef, ConfigPaths, ConfigRuntime, ConfigScope, ConfigValue,
+        MAX_CONFIG_STRING_BYTES,
     };
 
     use crate::presentation::{PresentationScreenView, build_smoke_view};
@@ -1035,6 +1296,17 @@ mod tests {
             TerminalIntent::Back
         );
         assert_eq!(
+            input.apply(TerminalInputEvent::Down, TerminalInputContext::ConfigObject),
+            TerminalIntent::MoveConfigObjectSelection(1)
+        );
+        assert_eq!(
+            input.apply(
+                TerminalInputEvent::Enter,
+                TerminalInputContext::ConfigObject,
+            ),
+            TerminalIntent::ActivateConfigObject
+        );
+        assert_eq!(
             input.apply(
                 TerminalInputEvent::Resize(80, 24),
                 TerminalInputContext::Other
@@ -1067,13 +1339,49 @@ mod tests {
             TerminalIntent::DiscardConfig
         );
         assert_eq!(
+            input.apply(
+                TerminalInputEvent::Character('h'),
+                TerminalInputContext::ConfigText,
+            ),
+            TerminalIntent::EditConfigText('h')
+        );
+        assert_eq!(
+            input.apply(
+                TerminalInputEvent::Backspace,
+                TerminalInputContext::ConfigText,
+            ),
+            TerminalIntent::BackspaceConfigText
+        );
+        assert_eq!(
+            input.apply(TerminalInputEvent::Delete, TerminalInputContext::ConfigText),
+            TerminalIntent::ClearConfigText
+        );
+        assert_eq!(
+            input.apply(TerminalInputEvent::Enter, TerminalInputContext::ConfigText),
+            TerminalIntent::SubmitConfigText
+        );
+        assert_eq!(
+            input.apply(
+                TerminalInputEvent::Escape,
+                TerminalInputContext::DiscardConfirmation,
+            ),
+            TerminalIntent::CancelDiscard
+        );
+        assert_eq!(
+            input.apply(
+                TerminalInputEvent::Enter,
+                TerminalInputContext::DiscardConfirmation,
+            ),
+            TerminalIntent::DiscardConfig
+        );
+        assert_eq!(
             input.apply(TerminalInputEvent::Enter, TerminalInputContext::Other),
             TerminalIntent::None
         );
     }
 
     #[test]
-    fn terminal_dimensions_and_slash_query_are_bounded_before_growth() {
+    fn terminal_dimensions_and_text_inputs_are_bounded_before_growth() {
         assert!(TerminalFrame::blank(512, 256).is_ok());
         assert!(TerminalFrame::blank(513, 1).is_err());
         assert!(TerminalFrame::blank(512, 257).is_err());
@@ -1090,6 +1398,57 @@ mod tests {
             ),
             TerminalIntent::None
         );
+
+        let root = terminal_test_root("bounded-provider-url");
+        let paths = ConfigPaths::new(root.join("user.toml"), root.join("project.toml"));
+        write_terminal_provider_config(&paths);
+        let mut config =
+            ConfigRuntime::open(paths, ConfigDocument::empty()).expect("config runtime");
+        let mut session = TerminalSession::new("/config provider url", 80, 24).expect("session");
+        session
+            .handle(TerminalInputEvent::Enter, Some(&mut config))
+            .expect("open provider selector");
+        session
+            .handle(TerminalInputEvent::Enter, Some(&mut config))
+            .expect("open provider URL editor");
+        let bounded = format!(
+            "https://{}",
+            "a".repeat(MAX_CONFIG_STRING_BYTES - "https://".len())
+        );
+        for character in bounded.chars() {
+            session
+                .handle(TerminalInputEvent::Character(character), Some(&mut config))
+                .expect("stage bounded URL");
+        }
+        session
+            .handle(TerminalInputEvent::Character('b'), Some(&mut config))
+            .expect("reject oversized URL input");
+        assert_eq!(
+            session.notice.as_deref(),
+            Some("Config value exceeds its input limit")
+        );
+        let PresentationScreenView::ProviderWizard { editor, .. } = session
+            .controller
+            .screen(Some(&config))
+            .expect("bounded provider editor screen")
+        else {
+            panic!("expected provider editor")
+        };
+        let ConfigFieldContents::Value {
+            target: Some(ConfigValue::String(target)),
+            ..
+        } = editor.field.contents
+        else {
+            panic!("expected bounded string target")
+        };
+        assert_eq!(target.len(), MAX_CONFIG_STRING_BYTES);
+        assert_eq!(
+            config_string_target(&config, "providers.edge.base_url").as_deref(),
+            Some("https://gateway.example.com/v1")
+        );
+        drop(session);
+        drop(config);
+        std::fs::remove_dir_all(root).expect("remove test config");
     }
 
     #[test]
@@ -1194,8 +1553,9 @@ mod tests {
                 .expect("preview"),
             TerminalLoopOutcome::Redraw
         );
+        let recovered_screen = session.controller.screen(Some(&config)).expect("screen");
         assert!(matches!(
-            session.controller.screen(Some(&config)).expect("screen"),
+            recovered_screen,
             PresentationScreenView::ConfigEditor {
                 dirty: true,
                 validated: true,
@@ -1339,8 +1699,9 @@ mod tests {
             session.notice.as_deref(),
             Some("Config changed; discard and reopen the editor")
         );
+        let recovered_screen = session.controller.screen(Some(&config)).expect("screen");
         assert!(matches!(
-            session.controller.screen(Some(&config)).expect("screen"),
+            recovered_screen,
             PresentationScreenView::ConfigEditor { dirty: true, .. }
         ));
         assert_eq!(
@@ -1384,6 +1745,20 @@ mod tests {
                 KeyModifiers::NONE,
             ))),
             TerminalInputEvent::Character('a')
+        );
+        assert_eq!(
+            map_crossterm_event(Event::Key(KeyEvent::new(
+                KeyCode::Backspace,
+                KeyModifiers::NONE,
+            ))),
+            TerminalInputEvent::Backspace
+        );
+        assert_eq!(
+            map_crossterm_event(Event::Key(KeyEvent::new(
+                KeyCode::Delete,
+                KeyModifiers::NONE,
+            ))),
+            TerminalInputEvent::Delete
         );
         assert_eq!(
             map_crossterm_event(Event::Key(KeyEvent::new_with_kind(
@@ -1445,6 +1820,277 @@ mod tests {
             Some("diagnostic")
         );
         assert!(!ledger.exists());
+        std::fs::remove_dir_all(root).expect("remove test config");
+    }
+
+    #[test]
+    fn terminal_loop_selects_provider_and_commits_url_from_real_key_events() {
+        let root = terminal_test_root("provider-url-loop");
+        std::fs::create_dir_all(&root).expect("create provider config directory");
+        let ledger = root.join("runtime.ledger");
+        let paths = ConfigPaths::new(root.join("user.toml"), root.join("project.toml"));
+        write_terminal_provider_config(&paths);
+        let mut config =
+            ConfigRuntime::open(paths.clone(), ConfigDocument::empty()).expect("config runtime");
+        let view = build_terminal_view(&ledger, &config, "/").expect("terminal view");
+        let mut events: VecDeque<_> = "config provider url"
+            .chars()
+            .map(|character| {
+                Event::Key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
+            })
+            .collect();
+        events.extend([
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        ]);
+        events.extend(
+            "https://new-gateway.example.com/v2"
+                .chars()
+                .map(|character| {
+                    Event::Key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
+                }),
+        );
+        events.extend([
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL)),
+        ]);
+
+        let output = run_terminal_loop(
+            Vec::new(),
+            FakeTerminalMode::default(),
+            &mut config,
+            &view,
+            80,
+            24,
+            move || Ok(events.pop_front().expect("bounded event sequence")),
+        )
+        .expect("terminal loop");
+
+        assert!(output.starts_with(ENTER_TERMINAL));
+        assert!(output.ends_with(LEAVE_TERMINAL));
+        assert_eq!(
+            config_string_target(&config, "providers.edge.base_url").as_deref(),
+            Some("https://new-gateway.example.com/v2")
+        );
+        drop(config);
+        let reopened = ConfigRuntime::open(paths, ConfigDocument::empty()).expect("reopen config");
+        assert_eq!(
+            config_string_target(&reopened, "providers.edge.base_url").as_deref(),
+            Some("https://new-gateway.example.com/v2")
+        );
+        assert!(!ledger.exists());
+        std::fs::remove_dir_all(root).expect("remove test config");
+    }
+
+    #[test]
+    fn terminal_provider_url_keeps_invalid_draft_live_and_recovers() {
+        let root = terminal_test_root("provider-url-recovery");
+        let paths = ConfigPaths::new(root.join("user.toml"), root.join("project.toml"));
+        write_terminal_provider_config(&paths);
+        let mut config =
+            ConfigRuntime::open(paths, ConfigDocument::empty()).expect("config runtime");
+        let mut session = TerminalSession::new("/config provider url", 80, 24).expect("session");
+
+        session
+            .handle(TerminalInputEvent::Enter, Some(&mut config))
+            .expect("open provider selector");
+        let smoke = build_smoke_view("/").expect("view");
+        let layout = session
+            .layout(Some(&config), smoke.view())
+            .expect("provider selector layout");
+        assert!(
+            layout
+                .body()
+                .iter()
+                .any(|row| row.is_selected() && row.text() == "> provider edge")
+        );
+        session
+            .handle(TerminalInputEvent::Enter, Some(&mut config))
+            .expect("open provider URL editor");
+        let editor_layout = session
+            .layout(Some(&config), smoke.view())
+            .expect("provider URL editor layout");
+        assert!(editor_layout.body().iter().any(|row| {
+            row.is_selected() && row.text() == "> target https://gateway.example.com/v1"
+        }));
+        session
+            .handle(TerminalInputEvent::Backspace, Some(&mut config))
+            .expect("reset existing URL with backspace");
+        assert!(matches!(
+            session.controller.screen(Some(&config)).expect("screen"),
+            PresentationScreenView::ProviderWizard {
+                editor: greentyper_core::config::ConfigEditorView {
+                    field: greentyper_core::config::ConfigFieldView {
+                        contents: ConfigFieldContents::Value { target: None, .. },
+                        ..
+                    },
+                    ..
+                },
+                ..
+            }
+        ));
+        for character in "http://provider.invalid/v1".chars() {
+            session
+                .handle(TerminalInputEvent::Character(character), Some(&mut config))
+                .expect("stage invalid URL");
+        }
+        session
+            .handle(TerminalInputEvent::Enter, Some(&mut config))
+            .expect("invalid preview remains live");
+        assert_eq!(
+            session.notice.as_deref(),
+            Some("Config validation failed at providers.edge.base_url")
+        );
+        assert!(matches!(
+            session.controller.screen(Some(&config)).expect("screen"),
+            PresentationScreenView::ProviderWizard {
+                dirty: true,
+                validated: false,
+                ..
+            }
+        ));
+        session
+            .handle(TerminalInputEvent::Escape, Some(&mut config))
+            .expect("request discard");
+        assert_eq!(session.notice.as_deref(), Some("Discard Config draft?"));
+        session
+            .handle(TerminalInputEvent::Escape, Some(&mut config))
+            .expect("cancel discard");
+        assert!(session.notice.is_none());
+        assert!(!session.confirming_discard);
+        assert_eq!(session.input_context(), TerminalInputContext::ConfigText);
+        let delete = map_crossterm_event(Event::Key(KeyEvent::new(
+            KeyCode::Delete,
+            KeyModifiers::NONE,
+        )));
+        assert_eq!(delete, TerminalInputEvent::Delete);
+        session
+            .handle(delete, Some(&mut config))
+            .expect("clear invalid URL");
+        assert!(matches!(
+            session.controller.screen(Some(&config)).expect("screen"),
+            PresentationScreenView::ProviderWizard {
+                editor: greentyper_core::config::ConfigEditorView {
+                    field: greentyper_core::config::ConfigFieldView {
+                        contents: ConfigFieldContents::Value { target: None, .. },
+                        ..
+                    },
+                    ..
+                },
+                ..
+            }
+        ));
+        for character in "https://recovered.example.com/v1".chars() {
+            session
+                .handle(TerminalInputEvent::Character(character), Some(&mut config))
+                .expect("stage recovered URL");
+        }
+        let recovered_screen = session.controller.screen(Some(&config)).expect("screen");
+        assert!(
+            matches!(
+                recovered_screen,
+                PresentationScreenView::ProviderWizard {
+                    editor: greentyper_core::config::ConfigEditorView {
+                        field: greentyper_core::config::ConfigFieldView {
+                            contents: ConfigFieldContents::Value {
+                                target: Some(ConfigValue::String(ref target)),
+                                ..
+                            },
+                            ..
+                        },
+                        ..
+                    },
+                    ..
+                } if target == "https://recovered.example.com/v1"
+            ),
+            "{recovered_screen:?}"
+        );
+        session
+            .handle(TerminalInputEvent::Enter, Some(&mut config))
+            .expect("preview recovered URL");
+        assert_eq!(session.notice.as_deref(), Some("Config draft validated"));
+        assert!(matches!(
+            session.controller.screen(Some(&config)).expect("screen"),
+            PresentationScreenView::ProviderWizard {
+                dirty: true,
+                validated: true,
+                editor: greentyper_core::config::ConfigEditorView {
+                    field: greentyper_core::config::ConfigFieldView {
+                        contents: ConfigFieldContents::Value {
+                            target: Some(ConfigValue::String(ref target)),
+                            ..
+                        },
+                        ..
+                    },
+                    ..
+                },
+                ..
+            } if target == "https://recovered.example.com/v1"
+        ));
+        session
+            .handle(TerminalInputEvent::Enter, Some(&mut config))
+            .expect("commit recovered URL");
+        assert!(session.controller.is_slash_panel());
+        assert_eq!(
+            config_string_target(&config, "providers.edge.base_url").as_deref(),
+            Some("https://recovered.example.com/v1")
+        );
+
+        let mut conflict =
+            TerminalSession::new("/config provider url", 80, 24).expect("conflict session");
+        conflict
+            .handle(TerminalInputEvent::Enter, Some(&mut config))
+            .expect("open conflict provider selector");
+        conflict
+            .handle(TerminalInputEvent::Enter, Some(&mut config))
+            .expect("open conflict provider URL editor");
+        for character in "https://loser.example.com/v1".chars() {
+            conflict
+                .handle(TerminalInputEvent::Character(character), Some(&mut config))
+                .expect("stage losing URL");
+        }
+        conflict
+            .handle(TerminalInputEvent::Enter, Some(&mut config))
+            .expect("preview losing URL");
+
+        let object = ConfigObjectRef::new(ConfigObjectKind::ProviderProfile, "edge");
+        let mut winner = ConfigEditorSession::open_from_query(
+            &config,
+            ConfigScope::User,
+            "/config provider url",
+            0,
+            Some(&object),
+        )
+        .expect("winner editor");
+        winner
+            .stage_raw("https://winner.example.com/v1")
+            .expect("stage winning URL");
+        winner.commit(&mut config).expect("commit winning URL");
+
+        conflict
+            .handle(TerminalInputEvent::Enter, Some(&mut config))
+            .expect("conflict remains live");
+        assert_eq!(
+            conflict.notice.as_deref(),
+            Some("Config changed; discard and reopen the editor")
+        );
+        assert!(matches!(
+            conflict.controller.screen(Some(&config)).expect("screen"),
+            PresentationScreenView::ProviderWizard { dirty: true, .. }
+        ));
+        conflict
+            .handle(TerminalInputEvent::Escape, Some(&mut config))
+            .expect("request conflict discard");
+        assert_eq!(conflict.notice.as_deref(), Some("Discard Config draft?"));
+        conflict
+            .handle(TerminalInputEvent::Enter, Some(&mut config))
+            .expect("confirm conflict discard");
+        assert!(conflict.controller.is_slash_panel());
+        assert_eq!(
+            config_string_target(&config, "providers.edge.base_url").as_deref(),
+            Some("https://winner.example.com/v1")
+        );
         std::fs::remove_dir_all(root).expect("remove test config");
     }
 
@@ -1553,6 +2199,29 @@ mod tests {
             std::process::id(),
             NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
         ))
+    }
+
+    fn write_terminal_provider_config(paths: &ConfigPaths) {
+        std::fs::create_dir_all(paths.user().parent().expect("provider config parent"))
+            .expect("create provider config directory");
+        std::fs::write(
+            paths.user(),
+            r#"schema_version = 1
+
+[providers.edge]
+template = "openai-compatible"
+credential = "synthetic-edge-credential-reference"
+base_url = "https://gateway.example.com/v1"
+dialects = ["responses"]
+
+[providers.edge.routes]
+responses = "/responses"
+
+[providers.edge.pricing]
+source = "unknown"
+"#,
+        )
+        .expect("write provider config");
     }
 
     fn config_string_target(config: &ConfigRuntime, path: &str) -> Option<String> {

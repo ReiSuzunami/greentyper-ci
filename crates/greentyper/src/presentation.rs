@@ -530,7 +530,11 @@ impl Error for ViewportError {}
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PresentationState {
     SlashPanel,
-    ConfigCenter { section: Option<ConfigSection> },
+    ConfigCenter {
+        section: Option<ConfigSection>,
+        selected: usize,
+        pending_query: Option<&'static str>,
+    },
     ConfigEditor,
     ProviderWizard,
     ModelSelector,
@@ -576,6 +580,16 @@ impl PresentationController {
 
     pub(crate) const fn is_slash_panel(&self) -> bool {
         matches!(self.state, PresentationState::SlashPanel)
+    }
+
+    pub(crate) const fn is_config_object_selector(&self) -> bool {
+        matches!(
+            self.state,
+            PresentationState::ConfigCenter {
+                pending_query: Some(_),
+                ..
+            }
+        )
     }
 
     pub(crate) fn config_editor_field(&self) -> Option<&ConfigFieldView> {
@@ -634,18 +648,24 @@ impl PresentationController {
             return Err(PresentationControllerError::NotSlashPanel);
         }
         let panel = SlashPanelView::build(&self.slash_query, self.selected)?;
-        let target = panel
+        let entry = panel
             .entries
             .get(self.selected)
-            .ok_or(PresentationControllerError::NoCommandSelection)?
-            .target;
+            .ok_or(PresentationControllerError::NoCommandSelection)?;
+        let target = entry.target;
         match target {
             CommandTarget::ConfigCenter => {
-                self.state = PresentationState::ConfigCenter { section: None };
+                self.state = PresentationState::ConfigCenter {
+                    section: None,
+                    selected: 0,
+                    pending_query: None,
+                };
             }
             CommandTarget::ConfigSection { section } => {
                 self.state = PresentationState::ConfigCenter {
                     section: Some(section),
+                    selected: 0,
+                    pending_query: None,
                 };
             }
             CommandTarget::ConfigObjectCreate { kind } => {
@@ -686,6 +706,17 @@ impl PresentationController {
                 });
                 self.state = PresentationState::ConfigEditor;
             }
+            CommandTarget::ConfigEditor { path_pattern, .. }
+                if object.is_none() && path_pattern.contains("<id>") =>
+            {
+                let section = config_section_for_path_pattern(path_pattern)
+                    .ok_or(ConfigEditorError::ConfigObjectRequired)?;
+                self.state = PresentationState::ConfigCenter {
+                    section: Some(section),
+                    selected: 0,
+                    pending_query: Some(entry.canonical),
+                };
+            }
             CommandTarget::ConfigEditor { .. } => {
                 let session = ConfigEditorSession::open_from_query(
                     runtime,
@@ -722,6 +753,51 @@ impl PresentationController {
             }
         }
         Ok(())
+    }
+
+    pub(crate) fn move_config_object_selection(
+        &mut self,
+        runtime: &ConfigRuntime,
+        offset: isize,
+    ) -> Result<(), PresentationControllerError> {
+        let PresentationState::ConfigCenter {
+            section, selected, ..
+        } = &mut self.state
+        else {
+            return Err(PresentationControllerError::NotConfigCenter);
+        };
+        let objects = config_center_objects(runtime, *section)?;
+        if objects.is_empty() {
+            *selected = 0;
+        } else {
+            *selected = selected
+                .saturating_add_signed(offset)
+                .min(objects.len() - 1);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn activate_config_object(
+        &mut self,
+        runtime: &mut ConfigRuntime,
+        scope: ConfigScope,
+    ) -> Result<(), PresentationControllerError> {
+        let PresentationState::ConfigCenter {
+            section,
+            selected,
+            pending_query,
+        } = &self.state
+        else {
+            return Err(PresentationControllerError::NotConfigCenter);
+        };
+        let object = config_center_objects(runtime, *section)?
+            .get(*selected)
+            .cloned()
+            .ok_or(PresentationControllerError::NoConfigObjectSelection)?;
+        let query =
+            (*pending_query).ok_or(PresentationControllerError::ConfigObjectRouteUnavailable)?;
+        self.set_slash_query(query)?;
+        self.activate(runtime, scope, Some(&object))
     }
 
     pub(crate) fn back(&mut self) -> Result<(), PresentationControllerError> {
@@ -846,14 +922,22 @@ impl PresentationController {
             PresentationState::SlashPanel => Ok(PresentationScreenView::SlashPanel(
                 SlashPanelView::build(&self.slash_query, self.selected)?,
             )),
-            PresentationState::ConfigCenter { section } => {
-                let mut objects = runtime
-                    .ok_or(PresentationControllerError::ConfigRuntimeRequired)?
-                    .addressable_objects()?;
-                if let Some(section) = section {
-                    objects.retain(|object| object_section(object.kind()) == section);
-                }
-                Ok(PresentationScreenView::ConfigCenter { section, objects })
+            PresentationState::ConfigCenter {
+                section,
+                selected,
+                pending_query,
+            } => {
+                let objects = config_center_objects(
+                    runtime.ok_or(PresentationControllerError::ConfigRuntimeRequired)?,
+                    section,
+                )?;
+                let selected = (pending_query.is_some() && !objects.is_empty())
+                    .then(|| selected.min(objects.len() - 1));
+                Ok(PresentationScreenView::ConfigCenter {
+                    section,
+                    objects,
+                    selected,
+                })
             }
             PresentationState::ConfigEditor => {
                 let editor = self.active_editor()?;
@@ -952,6 +1036,7 @@ pub(crate) enum PresentationScreenView {
     ConfigCenter {
         section: Option<ConfigSection>,
         objects: Vec<ConfigObjectRef>,
+        selected: Option<usize>,
     },
     ConfigEditor {
         object: Option<ConfigObjectRef>,
@@ -1280,16 +1365,26 @@ fn screen_rows(screen: &PresentationScreenView, view: &TuiViewModel) -> Vec<Layo
             }));
             rows
         }
-        PresentationScreenView::ConfigCenter { section, objects } => {
+        PresentationScreenView::ConfigCenter {
+            section,
+            objects,
+            selected,
+        } => {
             let title = section.map_or_else(
                 || "Config".to_owned(),
                 |section| format!("Config / {}", config_section_label(section)),
             );
             let mut rows = vec![LayoutRowView::new(title, false)];
-            rows.extend(objects.iter().map(|object| {
+            rows.extend(objects.iter().enumerate().map(|(index, object)| {
+                let is_selected = *selected == Some(index);
                 LayoutRowView::new(
-                    format!("{} {}", config_object_label(object.kind()), object.id()),
-                    false,
+                    format!(
+                        "{} {} {}",
+                        if is_selected { '>' } else { ' ' },
+                        config_object_label(object.kind()),
+                        object.id()
+                    ),
+                    is_selected,
                 )
             }));
             rows
@@ -1361,9 +1456,14 @@ fn config_editor_rows(
                 format!("effective {}", config_value_label(effective.as_ref())),
                 false,
             ));
+            let text_input_selected = editor.field.path_pattern == PROVIDER_BASE_URL_PATH_PATTERN;
             rows.push(LayoutRowView::new(
-                format!("target {}", config_value_label(target.as_ref())),
-                false,
+                format!(
+                    "{}target {}",
+                    if text_input_selected { "> " } else { "" },
+                    config_value_label(target.as_ref())
+                ),
+                text_input_selected,
             ));
             if editor.field.path == STATUSLINE_PRESET_PATH {
                 let selected = target.as_ref().or(effective.as_ref()).and_then(|value| {
@@ -1429,6 +1529,7 @@ fn config_editor_rows(
 pub(crate) const STATUSLINE_PRESET_PATH: &str = "ui.statusline.preset";
 pub(crate) const STATUSLINE_PRESET_CHOICES: [&str; 4] =
     ["minimal", "balanced", "diagnostic", "custom"];
+pub(crate) const PROVIDER_BASE_URL_PATH_PATTERN: &str = "providers.<id>.base_url";
 
 fn config_value_label(value: Option<&ConfigValue>) -> String {
     match value {
@@ -1478,6 +1579,31 @@ fn object_section(kind: ConfigObjectKind) -> ConfigSection {
         ConfigObjectKind::ModelPreset => ConfigSection::Model,
         ConfigObjectKind::PriceSchedule => ConfigSection::Pricing,
         ConfigObjectKind::UsageWindow => ConfigSection::StatsWindow,
+    }
+}
+
+fn config_center_objects(
+    runtime: &ConfigRuntime,
+    section: Option<ConfigSection>,
+) -> Result<Vec<ConfigObjectRef>, ConfigRuntimeError> {
+    let mut objects = runtime.addressable_objects()?;
+    if let Some(section) = section {
+        objects.retain(|object| object_section(object.kind()) == section);
+    }
+    Ok(objects)
+}
+
+fn config_section_for_path_pattern(path_pattern: &str) -> Option<ConfigSection> {
+    if path_pattern.starts_with("providers.<id>.") {
+        Some(ConfigSection::Provider)
+    } else if path_pattern.starts_with("model_presets.<id>.") {
+        Some(ConfigSection::Model)
+    } else if path_pattern.starts_with("price_schedules.<id>.") {
+        Some(ConfigSection::Pricing)
+    } else if path_pattern.starts_with("stats.windows.<id>.") {
+        Some(ConfigSection::StatsWindow)
+    } else {
+        None
     }
 }
 
@@ -1532,10 +1658,13 @@ pub(crate) enum PresentationControllerError {
     Config(ConfigRuntimeError),
     NoCommandSelection,
     NotSlashPanel,
+    NotConfigCenter,
     NotConfigEditor,
     NotProviderWizard,
     ConfigRuntimeRequired,
     UnsavedConfigDraft,
+    NoConfigObjectSelection,
+    ConfigObjectRouteUnavailable,
 }
 
 impl fmt::Display for PresentationControllerError {
@@ -1546,6 +1675,7 @@ impl fmt::Display for PresentationControllerError {
             Self::Config(source) => write!(formatter, "{source}"),
             Self::NoCommandSelection => formatter.write_str("no command is selected"),
             Self::NotSlashPanel => formatter.write_str("command requires the Slash Panel"),
+            Self::NotConfigCenter => formatter.write_str("command requires the Config Center"),
             Self::NotConfigEditor => formatter.write_str("command requires a Config editor"),
             Self::NotProviderWizard => {
                 formatter.write_str("command requires a Provider Profile wizard")
@@ -1555,6 +1685,10 @@ impl fmt::Display for PresentationControllerError {
             }
             Self::UnsavedConfigDraft => {
                 formatter.write_str("Config draft must be committed or discarded")
+            }
+            Self::NoConfigObjectSelection => formatter.write_str("no Config Object is selected"),
+            Self::ConfigObjectRouteUnavailable => {
+                formatter.write_str("Config Object has no rendered editor route")
             }
         }
     }
@@ -1568,10 +1702,13 @@ impl Error for PresentationControllerError {
             Self::Config(source) => Some(source),
             Self::NoCommandSelection
             | Self::NotSlashPanel
+            | Self::NotConfigCenter
             | Self::NotConfigEditor
             | Self::NotProviderWizard
             | Self::ConfigRuntimeRequired
-            | Self::UnsavedConfigDraft => None,
+            | Self::UnsavedConfigDraft
+            | Self::NoConfigObjectSelection
+            | Self::ConfigObjectRouteUnavailable => None,
         }
     }
 }
@@ -1840,8 +1977,8 @@ mod tests {
         CommandMatchKind, CommandTarget, ConfigDocument, ConfigEditorError, ConfigEditorOperation,
         ConfigEditorSession, ConfigEditorView, ConfigErrorCategory, ConfigFieldContents,
         ConfigFieldView, ConfigObjectKind, ConfigObjectRef, ConfigPaths, ConfigRepairIssue,
-        ConfigRuntime, ConfigRuntimeError, ConfigRuntimeStatus, ConfigScope, ConfigValue,
-        ModelPresetView,
+        ConfigRuntime, ConfigRuntimeError, ConfigRuntimeStatus, ConfigScope, ConfigSection,
+        ConfigValue, ModelPresetView,
     };
     use greentyper_core::context::{
         ContextPressure, ContextPressureAccuracy, ContextPressureInput, ContextPressurePolicy,
@@ -2801,21 +2938,43 @@ credential = "synthetic-deepseek-credential-reference"
             .expect("set Config Center query");
         controller
             .activate(&mut runtime, ConfigScope::Project, None)
-            .expect("open Config Center");
+            .expect("open browse-only Config Center");
         assert!(matches!(
             controller
                 .screen(Some(&runtime))
-                .expect("Config Center screen"),
-            PresentationScreenView::ConfigCenter { section: None, ref objects }
-                if objects == std::slice::from_ref(&object)
+                .expect("browse-only Config Center screen"),
+            PresentationScreenView::ConfigCenter {
+                section: None,
+                ref objects,
+                selected: None,
+            } if objects == std::slice::from_ref(&object)
         ));
+        assert!(matches!(
+            controller.activate_config_object(&mut runtime, ConfigScope::Project),
+            Err(PresentationControllerError::ConfigObjectRouteUnavailable)
+        ));
+        controller.back().expect("leave browse-only Config Center");
 
-        controller.back().expect("return to Slash Panel");
         controller
             .set_slash_query("/config pro url")
             .expect("set focused editor query");
         controller
-            .activate(&mut runtime, ConfigScope::Project, Some(&object))
+            .activate(&mut runtime, ConfigScope::Project, None)
+            .expect("open provider selector");
+        assert!(matches!(
+            controller
+                .screen(Some(&runtime))
+                .expect("provider selector screen"),
+            PresentationScreenView::ConfigCenter {
+                section: Some(ConfigSection::Provider),
+                ref objects,
+                selected: Some(0),
+            }
+                if objects == std::slice::from_ref(&object)
+        ));
+
+        controller
+            .activate_config_object(&mut runtime, ConfigScope::Project)
             .expect("open provider URL editor");
         controller
             .stage_config(&runtime, "http://provider.invalid/v1")

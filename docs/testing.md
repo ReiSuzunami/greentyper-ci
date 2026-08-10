@@ -297,11 +297,16 @@ clearing, wide-cell geometry, zero-byte identical frames, resize clearing,
 controller input mapping, blocking event delivery, 512x256/131,072-cell viewport
 and 256-byte Slash-query bounds, alternate-screen/raw-mode restoration,
 read-only missing-Ledger inspection, and non-terminal rejection before state
-creation or stdout output. The first rendered mutation tests drive
+creation or stdout output. Provider URL input is separately bounded to 512
+bytes before Draft growth. The first rendered mutation tests drive
 `/config statusline preset` through menu selection, dry-run preview, user-scope
 commit, disk reopen, explicit discard, validation recovery, and a competing
-revision winner. One full-loop test maps real Crossterm key events through VT
-rendering and reopens the resulting Config file. They assert that dirty
+revision winner. Provider URL tests drive a field command into an existing
+Profile selection, render the focused target, replace/reset bounded text,
+recover from invalid URL validation, commit and reopen, retain a losing CAS
+Draft, and explicitly discard it without overwriting the winner. Two full-loop
+tests map real Crossterm key events through VT rendering and reopen the resulting
+Config files. They assert that dirty
 Escape/quit is blocked, a failed preview
 is rendered without ending the loop, and a no-change commit creates no file.
 They do not constitute real ConPTY, panic-abort cleanup, remaining mutable
@@ -333,7 +338,10 @@ the remaining rendered mutable Config dialogs, interactive model selector states
 approval/blocker actions, panic-abort cleanup, final host cell geometry, and
 input-ready/idle resource budgets.
 
-Tests assert that `/config pro url` resolves to the focused Provider editor without registering a flat root command. Every Config Object must have a generic or purpose-built editor route. Credential fields must never support read-back.
+Tests assert that `/config pro url` resolves through Provider selection to the
+focused rendered editor without registering a flat root command. Every Config
+Object must have a generic or purpose-built editor route. Credential fields must
+never support read-back.
 
 ## Provider Testing
 

@@ -312,11 +312,13 @@ blocking Crossterm key and resize events, suppresses model-equality redraws,
 clears stale cells, bounds the viewport and Slash query before allocation, and
 restores raw mode, cursor visibility, and the alternate screen on normal and
 error returns. Windows startup explicitly requires VT output support. Its first
-mutable route is the user-scope `/config statusline preset` choice dialog. It
-stages one of four schema values, requires a successful real dry-run preview
-before commit, persists through the Config Runtime CAS/backup path, explicitly
-discards, blocks dirty escape/quit, preserves the editor on validation or
-revision conflict, and renders bounded error notices. Tests prove no-change
+mutable route is the user-scope `/config statusline preset` choice dialog. A
+second route, `/config provider url`, carries the pending field command into a
+Provider-filtered Config Center, selects an existing Profile, and edits its base
+URL through a 512-byte text input. Both require a successful real dry-run
+preview before commit, persist through the Config Runtime CAS/backup path,
+explicitly discard, block dirty escape/quit, preserve the editor on validation
+or revision conflict, and render bounded error notices. Tests prove no-change
 commit creates no file and committed state survives reopen. The rest of the TUI
 is snapshot-based; this slice adds no Runtime, Tool, credential, or approval
 authority and does not rebuild the frozen status projection after commit.

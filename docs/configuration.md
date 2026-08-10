@@ -101,9 +101,14 @@ a terminal-neutral hierarchical Command Path registry generated from Config
 Schema metadata, provenance-aware field views, typed nested object lifecycle
 actions, and a reusable Config Runtime editor session for focused multi-field
 draft validation, atomic create/edit/delete, and commit. The Direct VT product
-TUI now connects one non-secret route, `/config statusline preset`, to that real
-session in the user scope. Up/Down stages a bounded enum choice, Enter previews,
-`c` commits only the currently previewed choice, and `d` explicitly discards.
+TUI now connects two non-secret routes to that real session in the user scope.
+`/config statusline preset` stages a bounded enum choice with Up/Down, previews
+with Enter, commits the currently previewed choice with `c`, and explicitly
+discards with `d`. `/config provider url` carries the selected command into a
+Provider-filtered Config Center, opens one existing Profile, and edits its base
+URL through a 512-byte text input. Its first Enter previews and its second Enter
+commits; Delete resets the field, and dirty Escape requires discard
+confirmation.
 Validation and revision-conflict failures stay visible without consuming the
 Draft; Escape and quit keys cannot discard a dirty Draft, and a no-change commit
 does not create a Config file. The committed value is verified by reopening the
@@ -112,7 +117,7 @@ statusline reconstruction is not claimed by this slice. Object deletion is
 target-layer explicit and fails when the resulting effective configuration has
 dangling references. The snapshot-based `tui` tracer renders controller screens
 reachable from the Slash Panel, including the top-level Config Center; only the
-statusline-preset dialog above mutates a Draft. It does not yet ship remaining
+two dialogs above mutate a Draft. It does not yet ship remaining
 schema-driven terminal editor dialogs,
 object-name input form, rendered Provider
 template picker, or App Server surface described below. The current
@@ -139,7 +144,12 @@ The root Slash Panel exposes `/config` as one Command Path. It does not register
 `- security
 ```
 
-Prefix and fuzzy matching work token by token. `/con` finds `/config`; `/config pro url` finds the focused Provider Profile base-URL editor. Pressing Enter on `/config` opens the searchable Config Center. A global command palette can search all nested and recent actions without adding them to the root Slash Panel.
+Prefix and fuzzy matching work token by token. `/con` finds `/config`;
+`/config pro url` finds the Provider Profile base-URL route, after which the TUI
+selects the concrete Profile before opening its focused editor. Pressing Enter
+on `/config` opens the searchable Config Center. A global command palette can
+search all nested and recent actions without adding them to the root Slash
+Panel.
 
 `/config stats-window` edits named Usage Windows. The separate root command `/stats` displays usage reports and never mutates configuration. Likewise, `/model` selects a runnable Model Preset while `/config model` edits preset definitions.
 
@@ -374,7 +384,7 @@ and adds a detail row from 120 columns. This is a terminal-neutral layout
 contract. The first product `tui` tracer now renders it through a Direct VT diff,
 reacts to blocking key and resize events, and can persist the user-scope preset
 through the narrow dialog described above. It does not rebuild the frozen
-underlying snapshot after that commit, provide other mutable actions, or
+underlying snapshot after that commit, make other statusline fields mutable, or
 establish ConPTY/resource evidence. The target has four
 presets:
 
