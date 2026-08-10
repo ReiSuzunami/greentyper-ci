@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use url::{Host, Url};
 
-use super::{ConfigLayer, ConfigLayers};
+use super::{ConfigLayer, ConfigLayers, ReasoningEffort, ServiceTier};
 use crate::pricing::{
     PriceSchedule, PriceScheduleBook, PriceScheduleDefinition, PriceScheduleSource, TokenRates,
 };
@@ -626,8 +626,8 @@ pub struct ModelPresetView {
     pub provider: String,
     pub model: String,
     pub dialect: ProviderDialect,
-    pub reasoning_effort: Option<String>,
-    pub service_tier: Option<String>,
+    pub reasoning_effort: Option<ReasoningEffort>,
+    pub service_tier: Option<ServiceTier>,
     pub max_output_tokens: Option<u32>,
     pub context_mode: Option<String>,
     pub favorite: bool,
@@ -1320,13 +1320,37 @@ impl ConfigRuntime {
                         "model preset requires a dialect",
                     )
                 })?;
+                let reasoning_effort = preset
+                    .reasoning_effort
+                    .as_deref()
+                    .map(|value| {
+                        ReasoningEffort::parse(value).ok_or_else(|| {
+                            invalid(
+                                format!("model_presets.{id}.reasoning_effort"),
+                                "unknown reasoning effort",
+                            )
+                        })
+                    })
+                    .transpose()?;
+                let service_tier = preset
+                    .service_tier
+                    .as_deref()
+                    .map(|value| {
+                        ServiceTier::parse(value).ok_or_else(|| {
+                            invalid(
+                                format!("model_presets.{id}.service_tier"),
+                                "unknown service tier",
+                            )
+                        })
+                    })
+                    .transpose()?;
                 Ok(ModelPresetView {
                     id: id.clone(),
                     provider,
                     model,
                     dialect,
-                    reasoning_effort: preset.reasoning_effort.clone(),
-                    service_tier: preset.service_tier.clone(),
+                    reasoning_effort,
+                    service_tier,
                     max_output_tokens: preset.max_output_tokens,
                     context_mode: preset.context_mode.clone(),
                     favorite: preset.favorite.unwrap_or(false),
@@ -2692,7 +2716,20 @@ pub fn parse_config_value(path: &str, raw: &str) -> Result<ConfigValue, ConfigRu
 
 fn validate_value(path: &str, value: &ConfigValue) -> Result<(), ConfigRuntimeError> {
     match value {
-        ConfigValue::String(value) => validate_string(path, value),
+        ConfigValue::String(value) => {
+            validate_string(path, value)?;
+            if path_matches("model_presets.<id>.reasoning_effort", path)
+                && ReasoningEffort::parse(value).is_none()
+            {
+                Err(invalid(path, "unknown reasoning effort"))
+            } else if path_matches("model_presets.<id>.service_tier", path)
+                && ServiceTier::parse(value).is_none()
+            {
+                Err(invalid(path, "unknown service tier"))
+            } else {
+                Ok(())
+            }
+        }
         ConfigValue::PositiveInteger(value) => {
             if *value == 0 {
                 Err(invalid(path, "value must be greater than zero"))
@@ -3730,6 +3767,8 @@ impl ConfigDocument {
             provider_model: self.provider.model.clone(),
             max_output_bytes: self.runtime.max_output_bytes,
             max_output_tokens: None,
+            reasoning_effort: None,
+            service_tier: None,
         }
     }
 

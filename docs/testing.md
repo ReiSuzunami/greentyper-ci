@@ -134,9 +134,11 @@ and process death after a durable Tool success cannot repeat the effect.
 Migration tests replay a historical schema-1 Ledger before appending current
 events, decode historical schema-2 and schema-3 Provider Epoch shapes
 separately, and round-trip current Provider Profile, dialect, Config Usage
-Window, Usage Attempt, Price Schedule, and selected output-token data while
+Window, Usage Attempt, Price Schedule, selected output-token data, reasoning
+effort, and service tier while
 rejecting fingerprint, outcome, timestamp, and transition tampering. A schema-5
-Config Epoch without the new optional token field remains replayable.
+Config Epoch without the optional token field and a schema-6 Config Epoch
+without request-policy fields remain replayable.
 
 Product integration tests also run the configured Responses, Chat Completions,
 and Messages adapters against concrete loopback HTTP tracers. They resolve and
@@ -157,7 +159,10 @@ an `Authorization` header, disables unsupported thinking, and sends the frozen
 selected-Preset output-token limit or a bounded 4096 fallback. Responses and
 Chat request fixtures assert their dialect-specific fields, and all three Tool
 continuation fixtures assert the initial and continuation requests retain one
-frozen value. Coverage also includes canonical text/usage, missing credential
+frozen output limit. Responses and Chat fixtures additionally assert exact
+reasoning and service-tier fields on initial requests and continuations;
+Messages proves either unsupported policy fails before network I/O. Coverage
+also includes canonical text/usage, missing credential
 and unsupported-template rejection before network access, HTTP 503, wrong
 content type, provider error SSE redaction, and one exact `tool_use`/
 `tool_result` continuation with two Usage Records.
@@ -167,6 +172,8 @@ reconnect/retry, live Providers, or broader Tool presentation.
 
 The first Usage projection suite durably records Provider request and
 continuation attempts, closes interrupted attempts only on explicit resume,
+preserves frozen requested reasoning effort and service tier separately from
+observed metadata,
 and rebuilds cached Turn, Thread, Agent, Team, rolling, and named-window
 rollups. A deterministic exhaustive small-input test compares cached totals to
 source attempts across exact, estimated, unknown, and failed combinations;

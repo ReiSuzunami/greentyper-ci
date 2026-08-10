@@ -323,6 +323,20 @@ fn schema_and_parser_are_versioned_typed_and_secret_safe() {
         Err(ConfigRuntimeError::InvalidValue { path, .. })
             if path == "model_presets.big.max_output_tokens"
     ));
+    assert!(matches!(
+        ConfigDocument::parse(
+            "schema_version = 1\n[model_presets.bad]\nreasoning_effort = \"turbo\"\n"
+        ),
+        Err(ConfigRuntimeError::InvalidValue { path, .. })
+            if path == "model_presets.bad.reasoning_effort"
+    ));
+    assert!(matches!(
+        ConfigDocument::parse(
+            "schema_version = 1\n[model_presets.bad]\nservice_tier = \"free\"\n"
+        ),
+        Err(ConfigRuntimeError::InvalidValue { path, .. })
+            if path == "model_presets.bad.service_tier"
+    ));
 
     let document = ConfigDocument::parse(
         r#"
@@ -388,6 +402,8 @@ source = "unknown"
 provider = "edge"
 model = "fixture-model"
 dialect = "responses"
+reasoning_effort = "high"
+service_tier = "priority"
 max_output_tokens = 2048
 
 [[stats.windows]]
@@ -490,6 +506,14 @@ timezone = "Asia/Hong_Kong"
     assert_eq!(presets[0].provider, "edge");
     assert_eq!(presets[0].model, "fixture-model");
     assert_eq!(presets[0].dialect, ProviderDialect::Responses);
+    assert_eq!(
+        presets[0].reasoning_effort,
+        Some(greentyper_core::config::ReasoningEffort::High)
+    );
+    assert_eq!(
+        presets[0].service_tier,
+        Some(greentyper_core::config::ServiceTier::Priority)
+    );
     assert_eq!(presets[0].max_output_tokens, Some(2_048));
     assert!(!presets[0].favorite);
     assert!(presets[0].fallback.is_empty());

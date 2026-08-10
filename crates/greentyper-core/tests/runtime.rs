@@ -393,7 +393,7 @@ fn unsupported_runtime_event_schema_fails_closed() {
         .append(
             LedgerHead::default(),
             &[EventData {
-                schema: 7,
+                schema: 8,
                 kind: 1,
                 payload: 1_u64.to_le_bytes().to_vec(),
             }],
@@ -403,8 +403,8 @@ fn unsupported_runtime_event_schema_fails_closed() {
     assert!(matches!(
         RuntimeKernel::open(&path),
         Err(RuntimeError::UnsupportedRuntimeEventSchema {
-            supported: 6,
-            actual: 7
+            supported: 7,
+            actual: 8
         })
     ));
     fs::remove_file(path).expect("cleanup Runtime ledger");

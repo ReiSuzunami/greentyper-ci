@@ -203,9 +203,15 @@ selected Model Preset output limit as `max_tokens`, with a conservative 4096
 fallback when the Turn has no selected limit. Responses maps the same frozen
 value to `max_output_tokens`, while Chat Completions maps it to
 `max_completion_tokens`; those two adapters omit the field when no limit is
-selected. Initial requests and Tool continuations use the same Config Epoch
-value, including after restart. OpenCode Go is not admitted from a route string
-alone.
+selected. The same Config Epoch also freezes typed reasoning effort and service
+tier. Responses emits `reasoning: { effort }`, Chat emits `reasoning_effort`,
+and both emit `service_tier` on initial requests and Tool continuations.
+Messages rejects either policy field before network I/O until reasoning blocks
+are canonicalized; it does not silently discard the request. Requested values
+enter Usage Attempts separately from observed tier metadata. Initial requests
+and one in-process Tool continuation use the same Config Epoch values. Replay
+reconstructs them after restart, but does not make Tool continuation resumable.
+OpenCode Go is not admitted from a route string alone.
 
 ## Tool Boundary
 
@@ -335,8 +341,7 @@ and [DeepSeek Anthropic compatibility guide](https://api-docs.deepseek.com/guide
 - Reasoning, refusal, annotation, hosted-tool, and other Responses event kinds
   not listed above.
 - DeepSeek Responses/Chat Completions, all OpenCode Go execution, Messages
-  thinking/signature/server-tool blocks, Preset reasoning/service-tier/context/
-  fallback execution, Chat
+  thinking/signature/server-tool blocks, Preset context/fallback execution, Chat
   Completions refusal/reasoning and other delta kinds, and non-streaming
   Provider responses.
 - Multiple Tool calls, parallel calls, persisted resumable Provider

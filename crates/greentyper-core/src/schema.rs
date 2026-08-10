@@ -45,7 +45,7 @@ impl SchemaKind {
             | Self::LedgerFormat
             | Self::ProviderCatalog
             | Self::ToolEvent => SchemaVersion(1),
-            Self::RuntimeEvent => SchemaVersion(6),
+            Self::RuntimeEvent => SchemaVersion(7),
             Self::TeamEvent => SchemaVersion(2),
             Self::BenchmarkEvidence => SchemaVersion(2),
         }

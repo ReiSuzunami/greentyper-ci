@@ -101,6 +101,54 @@ fn insert_output_token_limit(
         .insert(field.to_owned(), serde_json::json!(*limit.value()));
 }
 
+fn insert_service_tier(body: &mut serde_json::Value, request: &ProviderRequest) {
+    let Some(tier) = request.config.resolved().service_tier() else {
+        return;
+    };
+    body.as_object_mut()
+        .expect("Provider request body must be an object")
+        .insert(
+            "service_tier".to_owned(),
+            serde_json::json!(tier.value().as_str()),
+        );
+}
+
+fn insert_responses_request_policy(body: &mut serde_json::Value, request: &ProviderRequest) {
+    if let Some(effort) = request.config.resolved().reasoning_effort() {
+        body.as_object_mut()
+            .expect("Provider request body must be an object")
+            .insert(
+                "reasoning".to_owned(),
+                serde_json::json!({"effort": effort.value().as_str()}),
+            );
+    }
+    insert_service_tier(body, request);
+}
+
+fn insert_chat_request_policy(body: &mut serde_json::Value, request: &ProviderRequest) {
+    if let Some(effort) = request.config.resolved().reasoning_effort() {
+        body.as_object_mut()
+            .expect("Provider request body must be an object")
+            .insert(
+                "reasoning_effort".to_owned(),
+                serde_json::json!(effort.value().as_str()),
+            );
+    }
+    insert_service_tier(body, request);
+}
+
+fn require_messages_request_policy(request: &ProviderRequest) -> Result<(), ProviderError> {
+    if request.config.resolved().reasoning_effort().is_some()
+        || request.config.resolved().service_tier().is_some()
+    {
+        Err(ProviderError::InvalidRequest(
+            "Messages adapter does not support preset reasoning effort or service tier",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
 pub(crate) struct ResponsesHttpProvider<V> {
     client: Client,
     endpoint: Url,
@@ -333,6 +381,7 @@ impl<V: CredentialVault> ProviderRuntime for ResponsesHttpProvider<V> {
             })
         };
         insert_output_token_limit(&mut body, "max_output_tokens", request);
+        insert_responses_request_policy(&mut body, request);
         let (response_id, events) = self.send_request(body, max_output_bytes)?;
         let events = if self.local_echo_enabled {
             normalize_local_echo_calls(events)?
@@ -386,6 +435,7 @@ impl<V: CredentialVault> ProviderRuntime for ResponsesHttpProvider<V> {
             "tools": [local_echo_tool_definition()],
         });
         insert_output_token_limit(&mut body, "max_output_tokens", request);
+        insert_responses_request_policy(&mut body, request);
         self.send_request(body, max_output_bytes)
             .map(|(_, events)| events)
     }
@@ -607,6 +657,7 @@ impl<V: CredentialVault> ProviderRuntime for ChatCompletionsHttpProvider<V> {
             })
         };
         insert_output_token_limit(&mut body, "max_completion_tokens", request);
+        insert_chat_request_policy(&mut body, request);
         let events = self.send_request(body, max_output_bytes)?;
         let events = if self.local_echo_enabled {
             normalize_local_echo_calls(events)?
@@ -673,6 +724,7 @@ impl<V: CredentialVault> ProviderRuntime for ChatCompletionsHttpProvider<V> {
             "tools": [chat_local_echo_tool_definition()],
         });
         insert_output_token_limit(&mut body, "max_completion_tokens", request);
+        insert_chat_request_policy(&mut body, request);
         let events = self.send_request(body, max_output_bytes)?;
         if events
             .iter()
@@ -884,6 +936,7 @@ impl<V: CredentialVault> ProviderRuntime for MessagesHttpProvider<V> {
 
     fn run(&mut self, request: &ProviderRequest) -> Result<Vec<ProviderEvent>, ProviderError> {
         self.require_request_identity(request)?;
+        require_messages_request_policy(request)?;
         let max_output_bytes =
             usize::try_from(*request.config.resolved().max_output_bytes().value())
                 .map_err(|_| ProviderError::InvalidConfiguration("output byte limit is invalid"))?;
@@ -941,6 +994,7 @@ impl<V: CredentialVault> ProviderRuntime for MessagesHttpProvider<V> {
         output: &ProviderToolOutput,
     ) -> Result<Vec<ProviderEvent>, ProviderError> {
         self.require_request_identity(request)?;
+        require_messages_request_policy(request)?;
         if !self.local_echo_enabled {
             return Err(ProviderError::InvalidRequest(
                 "Messages Provider has no enabled Tool continuation",
@@ -1850,7 +1904,7 @@ mod tests {
         Capability, CapabilitySnapshot, CommandOutcome, ResourceBudget, TaskScope, TaskSpec,
         TeamCommand,
     };
-    use greentyper_core::config::{ConfigEpoch, ConfigLayers};
+    use greentyper_core::config::{ConfigEpoch, ConfigLayers, ReasoningEffort, ServiceTier};
     use greentyper_core::model::{ConfigEpochId, ProviderEpochId, ThreadId, TurnId};
     use greentyper_core::provider::ProviderEpoch;
     use greentyper_core::runtime::ProviderTurnOutcome;
@@ -1919,8 +1973,21 @@ mod tests {
         dialect: ProviderDialect,
         max_output_tokens: impl Into<Option<u32>>,
     ) -> ProviderRequest {
+        provider_request_with_policy(profile, input, dialect, max_output_tokens, None, None)
+    }
+
+    fn provider_request_with_policy(
+        profile: ProviderProfileSnapshot,
+        input: &str,
+        dialect: ProviderDialect,
+        max_output_tokens: impl Into<Option<u32>>,
+        reasoning_effort: Option<ReasoningEffort>,
+        service_tier: Option<ServiceTier>,
+    ) -> ProviderRequest {
         let mut layers = ConfigLayers::default();
         layers.cli.max_output_tokens = max_output_tokens.into();
+        layers.cli.reasoning_effort = reasoning_effort;
+        layers.cli.service_tier = service_tier;
         ProviderRequest {
             thread: ThreadId::new(1).expect("thread"),
             turn: TurnId::new(1).expect("turn"),
@@ -2279,6 +2346,8 @@ source = "unknown"
                     "max_completion_tokens": 2048,
                     "messages": [{"role": "user", "content": "hello Chat"}],
                     "model": FIXTURE_MODEL,
+                    "reasoning_effort": "high",
+                    "service_tier": "fast",
                     "stream": true,
                     "stream_options": {"include_usage": true},
                 })
@@ -2296,11 +2365,13 @@ source = "unknown"
         let mut provider =
             ChatCompletionsHttpProvider::with_timeout(profile.clone(), vault, HTTP_TIMEOUT)
                 .expect("Chat Completions provider");
-        let request = provider_request_with_output_tokens(
+        let request = provider_request_with_policy(
             profile,
             "hello Chat",
             ProviderDialect::ChatCompletions,
             2_048,
+            Some(ReasoningEffort::High),
+            Some(ServiceTier::Fast),
         );
         let events = provider.run(&request).expect("Chat response");
         assert!(matches!(
@@ -2449,6 +2520,8 @@ source = "unknown"
                         "content": "echo through Chat",
                     }],
                     "model": FIXTURE_MODEL,
+                    "reasoning_effort": "medium",
+                    "service_tier": "priority",
                     "stream": true,
                     "stream_options": {"include_usage": true},
                     "tool_choice": "auto",
@@ -2506,6 +2579,8 @@ source = "unknown"
                         },
                     ],
                     "model": FIXTURE_MODEL,
+                    "reasoning_effort": "medium",
+                    "service_tier": "priority",
                     "stream": true,
                     "stream_options": {"include_usage": true},
                     "tool_choice": "none",
@@ -2581,6 +2656,8 @@ source = "unknown"
         provider.enable_local_echo();
         let mut layers = runtime.config_layers().expect("Config layers").clone();
         layers.cli.max_output_tokens = Some(6_000);
+        layers.cli.reasoning_effort = Some(ReasoningEffort::Medium);
+        layers.cli.service_tier = Some(ServiceTier::Priority);
 
         let runtime_path = test_ledger_path("chat-tool-continuation", "runtime");
         let team_path = test_ledger_path("chat-tool-continuation", "team");
@@ -2765,6 +2842,40 @@ source = "unknown"
             ),
             Err(ProviderError::InvalidConfiguration(
                 "Provider Profile template has no configured runtime adapter"
+            ))
+        ));
+        assert!(
+            matches!(listener.accept(), Err(error) if error.kind() == io::ErrorKind::WouldBlock)
+        );
+    }
+
+    #[test]
+    fn messages_provider_rejects_unsupported_request_policy_before_network() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("Messages policy listener");
+        listener
+            .set_nonblocking(true)
+            .expect("nonblocking Messages policy listener");
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let profile = messages_fixture_profile(&base_url, "messages-request-policy");
+        let mut provider = MessagesHttpProvider::with_timeout(
+            profile.clone(),
+            bound_messages_vault(&profile),
+            HTTP_TIMEOUT,
+        )
+        .expect("Messages provider");
+        let request = provider_request_with_policy(
+            profile,
+            "must fail before network",
+            ProviderDialect::Messages,
+            3_072,
+            Some(ReasoningEffort::High),
+            Some(ServiceTier::Priority),
+        );
+
+        assert!(matches!(
+            provider.run(&request),
+            Err(ProviderError::InvalidRequest(
+                "Messages adapter does not support preset reasoning effort or service tier"
             ))
         ));
         assert!(
@@ -3436,6 +3547,8 @@ credential = "synthetic-deepseek-reference"
                     "input": "echo through the approved tool",
                     "max_output_tokens": 6002,
                     "model": FIXTURE_MODEL,
+                    "reasoning": {"effort": "low"},
+                    "service_tier": "flex",
                     "stream": true,
                     "tool_choice": "auto",
                     "tools": [{
@@ -3475,6 +3588,8 @@ credential = "synthetic-deepseek-reference"
                     "max_output_tokens": 6002,
                     "model": FIXTURE_MODEL,
                     "previous_response_id": "resp_http_tool_1",
+                    "reasoning": {"effort": "low"},
+                    "service_tier": "flex",
                     "stream": true,
                     "tool_choice": "none",
                     "tools": [{
@@ -3548,6 +3663,8 @@ credential = "synthetic-deepseek-reference"
         };
         let mut layers = runtime.config_layers().expect("Config layers").clone();
         layers.cli.max_output_tokens = Some(6_002);
+        layers.cli.reasoning_effort = Some(ReasoningEffort::Low);
+        layers.cli.service_tier = Some(ServiceTier::Flex);
         let outcome = kernel
             .execute_provider_turn(
                 root,

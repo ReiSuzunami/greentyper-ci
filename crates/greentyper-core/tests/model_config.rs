@@ -1,5 +1,6 @@
 use greentyper_core::config::{
     ConfigEpoch, ConfigError, ConfigLayer, ConfigLayers, ConfigSource, MAX_OUTPUT_TOKENS,
+    ReasoningEffort, ServiceTier,
 };
 use greentyper_core::model::{
     CanonicalItem, ConfigEpochId, ItemId, ItemRole, MAX_ITEM_TEXT_BYTES, ThreadId, TurnId,
@@ -30,6 +31,34 @@ fn canonical_ids_reserve_zero_and_items_require_text() {
 }
 
 #[test]
+fn request_policy_enums_are_closed_and_canonical() {
+    for value in [
+        ReasoningEffort::None,
+        ReasoningEffort::Minimal,
+        ReasoningEffort::Low,
+        ReasoningEffort::Medium,
+        ReasoningEffort::High,
+        ReasoningEffort::XHigh,
+        ReasoningEffort::Max,
+    ] {
+        assert_eq!(ReasoningEffort::parse(value.as_str()), Some(value));
+    }
+    assert_eq!(ReasoningEffort::parse("turbo"), None);
+
+    for value in [
+        ServiceTier::Auto,
+        ServiceTier::Default,
+        ServiceTier::Flex,
+        ServiceTier::Scale,
+        ServiceTier::Priority,
+        ServiceTier::Fast,
+    ] {
+        assert_eq!(ServiceTier::parse(value.as_str()), Some(value));
+    }
+    assert_eq!(ServiceTier::parse("free"), None);
+}
+
+#[test]
 fn config_precedence_and_provenance_are_deterministic() {
     let layers = ConfigLayers {
         built_in: ConfigLayer::built_in(),
@@ -37,17 +66,21 @@ fn config_precedence_and_provenance_are_deterministic() {
             provider_profile: Some("user-profile".to_owned()),
             max_output_bytes: Some(1_024),
             max_output_tokens: Some(1_000),
+            reasoning_effort: Some(ReasoningEffort::Low),
             ..ConfigLayer::default()
         },
         project: ConfigLayer {
             provider_model: Some("project-model".to_owned()),
             max_output_bytes: Some(2_048),
             max_output_tokens: Some(2_000),
+            service_tier: Some(ServiceTier::Flex),
             ..ConfigLayer::default()
         },
         cli: ConfigLayer {
             max_output_bytes: Some(4_096),
             max_output_tokens: Some(3_000),
+            reasoning_effort: Some(ReasoningEffort::High),
+            service_tier: Some(ServiceTier::Priority),
             ..ConfigLayer::default()
         },
     };
@@ -67,17 +100,37 @@ fn config_precedence_and_provenance_are_deterministic() {
         resolved.max_output_tokens().map(|value| value.source()),
         Some(ConfigSource::Cli)
     );
+    assert_eq!(
+        resolved.reasoning_effort().map(|value| *value.value()),
+        Some(ReasoningEffort::High)
+    );
+    assert_eq!(
+        resolved.reasoning_effort().map(|value| value.source()),
+        Some(ConfigSource::Cli)
+    );
+    assert_eq!(
+        resolved.service_tier().map(|value| *value.value()),
+        Some(ServiceTier::Priority)
+    );
+    assert_eq!(
+        resolved.service_tier().map(|value| value.source()),
+        Some(ConfigSource::Cli)
+    );
 }
 
 #[test]
 fn frozen_epoch_is_immutable_when_layers_change() {
     let mut layers = ConfigLayers::default();
     layers.cli.max_output_tokens = Some(4_096);
+    layers.cli.reasoning_effort = Some(ReasoningEffort::Medium);
+    layers.cli.service_tier = Some(ServiceTier::Default);
     let id = ConfigEpochId::new(1).expect("nonzero epoch");
     let frozen = ConfigEpoch::freeze(id, &layers).expect("valid epoch");
 
     layers.cli.provider_model = Some("changed-after-freeze".to_owned());
     layers.cli.max_output_tokens = Some(8_192);
+    layers.cli.reasoning_effort = Some(ReasoningEffort::XHigh);
+    layers.cli.service_tier = Some(ServiceTier::Fast);
     let newer = ConfigEpoch::freeze(ConfigEpochId::new(2).expect("nonzero epoch"), &layers)
         .expect("valid newer epoch");
 
@@ -91,6 +144,17 @@ fn frozen_epoch_is_immutable_when_layers_change() {
             .max_output_tokens()
             .map(|value| *value.value()),
         Some(4_096)
+    );
+    assert_eq!(
+        frozen
+            .resolved()
+            .reasoning_effort()
+            .map(|value| *value.value()),
+        Some(ReasoningEffort::Medium)
+    );
+    assert_eq!(
+        frozen.resolved().service_tier().map(|value| *value.value()),
+        Some(ServiceTier::Default)
     );
     assert_ne!(frozen.fingerprint(), newer.fingerprint());
 }

@@ -3,6 +3,8 @@
 use std::error::Error;
 use std::fmt;
 
+use serde::Serialize;
+
 use crate::model::ConfigEpochId;
 use crate::pricing::PriceScheduleBook;
 use crate::schema::SchemaKind;
@@ -21,6 +23,85 @@ pub const MAX_OUTPUT_TOKENS: u32 = 1024 * 1024;
 pub const MAX_CONFIG_STRING_BYTES: usize = 512;
 pub const CONFIG_SCHEMA_VERSION: u16 = SchemaKind::ConfigEpoch.current().get();
 
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningEffort {
+    None,
+    Minimal,
+    Low,
+    Medium,
+    High,
+    XHigh,
+    Max,
+}
+
+impl ReasoningEffort {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Minimal => "minimal",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::XHigh => "xhigh",
+            Self::Max => "max",
+        }
+    }
+
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "none" => Some(Self::None),
+            "minimal" => Some(Self::Minimal),
+            "low" => Some(Self::Low),
+            "medium" => Some(Self::Medium),
+            "high" => Some(Self::High),
+            "xhigh" => Some(Self::XHigh),
+            "max" => Some(Self::Max),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ServiceTier {
+    Auto,
+    Default,
+    Flex,
+    Scale,
+    Priority,
+    Fast,
+}
+
+impl ServiceTier {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Default => "default",
+            Self::Flex => "flex",
+            Self::Scale => "scale",
+            Self::Priority => "priority",
+            Self::Fast => "fast",
+        }
+    }
+
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "auto" => Some(Self::Auto),
+            "default" => Some(Self::Default),
+            "flex" => Some(Self::Flex),
+            "scale" => Some(Self::Scale),
+            "priority" => Some(Self::Priority),
+            "fast" => Some(Self::Fast),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ConfigSource {
     BuiltIn,
@@ -35,6 +116,8 @@ pub struct ConfigLayer {
     pub provider_model: Option<String>,
     pub max_output_bytes: Option<u32>,
     pub max_output_tokens: Option<u32>,
+    pub reasoning_effort: Option<ReasoningEffort>,
+    pub service_tier: Option<ServiceTier>,
 }
 
 impl ConfigLayer {
@@ -45,6 +128,8 @@ impl ConfigLayer {
             provider_model: Some("deterministic-v1".to_owned()),
             max_output_bytes: Some(DEFAULT_MAX_OUTPUT_BYTES),
             max_output_tokens: None,
+            reasoning_effort: None,
+            service_tier: None,
         }
     }
 }
@@ -92,6 +177,8 @@ pub struct ResolvedConfig {
     provider_model: Sourced<String>,
     max_output_bytes: Sourced<u32>,
     max_output_tokens: Option<Sourced<u32>>,
+    reasoning_effort: Option<Sourced<ReasoningEffort>>,
+    service_tier: Option<Sourced<ServiceTier>>,
 }
 
 impl ResolvedConfig {
@@ -113,6 +200,16 @@ impl ResolvedConfig {
     #[must_use]
     pub const fn max_output_tokens(&self) -> Option<&Sourced<u32>> {
         self.max_output_tokens.as_ref()
+    }
+
+    #[must_use]
+    pub const fn reasoning_effort(&self) -> Option<&Sourced<ReasoningEffort>> {
+        self.reasoning_effort.as_ref()
+    }
+
+    #[must_use]
+    pub const fn service_tier(&self) -> Option<&Sourced<ServiceTier>> {
+        self.service_tier.as_ref()
     }
 }
 
@@ -249,12 +346,26 @@ impl ConfigLayers {
         {
             return Err(ConfigError::MaxOutputTokensTooLarge);
         }
+        let reasoning_effort = resolve_optional([
+            (&self.built_in.reasoning_effort, ConfigSource::BuiltIn),
+            (&self.user.reasoning_effort, ConfigSource::User),
+            (&self.project.reasoning_effort, ConfigSource::Project),
+            (&self.cli.reasoning_effort, ConfigSource::Cli),
+        ]);
+        let service_tier = resolve_optional([
+            (&self.built_in.service_tier, ConfigSource::BuiltIn),
+            (&self.user.service_tier, ConfigSource::User),
+            (&self.project.service_tier, ConfigSource::Project),
+            (&self.cli.service_tier, ConfigSource::Cli),
+        ]);
 
         Ok(ResolvedConfig {
             provider_profile,
             provider_model,
             max_output_bytes,
             max_output_tokens,
+            reasoning_effort,
+            service_tier,
         })
     }
 }
@@ -332,6 +443,19 @@ fn resolve_optional_u32<const N: usize>(
         .map(|(value, source)| Sourced { value, source })
 }
 
+fn resolve_optional<T: Clone, const N: usize>(
+    values: [(&Option<T>, ConfigSource); N],
+) -> Option<Sourced<T>> {
+    values
+        .into_iter()
+        .filter_map(|(value, source)| value.as_ref().map(|value| (value, source)))
+        .next_back()
+        .map(|(value, source)| Sourced {
+            value: value.clone(),
+            source,
+        })
+}
+
 fn fingerprint(
     config: &ResolvedConfig,
     usage_windows: &[UsageWindow],
@@ -358,6 +482,32 @@ fn fingerprint(
         for bytes in [
             max_output_tokens.value.to_le_bytes().as_slice(),
             &[source_tag(max_output_tokens.source)],
+        ] {
+            hash ^= bytes.len() as u64;
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+            for byte in bytes {
+                hash ^= u64::from(*byte);
+                hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        }
+    }
+    if let Some(reasoning_effort) = &config.reasoning_effort {
+        for bytes in [
+            reasoning_effort.value.as_str().as_bytes(),
+            &[source_tag(reasoning_effort.source)],
+        ] {
+            hash ^= bytes.len() as u64;
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+            for byte in bytes {
+                hash ^= u64::from(*byte);
+                hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        }
+    }
+    if let Some(service_tier) = &config.service_tier {
+        for bytes in [
+            service_tier.value.as_str().as_bytes(),
+            &[source_tag(service_tier.source)],
         ] {
             hash ^= bytes.len() as u64;
             hash = hash.wrapping_mul(0x0000_0100_0000_01b3);

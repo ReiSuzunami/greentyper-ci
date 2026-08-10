@@ -352,6 +352,16 @@ impl UsageAttempt {
         })
     }
 
+    pub(crate) fn with_requested_policy(
+        mut self,
+        reasoning_effort: Option<&str>,
+        service_tier: Option<&str>,
+    ) -> Self {
+        self.requested_reasoning_effort = reasoning_effort.map(str::to_owned);
+        self.requested_service_tier = service_tier.map(str::to_owned);
+        self
+    }
+
     #[must_use]
     pub const fn attempt(&self) -> u32 {
         self.attempt

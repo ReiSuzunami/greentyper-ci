@@ -15,6 +15,7 @@ use crate::agent_team::{
 };
 use crate::config::{
     ConfigEpoch, ConfigError, ConfigLayer, ConfigLayers, ConfigSource, MAX_CONFIG_STRING_BYTES,
+    ReasoningEffort, ServiceTier,
 };
 use crate::context::{ContextAdmissionDecision, ContextPressureSnapshot};
 use crate::ledger::{
@@ -2149,6 +2150,8 @@ struct UsageContext {
     profile: String,
     model: String,
     dialect: Option<ProviderDialect>,
+    reasoning_effort: Option<ReasoningEffort>,
+    service_tier: Option<ServiceTier>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2428,7 +2431,11 @@ impl RuntimeState {
                                     Some(usage),
                                     Vec::new(),
                                 )
-                                .map_err(RuntimeError::Usage)?,
+                                .map_err(RuntimeError::Usage)?
+                                .with_requested_policy(
+                                    context.reasoning_effort.map(ReasoningEffort::as_str),
+                                    context.service_tier.map(ServiceTier::as_str),
+                                ),
                             )
                             .map_err(RuntimeError::Usage)?;
                     }
@@ -2602,7 +2609,11 @@ impl RuntimeState {
                     usage,
                     resolved_windows,
                 )
-                .map_err(RuntimeError::Usage)?;
+                .map_err(RuntimeError::Usage)?
+                .with_requested_policy(
+                    context.reasoning_effort.map(ReasoningEffort::as_str),
+                    context.service_tier.map(ServiceTier::as_str),
+                );
                 self.pending_for(turn)?.open_usage_attempt = None;
                 self.usage
                     .record(usage_attempt)
@@ -2743,12 +2754,21 @@ impl RuntimeState {
             .ok_or(RuntimeError::CorruptState(
                 "usage Provider Epoch is missing",
             ))?;
+        let config = self
+            .configs
+            .get(&record.config)
+            .ok_or(RuntimeError::CorruptState("usage Config Epoch is missing"))?;
         Ok(UsageContext {
             thread,
             agent: record.agent,
             profile: provider.profile().to_owned(),
             model: provider.model().to_owned(),
             dialect: provider.dialect(),
+            reasoning_effort: config
+                .resolved()
+                .reasoning_effort()
+                .map(|value| *value.value()),
+            service_tier: config.resolved().service_tier().map(|value| *value.value()),
         })
     }
 }
@@ -3263,6 +3283,22 @@ fn encode_config_epoch(encoder: &mut Encoder, epoch: &ConfigEpoch) -> Result<(),
             encoder.u8(source_tag(value.source()));
         }
     }
+    match resolved.reasoning_effort() {
+        None => encoder.u8(0),
+        Some(value) => {
+            encoder.u8(1);
+            encoder.string(value.value().as_str())?;
+            encoder.u8(source_tag(value.source()));
+        }
+    }
+    match resolved.service_tier() {
+        None => encoder.u8(0),
+        Some(value) => {
+            encoder.u8(1);
+            encoder.string(value.value().as_str())?;
+            encoder.u8(source_tag(value.source()));
+        }
+    }
     Ok(())
 }
 
@@ -3327,6 +3363,40 @@ fn decode_config_epoch(
             _ => {
                 return Err(RuntimeError::CorruptEvent(
                     "invalid Config Epoch output-token limit",
+                ));
+            }
+        }
+    }
+    if schema >= 7 {
+        match decoder.u8()? {
+            0 => {}
+            1 => {
+                let value = decoder.string(MAX_CONFIG_STRING_BYTES)?;
+                let value = ReasoningEffort::parse(&value).ok_or(RuntimeError::CorruptEvent(
+                    "invalid Config Epoch reasoning effort",
+                ))?;
+                let source = decode_source(decoder.u8()?)?;
+                layer_mut(&mut layers, source).reasoning_effort = Some(value);
+            }
+            _ => {
+                return Err(RuntimeError::CorruptEvent(
+                    "invalid Config Epoch reasoning effort",
+                ));
+            }
+        }
+        match decoder.u8()? {
+            0 => {}
+            1 => {
+                let value = decoder.string(MAX_CONFIG_STRING_BYTES)?;
+                let value = ServiceTier::parse(&value).ok_or(RuntimeError::CorruptEvent(
+                    "invalid Config Epoch service tier",
+                ))?;
+                let source = decode_source(decoder.u8()?)?;
+                layer_mut(&mut layers, source).service_tier = Some(value);
+            }
+            _ => {
+                return Err(RuntimeError::CorruptEvent(
+                    "invalid Config Epoch service tier",
                 ));
             }
         }
@@ -3771,23 +3841,24 @@ mod tests {
     }
 
     #[test]
-    fn schema_six_config_epoch_freezes_output_tokens_and_schema_five_remains_replayable() {
+    fn schema_seven_config_epoch_freezes_request_policy_and_schema_six_remains_replayable() {
         let legacy_epoch = ConfigEpoch::freeze(
             ConfigEpochId::new(1).expect("Config Epoch id"),
             &ConfigLayers::default(),
         )
         .expect("legacy-compatible Config Epoch");
-        let mut schema_five = RuntimeEvent::ConfigFrozen {
+        let mut schema_six = RuntimeEvent::ConfigFrozen {
             epoch: legacy_epoch.clone(),
         }
         .encode()
         .expect("encode Config Epoch");
-        assert_eq!(schema_five.schema, 6);
-        assert_eq!(schema_five.payload.pop(), Some(0));
-        schema_five.schema = 5;
+        assert_eq!(schema_six.schema, 7);
+        assert_eq!(schema_six.payload.pop(), Some(0));
+        assert_eq!(schema_six.payload.pop(), Some(0));
+        schema_six.schema = 6;
         assert_eq!(
-            RuntimeEvent::decode(&stored_runtime_event(schema_five))
-                .expect("decode schema-five Config Epoch"),
+            RuntimeEvent::decode(&stored_runtime_event(schema_six))
+                .expect("decode schema-six Config Epoch"),
             RuntimeEvent::ConfigFrozen {
                 epoch: legacy_epoch
             }
@@ -3795,22 +3866,28 @@ mod tests {
 
         let mut layers = ConfigLayers::default();
         layers.cli.max_output_tokens = Some(8_192);
+        layers.cli.reasoning_effort = Some(crate::config::ReasoningEffort::Low);
+        layers.cli.service_tier = Some(crate::config::ServiceTier::Priority);
         let epoch = ConfigEpoch::freeze(ConfigEpochId::new(2).expect("Config Epoch id"), &layers)
-            .expect("token-bounded Config Epoch");
+            .expect("request-policy Config Epoch");
         let encoded = RuntimeEvent::ConfigFrozen {
             epoch: epoch.clone(),
         }
         .encode()
-        .expect("encode token-bounded Config Epoch");
+        .expect("encode request-policy Config Epoch");
         assert_eq!(
             RuntimeEvent::decode(&stored_runtime_event(encoded.clone()))
-                .expect("decode token-bounded Config Epoch"),
+                .expect("decode request-policy Config Epoch"),
             RuntimeEvent::ConfigFrozen { epoch }
         );
 
         let mut tampered = encoded;
-        let token_low_byte = tampered.payload.len() - 5;
-        tampered.payload[token_low_byte] ^= 1;
+        let reasoning_start = tampered
+            .payload
+            .windows(3)
+            .position(|window| window == b"low")
+            .expect("encoded reasoning effort");
+        tampered.payload[reasoning_start..reasoning_start + 3].copy_from_slice(b"max");
         assert!(matches!(
             RuntimeEvent::decode(&stored_runtime_event(tampered)),
             Err(RuntimeError::CorruptEvent(

@@ -143,13 +143,19 @@ keeps the deterministic simulator when no custom profile is selected.
 Current configured Provider Epochs freeze an explicit dialect. Historical
 pre-dialect Epochs retain their schema-compatible Responses default and still
 must pass the frozen Profile's adapter and capability checks during replay.
-Runtime Event schema 6 freezes an optional selected-Preset output-token limit in
-the Config Epoch. Responses sends it as `max_output_tokens`, Chat Completions as
-`max_completion_tokens`, and Messages as `max_tokens`; Responses and Chat omit
-the field when no limit is selected, while Messages retains its 4096 fallback.
-The same frozen value survives restart and Tool continuation. Schema 6 also
-preserves the schema-5 Usage and Cost contract, which brackets every Provider
-invocation with a durable
+Runtime Event schema 7 freezes the selected Preset's optional output-token
+limit, typed reasoning effort, and typed service tier in the Config Epoch.
+Responses sends reasoning as `reasoning.effort`, Chat Completions sends
+`reasoning_effort`, and both send `service_tier`; their output-token fields are
+`max_output_tokens` and `max_completion_tokens`. Messages sends the output limit
+as `max_tokens` but rejects a selected reasoning effort or service tier because
+its reasoning blocks and tier semantics are not yet mapped by this adapter.
+Unset fields remain omitted, except Messages retains its 4096 token fallback.
+One in-process Tool continuation uses the same policy; replay reconstructs it
+after restart without making continuation resumable. Requested effort/tier
+enter durable Usage Attempts separately from observed Provider metadata.
+Schema 7 also preserves the schema-6 Usage and Cost contract, which
+brackets every Provider invocation with a durable
 Usage Attempt, records UTC start/completion and outcome, preserves exact,
 estimated, and unknown token classes, and rebuilds cached Turn, Thread, Agent,
 Team, rolling, and named-window rollups. Config Epochs freeze normalized Usage
@@ -204,8 +210,7 @@ loop, ConPTY integration, rendered Config Center, object-name dialog, or
 rendered template picker, starter-preset workflow, or live catalog discovery.
 Live credential-gated provider validation, configurable proxy policy,
 reconnect/retry, DeepSeek Responses/Chat Completions, all OpenCode Go execution,
-Messages reasoning blocks, Preset reasoning/service-tier/context/fallback
-execution, richer approval
+Messages reasoning blocks, Preset context/fallback execution, richer approval
 presentation, broader Provider and Tool adapters,
 Workspace, TUI, and App Server work remain. The loopback Provider tracer remains
 an internal harness; `local.echo` is intentionally a fixed opt-in command rather

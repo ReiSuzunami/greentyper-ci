@@ -58,6 +58,8 @@ pub fn run(arguments: impl Iterator<Item = String>) -> Result<(), CliError> {
                     layers.cli.provider_profile = Some(preset.provider);
                     layers.cli.provider_model = Some(preset.model);
                     layers.cli.max_output_tokens = preset.max_output_tokens;
+                    layers.cli.reasoning_effort = preset.reasoning_effort;
+                    layers.cli.service_tier = preset.service_tier;
                     (profile, Some(preset.dialect))
                 }
                 None => (config.selected_provider_profile()?, dialect),
