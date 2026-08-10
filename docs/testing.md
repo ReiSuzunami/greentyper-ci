@@ -153,15 +153,22 @@ and usage, missing credential or explicit dialect before network access, HTTP
 503, wrong content type, malformed SSE, and one exact two-request Tool protocol:
 advertised `local_echo`, streamed call, canonical `local.echo` mapping,
 correlated assistant/Tool messages, final text, and two Usage Records.
+DeepSeek Chat coverage additionally binds the exact template and route, uses
+Bearer authorization, sends `max_tokens` with non-thinking mode, omits the
+Beta-only Tool `strict` flag, preserves top-level cache-hit usage, retains the
+same frozen policy through one continuation, and rejects unsupported reasoning,
+service tier, a limit above 384K, or a serialized request above 128 KiB before
+network I/O. Responses continuation coverage also rejects a mismatched frozen
+dialect and a second Tool call at the adapter boundary.
 Messages coverage binds the exact DeepSeek template and frozen Messages route,
 uses a sensitive `x-api-key` plus pinned compatibility-version header without
 an `Authorization` header, disables unsupported thinking, and sends the frozen
 selected-Preset output-token limit or a bounded 4096 fallback. Responses and
 Chat request fixtures assert their dialect-specific fields, and all three Tool
 continuation fixtures assert the initial and continuation requests retain one
-frozen output limit. Responses and Chat fixtures additionally assert exact
-reasoning and service-tier fields on initial requests and continuations;
-Messages proves either unsupported policy fails before network I/O. Coverage
+frozen output limit. OpenAI Responses and Chat fixtures additionally assert
+exact reasoning and service-tier fields on initial requests and continuations;
+both DeepSeek adapters prove either unsupported policy fails before network I/O. Coverage
 also includes canonical text/usage, missing credential
 and unsupported-template rejection before network access, HTTP 503, wrong
 content type, provider error SSE redaction, and one exact `tool_use`/
@@ -318,12 +325,13 @@ validation.
 The official OpenAI template identity is also exercised with an explicit
 loopback origin override through the Responses adapter and models probe. The
 test proves inherited routes and dialects cross the same endpoint and credential
-gates as an explicit compatible gateway. The Chat Completions adapter currently
-admits only the OpenAI and explicit openai-compatible template identities.
-The Messages adapter admits only the official DeepSeek template identity and
-its explicit Messages route. DeepSeek Responses/Chat Completions and all
-OpenCode Go execution remain outside this slice; a declared route or dialect is
-not treated as proof of wire compatibility.
+gates as an explicit compatible gateway. The Chat Completions adapter admits
+the OpenAI and explicit openai-compatible template identities plus the exact
+official DeepSeek identity with its DeepSeek-specific request policy. The
+Messages adapter admits only the official DeepSeek template identity and its
+explicit Messages route. DeepSeek Responses and all OpenCode Go execution remain
+outside this slice; a declared route or dialect is not treated as proof of wire
+compatibility.
 
 Live provider integration tests are not implemented yet. Planned opt-in,
 credential-gated tests will verify OpenAI, DeepSeek, and OpenCode Go without

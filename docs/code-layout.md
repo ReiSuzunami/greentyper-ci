@@ -42,7 +42,7 @@ The core must build and run pure tests on macOS ARM. Platform-specific I/O enter
 The shipped product executable. It owns composition and the target TUI, CLI,
 App Server, and concrete production adapters. Its current private modules
 include configured Responses and Chat Completions HTTP/SSE plus the DeepSeek
-Messages HTTP/SSE adapter, a bounded
+Chat Completions and Messages HTTP/SSE request policies, a bounded
 status-only Provider connection test adapter, origin-bound Windows Credential
 Manager access, the fixed
 `local.echo` process executor, a terminal-neutral presentation projection, Config

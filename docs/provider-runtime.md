@@ -20,7 +20,7 @@ terminal stream to provider-neutral text deltas, one canonical function call,
 and one optional Usage Record. The Runtime Kernel can drive that neutral
 interface through Tool Runtime approval and one Tool continuation. The product
 has configured OpenAI/openai-compatible Responses and Chat Completions HTTP
-adapters plus one DeepSeek Messages adapter. Each uses a
+adapters plus exact DeepSeek Chat Completions and Messages adapters. Each uses a
 no-proxy, no-redirect blocking client, streams the response through its matching
 decoder, and drives the single-Agent Runtime. Config Runtime resolves the
 selected Provider Profile and freezes its normalized origin, declared routes,
@@ -29,18 +29,21 @@ Provider Epoch.
 The release-bundled OpenAI template now supplies those defaults; the adapters
 admit it and explicit compatible gateways only after the frozen Profile declares
 the selected dialect and its endpoint. Adapter selection never infers one
-dialect from another. DeepSeek Responses/Chat Completions and every OpenCode Go
-record remain catalog facts until their template and selected dialect have an
-explicit product adapter.
+dialect from another. The implemented DeepSeek Chat pair is no longer
+catalog-only; DeepSeek Responses and every OpenCode Go record remain catalog
+facts until their template and selected dialect have an explicit product adapter.
 Before each request, the selected adapter resolves secret material from an
 origin-bound product vault; remote origins require HTTPS. The headless CLI selects the
 configured OpenAI adapter with `--dialect responses` or
 `--dialect chat_completions`, or the configured DeepSeek adapter with
-`--dialect messages`, and retains the deterministic simulator only when no
-custom profile is selected. Windows
+`--dialect chat_completions` or `--dialect messages`, and retains the
+deterministic simulator only when no custom profile is selected. Windows
 Credential Manager is the current platform
 backend; non-Windows product credential access fails closed. Retry, reconnect,
 live-provider validation, and broader Tool presentation remain separate work.
+All three HTTP dialect paths reject serialized request bodies above 128 KiB
+before network I/O. A Tool continuation also rejects any second Tool call at
+the adapter boundary; the Runtime repeats that invariant before projection.
 The Kernel durably brackets each request and continuation as a separate Usage
 Attempt before invoking this adapter, so transport failure, interruption,
 successful usage, and replay remain distinguishable without persisting raw
@@ -156,6 +159,11 @@ deltas, and the deprecated `function_call` shape. Function arguments must form
 one canonical JSON object. Missing usage fields remain unknown. Supported usage
 preserves prompt, cached-prompt, completion, reasoning-completion, and total
 tokens plus optional service tier without inventing cache-write counts.
+Cached prompt usage accepts both OpenAI's nested
+`prompt_tokens_details.cached_tokens` and DeepSeek's top-level
+`prompt_cache_hit_tokens`. If both are present they must agree; DeepSeek's
+reported cache hit plus cache miss must equal reported prompt tokens. Conflicts
+fail closed instead of selecting one source.
 
 `normalize_chat_completions_events` removes Chat chunk identities, preserves the
 Tool call ID only as correlation data, and emits the same provider-neutral
@@ -194,24 +202,31 @@ terminal state. `max_tokens` and context-window stops become incomplete rather
 than successful output. Unknown JSON fields are tolerated; unknown semantic
 event and block kinds fail closed.
 
-The concrete adapter is intentionally narrower than the wire format. It admits
-only the official `deepseek` template with an explicit frozen `messages`
-dialect and route, uses `x-api-key` plus `anthropic-version: 2023-06-01`, and
-disables proxy discovery and redirects. DeepSeek thinking is explicitly disabled
-because reasoning blocks are not yet canonicalized. Requests currently use the
-selected Model Preset output limit as `max_tokens`, with a conservative 4096
-fallback when the Turn has no selected limit. Responses maps the same frozen
-value to `max_output_tokens`, while Chat Completions maps it to
-`max_completion_tokens`; those two adapters omit the field when no limit is
-selected. The same Config Epoch also freezes typed reasoning effort and service
-tier. Responses emits `reasoning: { effort }`, Chat emits `reasoning_effort`,
-and both emit `service_tier` on initial requests and Tool continuations.
-Messages rejects either policy field before network I/O until reasoning blocks
-are canonicalized; it does not silently discard the request. Requested values
+The concrete DeepSeek adapters are intentionally narrower than their wire
+formats. Chat Completions admits only the official `deepseek` template with an
+explicit frozen `chat_completions` dialect and route, uses Bearer authorization,
+maps the selected output limit to `max_tokens`, and rejects limits above the
+documented 384K maximum. It explicitly disables thinking because reasoning
+deltas are not yet canonicalized, rejects preset reasoning effort or service
+tier before network I/O, and omits the Beta-only Tool `strict` flag on the
+ordinary endpoint. Messages admits the same template only with an explicit
+frozen `messages` dialect and route, uses `x-api-key` plus
+`anthropic-version: 2023-06-01`, and also disables thinking. Messages uses the
+selected output limit as `max_tokens`, with a conservative 4096 fallback when
+the Turn has no selected limit.
+
+OpenAI Responses maps the frozen output limit to `max_output_tokens`, while
+OpenAI Chat Completions maps it to `max_completion_tokens`; those adapters omit
+the field when no limit is selected. The same Config Epoch freezes typed
+reasoning effort and service tier. OpenAI Responses emits
+`reasoning: { effort }`, OpenAI Chat emits `reasoning_effort`, and both emit
+`service_tier` on initial requests and Tool continuations. Both DeepSeek
+adapters reject either policy field until reasoning blocks and tier semantics
+are canonicalized; they do not silently discard the request. Requested values
 enter Usage Attempts separately from observed tier metadata. Initial requests
 and one in-process Tool continuation use the same Config Epoch values. Replay
 reconstructs them after restart, but does not make Tool continuation resumable.
-OpenCode Go is not admitted from a route string alone.
+DeepSeek Responses and OpenCode Go are not admitted from route strings alone.
 
 ## Tool Boundary
 
@@ -326,6 +341,7 @@ The event shapes are checked against the official
 [OpenAI Responses streaming event reference](https://developers.openai.com/api/reference/resources/responses/streaming-events/)
 and
 [Chat Completions streaming event reference](https://developers.openai.com/api/reference/resources/chat/subresources/completions/streaming-events), plus the
+[DeepSeek Chat Completions reference](https://api-docs.deepseek.com/api/create-chat-completion),
 [Anthropic Messages streaming reference](https://docs.anthropic.com/en/api/messages-streaming)
 and [DeepSeek Anthropic compatibility guide](https://api-docs.deepseek.com/guides/anthropic_api/).
 
@@ -340,7 +356,7 @@ and [DeepSeek Anthropic compatibility guide](https://api-docs.deepseek.com/guide
   model, including reasoning, refusal, annotations, and hosted Tools.
 - Reasoning, refusal, annotation, hosted-tool, and other Responses event kinds
   not listed above.
-- DeepSeek Responses/Chat Completions, all OpenCode Go execution, Messages
+- DeepSeek Responses, all OpenCode Go execution, DeepSeek Chat/Messages
   thinking/signature/server-tool blocks, Preset context/fallback execution, Chat
   Completions refusal/reasoning and other delta kinds, and non-streaming
   Provider responses.

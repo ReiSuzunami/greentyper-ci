@@ -255,14 +255,15 @@ and starter-preset acceptance remain target behavior. Pricing still resolves
 through a Price Schedule rather than becoming an unversioned catalog number.
 The installed execution matrix is deliberately closed: adapters accept
 `openai` and explicit `openai-compatible` Profiles for Responses and Chat
-Completions, and official `deepseek` Profiles for Messages. A Provider Template
-may still declare additional routes and dialect support as Config/catalog facts;
-DeepSeek Responses/Chat Completions, every OpenCode Go pair, and OpenAI Messages
+Completions, and official `deepseek` Profiles for Chat Completions and Messages.
+A Provider Template may still declare additional routes and dialect support as
+Config/catalog facts; DeepSeek Responses, every OpenCode Go pair, and OpenAI Messages
 remain unavailable until an exact adapter is installed. A catalog route or
 declared dialect alone never proves wire compatibility. Release-candidate
-compatibility remains tied to each record's primary dialect, so the Messages
-adapter does not silently rewrite the current DeepSeek seed records whose
-primary dialects are Responses or Chat Completions.
+compatibility remains tied to each record's primary dialect. DeepSeek V4 Pro is
+therefore compatible through its primary Chat dialect, while V4 Flash remains
+unavailable because its primary Responses adapter is still absent; the Messages
+adapter never silently rewrites either primary dialect.
 The current release seed contains:
 
 | Provider Template | Seed family | Primary dialects |
@@ -299,9 +300,10 @@ exact configured ID, applies its Profile/model/dialect, and freezes optional
 `max_output_tokens`, typed reasoning effort, and typed service tier in the next
 Turn's Config Epoch. `--preset` and `--dialect` are mutually exclusive, and an
 unknown ID fails rather than triggering model-name inference. Responses maps
-reasoning to `reasoning.effort`; Chat Completions uses `reasoning_effort`; both
-send `service_tier`. Messages maps only the output limit and fails before network
-I/O when either unsupported policy field is selected. Initial requests and one
+reasoning to `reasoning.effort`; OpenAI Chat Completions uses
+`reasoning_effort`; both OpenAI adapters send `service_tier`. DeepSeek Chat and
+Messages map only the output limit and fail before network I/O when either
+unsupported policy field is selected. Initial requests and one
 in-process Tool continuation retain the same frozen values; restart replay
 reconstructs them without making Tool continuation resumable. Requested Usage
 metadata records the same policy. The accepted reasoning values are `none`,

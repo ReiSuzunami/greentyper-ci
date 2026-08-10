@@ -267,7 +267,7 @@ impl ChatCompletionsSseDecoder {
             if !chunk.choices.is_empty() || !self.choice_finished || self.usage.is_some() {
                 return Err(ChatCompletionsError::InvalidTransition);
             }
-            self.usage = Some(usage.into());
+            self.usage = Some(ChatCompletionsUsage::try_from(usage)?);
             return Ok(());
         }
 
@@ -650,6 +650,8 @@ struct WireUsage {
     prompt_tokens: Option<u64>,
     completion_tokens: Option<u64>,
     total_tokens: Option<u64>,
+    prompt_cache_hit_tokens: Option<u64>,
+    prompt_cache_miss_tokens: Option<u64>,
     prompt_tokens_details: Option<WirePromptTokenDetails>,
     completion_tokens_details: Option<WireCompletionTokenDetails>,
 }
@@ -664,19 +666,42 @@ struct WireCompletionTokenDetails {
     reasoning_tokens: Option<u64>,
 }
 
-impl From<WireUsage> for ChatCompletionsUsage {
-    fn from(value: WireUsage) -> Self {
-        Self {
+impl TryFrom<WireUsage> for ChatCompletionsUsage {
+    type Error = ChatCompletionsError;
+
+    fn try_from(value: WireUsage) -> Result<Self, Self::Error> {
+        let detailed_cached_tokens = value
+            .prompt_tokens_details
+            .and_then(|details| details.cached_tokens);
+        let cached_input_tokens = match (detailed_cached_tokens, value.prompt_cache_hit_tokens) {
+            (Some(details), Some(top_level)) if details != top_level => {
+                return Err(ChatCompletionsError::InvalidTransition);
+            }
+            (Some(details), _) => Some(details),
+            (_, top_level) => top_level,
+        };
+        if let (Some(input), Some(cached)) = (value.prompt_tokens, cached_input_tokens)
+            && cached > input
+        {
+            return Err(ChatCompletionsError::InvalidTransition);
+        }
+        if let (Some(input), Some(hit), Some(miss)) = (
+            value.prompt_tokens,
+            value.prompt_cache_hit_tokens,
+            value.prompt_cache_miss_tokens,
+        ) && hit.checked_add(miss) != Some(input)
+        {
+            return Err(ChatCompletionsError::InvalidTransition);
+        }
+        Ok(Self {
             input_tokens: value.prompt_tokens,
-            cached_input_tokens: value
-                .prompt_tokens_details
-                .and_then(|details| details.cached_tokens),
+            cached_input_tokens,
             output_tokens: value.completion_tokens,
             reasoning_output_tokens: value
                 .completion_tokens_details
                 .and_then(|details| details.reasoning_tokens),
             total_tokens: value.total_tokens,
-        }
+        })
     }
 }
 

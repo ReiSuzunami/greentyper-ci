@@ -10,7 +10,9 @@ pressure fixtures are compiled into candidate-specific acceptance runners. The
 Phase 1 deterministic Provider success fixture is compiled into the core
 simulator test. Versioned Responses, Chat Completions, and Messages fixtures now
 exercise their bounded dialect decoders, canonical normalization, HTTP request
-shapes, one Tool continuation, and fixed failure handling. Persistent Ledger
+shapes, one Tool continuation, and fixed failure handling. Chat fixtures
+preserve both OpenAI nested and DeepSeek top-level cache usage
+while rejecting contradictory reports. Persistent Ledger
 corruption is generated at exact frame boundaries by core tests; broader
 Config, Provider, and Memory fixtures land with the first vertical slice that
 consumes them.

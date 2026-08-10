@@ -44,6 +44,7 @@ const SYNTHETIC_SECRET: &[u8] = b"greentyper-synthetic-provider-token-v1";
 const HTTP_TIMEOUT: Duration = Duration::from_millis(200);
 const PROVIDER_TIMEOUT: Duration = Duration::from_secs(300);
 const MESSAGES_MAX_TOKENS: u32 = 4096;
+const DEEPSEEK_CHAT_MAX_TOKENS: u32 = 384 * 1024;
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 const SERVER_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_REQUEST_BYTES: usize = 128 * 1024;
@@ -55,6 +56,9 @@ const SUCCESS_SSE: &[u8] =
 #[cfg(test)]
 const CHAT_TEXT_SSE: &[u8] =
     include_bytes!("../../../tests/fixtures/provider/chat_completions/v1/http-text.sse");
+#[cfg(test)]
+const DEEPSEEK_CHAT_TEXT_SSE: &[u8] =
+    include_bytes!("../../../tests/fixtures/provider/chat_completions/v1/deepseek-usage.sse");
 #[cfg(test)]
 const CHAT_TOOL_CALL_SSE: &[u8] =
     include_bytes!("../../../tests/fixtures/provider/chat_completions/v1/http-tool-call.sse");
@@ -78,14 +82,28 @@ const TOOL_CALL_SSE: &[u8] =
 const TOOL_CONTINUATION_SSE: &[u8] =
     include_bytes!("../../../tests/fixtures/provider/responses/v1/http-tool-continuation.sse");
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ChatCompletionsAdapter {
+    OpenAi,
+    DeepSeek,
+}
+
+fn chat_completions_adapter(template: &str) -> Option<ChatCompletionsAdapter> {
+    match template {
+        OPENAI_TEMPLATE | OPENAI_COMPATIBLE_TEMPLATE => Some(ChatCompletionsAdapter::OpenAi),
+        DEEPSEEK_TEMPLATE => Some(ChatCompletionsAdapter::DeepSeek),
+        _ => None,
+    }
+}
+
 pub(crate) fn has_provider_adapter(template: &str, dialect: ProviderDialect) -> bool {
-    matches!(
-        (template, dialect),
-        (
-            OPENAI_TEMPLATE | OPENAI_COMPATIBLE_TEMPLATE,
-            ProviderDialect::Responses | ProviderDialect::ChatCompletions
-        ) | (DEEPSEEK_TEMPLATE, ProviderDialect::Messages)
-    )
+    match dialect {
+        ProviderDialect::Responses => {
+            matches!(template, OPENAI_TEMPLATE | OPENAI_COMPATIBLE_TEMPLATE)
+        }
+        ProviderDialect::ChatCompletions => chat_completions_adapter(template).is_some(),
+        ProviderDialect::Messages => template == DEEPSEEK_TEMPLATE,
+    }
 }
 
 fn insert_output_token_limit(
@@ -137,6 +155,42 @@ fn insert_chat_request_policy(body: &mut serde_json::Value, request: &ProviderRe
     insert_service_tier(body, request);
 }
 
+fn require_deepseek_chat_request_policy(request: &ProviderRequest) -> Result<(), ProviderError> {
+    if request.config.resolved().reasoning_effort().is_some()
+        || request.config.resolved().service_tier().is_some()
+    {
+        return Err(ProviderError::InvalidRequest(
+            "DeepSeek Chat adapter does not support preset reasoning effort or service tier",
+        ));
+    }
+    if request
+        .config
+        .resolved()
+        .max_output_tokens()
+        .is_some_and(|limit| *limit.value() > DEEPSEEK_CHAT_MAX_TOKENS)
+    {
+        return Err(ProviderError::InvalidRequest(
+            "DeepSeek Chat output token limit exceeds the documented maximum",
+        ));
+    }
+    Ok(())
+}
+
+fn insert_deepseek_chat_request_policy(
+    body: &mut serde_json::Value,
+    request: &ProviderRequest,
+) -> Result<(), ProviderError> {
+    require_deepseek_chat_request_policy(request)?;
+    insert_output_token_limit(body, "max_tokens", request);
+    body.as_object_mut()
+        .expect("Provider request body must be an object")
+        .insert(
+            "thinking".to_owned(),
+            serde_json::json!({"type": "disabled"}),
+        );
+    Ok(())
+}
+
 fn require_messages_request_policy(request: &ProviderRequest) -> Result<(), ProviderError> {
     if request.config.resolved().reasoning_effort().is_some()
         || request.config.resolved().service_tier().is_some()
@@ -147,6 +201,32 @@ fn require_messages_request_policy(request: &ProviderRequest) -> Result<(), Prov
     } else {
         Ok(())
     }
+}
+
+fn encode_bounded_request(
+    body: &serde_json::Value,
+    encoding_error: &'static str,
+    limit_error: &'static str,
+) -> Result<Vec<u8>, ProviderError> {
+    let body =
+        serde_json::to_vec(body).map_err(|_| ProviderError::InvalidRequest(encoding_error))?;
+    if body.len() > MAX_REQUEST_BYTES {
+        return Err(ProviderError::InvalidRequest(limit_error));
+    }
+    Ok(body)
+}
+
+fn reject_continuation_tool_calls(
+    events: Vec<ProviderEvent>,
+    error: &'static str,
+) -> Result<Vec<ProviderEvent>, ProviderError> {
+    if events
+        .iter()
+        .any(|event| matches!(event, ProviderEvent::FunctionCall(_)))
+    {
+        return Err(ProviderError::InvalidResponse(error));
+    }
+    Ok(events)
 }
 
 pub(crate) struct ResponsesHttpProvider<V> {
@@ -261,8 +341,11 @@ impl<V: CredentialVault> ResponsesHttpProvider<V> {
             .resolve(&self.credential_scope)
             .map_err(map_credential_resolve_error)?;
         let authorization = bearer_header(&secret)?;
-        let body = serde_json::to_vec(&body)
-            .map_err(|_| ProviderError::InvalidRequest("Responses request could not be encoded"))?;
+        let body = encode_bounded_request(
+            &body,
+            "Responses request could not be encoded",
+            "Responses request exceeds its byte limit",
+        )?;
         let mut response = self
             .client
             .post(self.endpoint.clone())
@@ -338,6 +421,21 @@ impl<V: CredentialVault> ResponsesHttpProvider<V> {
                 "Responses Provider has no pending Tool continuation",
             ))
     }
+
+    fn require_request_identity(&self, request: &ProviderRequest) -> Result<(), ProviderError> {
+        if request.provider.profile() != self.profile.profile()
+            || request.provider.profile_snapshot() != Some(&self.profile)
+            || request
+                .provider
+                .dialect()
+                .is_some_and(|dialect| dialect != ProviderDialect::Responses)
+        {
+            return Err(ProviderError::InvalidConfiguration(
+                "Responses provider identity does not match its frozen Profile and dialect",
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl<V: CredentialVault> ProviderRuntime for ResponsesHttpProvider<V> {
@@ -350,17 +448,7 @@ impl<V: CredentialVault> ProviderRuntime for ResponsesHttpProvider<V> {
     }
 
     fn run(&mut self, request: &ProviderRequest) -> Result<Vec<ProviderEvent>, ProviderError> {
-        if request.provider.profile() != self.profile.profile()
-            || request.provider.profile_snapshot() != Some(&self.profile)
-            || request
-                .provider
-                .dialect()
-                .is_some_and(|dialect| dialect != ProviderDialect::Responses)
-        {
-            return Err(ProviderError::InvalidConfiguration(
-                "Responses provider identity does not match its frozen Profile",
-            ));
-        }
+        self.require_request_identity(request)?;
         let max_output_bytes =
             usize::try_from(*request.config.resolved().max_output_bytes().value())
                 .map_err(|_| ProviderError::InvalidConfiguration("output byte limit is invalid"))?;
@@ -406,13 +494,7 @@ impl<V: CredentialVault> ProviderRuntime for ResponsesHttpProvider<V> {
         request: &ProviderRequest,
         output: &ProviderToolOutput,
     ) -> Result<Vec<ProviderEvent>, ProviderError> {
-        if request.provider.profile() != self.profile.profile()
-            || request.provider.profile_snapshot() != Some(&self.profile)
-        {
-            return Err(ProviderError::InvalidConfiguration(
-                "Responses provider identity does not match its frozen Profile",
-            ));
-        }
+        self.require_request_identity(request)?;
         if !self.local_echo_enabled {
             return Err(ProviderError::InvalidRequest(
                 "Responses Provider has no enabled Tool continuation",
@@ -436,8 +518,8 @@ impl<V: CredentialVault> ProviderRuntime for ResponsesHttpProvider<V> {
         });
         insert_output_token_limit(&mut body, "max_output_tokens", request);
         insert_responses_request_policy(&mut body, request);
-        self.send_request(body, max_output_bytes)
-            .map(|(_, events)| events)
+        let (_, events) = self.send_request(body, max_output_bytes)?;
+        reject_continuation_tool_calls(events, "Responses continuation returned another Tool call")
     }
 }
 
@@ -445,6 +527,7 @@ pub(crate) struct ChatCompletionsHttpProvider<V> {
     client: Client,
     endpoint: Url,
     profile: ProviderProfileSnapshot,
+    adapter: ChatCompletionsAdapter,
     credential_scope: ProviderCredentialScope,
     vault: V,
     local_echo_enabled: bool,
@@ -486,11 +569,11 @@ impl<V: CredentialVault> ChatCompletionsHttpProvider<V> {
         timeout: Duration,
         client: ClientBuilder,
     ) -> Result<Self, ProviderError> {
-        if !has_provider_adapter(profile.template(), ProviderDialect::ChatCompletions) {
-            return Err(ProviderError::InvalidConfiguration(
+        let adapter = chat_completions_adapter(profile.template()).ok_or(
+            ProviderError::InvalidConfiguration(
                 "Provider Profile template has no configured runtime adapter",
-            ));
-        }
+            ),
+        )?;
         if !profile.supports(ProviderDialect::ChatCompletions) {
             return Err(ProviderError::InvalidConfiguration(
                 "Chat Completions Provider Profile does not declare Chat Completions support",
@@ -520,6 +603,7 @@ impl<V: CredentialVault> ChatCompletionsHttpProvider<V> {
             client,
             endpoint,
             profile,
+            adapter,
             credential_scope,
             vault,
             local_echo_enabled: false,
@@ -541,9 +625,11 @@ impl<V: CredentialVault> ChatCompletionsHttpProvider<V> {
             .resolve(&self.credential_scope)
             .map_err(map_credential_resolve_error)?;
         let authorization = bearer_header(&secret)?;
-        let body = serde_json::to_vec(&body).map_err(|_| {
-            ProviderError::InvalidRequest("Chat Completions request could not be encoded")
-        })?;
+        let body = encode_bounded_request(
+            &body,
+            "Chat Completions request could not be encoded",
+            "Chat Completions request exceeds its byte limit",
+        )?;
         let mut response = self
             .client
             .post(self.endpoint.clone())
@@ -622,6 +708,28 @@ impl<V: CredentialVault> ChatCompletionsHttpProvider<V> {
         }
         Ok(())
     }
+
+    fn require_request_policy(&self, request: &ProviderRequest) -> Result<(), ProviderError> {
+        match self.adapter {
+            ChatCompletionsAdapter::OpenAi => Ok(()),
+            ChatCompletionsAdapter::DeepSeek => require_deepseek_chat_request_policy(request),
+        }
+    }
+
+    fn insert_request_policy(
+        &self,
+        body: &mut serde_json::Value,
+        request: &ProviderRequest,
+    ) -> Result<(), ProviderError> {
+        match self.adapter {
+            ChatCompletionsAdapter::OpenAi => {
+                insert_output_token_limit(body, "max_completion_tokens", request);
+                insert_chat_request_policy(body, request);
+                Ok(())
+            }
+            ChatCompletionsAdapter::DeepSeek => insert_deepseek_chat_request_policy(body, request),
+        }
+    }
 }
 
 impl<V: CredentialVault> ProviderRuntime for ChatCompletionsHttpProvider<V> {
@@ -646,7 +754,7 @@ impl<V: CredentialVault> ProviderRuntime for ChatCompletionsHttpProvider<V> {
                 "stream": true,
                 "stream_options": {"include_usage": true},
                 "tool_choice": "auto",
-                "tools": [chat_local_echo_tool_definition()],
+                "tools": [chat_local_echo_tool_definition(self.adapter)],
             })
         } else {
             serde_json::json!({
@@ -656,8 +764,7 @@ impl<V: CredentialVault> ProviderRuntime for ChatCompletionsHttpProvider<V> {
                 "stream_options": {"include_usage": true},
             })
         };
-        insert_output_token_limit(&mut body, "max_completion_tokens", request);
-        insert_chat_request_policy(&mut body, request);
+        self.insert_request_policy(&mut body, request)?;
         let events = self.send_request(body, max_output_bytes)?;
         let events = if self.local_echo_enabled {
             normalize_local_echo_calls(events)?
@@ -692,6 +799,7 @@ impl<V: CredentialVault> ProviderRuntime for ChatCompletionsHttpProvider<V> {
                 "Chat Completions Provider has no enabled Tool continuation",
             ));
         }
+        self.require_request_policy(request)?;
         let pending = self.take_pending_continuation(output.call_id())?;
         let max_output_bytes =
             usize::try_from(*request.config.resolved().max_output_bytes().value())
@@ -721,20 +829,14 @@ impl<V: CredentialVault> ProviderRuntime for ChatCompletionsHttpProvider<V> {
             "stream": true,
             "stream_options": {"include_usage": true},
             "tool_choice": "none",
-            "tools": [chat_local_echo_tool_definition()],
+            "tools": [chat_local_echo_tool_definition(self.adapter)],
         });
-        insert_output_token_limit(&mut body, "max_completion_tokens", request);
-        insert_chat_request_policy(&mut body, request);
+        self.insert_request_policy(&mut body, request)?;
         let events = self.send_request(body, max_output_bytes)?;
-        if events
-            .iter()
-            .any(|event| matches!(event, ProviderEvent::FunctionCall(_)))
-        {
-            return Err(ProviderError::InvalidResponse(
-                "Chat Completions continuation returned another Tool call",
-            ));
-        }
-        Ok(events)
+        reject_continuation_tool_calls(
+            events,
+            "Chat Completions continuation returned another Tool call",
+        )
     }
 }
 
@@ -837,13 +939,11 @@ impl<V: CredentialVault> MessagesHttpProvider<V> {
             .resolve(&self.credential_scope)
             .map_err(map_credential_resolve_error)?;
         let api_key = credential_header(&secret)?;
-        let body = serde_json::to_vec(&body)
-            .map_err(|_| ProviderError::InvalidRequest("Messages request could not be encoded"))?;
-        if body.len() > MAX_REQUEST_BYTES {
-            return Err(ProviderError::InvalidRequest(
-                "Messages request exceeds its byte limit",
-            ));
-        }
+        let body = encode_bounded_request(
+            &body,
+            "Messages request could not be encoded",
+            "Messages request exceeds its byte limit",
+        )?;
         let mut response = self
             .client
             .post(self.endpoint.clone())
@@ -1040,15 +1140,7 @@ impl<V: CredentialVault> ProviderRuntime for MessagesHttpProvider<V> {
             "tools": [messages_local_echo_tool_definition()],
         });
         let events = self.send_request(body, max_output_bytes)?;
-        if events
-            .iter()
-            .any(|event| matches!(event, ProviderEvent::FunctionCall(_)))
-        {
-            return Err(ProviderError::InvalidResponse(
-                "Messages continuation returned another Tool call",
-            ));
-        }
-        Ok(events)
+        reject_continuation_tool_calls(events, "Messages continuation returned another Tool call")
     }
 }
 
@@ -1069,22 +1161,28 @@ fn local_echo_tool_definition() -> serde_json::Value {
     })
 }
 
-fn chat_local_echo_tool_definition() -> serde_json::Value {
+fn chat_local_echo_tool_definition(adapter: ChatCompletionsAdapter) -> serde_json::Value {
+    let mut function = serde_json::json!({
+        "name": "local_echo",
+        "description": "Return the supplied message unchanged.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "message": {"type": "string"},
+            },
+            "required": ["message"],
+            "additionalProperties": false,
+        },
+    });
+    if adapter == ChatCompletionsAdapter::OpenAi {
+        function
+            .as_object_mut()
+            .expect("Chat Tool definition must be an object")
+            .insert("strict".to_owned(), serde_json::Value::Bool(true));
+    }
     serde_json::json!({
         "type": "function",
-        "function": {
-            "name": "local_echo",
-            "description": "Return the supplied message unchanged.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "message": {"type": "string"},
-                },
-                "required": ["message"],
-                "additionalProperties": false,
-            },
-            "strict": true,
-        },
+        "function": function,
     })
 }
 
@@ -2050,6 +2148,73 @@ source = "unknown"
         vault
     }
 
+    fn deepseek_chat_fixture_profile(base_url: &str, name: &str) -> ProviderProfileSnapshot {
+        let encoded_base_url = serde_json::to_string(base_url).expect("encode DeepSeek origin");
+        let document = ConfigDocument::parse(&format!(
+            r#"
+schema_version = 1
+
+[provider]
+profile = "deepseek-chat-loopback"
+model = "{FIXTURE_MODEL}"
+
+[providers.deepseek-chat-loopback]
+template = "{DEEPSEEK_TEMPLATE}"
+credential = "deepseek-chat-loopback-synthetic"
+base_url = {encoded_base_url}
+dialects = ["chat_completions"]
+allow_insecure_loopback = true
+
+[providers.deepseek-chat-loopback.routes]
+chat_completions = "/chat/completions"
+models = "/models"
+
+[providers.deepseek-chat-loopback.pricing]
+source = "unknown"
+"#,
+        ))
+        .expect("parse DeepSeek Chat fixture Config");
+        ConfigRuntime::open(test_config_paths(name), document)
+            .expect("resolve DeepSeek Chat fixture Config")
+            .selected_provider_profile()
+            .expect("resolve DeepSeek Chat Profile")
+            .expect("external DeepSeek Chat Profile")
+    }
+
+    fn openai_dual_fixture_profile(base_url: &str, name: &str) -> ProviderProfileSnapshot {
+        let encoded_base_url = serde_json::to_string(base_url).expect("encode OpenAI origin");
+        let document = ConfigDocument::parse(&format!(
+            r#"
+schema_version = 1
+
+[provider]
+profile = "openai-dual-loopback"
+model = "{FIXTURE_MODEL}"
+
+[providers.openai-dual-loopback]
+template = "{OPENAI_COMPATIBLE_TEMPLATE}"
+credential = "openai-dual-loopback-synthetic"
+base_url = {encoded_base_url}
+dialects = ["responses", "chat_completions"]
+allow_insecure_loopback = true
+
+[providers.openai-dual-loopback.routes]
+responses = "/v1/responses"
+chat_completions = "/v1/chat/completions"
+models = "/v1/models"
+
+[providers.openai-dual-loopback.pricing]
+source = "unknown"
+"#,
+        ))
+        .expect("parse dual OpenAI fixture Config");
+        ConfigRuntime::open(test_config_paths(name), document)
+            .expect("resolve dual OpenAI fixture Config")
+            .selected_provider_profile()
+            .expect("resolve dual OpenAI Profile")
+            .expect("external dual OpenAI Profile")
+    }
+
     fn messages_fixture_profile(base_url: &str, name: &str) -> ProviderProfileSnapshot {
         let encoded_base_url = serde_json::to_string(base_url).expect("encode Messages origin");
         let document = ConfigDocument::parse(&format!(
@@ -2715,6 +2880,377 @@ source = "unknown"
             Some(ProviderDialect::ChatCompletions)
         );
         server.join().expect("join Chat Tool server");
+
+        drop(kernel);
+        fs::remove_file(runtime_path).expect("cleanup Runtime Ledger");
+        fs::remove_file(team_path).expect("cleanup Team Ledger");
+        fs::remove_file(tool_path).expect("cleanup Tool Ledger");
+    }
+
+    #[test]
+    fn deepseek_chat_adapter_uses_exact_non_thinking_policy_and_route() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("DeepSeek Chat listener");
+        let address = listener
+            .local_addr()
+            .expect("DeepSeek Chat listener address");
+        let base_url = format!("http://{address}");
+        let profile = deepseek_chat_fixture_profile(&base_url, "deepseek-chat-adapter");
+        let vault = bound_chat_vault(&profile);
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept DeepSeek Chat request");
+            configure_fixture_stream(&stream).expect("configure DeepSeek Chat request");
+            let body = read_test_request_body_for(&mut stream, "/chat/completions");
+            assert_eq!(
+                body,
+                serde_json::json!({
+                    "max_tokens": 3072,
+                    "messages": [{"role": "user", "content": "hello DeepSeek Chat"}],
+                    "model": FIXTURE_MODEL,
+                    "stream": true,
+                    "stream_options": {"include_usage": true},
+                    "thinking": {"type": "disabled"},
+                })
+            );
+            write_fixture_response(
+                &mut stream,
+                "200 OK",
+                "text/event-stream",
+                DEEPSEEK_CHAT_TEXT_SSE,
+                true,
+            )
+            .expect("write DeepSeek Chat response");
+        });
+
+        assert!(has_provider_adapter(
+            DEEPSEEK_TEMPLATE,
+            ProviderDialect::ChatCompletions
+        ));
+        assert!(!has_provider_adapter(
+            DEEPSEEK_TEMPLATE,
+            ProviderDialect::Responses
+        ));
+        assert!(!has_provider_adapter(
+            "opencode-go",
+            ProviderDialect::ChatCompletions
+        ));
+        let mut provider = ConfiguredProvider::for_new_turn_with_dialect(
+            profile.clone(),
+            ProviderDialect::ChatCompletions,
+            vault,
+        )
+        .expect("configured DeepSeek Chat provider");
+        let request = provider_request_with_output_tokens(
+            profile,
+            "hello DeepSeek Chat",
+            ProviderDialect::ChatCompletions,
+            3_072,
+        );
+        let events = provider.run(&request).expect("DeepSeek Chat response");
+        assert!(matches!(
+            events.as_slice(),
+            [ProviderEvent::TextDelta(text), ProviderEvent::Completed(usage)]
+                if text == "DeepSeek"
+                    && usage.input_tokens() == Some(11)
+                    && usage.cached_input_tokens() == Some(3)
+                    && usage.output_tokens() == Some(5)
+        ));
+        server.join().expect("join DeepSeek Chat server");
+    }
+
+    #[test]
+    fn deepseek_chat_rejects_unsupported_policy_and_excess_output_before_network() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("DeepSeek Chat guard listener");
+        listener
+            .set_nonblocking(true)
+            .expect("nonblocking DeepSeek Chat guard listener");
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let profile = deepseek_chat_fixture_profile(&base_url, "deepseek-chat-policy-guards");
+        let mut provider = ChatCompletionsHttpProvider::with_timeout(
+            profile.clone(),
+            bound_chat_vault(&profile),
+            HTTP_TIMEOUT,
+        )
+        .expect("DeepSeek Chat provider");
+
+        for request in [
+            provider_request_with_policy(
+                profile.clone(),
+                "must not send reasoning",
+                ProviderDialect::ChatCompletions,
+                3_072,
+                Some(ReasoningEffort::Low),
+                None,
+            ),
+            provider_request_with_policy(
+                profile.clone(),
+                "must not send tier",
+                ProviderDialect::ChatCompletions,
+                3_072,
+                None,
+                Some(ServiceTier::Default),
+            ),
+        ] {
+            assert!(matches!(
+                provider.run(&request),
+                Err(ProviderError::InvalidRequest(
+                    "DeepSeek Chat adapter does not support preset reasoning effort or service tier"
+                ))
+            ));
+        }
+
+        let oversized_input = "x".repeat(MAX_REQUEST_BYTES);
+        let request = provider_request_with_output_tokens(
+            profile.clone(),
+            &oversized_input,
+            ProviderDialect::ChatCompletions,
+            3_072,
+        );
+        assert!(matches!(
+            provider.run(&request),
+            Err(ProviderError::InvalidRequest(
+                "Chat Completions request exceeds its byte limit"
+            ))
+        ));
+
+        let request = provider_request_with_output_tokens(
+            profile,
+            "must not send excessive output",
+            ProviderDialect::ChatCompletions,
+            384 * 1024 + 1,
+        );
+        assert!(matches!(
+            provider.run(&request),
+            Err(ProviderError::InvalidRequest(
+                "DeepSeek Chat output token limit exceeds the documented maximum"
+            ))
+        ));
+        assert!(
+            matches!(listener.accept(), Err(error) if error.kind() == io::ErrorKind::WouldBlock)
+        );
+    }
+
+    #[test]
+    fn responses_continuation_identity_rejects_a_non_responses_dialect() {
+        let profile = openai_dual_fixture_profile(
+            "http://127.0.0.1:9",
+            "responses-continuation-dialect-guard",
+        );
+        let mut vault = InMemoryCredentialVault::default();
+        let scope = ProviderCredentialScope::from_profile(&profile).expect("credential scope");
+        vault
+            .bind(
+                &scope,
+                SecretValue::new(SYNTHETIC_SECRET.to_vec()).expect("synthetic secret"),
+            )
+            .expect("bind Responses credential");
+        let provider = ResponsesHttpProvider::with_timeout(profile.clone(), vault, HTTP_TIMEOUT)
+            .expect("Responses provider");
+        let request = provider_request_with_dialect(
+            profile,
+            "must not continue through Responses",
+            ProviderDialect::ChatCompletions,
+        );
+
+        assert!(matches!(
+            provider.require_request_identity(&request),
+            Err(ProviderError::InvalidConfiguration(
+                "Responses provider identity does not match its frozen Profile and dialect"
+            ))
+        ));
+    }
+
+    #[test]
+    fn continuation_event_guard_rejects_another_tool_call() {
+        let events = vec![ProviderEvent::FunctionCall(
+            ProviderToolCall::new("call_again", "local.echo", r#"{"message":"again"}"#)
+                .expect("Provider Tool call"),
+        )];
+
+        assert!(matches!(
+            reject_continuation_tool_calls(
+                events,
+                "Responses continuation returned another Tool call"
+            ),
+            Err(ProviderError::InvalidResponse(
+                "Responses continuation returned another Tool call"
+            ))
+        ));
+    }
+
+    #[test]
+    fn deepseek_chat_continues_one_approved_tool_call_with_frozen_policy() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("DeepSeek Chat Tool listener");
+        let address = listener
+            .local_addr()
+            .expect("DeepSeek Chat Tool listener address");
+        let server = thread::spawn(move || {
+            let (mut initial, _) = listener
+                .accept()
+                .expect("accept initial DeepSeek Chat request");
+            configure_fixture_stream(&initial).expect("configure DeepSeek Chat request");
+            let initial_body = read_test_request_body_for(&mut initial, "/chat/completions");
+            assert_eq!(
+                initial_body,
+                serde_json::json!({
+                    "max_tokens": 6000,
+                    "messages": [{
+                        "role": "user",
+                        "content": "echo through DeepSeek Chat",
+                    }],
+                    "model": FIXTURE_MODEL,
+                    "stream": true,
+                    "stream_options": {"include_usage": true},
+                    "thinking": {"type": "disabled"},
+                    "tool_choice": "auto",
+                    "tools": [{
+                        "type": "function",
+                        "function": {
+                            "name": "local_echo",
+                            "description": "Return the supplied message unchanged.",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {"message": {"type": "string"}},
+                                "required": ["message"],
+                                "additionalProperties": false,
+                            },
+                        },
+                    }],
+                })
+            );
+            write_fixture_response(
+                &mut initial,
+                "200 OK",
+                "text/event-stream",
+                CHAT_TOOL_CALL_SSE,
+                true,
+            )
+            .expect("write DeepSeek Chat Tool call response");
+
+            let (mut continuation, _) = listener
+                .accept()
+                .expect("accept DeepSeek Chat continuation");
+            configure_fixture_stream(&continuation).expect("configure DeepSeek Chat continuation");
+            let continuation_body =
+                read_test_request_body_for(&mut continuation, "/chat/completions");
+            assert_eq!(
+                continuation_body,
+                serde_json::json!({
+                    "max_tokens": 6000,
+                    "messages": [
+                        {"role": "user", "content": "echo through DeepSeek Chat"},
+                        {
+                            "role": "assistant",
+                            "content": null,
+                            "tool_calls": [{
+                                "id": "call_chat_echo_1",
+                                "type": "function",
+                                "function": {
+                                    "name": "local_echo",
+                                    "arguments": "{\"message\":\"tool says hi\"}",
+                                },
+                            }],
+                        },
+                        {
+                            "role": "tool",
+                            "tool_call_id": "call_chat_echo_1",
+                            "content": "tool says hi",
+                        },
+                    ],
+                    "model": FIXTURE_MODEL,
+                    "stream": true,
+                    "stream_options": {"include_usage": true},
+                    "thinking": {"type": "disabled"},
+                    "tool_choice": "none",
+                    "tools": [{
+                        "type": "function",
+                        "function": {
+                            "name": "local_echo",
+                            "description": "Return the supplied message unchanged.",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {"message": {"type": "string"}},
+                                "required": ["message"],
+                                "additionalProperties": false,
+                            },
+                        },
+                    }],
+                })
+            );
+            write_fixture_response(
+                &mut continuation,
+                "200 OK",
+                "text/event-stream",
+                CHAT_TOOL_CONTINUATION_SSE,
+                true,
+            )
+            .expect("write DeepSeek Chat Tool continuation response");
+        });
+
+        let base_url = format!("http://{address}");
+        let profile = deepseek_chat_fixture_profile(&base_url, "deepseek-chat-tool");
+        let vault = bound_chat_vault(&profile);
+        let mut provider =
+            ChatCompletionsHttpProvider::with_timeout(profile, vault, Duration::from_secs(2))
+                .expect("DeepSeek Chat provider");
+        provider.enable_local_echo();
+        let mut layers = ConfigLayers::default();
+        layers.cli.provider_profile = Some("deepseek-chat-loopback".into());
+        layers.cli.provider_model = Some(FIXTURE_MODEL.into());
+        layers.cli.max_output_tokens = Some(6_000);
+
+        let runtime_path = test_ledger_path("deepseek-chat-tool-continuation", "runtime");
+        let team_path = test_ledger_path("deepseek-chat-tool-continuation", "team");
+        let tool_path = test_ledger_path("deepseek-chat-tool-continuation", "tool");
+        let (mut kernel, recovery) =
+            RuntimeKernel::open_with_team_and_tools(&runtime_path, &team_path, &tool_path, 1)
+                .expect("open Kernel");
+        assert!(recovery.into_sessions().is_empty());
+        let operation = kernel
+            .dispatch_team(TeamCommand::AdmitRoot {
+                task: TaskSpec::new(
+                    "exercise one DeepSeek Chat Tool continuation",
+                    TaskScope::from_labels(["provider-deepseek-chat-tool-http"]),
+                ),
+                budget: ResourceBudget::new(1_000, 1),
+                capabilities: CapabilitySnapshot::from_capabilities([
+                    Capability::Tool("local.echo".into()),
+                    Capability::Process,
+                ]),
+            })
+            .expect("admit root");
+        kernel
+            .acknowledge_team_operation(operation.operation)
+            .expect("acknowledge root admission");
+        let root = match operation.commit.outcome {
+            CommandOutcome::RootAdmitted { session, .. } => session,
+            other => panic!("unexpected root outcome: {other:?}"),
+        };
+        let outcome = kernel
+            .execute_provider_turn(
+                root,
+                &layers,
+                "echo through DeepSeek Chat",
+                &mut provider,
+                |_| Ok(ToolResources::default().with_process("greentyper.local.echo.v1")),
+            )
+            .expect("prepare DeepSeek Chat Tool approval");
+        let approval = match outcome {
+            ProviderTurnOutcome::ApprovalRequired(approval) => approval,
+            other => panic!("unexpected Provider outcome: {other:?}"),
+        };
+        let output = kernel
+            .resolve_provider_tool_call(
+                approval,
+                ApprovalDecision::Grant {
+                    expires_at_unix_ms: u64::MAX,
+                },
+                &mut EchoExecutor,
+                &mut provider,
+            )
+            .expect("continue after DeepSeek Chat Tool output");
+        assert_eq!(output.text(), "Echoed: tool says hi");
+        assert_eq!(output.usage_records().len(), 2);
+        server.join().expect("join DeepSeek Chat Tool server");
 
         drop(kernel);
         fs::remove_file(runtime_path).expect("cleanup Runtime Ledger");

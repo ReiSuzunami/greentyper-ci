@@ -88,8 +88,9 @@ cargo run -p greentyper -- config test-provider
 
 For a configured OpenAI or openai-compatible Profile, `headless` accepts
 `--dialect responses` or `--dialect chat_completions`. A configured DeepSeek
-Profile accepts `--dialect messages`; every other template/dialect pair fails
-closed unless the product has an explicit adapter for that exact identity.
+Profile accepts `--dialect chat_completions` or `--dialect messages`; every
+other template/dialect pair fails closed unless the product has an explicit
+adapter for that exact identity.
 `headless --preset ID` resolves one configured Model Preset by exact ID and
 freezes its Profile, model, dialect, and optional output-token limit for the
 Turn. It cannot be combined with `--dialect`; missing IDs fail rather than
@@ -124,9 +125,12 @@ only after stdout is flushed. A restart before approval re-presents the durable
 request; a successful or ambiguous effect is never automatically repeated.
 
 Configured OpenAI-compatible Responses and Chat Completions profiles plus the
-official DeepSeek Anthropic-compatible Messages profile now run through
+official DeepSeek Chat Completions and Anthropic-compatible Messages profiles now run through
 no-proxy, no-redirect HTTPS clients, origin-bound credential lookup, bounded
-streaming decode, and a fixed deadline. Messages uses `x-api-key`, pins the
+streaming decode, and a fixed deadline. DeepSeek Chat uses Bearer authorization,
+the explicit `/chat/completions` route, `max_tokens`, and non-thinking mode; it
+caps an explicit output limit at 384K and rejects preset reasoning effort or
+service tier before network I/O. Messages uses `x-api-key`, pins the
 Anthropic API version header, explicitly disables DeepSeek's default thinking
 mode, and sends the selected Model Preset output limit as `max_tokens`, with a
 conservative 4096 fallback when no limit is selected. Config Runtime freezes the
@@ -145,11 +149,12 @@ pre-dialect Epochs retain their schema-compatible Responses default and still
 must pass the frozen Profile's adapter and capability checks during replay.
 Runtime Event schema 7 freezes the selected Preset's optional output-token
 limit, typed reasoning effort, and typed service tier in the Config Epoch.
-Responses sends reasoning as `reasoning.effort`, Chat Completions sends
-`reasoning_effort`, and both send `service_tier`; their output-token fields are
-`max_output_tokens` and `max_completion_tokens`. Messages sends the output limit
-as `max_tokens` but rejects a selected reasoning effort or service tier because
-its reasoning blocks and tier semantics are not yet mapped by this adapter.
+OpenAI Responses sends reasoning as `reasoning.effort`, OpenAI Chat Completions
+sends `reasoning_effort`, and both send `service_tier`; their output-token
+fields are `max_output_tokens` and `max_completion_tokens`. DeepSeek Chat and
+Messages send the output limit as `max_tokens` but reject a selected reasoning
+effort or service tier because their reasoning blocks and tier semantics are
+not yet mapped by these adapters.
 Unset fields remain omitted, except Messages retains its 4096 token fallback.
 One in-process Tool continuation uses the same policy; replay reconstructs it
 after restart without making continuation resumable. Requested effort/tier
@@ -209,7 +214,7 @@ conflicts leave the editor live. This is not an ANSI/VT backend, live keyboard
 loop, ConPTY integration, rendered Config Center, object-name dialog, or
 rendered template picker, starter-preset workflow, or live catalog discovery.
 Live credential-gated provider validation, configurable proxy policy,
-reconnect/retry, DeepSeek Responses/Chat Completions, all OpenCode Go execution,
+reconnect/retry, DeepSeek Responses, all OpenCode Go execution,
 Messages reasoning blocks, Preset context/fallback execution, richer approval
 presentation, broader Provider and Tool adapters,
 Workspace, TUI, and App Server work remain. The loopback Provider tracer remains

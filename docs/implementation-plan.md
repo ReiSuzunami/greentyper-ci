@@ -138,15 +138,18 @@ The product exposes it only through explicit `--tool local.echo` approval; it
 is one narrow local process Tool, not a general process sandbox or
 caller-selected command.
 
-Three configured product adapters now exercise the concrete Responses, Chat
-Completions, and Messages HTTP seams.
+Three configured dialect adapters now exercise four exact template/dialect
+pairs across the concrete Responses, Chat Completions, and Messages HTTP seams.
 Config Runtime resolves and freezes its typed Provider Profile, origin,
 selected-dialect route, dialect, pricing decision, and opaque credential
 reference. Each adapter resolves a secret from the origin-bound product vault,
 requires HTTPS for remote origins, disables proxy discovery and redirects,
 sends a bounded canonical request, applies a fixed deadline, and streams the
 response through its core decoder into the real single-Agent Runtime. The
-DeepSeek Messages adapter uses `x-api-key`, pins the compatibility version,
+DeepSeek Chat adapter uses Bearer authorization, `max_tokens`, a 384K output
+ceiling, non-thinking mode, and an ordinary non-Beta Tool schema; it rejects
+unsupported reasoning/service-tier policy before network I/O. The DeepSeek
+Messages adapter uses `x-api-key`, pins the compatibility version,
 disables unsupported reasoning blocks, and admits only the exact frozen
 DeepSeek/Messages pair. Private loopback fixtures retain synthetic
 authorization. Tests cover fragmented success, canonical replay, exact
@@ -156,8 +159,8 @@ missing credential failure before network access.
 
 The remaining slices are still policy, protocol, and fault-adapter work:
 live-provider validation, non-Windows credential backends, configurable proxy
-policy, live catalog discovery, template-specific DeepSeek Responses/Chat
-Completions and all OpenCode Go execution, Messages reasoning blocks, Preset
+policy, live catalog discovery, template-specific DeepSeek Responses and all
+OpenCode Go execution, DeepSeek Chat/Messages reasoning blocks, Preset
 context/fallback execution, broader canonical Items, multiple
 Tool calls,
 durable resumable Tool result references, richer TUI/App Server
@@ -292,16 +295,16 @@ Exit criteria:
 ## Phase 4: Provider Portability
 
 Continue the release templates and seed catalog with template-specific DeepSeek
-Responses/Chat Completions and OpenCode Go adapter execution, lazy discovery,
+Responses and OpenCode Go adapter execution, lazy discovery,
 starter-preset acceptance, provider capability probes, explicit fallback
 chains, observed availability, and provider/model epoch switching. The
-OpenAI/openai-compatible Responses and Chat Completions adapters and the first
-official DeepSeek Messages adapter are implemented; custom gateway routes and
+OpenAI/openai-compatible Responses and Chat Completions adapters plus official
+DeepSeek Chat Completions and Messages adapters are implemented; custom gateway routes and
 user-owned Model Presets can be selected explicitly by ID for headless Turns.
 Their Profile/model/dialect, optional output-token limit, typed reasoning effort,
 and typed service tier resolve through the frozen Config/Provider Epoch boundary.
-Responses and Chat map the supported request fields; Messages rejects the two
-unsupported policy fields before network I/O. Rendered selection, context mode,
+OpenAI Responses and Chat map the supported request fields; both DeepSeek
+adapters reject the two unsupported policy fields before network I/O. Rendered selection, context mode,
 and fallback execution are still pending.
 
 Exit criteria:

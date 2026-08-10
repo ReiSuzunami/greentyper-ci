@@ -12,6 +12,10 @@ const INCOMPLETE: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../tests/fixtures/provider/chat_completions/v1/incomplete.sse"
 ));
+const DEEPSEEK_USAGE: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../tests/fixtures/provider/chat_completions/v1/deepseek-usage.sse"
+));
 
 fn decode(stream: &[u8]) -> Result<Vec<ChatCompletionsEvent>, ChatCompletionsError> {
     let mut decoder = ChatCompletionsSseDecoder::new(512 * 1024)?;
@@ -63,6 +67,41 @@ fn chat_completions_sse_assembles_text_one_function_call_and_usage() {
             }),
         ]
     );
+}
+
+#[test]
+fn chat_completions_preserves_deepseek_cache_usage_and_rejects_conflicts() {
+    let events = decode(DEEPSEEK_USAGE).expect("complete DeepSeek Chat stream");
+    let ChatCompletionsEventKind::Completed { usage, .. } =
+        &events.last().expect("DeepSeek Chat completion event").kind
+    else {
+        panic!("DeepSeek Chat stream did not complete");
+    };
+    assert_eq!(
+        *usage,
+        Some(ChatCompletionsUsage {
+            input_tokens: Some(11),
+            cached_input_tokens: Some(3),
+            output_tokens: Some(5),
+            reasoning_output_tokens: Some(0),
+            total_tokens: Some(16),
+        })
+    );
+
+    let mut decoder = ChatCompletionsSseDecoder::new(1024).expect("decoder");
+    push_data(
+        &mut decoder,
+        r#"{"id":"chatcmpl_conflict","object":"chat.completion.chunk","created":1,"model":"model-a","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}"#,
+    )
+    .expect("finish choice");
+    assert_eq!(
+        push_data(
+            &mut decoder,
+            r#"{"id":"chatcmpl_conflict","object":"chat.completion.chunk","created":1,"model":"model-a","choices":[],"usage":{"prompt_tokens":5,"prompt_cache_hit_tokens":3,"prompt_cache_miss_tokens":2,"completion_tokens":1,"total_tokens":6,"prompt_tokens_details":{"cached_tokens":2}}}"#,
+        ),
+        Err(ChatCompletionsError::InvalidTransition)
+    );
+    assert_eq!(decoder.push(b""), Err(ChatCompletionsError::Poisoned));
 }
 
 #[test]
