@@ -110,9 +110,10 @@ terminal-neutral schema-driven editor session and Provider Profile wizard. A
 release-bundled Provider Catalog now supplies versioned OpenAI, DeepSeek, and
 OpenCode Go template defaults plus seed model facts with field provenance. The
 selector exposes compatible release candidates while keeping unverified live
-availability explicit. A first read-only Direct VT product tracer now renders the
-Slash Panel, controller screens, and adaptive status rows through `greentyper tui`;
-rendered mutable TUI/App Server editors remain pending. The product CLI can bind,
+availability explicit. A first Direct VT product tracer now renders the Slash
+Panel, controller screens, and adaptive status rows through `greentyper tui` and
+includes one narrow mutable user-scope statusline-preset editor; remaining
+rendered TUI/App Server editors remain pending. The product CLI can bind,
 replace, test, and forget origin-bound credential references without
 putting secret material in arguments, Config, or Ledgers. Windows stores values
 in the current user's Credential Manager; other platforms currently fail
@@ -255,9 +256,15 @@ conflicts leave the editor live. The public `tui` command is the first real
 product terminal adapter: it enters the alternate screen and raw mode, maps
 blocking Crossterm key and resize events into the existing controller, emits a
 Unicode-aware Direct VT cell diff, suppresses identical frames, clears stale
-cells, and restores the terminal on normal and error returns. This tracer is
-read-only and snapshot-based. It is not a mutable terminal editor, approval
-surface, live refresh loop, audited ConPTY integration, object-name dialog,
+cells, and restores the terminal on normal and error returns. The route
+`/config statusline preset` is its first mutable dialog: Up/Down stages one of
+the four schema values, Enter runs the real dry-run preview, `c` commits the
+validated user-scope Draft, and `d` explicitly discards it. Invalid previews
+and revision conflicts render a bounded notice and keep the Draft live; Escape,
+Ctrl-C, and Ctrl-Q do not implicitly discard a dirty Draft. A no-change commit
+does not create a Config file, and tests reopen the committed file. Outside that
+one dialog the tracer remains snapshot-based and read-only. It is not a general
+mutable terminal editor, approval surface, live refresh loop, audited ConPTY integration, object-name dialog,
 rendered template picker, starter-preset workflow, or persistent live catalog
 discovery. Live inference conformance, configurable proxy policy,
 reconnect/retry, OpenCode Go Messages execution,

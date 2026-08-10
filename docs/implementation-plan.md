@@ -305,18 +305,25 @@ Ledger or Provider effects; soft and unknown facts preserve existing admission.
 The terminal-neutral status projection carries the immutable snapshot and marks
 estimated occupancy with `~`. No reduction or compaction is performed.
 
-A first read-only product terminal tracer is now implemented. `greentyper tui`
+A first product terminal tracer is now implemented. `greentyper tui`
 inspects the selected Ledger without creating it, renders the existing
 Presentation Controller through a Unicode-aware Direct VT cell diff, maps
 blocking Crossterm key and resize events, suppresses model-equality redraws,
 clears stale cells, bounds the viewport and Slash query before allocation, and
 restores raw mode, cursor visibility, and the alternate screen on normal and
-error returns. Windows startup explicitly requires VT output support. It is
-snapshot-based and carries no new
-Runtime, Tool, credential, Config mutation, or approval authority.
+error returns. Windows startup explicitly requires VT output support. Its first
+mutable route is the user-scope `/config statusline preset` choice dialog. It
+stages one of four schema values, requires a successful real dry-run preview
+before commit, persists through the Config Runtime CAS/backup path, explicitly
+discards, blocks dirty escape/quit, preserves the editor on validation or
+revision conflict, and renders bounded error notices. Tests prove no-change
+commit creates no file and committed state survives reopen. The rest of the TUI
+is snapshot-based; this slice adds no Runtime, Tool, credential, or approval
+authority and does not rebuild the frozen status projection after commit.
 
-This does not complete Phase 3. Audited Windows ConPTY behavior, terminal-backed
-schema editing and approval interaction, live snapshot refresh, rendered object-name and confirmation
+This does not complete Phase 3. Audited Windows ConPTY behavior, remaining
+terminal-backed schema editing and approval interaction, live snapshot refresh,
+rendered object-name and confirmation
 dialogs, rendered credential binding and template-picker/starter-preset workflow,
 live catalog discovery and Recent evidence, automatic Context View/token-source
 projection, provider-reported

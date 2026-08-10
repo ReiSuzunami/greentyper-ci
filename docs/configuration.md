@@ -71,9 +71,9 @@ field-level provenance. Effective Profiles inherit those defaults unless the
 user overrides a field. A custom origin under a template with a bundled,
 versioned release rate card defaults to `template_mirror`; other custom origins
 still require an explicit pricing decision.
-Default/constraint/normalization/migration metadata in Config Schema, rendered
-TUI and App Server surfaces, live discovery, and starter-preset workflows remain
-later work. The product now provides origin-bound credential bind, replace,
+Default/constraint/normalization/migration metadata in Config Schema, remaining
+rendered TUI and App Server surfaces, live discovery, and starter-preset workflows
+remain later work. The product now provides origin-bound credential bind, replace,
 test, and forget operations backed by Windows Credential Manager; non-Windows
 access fails closed until another platform backend is implemented.
 
@@ -100,11 +100,20 @@ This section defines the target interaction contract. The current product has
 a terminal-neutral hierarchical Command Path registry generated from Config
 Schema metadata, provenance-aware field views, typed nested object lifecycle
 actions, and a reusable Config Runtime editor session for focused multi-field
-draft validation, atomic create/edit/delete, and commit. Object deletion is
+draft validation, atomic create/edit/delete, and commit. The Direct VT product
+TUI now connects one non-secret route, `/config statusline preset`, to that real
+session in the user scope. Up/Down stages a bounded enum choice, Enter previews,
+`c` commits only the currently previewed choice, and `d` explicitly discards.
+Validation and revision-conflict failures stay visible without consuming the
+Draft; Escape and quit keys cannot discard a dirty Draft, and a no-change commit
+does not create a Config file. The committed value is verified by reopening the
+Config Runtime. The running TUI still uses its frozen startup snapshot, so live
+statusline reconstruction is not claimed by this slice. Object deletion is
 target-layer explicit and fails when the resulting effective configuration has
-dangling references. The read-only `tui` tracer renders controller screens
-reachable from the Slash Panel, including the top-level Config Center, but it
-does not mutate drafts. It does not yet ship mutable terminal editor dialogs,
+dangling references. The snapshot-based `tui` tracer renders controller screens
+reachable from the Slash Panel, including the top-level Config Center; only the
+statusline-preset dialog above mutates a Draft. It does not yet ship remaining
+schema-driven terminal editor dialogs,
 object-name input form, rendered Provider
 template picker, or App Server surface described below. The current
 terminal-neutral Provider Profile wizard resolves release template defaults into
@@ -362,10 +371,11 @@ projector. Estimated occupancy renders with `~`; a missing limit, used-token
 fact, reserve, or accuracy marker stays unknown. Its compact row now applies
 a deterministic priority and Unicode-safe truncation at 40, 80, and 160 columns,
 and adds a detail row from 120 columns. This is a terminal-neutral layout
-contract. The first read-only product `tui` tracer now renders it through a
-Direct VT diff and reacts to blocking key and resize events; it does not refresh
-the underlying snapshot, provide mutable actions, or establish ConPTY/resource
-evidence. The target has four
+contract. The first product `tui` tracer now renders it through a Direct VT diff,
+reacts to blocking key and resize events, and can persist the user-scope preset
+through the narrow dialog described above. It does not rebuild the frozen
+underlying snapshot after that commit, provide other mutable actions, or
+establish ConPTY/resource evidence. The target has four
 presets:
 
 - `minimal`: model, Context Pressure, blocker/approval

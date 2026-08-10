@@ -9,9 +9,9 @@ use greentyper_core::agent_team::{TaskStatus, TeamOperationStatus};
 use greentyper_core::config::{
     CommandMatchKind, CommandQueryError, CommandTarget, ConfigCommit, ConfigEditorError,
     ConfigEditorOperation, ConfigEditorSession, ConfigEditorView, ConfigErrorCategory,
-    ConfigFieldContents, ConfigObjectKind, ConfigObjectRef, ConfigRuntime, ConfigRuntimeError,
-    ConfigRuntimeStatus, ConfigScope, ConfigSection, ConfigValue, ModelCatalogView,
-    ModelPresetView, match_command_paths,
+    ConfigFieldContents, ConfigFieldView, ConfigObjectKind, ConfigObjectRef, ConfigRuntime,
+    ConfigRuntimeError, ConfigRuntimeStatus, ConfigScope, ConfigSection, ConfigValue,
+    ModelCatalogView, ModelPresetView, match_command_paths,
 };
 use greentyper_core::context::{ContextPressureAccuracy, ContextPressureSnapshot};
 use greentyper_core::ledger::LedgerHead;
@@ -576,6 +576,14 @@ impl PresentationController {
 
     pub(crate) const fn is_slash_panel(&self) -> bool {
         matches!(self.state, PresentationState::SlashPanel)
+    }
+
+    pub(crate) fn config_editor_field(&self) -> Option<&ConfigFieldView> {
+        self.editor.as_ref().map(|editor| &editor.view.field)
+    }
+
+    pub(crate) fn has_unsaved_config_draft(&self) -> bool {
+        self.editor.as_ref().is_some_and(|editor| editor.dirty)
     }
 
     pub(crate) fn set_slash_query(
@@ -1357,6 +1365,22 @@ fn config_editor_rows(
                 format!("target {}", config_value_label(target.as_ref())),
                 false,
             ));
+            if editor.field.path == STATUSLINE_PRESET_PATH {
+                let selected = target.as_ref().or(effective.as_ref()).and_then(|value| {
+                    if let ConfigValue::String(value) = value {
+                        Some(value.as_str())
+                    } else {
+                        None
+                    }
+                });
+                rows.extend(STATUSLINE_PRESET_CHOICES.into_iter().map(|choice| {
+                    let is_selected = selected == Some(choice);
+                    LayoutRowView::new(
+                        format!("{} {choice}", if is_selected { '>' } else { ' ' }),
+                        is_selected,
+                    )
+                }));
+            }
         }
         ConfigFieldContents::CredentialBinding {
             effective_bound,
@@ -1401,6 +1425,10 @@ fn config_editor_rows(
     }
     rows
 }
+
+pub(crate) const STATUSLINE_PRESET_PATH: &str = "ui.statusline.preset";
+pub(crate) const STATUSLINE_PRESET_CHOICES: [&str; 4] =
+    ["minimal", "balanced", "diagnostic", "custom"];
 
 fn config_value_label(value: Option<&ConfigValue>) -> String {
     match value {

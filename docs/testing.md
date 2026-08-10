@@ -297,8 +297,15 @@ clearing, wide-cell geometry, zero-byte identical frames, resize clearing,
 controller input mapping, blocking event delivery, 512x256/131,072-cell viewport
 and 256-byte Slash-query bounds, alternate-screen/raw-mode restoration,
 read-only missing-Ledger inspection, and non-terminal rejection before state
-creation or stdout output. They do not constitute real ConPTY,
-panic-abort cleanup, mutable editor/approval, live-refresh, or resource evidence.
+creation or stdout output. The first rendered mutation tests drive
+`/config statusline preset` through menu selection, dry-run preview, user-scope
+commit, disk reopen, explicit discard, validation recovery, and a competing
+revision winner. One full-loop test maps real Crossterm key events through VT
+rendering and reopens the resulting Config file. They assert that dirty
+Escape/quit is blocked, a failed preview
+is rendered without ending the loop, and a no-change commit creates no file.
+They do not constitute real ConPTY, panic-abort cleanup, remaining mutable
+editors, approval, live-refresh, or resource evidence.
 Context Pressure tests freeze exact 65%/90% threshold transitions, estimated and
 missing-fact propagation, invalid policy/limit and arithmetic failure, and the
 no-side-effect hard admission gate. Product presentation tests assert estimated
@@ -322,7 +329,7 @@ read-only `config catalog` integration test proves the snapshot contains no
 local path or credential reference.
 
 Remaining terminal-backend evidence covers real terminal/ConPTY resize and input,
-rendered mutable Config dialogs, interactive model selector states,
+the remaining rendered mutable Config dialogs, interactive model selector states,
 approval/blocker actions, panic-abort cleanup, final host cell geometry, and
 input-ready/idle resource budgets.
 

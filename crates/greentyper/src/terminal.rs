@@ -11,14 +11,16 @@ use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 use greentyper_core::config::{
-    ConfigError, ConfigRuntime, ConfigRuntimeError, ConfigScope, MAX_COMMAND_QUERY_BYTES,
+    ConfigEditorError, ConfigError, ConfigFieldContents, ConfigRuntime, ConfigRuntimeError,
+    ConfigScope, ConfigValue, MAX_COMMAND_QUERY_BYTES,
 };
 use greentyper_core::runtime::{RuntimeError, RuntimeKernel};
 use greentyper_core::usage::{UsageError, UsageTimestamp};
 
 use crate::presentation::{
     PresentationController, PresentationControllerError, PresentationError, PresentationLayoutView,
-    PresentationSources, TuiViewModel, Viewport, ViewportError,
+    PresentationSources, STATUSLINE_PRESET_CHOICES, STATUSLINE_PRESET_PATH, TuiViewModel, Viewport,
+    ViewportError,
 };
 
 pub(crate) fn require_interactive() -> Result<(), TerminalError> {
@@ -177,6 +179,7 @@ enum TerminalStyle {
     Header,
     Accent,
     Dim,
+    Warning,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -232,10 +235,21 @@ impl TerminalFrame {
         Ok(frame)
     }
 
+    #[cfg(test)]
     fn from_layout(layout: &PresentationLayoutView) -> Result<Self, TerminalError> {
+        Self::from_layout_with_notice(layout, None)
+    }
+
+    fn from_layout_with_notice(
+        layout: &PresentationLayoutView,
+        notice: Option<&str>,
+    ) -> Result<Self, TerminalError> {
         let viewport = layout.viewport();
         let mut frame = Self::blank(viewport.width(), viewport.height())?;
-        for (row_index, row) in layout.body().iter().enumerate() {
+        let status_start = usize::from(viewport.height()) - layout.statusline_rows().len();
+        let notice_row = notice.map(|_| status_start.saturating_sub(1));
+        let body_limit = notice_row.unwrap_or(status_start);
+        for (row_index, row) in layout.body().iter().take(body_limit).enumerate() {
             let style = if row.is_selected() {
                 TerminalStyle::Accent
             } else if row_index == 0 {
@@ -245,9 +259,21 @@ impl TerminalFrame {
             };
             frame.set_row(row_index, row.text(), style)?;
         }
-        let status_start = usize::from(viewport.height()) - layout.statusline_rows().len();
         for (offset, row) in layout.statusline_rows().iter().enumerate() {
             frame.set_row(status_start + offset, row.text(), TerminalStyle::Dim)?;
+        }
+        if let (Some(notice), Some(notice_row)) = (notice, notice_row) {
+            let sanitized: String = notice
+                .chars()
+                .map(|character| {
+                    if character.is_control() {
+                        '?'
+                    } else {
+                        character
+                    }
+                })
+                .collect();
+            frame.set_row(notice_row, &sanitized, TerminalStyle::Warning)?;
         }
         Ok(frame)
     }
@@ -373,6 +399,7 @@ const fn terminal_style(style: TerminalStyle) -> &'static [u8] {
         TerminalStyle::Header => b"\x1b[0;1;38;5;6m",
         TerminalStyle::Accent => b"\x1b[0;38;5;2m",
         TerminalStyle::Dim => b"\x1b[0;2;38;5;8m",
+        TerminalStyle::Warning => b"\x1b[0;38;5;3m",
     }
 }
 
@@ -422,10 +449,21 @@ enum TerminalIntent {
     SetSlashQuery(String),
     MoveSelection(isize),
     Activate,
+    MoveConfigChoice(isize),
+    PreviewConfig,
+    CommitConfig,
+    DiscardConfig,
     Back,
     Resize(u16, u16),
     Quit,
     None,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TerminalInputContext {
+    SlashPanel,
+    ConfigChoice,
+    Other,
 }
 
 struct TerminalInputState {
@@ -445,10 +483,14 @@ impl TerminalInputState {
         })
     }
 
-    fn apply(&mut self, event: TerminalInputEvent, slash_panel: bool) -> TerminalIntent {
+    fn apply(
+        &mut self,
+        event: TerminalInputEvent,
+        context: TerminalInputContext,
+    ) -> TerminalIntent {
         match event {
             TerminalInputEvent::Character(character)
-                if slash_panel
+                if context == TerminalInputContext::SlashPanel
                     && !character.is_control()
                     && self.slash_query.len().saturating_add(character.len_utf8())
                         <= MAX_COMMAND_QUERY_BYTES =>
@@ -456,7 +498,7 @@ impl TerminalInputState {
                 self.slash_query.push(character);
                 TerminalIntent::SetSlashQuery(self.slash_query.clone())
             }
-            TerminalInputEvent::Backspace if slash_panel => {
+            TerminalInputEvent::Backspace if context == TerminalInputContext::SlashPanel => {
                 if self.slash_query != "/" {
                     let last =
                         UnicodeSegmentation::grapheme_indices(self.slash_query.as_str(), true)
@@ -466,10 +508,33 @@ impl TerminalInputState {
                 }
                 TerminalIntent::SetSlashQuery(self.slash_query.clone())
             }
-            TerminalInputEvent::Up if slash_panel => TerminalIntent::MoveSelection(-1),
-            TerminalInputEvent::Down if slash_panel => TerminalIntent::MoveSelection(1),
-            TerminalInputEvent::Enter => TerminalIntent::Activate,
-            TerminalInputEvent::Escape if slash_panel => TerminalIntent::Quit,
+            TerminalInputEvent::Up if context == TerminalInputContext::SlashPanel => {
+                TerminalIntent::MoveSelection(-1)
+            }
+            TerminalInputEvent::Down if context == TerminalInputContext::SlashPanel => {
+                TerminalIntent::MoveSelection(1)
+            }
+            TerminalInputEvent::Enter if context == TerminalInputContext::SlashPanel => {
+                TerminalIntent::Activate
+            }
+            TerminalInputEvent::Up if context == TerminalInputContext::ConfigChoice => {
+                TerminalIntent::MoveConfigChoice(-1)
+            }
+            TerminalInputEvent::Down if context == TerminalInputContext::ConfigChoice => {
+                TerminalIntent::MoveConfigChoice(1)
+            }
+            TerminalInputEvent::Enter if context == TerminalInputContext::ConfigChoice => {
+                TerminalIntent::PreviewConfig
+            }
+            TerminalInputEvent::Character('c') if context == TerminalInputContext::ConfigChoice => {
+                TerminalIntent::CommitConfig
+            }
+            TerminalInputEvent::Character('d') if context == TerminalInputContext::ConfigChoice => {
+                TerminalIntent::DiscardConfig
+            }
+            TerminalInputEvent::Escape if context == TerminalInputContext::SlashPanel => {
+                TerminalIntent::Quit
+            }
             TerminalInputEvent::Escape => TerminalIntent::Back,
             TerminalInputEvent::Resize(width, height) => TerminalIntent::Resize(width, height),
             TerminalInputEvent::Quit => TerminalIntent::Quit,
@@ -477,6 +542,7 @@ impl TerminalInputState {
             | TerminalInputEvent::Backspace
             | TerminalInputEvent::Up
             | TerminalInputEvent::Down
+            | TerminalInputEvent::Enter
             | TerminalInputEvent::Ignore => TerminalIntent::None,
         }
     }
@@ -494,6 +560,8 @@ struct TerminalSession {
     controller: PresentationController,
     input: TerminalInputState,
     viewport: Viewport,
+    validated_config_choice: Option<String>,
+    notice: Option<String>,
 }
 
 impl TerminalSession {
@@ -504,6 +572,8 @@ impl TerminalSession {
             controller,
             input: TerminalInputState::new(query)?,
             viewport: Viewport::new(width, height)?,
+            validated_config_choice: None,
+            notice: None,
         })
     }
 
@@ -512,32 +582,156 @@ impl TerminalSession {
         event: TerminalInputEvent,
         runtime: Option<&mut ConfigRuntime>,
     ) -> Result<TerminalLoopOutcome, TerminalError> {
-        let intent = self.input.apply(event, self.controller.is_slash_panel());
+        let intent = self.input.apply(event, self.input_context());
         match intent {
             TerminalIntent::SetSlashQuery(query) => {
                 self.controller.set_slash_query(&query)?;
+                self.notice = None;
                 Ok(TerminalLoopOutcome::Redraw)
             }
             TerminalIntent::MoveSelection(offset) => {
                 self.controller.move_selection(offset)?;
+                self.notice = None;
                 Ok(TerminalLoopOutcome::Redraw)
             }
             TerminalIntent::Activate => {
                 let runtime = runtime.ok_or(TerminalError::ConfigRuntimeRequired)?;
-                self.controller.activate(runtime, ConfigScope::User, None)?;
+                match self.controller.activate(runtime, ConfigScope::User, None) {
+                    Ok(()) => {
+                        self.validated_config_choice = None;
+                        self.notice = None;
+                    }
+                    Err(source) => self.notice = Some(presentation_notice(&source)),
+                }
+                Ok(TerminalLoopOutcome::Redraw)
+            }
+            TerminalIntent::MoveConfigChoice(offset) => {
+                let runtime = runtime.ok_or(TerminalError::ConfigRuntimeRequired)?;
+                match self.move_config_choice(runtime, offset) {
+                    Ok(()) => {
+                        self.validated_config_choice = None;
+                        self.notice = None;
+                    }
+                    Err(source) => self.notice = Some(presentation_notice(&source)),
+                }
+                Ok(TerminalLoopOutcome::Redraw)
+            }
+            TerminalIntent::PreviewConfig => {
+                let runtime = runtime.ok_or(TerminalError::ConfigRuntimeRequired)?;
+                let choice = self.config_choice().map(str::to_owned);
+                match self.controller.preview_config(runtime) {
+                    Ok(_) => {
+                        self.validated_config_choice = choice;
+                        self.notice = Some("Config draft validated".to_owned());
+                    }
+                    Err(source) => {
+                        self.validated_config_choice = None;
+                        self.notice = Some(presentation_notice(&source));
+                    }
+                }
+                Ok(TerminalLoopOutcome::Redraw)
+            }
+            TerminalIntent::CommitConfig => {
+                let runtime = runtime.ok_or(TerminalError::ConfigRuntimeRequired)?;
+                if !self.controller.has_unsaved_config_draft() {
+                    self.notice = Some("No Config changes to commit".to_owned());
+                } else if self.config_choice().map(str::to_owned) != self.validated_config_choice {
+                    self.notice = Some("Config draft must be previewed before commit".to_owned());
+                } else {
+                    match self.controller.commit_config(runtime) {
+                        Ok(_) => {
+                            self.validated_config_choice = None;
+                            self.notice = None;
+                        }
+                        Err(source) => self.notice = Some(presentation_notice(&source)),
+                    }
+                }
+                Ok(TerminalLoopOutcome::Redraw)
+            }
+            TerminalIntent::DiscardConfig => {
+                self.controller.discard_config()?;
+                self.validated_config_choice = None;
+                self.notice = None;
                 Ok(TerminalLoopOutcome::Redraw)
             }
             TerminalIntent::Back => {
-                self.controller.back()?;
+                match self.controller.back() {
+                    Ok(()) => {
+                        self.validated_config_choice = None;
+                        self.notice = None;
+                    }
+                    Err(PresentationControllerError::UnsavedConfigDraft) => {
+                        self.notice =
+                            Some("Config draft must be committed or discarded".to_owned());
+                    }
+                    Err(source) => return Err(source.into()),
+                }
                 Ok(TerminalLoopOutcome::Redraw)
             }
             TerminalIntent::Resize(width, height) => {
                 self.viewport = Viewport::new(width, height)?;
                 Ok(TerminalLoopOutcome::Resize(width, height))
             }
+            TerminalIntent::Quit if self.controller.has_unsaved_config_draft() => {
+                self.notice = Some("Config draft must be committed or discarded".to_owned());
+                Ok(TerminalLoopOutcome::Redraw)
+            }
             TerminalIntent::Quit => Ok(TerminalLoopOutcome::Quit),
             TerminalIntent::None => Ok(TerminalLoopOutcome::Noop),
         }
+    }
+
+    fn input_context(&self) -> TerminalInputContext {
+        if self.controller.is_slash_panel() {
+            TerminalInputContext::SlashPanel
+        } else if self.controller.config_editor_field().is_some_and(|field| {
+            field.path == STATUSLINE_PRESET_PATH
+                && matches!(field.contents, ConfigFieldContents::Value { .. })
+        }) {
+            TerminalInputContext::ConfigChoice
+        } else {
+            TerminalInputContext::Other
+        }
+    }
+
+    fn config_choice(&self) -> Option<&str> {
+        let field = self.controller.config_editor_field()?;
+        if field.path != STATUSLINE_PRESET_PATH {
+            return None;
+        }
+        let ConfigFieldContents::Value {
+            effective, target, ..
+        } = &field.contents
+        else {
+            return None;
+        };
+        target
+            .as_ref()
+            .or(effective.as_ref())
+            .and_then(|value| match value {
+                ConfigValue::String(value) => Some(value.as_str()),
+                _ => None,
+            })
+    }
+
+    fn move_config_choice(
+        &mut self,
+        runtime: &ConfigRuntime,
+        offset: isize,
+    ) -> Result<(), PresentationControllerError> {
+        let current = self.config_choice();
+        let index = current
+            .and_then(|current| {
+                STATUSLINE_PRESET_CHOICES
+                    .iter()
+                    .position(|choice| *choice == current)
+            })
+            .unwrap_or(0);
+        let next = index
+            .saturating_add_signed(offset)
+            .min(STATUSLINE_PRESET_CHOICES.len() - 1);
+        self.controller
+            .stage_config(runtime, STATUSLINE_PRESET_CHOICES[next])
     }
 
     fn layout(
@@ -548,6 +742,58 @@ impl TerminalSession {
         self.controller
             .layout(runtime, view, self.viewport)
             .map_err(TerminalError::Presentation)
+    }
+
+    fn frame(
+        &self,
+        runtime: Option<&ConfigRuntime>,
+        view: &TuiViewModel,
+    ) -> Result<TerminalFrame, TerminalError> {
+        let layout = self.layout(runtime, view)?;
+        TerminalFrame::from_layout_with_notice(&layout, self.notice.as_deref())
+    }
+}
+
+fn presentation_notice(source: &PresentationControllerError) -> String {
+    match source {
+        PresentationControllerError::ConfigEditor(ConfigEditorError::Config(source))
+        | PresentationControllerError::Config(source) => config_runtime_notice(source),
+        PresentationControllerError::UnsavedConfigDraft => {
+            "Config draft must be committed or discarded".to_owned()
+        }
+        PresentationControllerError::NoCommandSelection => "No command is selected".to_owned(),
+        PresentationControllerError::NotSlashPanel
+        | PresentationControllerError::NotConfigEditor
+        | PresentationControllerError::NotProviderWizard
+        | PresentationControllerError::ConfigRuntimeRequired => {
+            "Config action is unavailable in this view".to_owned()
+        }
+        PresentationControllerError::Command(_) | PresentationControllerError::ConfigEditor(_) => {
+            "Config action failed".to_owned()
+        }
+    }
+}
+
+fn config_runtime_notice(source: &ConfigRuntimeError) -> String {
+    match source {
+        ConfigRuntimeError::InvalidValue { path, .. } => {
+            format!("Config validation failed at {path}")
+        }
+        ConfigRuntimeError::RevisionConflict { .. } => {
+            "Config changed; discard and reopen the editor".to_owned()
+        }
+        ConfigRuntimeError::ReadOnlyScope(_) => "Config scope is read-only".to_owned(),
+        ConfigRuntimeError::RepairRequired(_) => "Config repair is required".to_owned(),
+        ConfigRuntimeError::Locked(_) => "Config is locked by another writer".to_owned(),
+        ConfigRuntimeError::Io(_) => "Config I/O failed".to_owned(),
+        ConfigRuntimeError::UnknownObject(_)
+        | ConfigRuntimeError::WrongType { .. }
+        | ConfigRuntimeError::SecretReadForbidden(_)
+        | ConfigRuntimeError::BackupUnavailable { .. }
+        | ConfigRuntimeError::UnsupportedSchema { .. }
+        | ConfigRuntimeError::Parse { .. }
+        | ConfigRuntimeError::SymlinkPath(_)
+        | ConfigRuntimeError::NotRegularFile(_) => "Config validation failed".to_owned(),
     }
 }
 
@@ -569,8 +815,7 @@ where
     let mut renderer = DirectVtRenderer::new(width, height)?;
     let mut session = TerminalSession::new("/", width, height)?;
 
-    let layout = session.layout(Some(config), view)?;
-    let frame = TerminalFrame::from_layout(&layout)?;
+    let frame = session.frame(Some(config), view)?;
     surface.write_frame(&renderer.draw(&frame)?)?;
 
     loop {
@@ -578,13 +823,11 @@ where
             TerminalLoopOutcome::Quit => break,
             TerminalLoopOutcome::Resize(width, height) => {
                 surface.write_frame(&renderer.resize(width, height)?)?;
-                let layout = session.layout(Some(config), view)?;
-                let frame = TerminalFrame::from_layout(&layout)?;
+                let frame = session.frame(Some(config), view)?;
                 surface.write_frame(&renderer.draw(&frame)?)?;
             }
             TerminalLoopOutcome::Redraw => {
-                let layout = session.layout(Some(config), view)?;
-                let frame = TerminalFrame::from_layout(&layout)?;
+                let frame = session.frame(Some(config), view)?;
                 surface.write_frame(&renderer.draw(&frame)?)?;
             }
             TerminalLoopOutcome::Noop => {}
@@ -710,14 +953,18 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-    use greentyper_core::config::{ConfigDocument, ConfigPaths, ConfigRuntime};
+    use greentyper_core::config::{
+        ConfigDocument, ConfigEditorSession, ConfigFieldContents, ConfigPaths, ConfigRuntime,
+        ConfigScope, ConfigValue,
+    };
 
-    use crate::presentation::build_smoke_view;
+    use crate::presentation::{PresentationScreenView, build_smoke_view};
 
     use super::{
-        DirectVtRenderer, ENTER_TERMINAL, LEAVE_TERMINAL, TerminalFrame, TerminalInputEvent,
-        TerminalInputState, TerminalIntent, TerminalLoopOutcome, TerminalMode, TerminalSession,
-        TerminalSurface, build_terminal_view, map_crossterm_event, run_terminal_loop,
+        DirectVtRenderer, ENTER_TERMINAL, LEAVE_TERMINAL, TerminalFrame, TerminalInputContext,
+        TerminalInputEvent, TerminalInputState, TerminalIntent, TerminalLoopOutcome, TerminalMode,
+        TerminalSession, TerminalSurface, build_terminal_view, map_crossterm_event,
+        run_terminal_loop,
     };
 
     static NEXT_TEMP: AtomicU64 = AtomicU64::new(1);
@@ -754,36 +1001,74 @@ mod tests {
         let mut input = TerminalInputState::new("/").expect("input state");
 
         assert_eq!(
-            input.apply(TerminalInputEvent::Character('c'), true),
+            input.apply(
+                TerminalInputEvent::Character('c'),
+                TerminalInputContext::SlashPanel,
+            ),
             TerminalIntent::SetSlashQuery("/c".to_owned())
         );
         assert_eq!(
-            input.apply(TerminalInputEvent::Backspace, true),
+            input.apply(
+                TerminalInputEvent::Backspace,
+                TerminalInputContext::SlashPanel,
+            ),
             TerminalIntent::SetSlashQuery("/".to_owned())
         );
         assert_eq!(
-            input.apply(TerminalInputEvent::Up, true),
+            input.apply(TerminalInputEvent::Up, TerminalInputContext::SlashPanel),
             TerminalIntent::MoveSelection(-1)
         );
         assert_eq!(
-            input.apply(TerminalInputEvent::Down, true),
+            input.apply(TerminalInputEvent::Down, TerminalInputContext::SlashPanel),
             TerminalIntent::MoveSelection(1)
         );
         assert_eq!(
-            input.apply(TerminalInputEvent::Enter, true),
+            input.apply(TerminalInputEvent::Enter, TerminalInputContext::SlashPanel),
             TerminalIntent::Activate
         );
         assert_eq!(
-            input.apply(TerminalInputEvent::Escape, true),
+            input.apply(TerminalInputEvent::Escape, TerminalInputContext::SlashPanel),
             TerminalIntent::Quit
         );
         assert_eq!(
-            input.apply(TerminalInputEvent::Escape, false),
+            input.apply(TerminalInputEvent::Escape, TerminalInputContext::Other),
             TerminalIntent::Back
         );
         assert_eq!(
-            input.apply(TerminalInputEvent::Resize(80, 24), false),
+            input.apply(
+                TerminalInputEvent::Resize(80, 24),
+                TerminalInputContext::Other
+            ),
             TerminalIntent::Resize(80, 24)
+        );
+        assert_eq!(
+            input.apply(TerminalInputEvent::Down, TerminalInputContext::ConfigChoice),
+            TerminalIntent::MoveConfigChoice(1)
+        );
+        assert_eq!(
+            input.apply(
+                TerminalInputEvent::Enter,
+                TerminalInputContext::ConfigChoice
+            ),
+            TerminalIntent::PreviewConfig
+        );
+        assert_eq!(
+            input.apply(
+                TerminalInputEvent::Character('c'),
+                TerminalInputContext::ConfigChoice,
+            ),
+            TerminalIntent::CommitConfig
+        );
+        assert_eq!(
+            input.apply(
+                TerminalInputEvent::Character('d'),
+                TerminalInputContext::ConfigChoice,
+            ),
+            TerminalIntent::DiscardConfig
+        );
+        assert_eq!(
+            input.apply(TerminalInputEvent::Enter, TerminalInputContext::Other),
+            TerminalIntent::None
         );
     }
 
@@ -799,7 +1084,10 @@ mod tests {
         let full_query = format!("/{}", "a".repeat(255));
         let mut input = TerminalInputState::new(&full_query).expect("bounded query");
         assert_eq!(
-            input.apply(TerminalInputEvent::Character('b'), true),
+            input.apply(
+                TerminalInputEvent::Character('b'),
+                TerminalInputContext::SlashPanel,
+            ),
             TerminalIntent::None
         );
     }
@@ -863,6 +1151,225 @@ mod tests {
     }
 
     #[test]
+    fn terminal_statusline_choice_previews_and_commits_through_the_config_runtime() {
+        let root = terminal_test_root("config-commit");
+        let paths = ConfigPaths::new(root.join("user.toml"), root.join("project.toml"));
+        let mut config =
+            ConfigRuntime::open(paths.clone(), ConfigDocument::empty()).expect("config runtime");
+        let mut session =
+            TerminalSession::new("/config statusline preset", 80, 24).expect("session");
+
+        assert_eq!(
+            session
+                .handle(TerminalInputEvent::Enter, Some(&mut config))
+                .expect("open editor"),
+            TerminalLoopOutcome::Redraw
+        );
+        assert_eq!(
+            session
+                .handle(TerminalInputEvent::Character('c'), Some(&mut config))
+                .expect("reject no-op commit"),
+            TerminalLoopOutcome::Redraw
+        );
+        assert!(!root.join("user.toml").exists());
+        assert_eq!(
+            session
+                .handle(TerminalInputEvent::Down, Some(&mut config))
+                .expect("choose diagnostic"),
+            TerminalLoopOutcome::Redraw
+        );
+        let smoke = build_smoke_view("/").expect("view");
+        let layout = session
+            .layout(Some(&config), smoke.view())
+            .expect("choice layout");
+        assert!(
+            layout
+                .body()
+                .iter()
+                .any(|row| { row.is_selected() && row.text() == "> diagnostic" })
+        );
+        assert_eq!(
+            session
+                .handle(TerminalInputEvent::Enter, Some(&mut config))
+                .expect("preview"),
+            TerminalLoopOutcome::Redraw
+        );
+        assert!(matches!(
+            session.controller.screen(Some(&config)).expect("screen"),
+            PresentationScreenView::ConfigEditor {
+                dirty: true,
+                validated: true,
+                ..
+            }
+        ));
+        assert_eq!(
+            session
+                .handle(TerminalInputEvent::Character('c'), Some(&mut config))
+                .expect("commit"),
+            TerminalLoopOutcome::Redraw
+        );
+        assert!(session.controller.is_slash_panel());
+        assert_eq!(
+            config_string_target(&config, "ui.statusline.preset").as_deref(),
+            Some("diagnostic")
+        );
+
+        drop(config);
+        let reopened = ConfigRuntime::open(paths, ConfigDocument::empty()).expect("reopen config");
+        assert_eq!(
+            config_string_target(&reopened, "ui.statusline.preset").as_deref(),
+            Some("diagnostic")
+        );
+        std::fs::remove_dir_all(root).expect("remove test config");
+    }
+
+    #[test]
+    fn terminal_statusline_choice_keeps_failed_preview_live_and_recovers() {
+        let root = terminal_test_root("config-preview");
+        let mut config = ConfigRuntime::open(
+            ConfigPaths::new(root.join("user.toml"), root.join("project.toml")),
+            ConfigDocument::empty(),
+        )
+        .expect("config runtime");
+        let mut session =
+            TerminalSession::new("/config statusline preset", 80, 24).expect("session");
+
+        session
+            .handle(TerminalInputEvent::Enter, Some(&mut config))
+            .expect("open editor");
+        session
+            .handle(TerminalInputEvent::Down, Some(&mut config))
+            .expect("choose diagnostic");
+        session
+            .handle(TerminalInputEvent::Down, Some(&mut config))
+            .expect("choose custom");
+        assert_eq!(
+            session
+                .handle(TerminalInputEvent::Enter, Some(&mut config))
+                .expect("failed preview stays live"),
+            TerminalLoopOutcome::Redraw
+        );
+        let screen = session.controller.screen(Some(&config)).expect("screen");
+        assert!(
+            matches!(
+                screen,
+                PresentationScreenView::ConfigEditor {
+                    dirty: true,
+                    validated: false,
+                    ..
+                }
+            ),
+            "{screen:?}"
+        );
+        let smoke = build_smoke_view("/").expect("view");
+        let frame = session
+            .frame(Some(&config), smoke.view())
+            .expect("error frame");
+        let mut renderer = DirectVtRenderer::new(80, 24).expect("renderer");
+        let output = String::from_utf8(renderer.draw(&frame).expect("draw")).expect("UTF-8");
+        assert!(output.contains("\x1b[0;38;5;3m"), "{output:?}");
+        assert!(output.contains("ui.statusline.custom"), "{output:?}");
+        session
+            .handle(TerminalInputEvent::Resize(80, 1), Some(&mut config))
+            .expect("narrow resize");
+        let frame = session
+            .frame(Some(&config), smoke.view())
+            .expect("one-row error frame");
+        let mut renderer = DirectVtRenderer::new(80, 1).expect("one-row renderer");
+        let output = String::from_utf8(renderer.draw(&frame).expect("draw")).expect("UTF-8");
+        assert!(output.contains("\x1b[0;38;5;3m"), "{output:?}");
+        assert!(output.contains("ui.statusline.custom"), "{output:?}");
+        assert!(!output.contains("ready"), "{output:?}");
+        session
+            .handle(TerminalInputEvent::Resize(80, 24), Some(&mut config))
+            .expect("restore viewport");
+
+        session
+            .handle(TerminalInputEvent::Up, Some(&mut config))
+            .expect("recover choice");
+        session
+            .handle(TerminalInputEvent::Enter, Some(&mut config))
+            .expect("valid preview");
+        session
+            .handle(TerminalInputEvent::Character('c'), Some(&mut config))
+            .expect("commit recovered choice");
+        assert_eq!(
+            config_string_target(&config, "ui.statusline.preset").as_deref(),
+            Some("diagnostic")
+        );
+        std::fs::remove_dir_all(root).expect("remove test config");
+    }
+
+    #[test]
+    fn terminal_statusline_choice_requires_explicit_discard_and_survives_cas_conflict() {
+        let root = terminal_test_root("config-conflict");
+        let paths = ConfigPaths::new(root.join("user.toml"), root.join("project.toml"));
+        let mut config =
+            ConfigRuntime::open(paths, ConfigDocument::empty()).expect("config runtime");
+        let mut session =
+            TerminalSession::new("/config statusline preset", 80, 24).expect("session");
+
+        session
+            .handle(TerminalInputEvent::Enter, Some(&mut config))
+            .expect("open editor");
+        let mut winner = ConfigEditorSession::open_from_query(
+            &config,
+            ConfigScope::User,
+            "/config statusline preset",
+            0,
+            None,
+        )
+        .expect("winner editor");
+        session
+            .handle(TerminalInputEvent::Down, Some(&mut config))
+            .expect("choose diagnostic");
+        session
+            .handle(TerminalInputEvent::Enter, Some(&mut config))
+            .expect("preview diagnostic");
+
+        winner.stage_raw("minimal").expect("stage winner");
+        winner.commit(&mut config).expect("commit winner");
+        assert_eq!(
+            session
+                .handle(TerminalInputEvent::Character('c'), Some(&mut config))
+                .expect("conflict stays live"),
+            TerminalLoopOutcome::Redraw
+        );
+        assert_eq!(
+            session.notice.as_deref(),
+            Some("Config changed; discard and reopen the editor")
+        );
+        assert!(matches!(
+            session.controller.screen(Some(&config)).expect("screen"),
+            PresentationScreenView::ConfigEditor { dirty: true, .. }
+        ));
+        assert_eq!(
+            session
+                .handle(TerminalInputEvent::Escape, Some(&mut config))
+                .expect("dirty escape is blocked"),
+            TerminalLoopOutcome::Redraw
+        );
+        assert_eq!(
+            session
+                .handle(TerminalInputEvent::Quit, Some(&mut config))
+                .expect("dirty quit is blocked"),
+            TerminalLoopOutcome::Redraw
+        );
+        assert_eq!(
+            session
+                .handle(TerminalInputEvent::Character('d'), Some(&mut config))
+                .expect("discard"),
+            TerminalLoopOutcome::Redraw
+        );
+        assert!(session.controller.is_slash_panel());
+        assert_eq!(
+            config_string_target(&config, "ui.statusline.preset").as_deref(),
+            Some("minimal")
+        );
+        std::fs::remove_dir_all(root).expect("remove test config");
+    }
+
+    #[test]
     fn crossterm_events_map_only_pressed_keys_and_resizes() {
         assert_eq!(
             map_crossterm_event(Event::Key(KeyEvent::new(
@@ -890,6 +1397,55 @@ mod tests {
             map_crossterm_event(Event::Resize(120, 40)),
             TerminalInputEvent::Resize(120, 40)
         );
+    }
+
+    #[test]
+    fn terminal_loop_commits_statusline_choice_from_real_key_events() {
+        let root = terminal_test_root("config-loop");
+        let ledger = root.join("runtime.ledger");
+        let paths = ConfigPaths::new(root.join("user.toml"), root.join("project.toml"));
+        let mut config =
+            ConfigRuntime::open(paths.clone(), ConfigDocument::empty()).expect("config runtime");
+        let view = build_terminal_view(&ledger, &config, "/").expect("terminal view");
+        let mut events: VecDeque<_> = "config statusline preset"
+            .chars()
+            .map(|character| {
+                Event::Key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
+            })
+            .collect();
+        events.extend([
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL)),
+        ]);
+
+        let output = run_terminal_loop(
+            Vec::new(),
+            FakeTerminalMode::default(),
+            &mut config,
+            &view,
+            80,
+            24,
+            move || Ok(events.pop_front().expect("bounded event sequence")),
+        )
+        .expect("terminal loop");
+
+        assert!(output.starts_with(ENTER_TERMINAL));
+        assert!(output.ends_with(LEAVE_TERMINAL));
+        assert_eq!(
+            config_string_target(&config, "ui.statusline.preset").as_deref(),
+            Some("diagnostic")
+        );
+        drop(config);
+        let reopened = ConfigRuntime::open(paths, ConfigDocument::empty()).expect("reopen config");
+        assert_eq!(
+            config_string_target(&reopened, "ui.statusline.preset").as_deref(),
+            Some("diagnostic")
+        );
+        assert!(!ledger.exists());
+        std::fs::remove_dir_all(root).expect("remove test config");
     }
 
     #[derive(Clone, Default)]
@@ -989,5 +1545,27 @@ mod tests {
         assert!(output.windows(7).any(|bytes| bytes == b"\x1b[2J\x1b[H"));
         assert!(output.ends_with(LEAVE_TERMINAL));
         assert!(!ledger.exists());
+    }
+
+    fn terminal_test_root(label: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "greentyper-terminal-{label}-{}-{}",
+            std::process::id(),
+            NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
+        ))
+    }
+
+    fn config_string_target(config: &ConfigRuntime, path: &str) -> Option<String> {
+        let field = config
+            .inspect_field(ConfigScope::User, path)
+            .expect("inspect config field");
+        let ConfigFieldContents::Value { target, .. } = field.contents else {
+            panic!("expected value field")
+        };
+        match target {
+            Some(ConfigValue::String(value)) => Some(value),
+            None => None,
+            Some(_) => panic!("expected string value"),
+        }
     }
 }
