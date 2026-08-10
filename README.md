@@ -140,7 +140,8 @@ reconciliation, and later Turn admission.
 
 Configured OpenAI-compatible Responses and Chat Completions profiles, the
 official DeepSeek Responses, Chat Completions, and Anthropic-compatible Messages
-profiles, plus release-catalog OpenCode Go Chat Completions models now run through
+profiles, plus release-catalog OpenCode Go Chat Completions models and the
+GPT-5.6 Luna Responses pair now run through
 no-proxy, no-redirect HTTPS clients, origin-bound credential lookup, bounded
 streaming decode, and a fixed deadline. DeepSeek Chat uses Bearer authorization,
 the explicit `/chat/completions` route, `max_tokens`, and non-thinking mode; it
@@ -153,7 +154,12 @@ Bearer authorization, the frozen Chat route (template default
 `/chat/completions`), and
 `max_completion_tokens`. It admits only release-catalog-verified Chat models
 before credential lookup and rejects preset reasoning effort or service tier
-before network I/O. Config Runtime freezes the
+before network I/O. OpenCode Go Responses uses Bearer authorization, the frozen
+Responses route (template default `/responses`), and `max_output_tokens`. It
+admits only the exact GPT-5.6 Luna Responses catalog pair before credential
+lookup, rejects preset reasoning effort or service tier before network I/O, and
+supports one stateful Tool continuation through the same durable approval
+boundary. Config Runtime freezes the
 normalized origin, selected-dialect route, dialect, pricing decision, and opaque
 credential reference in the Provider Epoch; adapter reconstruction uses that
 snapshot without changing an explicit dialect. Private loopback fixtures retain
@@ -250,7 +256,7 @@ read-only and snapshot-based. It is not a mutable terminal editor, approval
 surface, live refresh loop, audited ConPTY integration, object-name dialog,
 rendered template picker, starter-preset workflow, or live catalog discovery.
 Live credential-gated provider validation, configurable proxy policy,
-reconnect/retry, OpenCode Go Responses and Messages execution,
+reconnect/retry, OpenCode Go Messages execution,
 Messages reasoning blocks, Preset context/fallback execution, richer approval
 presentation, broader Provider and Tool adapters,
 Workspace, remaining TUI, and App Server work remain. The loopback Provider tracer remains

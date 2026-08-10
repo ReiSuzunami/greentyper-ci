@@ -363,7 +363,10 @@ loopback origin override through the Responses adapter and models probe. The
 test proves inherited routes and dialects cross the same endpoint and credential
 gates as an explicit compatible gateway. The Responses adapter admits OpenAI
 and explicit openai-compatible identities, plus the exact DeepSeek/V4-Flash
-pair. The Chat Completions adapter admits the OpenAI and explicit
+pair and exact OpenCode Go/GPT-5.6 Luna pair. OpenCode Go Responses tests assert
+the frozen `/responses` route, Bearer request shape, bounded SSE normalization,
+catalog and policy rejection before network I/O, Provider Epoch reconstruction,
+and one Tool continuation through durable approval. The Chat Completions adapter admits the OpenAI and explicit
 openai-compatible template identities plus the exact
 official DeepSeek identity with its DeepSeek-specific request policy. The
 Chat adapter also admits exact release-catalog OpenCode Go Chat model/dialect
@@ -371,7 +374,7 @@ pairs with the OpenCode-specific request policy. The
 Messages adapter admits only the official DeepSeek template identity and its
 explicit Messages route. V4 Pro resolves a preferred Responses dialect to Chat
 before admission; this bounded capability resolution is not a network retry or
-general Preset fallback. OpenCode Go Responses and Messages remain outside this
+general Preset fallback. OpenCode Go Messages remains outside this
 slice; a declared route or dialect is not treated as proof of wire compatibility.
 
 Live provider integration tests are not implemented yet. Planned opt-in,

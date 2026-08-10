@@ -579,6 +579,56 @@ max_output_tokens = 4096
     fs::remove_dir_all(config_root).expect("cleanup config root");
 }
 
+#[test]
+fn headless_opencode_go_responses_preset_reaches_the_credential_boundary_before_admission() {
+    let ledger = temp_path("opencode-go-responses-preset");
+    let config_root = temp_path("opencode-go-responses-preset-config");
+    let config_path = user_config_path(&config_root);
+    fs::create_dir_all(config_path.parent().unwrap()).expect("create config parent");
+    fs::write(
+        &config_path,
+        r#"schema_version = 1
+
+[providers.go]
+template = "opencode-go"
+credential = "opencode-go-synthetic"
+
+[model_presets.go-responses]
+provider = "go"
+model = "gpt-5.6-luna"
+dialect = "responses"
+max_output_tokens = 4096
+"#,
+    )
+    .expect("write OpenCode Go Responses Model Preset config");
+
+    let output = binary_with_config_root(&config_root)
+        .args(["headless", "--preset", "go-responses", "--ledger"])
+        .arg(&ledger)
+        .args(["--input", "select OpenCode Go Responses"])
+        .output()
+        .expect("run OpenCode Go Responses preset-selected headless command");
+    assert!(!output.status.success(), "{output:?}");
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Provider credential binding was not found")
+            || stderr.contains("platform credential vault is unavailable")
+            || stderr.contains("provider unavailable"),
+        "{output:?}"
+    );
+    assert!(
+        !stderr.contains("no configured runtime adapter"),
+        "{output:?}"
+    );
+    assert!(
+        !ledger.exists(),
+        "credential failure must precede admission"
+    );
+
+    fs::remove_dir_all(config_root).expect("cleanup config root");
+}
+
 struct PanicProvider;
 
 impl ProviderRuntime for PanicProvider {

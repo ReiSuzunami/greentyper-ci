@@ -262,10 +262,11 @@ through a Price Schedule rather than becoming an unversioned catalog number.
 The installed execution matrix is deliberately closed: adapters accept
 `openai` and explicit `openai-compatible` Profiles for Responses and Chat
 Completions, and official `deepseek` Profiles for Responses, Chat Completions,
-and Messages. `opencode-go` Profiles admit Chat Completions only when the
-selected model has an exact release-catalog Chat record.
+and Messages. `opencode-go` Profiles admit Chat Completions when the selected
+model has an exact release-catalog Chat record and Responses only for the exact
+GPT-5.6 Luna Responses record.
 A Provider Template may still declare additional routes and dialect support as
-Config/catalog facts; OpenCode Go Responses and Messages plus OpenAI Messages
+Config/catalog facts; OpenCode Go Messages plus OpenAI Messages
 remain unavailable until an exact adapter is installed. A catalog route or
 declared dialect alone never proves wire compatibility. Release-candidate
 compatibility remains tied to each record's primary dialect. DeepSeek V4 Pro is
@@ -322,7 +323,9 @@ maps `max_output_tokens` and supported `reasoning.effort`, but rejects service
 tier. DeepSeek Chat and Messages map only the output limit and fail before
 network I/O when either unsupported policy field is selected. OpenCode Go Chat
 maps the output limit to `max_completion_tokens` and likewise rejects both
-unsupported policy fields. Initial requests and one
+unsupported policy fields. OpenCode Go Responses maps the output limit to
+`max_output_tokens` and also rejects both fields until their gateway semantics
+are canonicalized. Initial requests and one
 in-process Tool continuation retain the same frozen values; restart replay
 reconstructs them without making Tool continuation resumable. Requested Usage
 metadata records the same policy. The accepted reasoning values are `none`,

@@ -41,6 +41,7 @@ const OPENAI_TEMPLATE: &str = "openai";
 const OPENAI_COMPATIBLE_TEMPLATE: &str = "openai-compatible";
 const DEEPSEEK_TEMPLATE: &str = "deepseek";
 const OPENCODE_GO_TEMPLATE: &str = "opencode-go";
+const OPENCODE_GO_RESPONSES_MODEL: &str = "gpt-5.6-luna";
 const FIXTURE_CREDENTIAL_REFERENCE: &str = "responses-loopback-synthetic";
 const SYNTHETIC_AUTHORIZATION: &str = "Bearer greentyper-synthetic-provider-token-v1";
 const SYNTHETIC_SECRET: &[u8] = b"greentyper-synthetic-provider-token-v1";
@@ -89,12 +90,14 @@ const TOOL_CONTINUATION_SSE: &[u8] =
 enum ResponsesAdapter {
     OpenAi,
     DeepSeek,
+    OpenCodeGo,
 }
 
 fn responses_adapter(template: &str) -> Option<ResponsesAdapter> {
     match template {
         OPENAI_TEMPLATE | OPENAI_COMPATIBLE_TEMPLATE => Some(ResponsesAdapter::OpenAi),
         DEEPSEEK_TEMPLATE => Some(ResponsesAdapter::DeepSeek),
+        OPENCODE_GO_TEMPLATE => Some(ResponsesAdapter::OpenCodeGo),
         _ => None,
     }
 }
@@ -199,6 +202,24 @@ fn require_opencode_go_chat_request_policy(request: &ProviderRequest) -> Result<
     {
         return Err(ProviderError::InvalidRequest(
             "OpenCode Go Chat adapter does not support preset reasoning effort or service tier",
+        ));
+    }
+    Ok(())
+}
+
+fn require_opencode_go_responses_request_policy(
+    request: &ProviderRequest,
+) -> Result<(), ProviderError> {
+    if request.provider.model() != OPENCODE_GO_RESPONSES_MODEL {
+        return Err(ProviderError::InvalidRequest(
+            "OpenCode Go Responses currently supports only gpt-5.6-luna",
+        ));
+    }
+    if request.config.resolved().reasoning_effort().is_some()
+        || request.config.resolved().service_tier().is_some()
+    {
+        return Err(ProviderError::InvalidRequest(
+            "OpenCode Go Responses adapter does not support preset reasoning effort or service tier",
         ));
     }
     Ok(())
@@ -495,18 +516,41 @@ impl<V: CredentialVault> ResponsesHttpProvider<V> {
     }
 
     fn require_request_identity(&self, request: &ProviderRequest) -> Result<(), ProviderError> {
-        if request.provider.profile() != self.profile.profile()
-            || request.provider.profile_snapshot() != Some(&self.profile)
-            || request
+        let dialect_matches = match self.adapter {
+            ResponsesAdapter::OpenCodeGo => {
+                request.provider.dialect() == Some(ProviderDialect::Responses)
+            }
+            ResponsesAdapter::OpenAi | ResponsesAdapter::DeepSeek => !request
                 .provider
                 .dialect()
-                .is_some_and(|dialect| dialect != ProviderDialect::Responses)
+                .is_some_and(|dialect| dialect != ProviderDialect::Responses),
+        };
+        if request.provider.profile() != self.profile.profile()
+            || request.provider.profile_snapshot() != Some(&self.profile)
+            || !dialect_matches
         {
             return Err(ProviderError::InvalidConfiguration(
                 "Responses provider identity does not match its frozen Profile and dialect",
             ));
         }
         Ok(())
+    }
+
+    fn require_request_policy(&self, request: &ProviderRequest) -> Result<(), ProviderError> {
+        match self.adapter {
+            ResponsesAdapter::OpenAi => Ok(()),
+            ResponsesAdapter::DeepSeek => require_deepseek_responses_request_policy(request),
+            ResponsesAdapter::OpenCodeGo => require_opencode_go_responses_request_policy(request),
+        }
+    }
+
+    fn insert_request_policy(&self, body: &mut serde_json::Value, request: &ProviderRequest) {
+        match self.adapter {
+            ResponsesAdapter::OpenAi | ResponsesAdapter::DeepSeek => {
+                insert_responses_request_policy(body, request);
+            }
+            ResponsesAdapter::OpenCodeGo => {}
+        }
     }
 }
 
@@ -521,9 +565,7 @@ impl<V: CredentialVault> ProviderRuntime for ResponsesHttpProvider<V> {
 
     fn run(&mut self, request: &ProviderRequest) -> Result<Vec<ProviderEvent>, ProviderError> {
         self.require_request_identity(request)?;
-        if self.adapter == ResponsesAdapter::DeepSeek {
-            require_deepseek_responses_request_policy(request)?;
-        }
+        self.require_request_policy(request)?;
         let max_output_bytes =
             usize::try_from(*request.config.resolved().max_output_bytes().value())
                 .map_err(|_| ProviderError::InvalidConfiguration("output byte limit is invalid"))?;
@@ -544,7 +586,7 @@ impl<V: CredentialVault> ProviderRuntime for ResponsesHttpProvider<V> {
             })
         };
         insert_output_token_limit(&mut body, "max_output_tokens", request);
-        insert_responses_request_policy(&mut body, request);
+        self.insert_request_policy(&mut body, request);
         let (response_id, events) = self.send_request(body, max_output_bytes)?;
         let events = if self.local_echo_enabled {
             normalize_local_echo_calls(events)?
@@ -577,15 +619,13 @@ impl<V: CredentialVault> ProviderRuntime for ResponsesHttpProvider<V> {
                 "Responses Provider has no enabled Tool continuation",
             ));
         }
-        if self.adapter == ResponsesAdapter::DeepSeek {
-            require_deepseek_responses_request_policy(request)?;
-        }
+        self.require_request_policy(request)?;
         let pending = self.take_pending_continuation(output.call_id())?;
         let max_output_bytes =
             usize::try_from(*request.config.resolved().max_output_bytes().value())
                 .map_err(|_| ProviderError::InvalidConfiguration("output byte limit is invalid"))?;
         let mut body = match self.adapter {
-            ResponsesAdapter::OpenAi => serde_json::json!({
+            ResponsesAdapter::OpenAi | ResponsesAdapter::OpenCodeGo => serde_json::json!({
                 "input": [{
                     "type": "function_call_output",
                     "call_id": output.call_id(),
@@ -619,7 +659,7 @@ impl<V: CredentialVault> ProviderRuntime for ResponsesHttpProvider<V> {
             }),
         };
         insert_output_token_limit(&mut body, "max_output_tokens", request);
-        insert_responses_request_policy(&mut body, request);
+        self.insert_request_policy(&mut body, request);
         let (_, events) = self.send_request(body, max_output_bytes)?;
         reject_continuation_tool_calls(events, "Responses continuation returned another Tool call")
     }
@@ -1266,7 +1306,10 @@ fn responses_local_echo_tool_definition(adapter: ResponsesAdapter) -> serde_json
             "additionalProperties": false,
         },
     });
-    if adapter == ResponsesAdapter::OpenAi {
+    if matches!(
+        adapter,
+        ResponsesAdapter::OpenAi | ResponsesAdapter::OpenCodeGo
+    ) {
         definition
             .as_object_mut()
             .expect("Responses Tool definition must be an object")
@@ -2417,6 +2460,44 @@ source = "unknown"
             .expect("external OpenCode Go Chat Profile")
     }
 
+    fn opencode_go_responses_fixture_profile(
+        base_url: &str,
+        name: &str,
+        model: &str,
+    ) -> ProviderProfileSnapshot {
+        let encoded_base_url = serde_json::to_string(base_url).expect("encode OpenCode Go origin");
+        let encoded_model = serde_json::to_string(model).expect("encode OpenCode Go model");
+        let document = ConfigDocument::parse(&format!(
+            r#"
+schema_version = 1
+
+[provider]
+profile = "opencode-go-responses-loopback"
+model = {encoded_model}
+
+[providers.opencode-go-responses-loopback]
+template = "opencode-go"
+credential = "opencode-go-responses-loopback-synthetic"
+base_url = {encoded_base_url}
+dialects = ["responses"]
+allow_insecure_loopback = true
+
+[providers.opencode-go-responses-loopback.routes]
+responses = "/responses"
+models = "/models"
+
+[providers.opencode-go-responses-loopback.pricing]
+source = "unknown"
+"#,
+        ))
+        .expect("parse OpenCode Go Responses fixture Config");
+        ConfigRuntime::open(test_config_paths(name), document)
+            .expect("resolve OpenCode Go Responses fixture Config")
+            .selected_provider_profile()
+            .expect("resolve OpenCode Go Responses Profile")
+            .expect("external OpenCode Go Responses Profile")
+    }
+
     fn deepseek_dual_fixture_profile(base_url: &str, name: &str) -> ProviderProfileSnapshot {
         let encoded_base_url = serde_json::to_string(base_url).expect("encode DeepSeek origin");
         let document = ConfigDocument::parse(&format!(
@@ -3292,6 +3373,343 @@ source = "unknown"
             .expect("reconstruct frozen OpenCode Go provider");
         assert_eq!(resumed.dialect(), Some(ProviderDialect::ChatCompletions));
         server.join().expect("join OpenCode Go Chat server");
+    }
+
+    #[test]
+    fn opencode_go_responses_adapter_runs_a_documented_model_with_exact_request_shape() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("OpenCode Go Responses listener");
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let model = "gpt-5.6-luna";
+        let profile =
+            opencode_go_responses_fixture_profile(&base_url, "opencode-go-responses", model);
+        let vault = bound_chat_vault(&profile);
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener
+                .accept()
+                .expect("accept OpenCode Go Responses request");
+            configure_fixture_stream(&stream).expect("configure OpenCode Go Responses request");
+            let body = read_test_request_body_for(&mut stream, "/responses");
+            assert_eq!(
+                body,
+                serde_json::json!({
+                    "input": "hello OpenCode Go Responses",
+                    "max_output_tokens": 4096,
+                    "model": model,
+                    "stream": true,
+                })
+            );
+            write_fixture_response(
+                &mut stream,
+                "200 OK",
+                "text/event-stream",
+                SUCCESS_SSE,
+                true,
+            )
+            .expect("write OpenCode Go Responses response");
+        });
+
+        assert!(has_provider_adapter(
+            "opencode-go",
+            ProviderDialect::Responses
+        ));
+        let mut provider = ConfiguredProvider::for_new_turn_with_preferred_dialect(
+            profile.clone(),
+            model,
+            ProviderDialect::Responses,
+            vault,
+        )
+        .expect("configured OpenCode Go Responses provider");
+        let request = provider_request_with_model_policy(
+            profile.clone(),
+            model,
+            "hello OpenCode Go Responses",
+            ProviderDialect::Responses,
+            4_096,
+            None,
+            None,
+        );
+        let events = provider
+            .run(&request)
+            .expect("OpenCode Go Responses response");
+        assert!(matches!(
+            events.as_slice(),
+            [ProviderEvent::TextDelta(first), ProviderEvent::TextDelta(second), ProviderEvent::Completed(usage)]
+                if first == "fixture network "
+                    && second == "中"
+                    && usage.input_tokens() == Some(4)
+                    && usage.cached_input_tokens() == Some(1)
+                    && usage.output_tokens() == Some(3)
+        ));
+        let resumed = ConfiguredProvider::from_epoch(&request.provider, bound_chat_vault(&profile))
+            .expect("reconstruct frozen OpenCode Go Responses provider");
+        assert_eq!(resumed.dialect(), Some(ProviderDialect::Responses));
+        server.join().expect("join OpenCode Go Responses server");
+    }
+
+    #[test]
+    fn opencode_go_responses_continues_one_tool_call_with_the_frozen_request_shape() {
+        let listener =
+            TcpListener::bind(("127.0.0.1", 0)).expect("OpenCode Go Responses Tool listener");
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let model = "gpt-5.6-luna";
+        let profile =
+            opencode_go_responses_fixture_profile(&base_url, "opencode-go-responses-tool", model);
+        let server = thread::spawn(move || {
+            let expected_tool = serde_json::json!({
+                "type": "function",
+                "name": "local_echo",
+                "description": "Return the supplied message unchanged.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"message": {"type": "string"}},
+                    "required": ["message"],
+                    "additionalProperties": false,
+                },
+                "strict": true,
+            });
+            let (mut initial, _) = listener
+                .accept()
+                .expect("accept initial OpenCode Go Responses request");
+            configure_fixture_stream(&initial)
+                .expect("configure initial OpenCode Go Responses request");
+            assert_eq!(
+                read_test_request_body_for(&mut initial, "/responses"),
+                serde_json::json!({
+                    "input": "echo through OpenCode Go Responses",
+                    "max_output_tokens": 6002,
+                    "model": model,
+                    "stream": true,
+                    "tool_choice": "auto",
+                    "tools": [expected_tool.clone()],
+                })
+            );
+            write_fixture_response(
+                &mut initial,
+                "200 OK",
+                "text/event-stream",
+                TOOL_CALL_SSE,
+                true,
+            )
+            .expect("write OpenCode Go Responses Tool call");
+
+            let (mut continuation, _) = listener
+                .accept()
+                .expect("accept OpenCode Go Responses continuation");
+            configure_fixture_stream(&continuation)
+                .expect("configure OpenCode Go Responses continuation");
+            assert_eq!(
+                read_test_request_body_for(&mut continuation, "/responses"),
+                serde_json::json!({
+                    "input": [{
+                        "type": "function_call_output",
+                        "call_id": "call_http_echo_1",
+                        "output": "tool says hi",
+                    }],
+                    "max_output_tokens": 6002,
+                    "model": model,
+                    "previous_response_id": "resp_http_tool_1",
+                    "stream": true,
+                    "tool_choice": "none",
+                    "tools": [expected_tool],
+                })
+            );
+            write_fixture_response(
+                &mut continuation,
+                "200 OK",
+                "text/event-stream",
+                TOOL_CONTINUATION_SSE,
+                true,
+            )
+            .expect("write OpenCode Go Responses Tool continuation");
+        });
+
+        let mut provider = ConfiguredProvider::for_new_turn_with_dialect(
+            profile.clone(),
+            model,
+            ProviderDialect::Responses,
+            bound_chat_vault(&profile),
+        )
+        .expect("configured OpenCode Go Responses Tool provider");
+        provider.enable_local_echo();
+
+        let runtime_path = test_ledger_path("opencode-go-responses-tool", "runtime");
+        let team_path = test_ledger_path("opencode-go-responses-tool", "team");
+        let tool_path = test_ledger_path("opencode-go-responses-tool", "tool");
+        let (mut kernel, recovery) =
+            RuntimeKernel::open_with_team_and_tools(&runtime_path, &team_path, &tool_path, 1)
+                .expect("open OpenCode Go Responses Kernel");
+        assert!(recovery.into_sessions().is_empty());
+        let operation = kernel
+            .dispatch_team(TeamCommand::AdmitRoot {
+                task: TaskSpec::new(
+                    "exercise OpenCode Go Responses Tool continuation",
+                    TaskScope::from_labels(["opencode-go-responses-tool"]),
+                ),
+                budget: ResourceBudget::new(1_000, 1),
+                capabilities: CapabilitySnapshot::from_capabilities([
+                    Capability::Tool("local.echo".into()),
+                    Capability::Process,
+                ]),
+            })
+            .expect("admit OpenCode Go Responses root");
+        kernel
+            .acknowledge_team_operation(operation.operation)
+            .expect("acknowledge OpenCode Go Responses root admission");
+        let root = match operation.commit.outcome {
+            CommandOutcome::RootAdmitted { session, .. } => session,
+            other => panic!("unexpected OpenCode Go Responses root outcome: {other:?}"),
+        };
+        let mut layers = ConfigLayers::default();
+        layers.cli.provider_profile = Some(profile.profile().to_owned());
+        layers.cli.provider_model = Some(model.to_owned());
+        layers.cli.max_output_tokens = Some(6_002);
+        let outcome = kernel
+            .execute_provider_turn(
+                root,
+                &layers,
+                "echo through OpenCode Go Responses",
+                &mut provider,
+                |_| Ok(ToolResources::default().with_process("greentyper.local.echo.v1")),
+            )
+            .expect("prepare OpenCode Go Responses Tool approval");
+        let approval = match outcome {
+            ProviderTurnOutcome::ApprovalRequired(approval) => approval,
+            other => panic!("unexpected OpenCode Go Responses outcome: {other:?}"),
+        };
+        let output = kernel
+            .resolve_provider_tool_call(
+                approval,
+                ApprovalDecision::Grant {
+                    expires_at_unix_ms: u64::MAX,
+                },
+                &mut EchoExecutor,
+                &mut provider,
+            )
+            .expect("continue OpenCode Go Responses after Tool output");
+        assert_eq!(output.text(), "Echoed: tool says hi");
+        assert_eq!(output.usage_records().len(), 2);
+        assert_eq!(
+            kernel
+                .pending_provider_epoch()
+                .expect("pending OpenCode Go Responses Provider Epoch")
+                .dialect(),
+            Some(ProviderDialect::Responses)
+        );
+        server
+            .join()
+            .expect("join OpenCode Go Responses Tool server");
+
+        drop(kernel);
+        fs::remove_file(runtime_path).expect("cleanup OpenCode Go Responses Runtime Ledger");
+        fs::remove_file(team_path).expect("cleanup OpenCode Go Responses Team Ledger");
+        fs::remove_file(tool_path).expect("cleanup OpenCode Go Responses Tool Ledger");
+    }
+
+    #[test]
+    fn opencode_go_responses_rejects_unverified_models_and_policy_before_network() {
+        let listener =
+            TcpListener::bind(("127.0.0.1", 0)).expect("OpenCode Go Responses guard listener");
+        listener
+            .set_nonblocking(true)
+            .expect("make OpenCode Go Responses guard listener nonblocking");
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let profile = opencode_go_responses_fixture_profile(
+            &base_url,
+            "opencode-go-responses-unknown-model",
+            "unverified-model",
+        );
+        let error = match ConfiguredProvider::for_new_turn_with_dialect(
+            profile,
+            "unverified-model",
+            ProviderDialect::Responses,
+            InMemoryCredentialVault::default(),
+        ) {
+            Ok(_) => panic!("unverified OpenCode Go Responses model must fail closed"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error,
+            ProviderError::InvalidConfiguration(
+                "OpenCode Go model and dialect are not verified by the release catalog"
+            )
+        );
+
+        let model = "gpt-5.6-luna";
+        let profile =
+            opencode_go_responses_fixture_profile(&base_url, "opencode-go-responses-policy", model);
+        let mut provider = ResponsesHttpProvider::with_timeout(
+            profile.clone(),
+            bound_chat_vault(&profile),
+            HTTP_TIMEOUT,
+        )
+        .expect("configured OpenCode Go Responses policy guard");
+        let mut dialectless = provider_request_with_model_policy(
+            profile.clone(),
+            model,
+            "must not accept an unfrozen Responses dialect",
+            ProviderDialect::Responses,
+            4_096,
+            None,
+            None,
+        );
+        dialectless.provider = ProviderEpoch::with_profile_snapshot(
+            ProviderEpochId::new(1).expect("Provider Epoch"),
+            profile.profile(),
+            model,
+            profile.clone(),
+        )
+        .expect("dialectless OpenCode Go Responses Provider Epoch");
+        assert_eq!(
+            provider.require_request_identity(&dialectless),
+            Err(ProviderError::InvalidConfiguration(
+                "Responses provider identity does not match its frozen Profile and dialect"
+            ))
+        );
+        let mismatched = provider_request_with_model_policy(
+            profile.clone(),
+            "unverified-model",
+            "must not send an unverified model",
+            ProviderDialect::Responses,
+            4_096,
+            None,
+            None,
+        );
+        assert_eq!(
+            provider.run(&mismatched),
+            Err(ProviderError::InvalidRequest(
+                "OpenCode Go Responses currently supports only gpt-5.6-luna"
+            ))
+        );
+        for request in [
+            provider_request_with_model_policy(
+                profile.clone(),
+                model,
+                "must not send reasoning",
+                ProviderDialect::Responses,
+                4_096,
+                Some(ReasoningEffort::High),
+                None,
+            ),
+            provider_request_with_model_policy(
+                profile,
+                model,
+                "must not send tier",
+                ProviderDialect::Responses,
+                4_096,
+                None,
+                Some(ServiceTier::Default),
+            ),
+        ] {
+            assert_eq!(
+                provider.run(&request),
+                Err(ProviderError::InvalidRequest(
+                    "OpenCode Go Responses adapter does not support preset reasoning effort or service tier"
+                ))
+            );
+        }
+        assert!(
+            matches!(listener.accept(), Err(error) if error.kind() == io::ErrorKind::WouldBlock)
+        );
     }
 
     #[test]
@@ -4387,42 +4805,6 @@ source = "unknown"
         fs::remove_file(runtime_path).expect("cleanup Runtime Ledger");
         fs::remove_file(team_path).expect("cleanup Team Ledger");
         fs::remove_file(tool_path).expect("cleanup Tool Ledger");
-    }
-
-    #[test]
-    fn catalog_templates_without_a_product_adapter_fail_before_credential_lookup() {
-        let document = ConfigDocument::parse(
-            r#"
-schema_version = 1
-
-[provider]
-profile = "opencode-main"
-model = "opencode-go/gpt-5.6-luna"
-
-[providers.opencode-main]
-template = "opencode-go"
-credential = "synthetic-opencode-reference"
-"#,
-        )
-        .expect("parse OpenCode catalog fixture");
-        let runtime = ConfigRuntime::open(test_config_paths("opencode-adapter-gate"), document)
-            .expect("resolve OpenCode template");
-        let profile = runtime
-            .selected_provider_profile()
-            .expect("resolve DeepSeek Profile")
-            .expect("external Profile");
-        let error = ResponsesHttpProvider::with_timeout(
-            profile,
-            InMemoryCredentialVault::default(),
-            HTTP_TIMEOUT,
-        )
-        .expect_err("OpenCode must not route through the OpenAI Responses adapter");
-        assert_eq!(
-            error,
-            ProviderError::InvalidConfiguration(
-                "Provider Profile template has no configured runtime adapter"
-            )
-        );
     }
 
     #[test]

@@ -21,7 +21,8 @@ and one optional Usage Record. The Runtime Kernel can drive that neutral
 interface through Tool Runtime approval and one Tool continuation. The product
 has configured OpenAI/openai-compatible Responses and Chat Completions HTTP
 adapters, exact DeepSeek Responses, Chat Completions, and Messages pairs, and an
-OpenCode Go Chat adapter for release-catalog-verified Chat models. Each uses a
+OpenCode Go Chat adapter for release-catalog-verified Chat models plus a
+Responses adapter for the exact GPT-5.6 Luna pair. Each uses a
 no-proxy, no-redirect blocking client, streams the response through its matching
 decoder, and drives the single-Agent Runtime. Config Runtime resolves the
 selected Provider Profile and freezes its normalized origin, declared routes,
@@ -36,13 +37,15 @@ Completions because Pro does not support Responses. The effective dialect is
 then frozen in the Provider Epoch. This is model-capability resolution, not a
 retry or a switch after network I/O. Every OpenCode Go record remains a catalog
 fact until its template and selected dialect have an explicit product adapter;
-only verified Chat Completions records are admitted in the current slice.
+verified Chat Completions records and the exact GPT-5.6 Luna Responses record
+are admitted in the current slice.
 Before each request, the selected adapter resolves secret material from an
 origin-bound product vault; remote origins require HTTPS. The headless CLI selects the
 configured OpenAI adapter with `--dialect responses` or
 `--dialect chat_completions`, or the configured DeepSeek adapter with
 `--dialect responses`, `--dialect chat_completions`, or `--dialect messages`,
-or a configured OpenCode Go Chat model with `--dialect chat_completions`, and
+or a configured OpenCode Go Chat model with `--dialect chat_completions` or
+GPT-5.6 Luna with `--dialect responses`, and
 retains the
 deterministic simulator only when no custom profile is selected. Windows
 Credential Manager is the current platform
@@ -243,6 +246,14 @@ lookup. The adapter uses Bearer authorization, the frozen Chat route, and
 `max_completion_tokens`; it rejects preset reasoning effort or service tier
 before network I/O because those gateway semantics are not yet canonicalized.
 
+OpenCode Go Responses admits only the exact release-catalog
+`opencode-go/gpt-5.6-luna` pair. The model/dialect check runs before credential
+lookup. The adapter uses Bearer authorization, the frozen Responses route, and
+`max_output_tokens`; it rejects preset reasoning effort or service tier before
+network I/O because those gateway semantics are not yet canonicalized. One
+approved Tool continuation uses the standard Responses correlation body and
+the same frozen request policy. The continuation identity remains process-local.
+
 OpenAI Responses maps the frozen output limit to `max_output_tokens`, while
 OpenAI Chat Completions maps it to `max_completion_tokens`; those adapters omit
 the field when no limit is selected. The same Config Epoch freezes typed
@@ -256,7 +267,7 @@ rejects service tier. Requested values
 enter Usage Attempts separately from observed tier metadata. Initial requests
 and one in-process Tool continuation use the same Config Epoch values. Replay
 reconstructs them after restart, but does not make Tool continuation resumable.
-OpenCode Go Responses and Messages are not admitted from route strings alone.
+OpenCode Go Messages is not admitted from a route string alone.
 
 ## Tool Boundary
 
@@ -379,7 +390,8 @@ and
 [DeepSeek Responses guide](https://api-docs.deepseek.com/guides/responses_api/),
 [DeepSeek Chat Completions reference](https://api-docs.deepseek.com/api/create-chat-completion),
 [Anthropic Messages streaming reference](https://docs.anthropic.com/en/api/messages-streaming)
-and [DeepSeek Anthropic compatibility guide](https://api-docs.deepseek.com/guides/anthropic_api/).
+and [DeepSeek Anthropic compatibility guide](https://api-docs.deepseek.com/guides/anthropic_api/),
+plus the [OpenCode Go endpoint matrix](https://opencode.ai/docs/go/).
 
 ## Still Pending
 
@@ -392,7 +404,7 @@ and [DeepSeek Anthropic compatibility guide](https://api-docs.deepseek.com/guide
   model, including reasoning, refusal, annotations, and hosted Tools.
 - Reasoning, refusal, annotation, hosted-tool, and other Responses event kinds
   not listed above.
-- OpenCode Go Responses and Messages execution, DeepSeek Chat/Messages
+- OpenCode Go Messages execution, DeepSeek Chat/Messages
   thinking/signature/server-tool blocks, general Preset context/fallback execution, Chat
   Completions refusal/reasoning and other delta kinds, and non-streaming
   Provider responses.
