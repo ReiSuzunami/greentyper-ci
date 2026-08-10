@@ -95,7 +95,8 @@ external-reason exclusion, pre-effect durability failure with zero executor
 calls, and post-effect outcome failure requiring reopen and explicit
 reconciliation.
 
-The first Provider dialect slice is also implemented. A reusable bounded SSE
+The first Provider dialect slice and one additional adapter slice are also
+implemented. A reusable bounded SSE
 framer handles LF, CRLF, lone CR, fragmented UTF-8, comments, multiline data,
 and explicit byte limits. The OpenAI Responses decoder validates a documented
 event subset, assembles streamed text and function arguments, preserves
@@ -103,6 +104,10 @@ optional cache/reasoning usage and service tier, rejects invalid state
 transitions, and redacts Debug output. Its output remains dialect-scoped data,
 not Runtime state or Tool authority. Redacted fixture tests cover success,
 failure, incomplete, and error terminals.
+The separate Chat Completions decoder validates one choice, streamed content,
+one fragmented function call, usage-only completion, fixed incomplete states,
+and `[DONE]`; it shares only the bounded SSE framer and provider-neutral output
+contract with Responses.
 
 A fixture tracer bullet now normalizes the supported Responses facts into
 provider-neutral text, one canonical function call, and optional Usage Records.
@@ -127,20 +132,23 @@ The product exposes it only through explicit `--tool local.echo` approval; it
 is one narrow local process Tool, not a general process sandbox or
 caller-selected command.
 
-A configured product adapter now exercises the concrete Responses HTTP seam.
+A pair of configured product adapters now exercise the concrete Responses and
+Chat Completions HTTP seams.
 Config Runtime resolves and freezes its typed Provider Profile, origin,
-Responses route, dialect, pricing decision, and opaque credential reference.
-The adapter resolves a secret from the origin-bound product vault, requires
-HTTPS for remote origins, disables proxy discovery and redirects, sends a
-bounded canonical request, applies a fixed deadline, and streams the response
-through the core decoder into the real single-Agent Runtime. A private loopback
-fixture retains synthetic authorization. Tests cover fragmented success,
-canonical replay, HTTP failure-body redaction, timeout, endpoint/status policy,
-trusted and untrusted TLS, and missing credential failure before network access.
+selected-dialect route, dialect, pricing decision, and opaque credential
+reference. Each adapter resolves a secret from the origin-bound product vault,
+requires HTTPS for remote origins, disables proxy discovery and redirects,
+sends a bounded canonical request, applies a fixed deadline, and streams the
+response through its core decoder into the real single-Agent Runtime. Private
+loopback fixtures retain synthetic authorization. Tests cover fragmented success,
+canonical replay, exact dialect-specific request and one-Tool continuation
+bodies, HTTP failure-body redaction, timeout, endpoint/status policy, trusted
+and untrusted TLS, and missing credential failure before network access.
 
 The remaining slices are still policy, protocol, and fault-adapter work:
 live-provider validation, non-Windows credential backends, configurable proxy
-policy, live catalog discovery, broader canonical Items, multiple Tool calls,
+policy, live catalog discovery, Anthropic Messages, template-specific DeepSeek
+and OpenCode Go execution, broader canonical Items, multiple Tool calls,
 durable resumable Tool result references, richer TUI/App Server
 approval/delivery, caller-selected process policy, complete Windows Job
 lifetime/resource evidence, reconnect/retry behavior, and the cross-process
@@ -148,7 +156,8 @@ Tool crash matrix remain pending.
 
 Exit criteria:
 
-- A real or fixture Responses Turn can call one approved tool and finish canonically.
+- A fixture Responses or Chat Completions Turn can call one approved Tool and
+  finish canonically.
 - Successful and ambiguous effects cannot auto-repeat after injected crashes.
 - Credentials stay outside files and Ledgers.
 - Provider raw events are diagnostic artifacts, not core state.
@@ -223,9 +232,9 @@ catalog mode includes template data. The selector searches configured presets
 and release candidates, reports compatibility from frozen dialect support plus
 the installed product-adapter boundary, and keeps live availability and Recent
 unknown. `greentyper config catalog` emits the static snapshot without Config,
-credential, or network access. The current
-Responses adapter accepts the official OpenAI template through the same frozen
-capability and endpoint checks as compatible gateways.
+credential, or network access. The current Responses and Chat Completions
+adapters accept the official OpenAI template through the same frozen capability,
+dialect, and endpoint checks as compatible gateways.
 Price Schedules are now a fourth typed Config Object with nested lifecycle and
 schema-generated editor routes. The Config Runtime validates provider/pricing
 provenance, effective intervals, selector overlap, and fixed integer rates before
@@ -269,11 +278,13 @@ Exit criteria:
 
 ## Phase 4: Provider Portability
 
-Extend the release templates and seed catalog with Chat Completions and
-Anthropic Messages adapters, lazy discovery, starter-preset acceptance,
-provider capability probes, explicit fallback chains, observed availability,
-and provider/model epoch switching. Custom gateway routes and user-owned Model
-Presets already resolve through the frozen Config/Provider Epoch boundary.
+Continue the release templates and seed catalog with an Anthropic Messages
+adapter, template-specific DeepSeek and OpenCode Go Chat Completions execution,
+lazy discovery, starter-preset acceptance, provider capability probes, explicit
+fallback chains, observed availability, and provider/model epoch switching.
+The OpenAI/openai-compatible Chat Completions adapter is already implemented;
+custom gateway routes and user-owned Model Presets already resolve through the
+frozen Config/Provider Epoch boundary.
 
 Exit criteria:
 

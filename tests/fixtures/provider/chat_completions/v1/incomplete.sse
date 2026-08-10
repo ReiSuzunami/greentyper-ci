@@ -1,0 +1,7 @@
+data: {"id":"chatcmpl_incomplete_1","object":"chat.completion.chunk","created":1786310400,"model":"fixture-chat-model","choices":[{"index":0,"delta":{"role":"assistant","content":"partial"},"finish_reason":null}],"service_tier":null,"usage":null}
+
+data: {"id":"chatcmpl_incomplete_1","object":"chat.completion.chunk","created":1786310400,"model":"fixture-chat-model","choices":[{"index":0,"delta":{},"finish_reason":"length"}],"service_tier":null,"usage":null}
+
+data: [DONE]
+
+: fixture-end

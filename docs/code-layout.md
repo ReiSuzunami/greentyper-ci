@@ -21,8 +21,9 @@ greentyper/
 ### `greentyper-core`
 
 The only library package. It contains the canonical model, Config Runtime,
-provisional file Ledger, deterministic Provider seam, bounded generic SSE and
-OpenAI Responses dialect decoding, recoverable single-Agent Runtime Kernel,
+provisional file Ledger, deterministic Provider seam, bounded generic SSE plus
+OpenAI Responses and Chat Completions dialect decoding, recoverable single-Agent
+Runtime Kernel,
 Agent Team Runtime, durable Tool Runtime policy, and the immutable Usage
 Attempt/window/rollup projection. It also owns the immutable release Provider
 Catalog and its field provenance. Config Runtime owns catalog-template
@@ -40,8 +41,9 @@ The core must build and run pure tests on macOS ARM. Platform-specific I/O enter
 
 The shipped product executable. It owns composition and the target TUI, CLI,
 App Server, and concrete production adapters. Its current private modules
-include configured Responses HTTP/SSE, a bounded status-only Provider connection
-test adapter, origin-bound Windows Credential Manager access, the fixed
+include configured Responses and Chat Completions HTTP/SSE, a bounded
+status-only Provider connection test adapter, origin-bound Windows Credential
+Manager access, the fixed
 `local.echo` process executor, a terminal-neutral presentation projection, Config
 Object lifecycle/Provider-wizard controller, deterministic viewport-row layout, and a
 ProductDriver that composes the Kernel-owned Team, Tool, Provider, approval, and

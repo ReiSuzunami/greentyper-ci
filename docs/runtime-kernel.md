@@ -11,11 +11,12 @@ output preparation from user-visible output acknowledgement.
 This slice is deliberately smaller than the full Provider Runtime and product
 Agent Team execution path. The core Kernel owns the durable Team and Tool
 adapters, gates root admission, rebinds non-terminal Sessions, and reconciles
-prepared Tool effects. A fixture Provider driver can now normalize one OpenAI
-Responses function call, cross Tool Runtime approval and effect durability,
-continue the Provider once, and prepare canonical output. The product CLI now
-drives configured Responses profiles through the provider-neutral seam and
-retains the deterministic simulator for the unconfigured default. Its opt-in
+prepared Tool effects. Fixture Provider drivers can now normalize one OpenAI
+Responses or Chat Completions function call, cross Tool Runtime approval and
+effect durability, continue the Provider once, and prepare canonical output.
+The product CLI now drives configured OpenAI/openai-compatible profiles through
+an explicit frozen Responses or Chat Completions dialect and retains the
+deterministic simulator for the unconfigured default. Its opt-in
 `local.echo` path composes the Kernel-owned Team, Tool, Provider continuation,
 explicit approval, stdout delivery, and acknowledgement seams. The
 provisional checksummed file Ledger is not yet the recorded SQLite-versus-
@@ -235,7 +236,8 @@ startup without one enters repair instead of silently dropping a layer.
 ## Current Commands
 
 ```text
-greentyper headless [--ledger PATH] [--tool local.echo] --input TEXT
+greentyper headless [--ledger PATH] [--tool local.echo]
+  [--dialect responses|chat_completions|messages] --input TEXT
 greentyper resume [--ledger PATH] [--tool local.echo]
 greentyper status [--ledger PATH]
 greentyper stats [--ledger PATH] [--at UNIX_MS]
@@ -334,10 +336,10 @@ future dedicated authority paths.
 - Live-provider validation, non-Windows credential backends, configurable proxy
   policy, broader TLS platform evidence, reconnect policy, multiple or parallel
   Tool calls, resumable result references, broader canonical Items, and the
-  unimplemented Provider event kinds. The bounded SSE, first OpenAI Responses
-  decoder, neutral normalizer, typed frozen Provider Profile metadata,
-  origin-bound Windows credential lookup, configured HTTPS adapter, and
-  one-Tool fixture Kernel path are present.
+  unimplemented Provider event kinds. The bounded SSE, OpenAI Responses and
+  Chat Completions decoders, neutral normalizers, typed frozen Provider Profile
+  metadata, origin-bound Windows credential lookup, configured HTTPS adapters,
+  and one-Tool fixture Kernel path are present.
 - Broader Tool adapters and sandboxing: the private fixed `local.echo` tracer,
   Unix process-group termination, and Windows Job wrapper are present;
   caller-selected process policy, complete Windows lifetime/resource evidence,

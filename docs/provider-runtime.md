@@ -2,31 +2,39 @@
 
 ## Decision
 
-Provider protocol handling is split into two layers inside `greentyper-core`:
+Provider protocol handling is split into a transport layer and dialect-scoped
+decoders inside `greentyper-core`:
 
 1. `provider::sse` frames bounded Server-Sent Events without knowing a Provider
    dialect.
 2. `provider::responses` validates and assembles the supported OpenAI Responses
    streaming event subset into typed, dialect-scoped facts.
+3. `provider::chat_completions` validates and assembles the supported OpenAI
+   Chat Completions streaming subset into separate typed facts.
 
-The Responses facts retain OpenAI response, item, output, and content indices.
-They are not Runtime authority or durable state. A separate normalizer reduces
-the supported terminal stream to provider-neutral text deltas, one canonical
-function call, and one optional Usage Record. The Runtime Kernel can drive that
-neutral interface through Tool Runtime approval and one Tool continuation. The
-product has a configured Responses HTTP adapter that sends one request through
-a no-proxy, no-redirect blocking client, streams the response through this
+The dialect facts retain their wire identities and ordering data. They are not
+Runtime authority or durable state. Separate normalizers reduce either supported
+terminal stream to provider-neutral text deltas, one canonical function call,
+and one optional Usage Record. The Runtime Kernel can drive that neutral
+interface through Tool Runtime approval and one Tool continuation. The product
+has configured Responses and Chat Completions HTTP adapters. Each uses a
+no-proxy, no-redirect blocking client, streams the response through its matching
 decoder, and drives the single-Agent Runtime. Config Runtime resolves the
-selected Provider Profile and freezes its normalized origin, Responses route,
-dialect, pricing source, and opaque credential reference in the Provider Epoch.
-The release-bundled OpenAI template now supplies those defaults; the adapter
-admits it and explicit compatible gateways only after the frozen Profile declares
-Responses support and a Responses endpoint. Release DeepSeek and OpenCode Go
-records remain catalog facts until their selected dialect has a product adapter.
-Before each request, the adapter resolves secret material from an origin-bound
-product vault; remote origins require HTTPS. The headless CLI uses this adapter
-for configured profiles and retains the deterministic simulator only when no
-custom profile is selected. Windows Credential Manager is the current platform
+selected Provider Profile and freezes its normalized origin, declared routes,
+explicit dialect, pricing source, and opaque credential reference in the
+Provider Epoch.
+The release-bundled OpenAI template now supplies those defaults; the adapters
+admit it and explicit compatible gateways only after the frozen Profile declares
+the selected dialect and its endpoint. Adapter selection never infers one
+dialect from another. Release DeepSeek and OpenCode Go records remain catalog
+facts until their template and selected dialect have an explicit product
+adapter.
+Before each request, the selected adapter resolves secret material from an
+origin-bound product vault; remote origins require HTTPS. The headless CLI selects the
+configured adapter with `--dialect responses` or `--dialect chat_completions`
+and retains the deterministic simulator only when no custom profile is selected.
+`messages` is a declared but currently unsupported execution dialect. Windows
+Credential Manager is the current platform
 backend; non-Windows product credential access fails closed. Retry, reconnect,
 live-provider validation, and broader Tool presentation remain separate work.
 The Kernel durably brackets each request and continuation as a separate Usage
@@ -50,9 +58,13 @@ let dialect_events = decoder.finish()?;
 let provider_events = normalize_responses_events(&dialect_events)?;
 ```
 
-`SseParser` is separately reusable by transports that need only framing. Both
-parsers become poisoned after an error so callers cannot continue from a state
-whose byte or protocol position is uncertain.
+Chat Completions follows the same shape with
+`ChatCompletionsSseDecoder` and `normalize_chat_completions_events`; the two
+dialect event types are intentionally not interchangeable.
+
+`SseParser` is separately reusable by transports that need only framing. The
+framer and both dialect decoders become poisoned after an error so callers
+cannot continue from a state whose byte or protocol position is uncertain.
 
 ## SSE Framing Contract
 
@@ -119,6 +131,32 @@ does not need, preserves the Provider call ID only as stable correlation data,
 maps supported usage fields without fabricating missing values, and classifies
 failed, incomplete, or error terminals without persisting upstream free text.
 
+## Supported Chat Completions Events
+
+The Chat Completions slice accepts `data` messages containing one streamed
+completion with a stable completion ID, model, and optional service tier. It
+supports exactly one choice at index 0, assistant-role content deltas, one
+fragmented function `tool_calls` entry at index 0, a usage-only chunk after the
+choice finishes, and the terminal `[DONE]` sentinel. `stop` and `tool_calls` are
+complete finish reasons; `length` and `content_filter` produce a fixed
+incomplete classification rather than successful canonical output.
+
+One decoded stream has the same 4 MiB total, 1 MiB line, 4096-event, 64 KiB
+argument, 64-level argument-depth, and caller-bounded text limits as the
+Responses decoder. The decoder rejects multiple choices or Tool calls, changed
+wire identity, changed service tier, usage before choice completion, duplicate
+usage, content after completion, missing or duplicate terminal state, refusal
+deltas, and the deprecated `function_call` shape. Function arguments must form
+one canonical JSON object. Missing usage fields remain unknown. Supported usage
+preserves prompt, cached-prompt, completion, reasoning-completion, and total
+tokens plus optional service tier without inventing cache-write counts.
+
+`normalize_chat_completions_events` removes Chat chunk identities, preserves the
+Tool call ID only as correlation data, and emits the same provider-neutral
+`TextDelta`, `FunctionCall`, and `Completed` facts used by the Kernel. Debug and
+error paths report only bounded categories or byte counts, never Provider text,
+arguments, identifiers, or upstream error bodies.
+
 ## Tool Boundary
 
 A decoded function call remains only Provider data. The Kernel's explicit
@@ -138,12 +176,16 @@ If the process dies after a durable Tool success but before continuation, the
 raw result is intentionally unavailable after restart: recovery blocks the
 Turn and never invokes the successful effect again.
 
-When `local.echo` is enabled, the HTTP adapter advertises the Responses-safe
-function name `local_echo`, maps it back to the stable product Tool identity
-`local.echo`, and rejects every unconfigured returned Tool. Continuation sends
-one `function_call_output` item correlated by the Provider call ID and the
-previous response ID. Those response identifiers remain process-local; they
-are not authority and are not written to the Runtime or Tool Ledger.
+When `local.echo` is enabled, both HTTP adapters advertise the wire-safe function
+name `local_echo`, map it back to the stable product Tool identity `local.echo`,
+and reject every unconfigured returned Tool. Responses continuation sends one
+`function_call_output` item correlated by the Provider call ID and previous
+response ID. Chat Completions continuation reconstructs the bounded user,
+assistant Tool-call, and Tool-result message sequence with the same call ID.
+Those correlation details remain process-local; they are not authority and are
+not written to the Runtime or Tool Ledger. Consequently neither adapter can
+resume a Provider continuation after process loss; the durable Runtime blocks
+rather than repeating a successful or ambiguous Tool effect.
 
 The product `ProductDriver` owns the narrow user-visible path. It restores the
 Kernel-derived Agent Session, presents and flushes any durable Team operation
@@ -161,6 +203,13 @@ event-count, output, item, argument-byte, argument-depth, and SSE data-line
 bounds, non-object arguments, terminal ordering, missing terminal events,
 poisoning, optional usage, and redacted Debug output.
 
+Redacted fixtures under `tests/fixtures/provider/chat_completions/v1/` cover
+fragmented text, one fragmented function call, usage-only completion, Tool
+continuation, and incomplete termination. Module tests additionally cover
+split transport chunks, identity and service-tier changes, multiple choices,
+duplicate usage, missing and post-terminal data, output and argument limits,
+argument depth, poisoning, canonical normalization, and redacted Debug output.
+
 The Kernel tracer-bullet test decodes a first fixture containing text and one
 function call, durably approves and executes one injected Tool, decodes a
 continuation fixture, prepares and acknowledges the combined output, and then
@@ -168,21 +217,24 @@ replays all three Ledgers. Companion tests cover stale Sessions, ambiguous Tool
 effects, non-UTF-8 Tool output, and process death after durable Tool success
 without effect repetition.
 
-Product integration tests exercise the adapter against an actual loopback TCP
-server. Config Runtime resolves the fixture profile and the adapter uses its
-frozen Responses endpoint; the server validates that route, model, input,
-streaming flag, and synthetic Authorization header, then fragments a bounded
-SSE response across network writes. Tests prove canonical Runtime output and
-replay, fixed classification for HTTP 503 and request timeout, and exclusion of
-the upstream error body from stderr and the Runtime Ledger. Module tests drive
+Product integration tests exercise both adapters against actual loopback TCP
+servers. Config Runtime resolves the fixture profile and each adapter uses its
+exact frozen dialect endpoint; the server validates route, model, input or
+messages, streaming flags, and synthetic Authorization, then fragments a
+bounded SSE response across network writes. Chat tests cover canonical text and
+usage, one approved function call and exact continuation body, missing explicit
+dialect or credential before network access, HTTP 503, wrong content type, and
+malformed SSE with fixed redacted errors. Responses tests additionally prove
+canonical replay, request timeout, and exclusion of an upstream error body from
+stderr and the Runtime Ledger. Module tests drive
 a locally generated HTTPS certificate through an explicitly trusted test root,
 reject the same certificate under default trust, verify endpoint and status
 classification, require an origin-bound credential before network access, and
 redact Authorization. The fixture remains synthetic and does not constitute a
 live-provider test.
 
-The product also has an explicit Provider connection-test port and one current
-HTTP adapter for OpenAI-compatible Profiles. It sends one bounded GET to the
+The product also has an explicit Provider connection-test port for configured
+OpenAI-compatible Profiles. It sends one bounded GET to the
 frozen Profile's configured `models` route, with proxy discovery and redirects
 disabled and the same origin-bound credential policy as inference. It does not
 read the response body, discover models, mutate Config, retry, or expose the
@@ -190,9 +242,10 @@ endpoint or credential in its status. The terminal-neutral Provider Profile
 wizard can test an uncommitted validated candidate; `config test-provider` tests
 the currently selected committed Profile.
 
-A two-request HTTP test verifies the exact function definition, initial Tool
-call stream, canonical `local.echo` mapping, approved output correlation,
-previous-response continuation request, final text, and both Usage Records.
+A two-request test for each dialect verifies its exact function definition,
+initial Tool-call stream, canonical `local.echo` mapping, approved output
+correlation, dialect-specific continuation request, final text, and both Usage
+Records.
 Runtime tests additionally verify that those two records become two immutable
 Usage Attempts and that a process interruption closes the prior attempt before
 an explicit resume starts a new one.
@@ -203,19 +256,24 @@ replays its dedicated Team and Tool Ledgers while preserving stdout delivery
 and final `ready` status.
 
 The event shapes are checked against the official
-[OpenAI Responses streaming event reference](https://developers.openai.com/api/reference/resources/responses/streaming-events/).
+[OpenAI Responses streaming event reference](https://developers.openai.com/api/reference/resources/responses/streaming-events/)
+and
+[Chat Completions streaming event reference](https://developers.openai.com/api/reference/resources/chat/subresources/completions/streaming-events).
 
 ## Still Pending
 
 - Live credential-gated provider validation, live catalog discovery/refresh,
   starter-preset acceptance, configurable proxy policy, broader TLS platform
   evidence, reconnect classification, and retry policy. Release Provider
-  Template defaults and seed catalog facts are bundled, but the current adapter
-  does not reconnect or retry partial streams.
+  Template defaults and seed catalog facts are bundled, but the current adapters
+  do not reconnect or retry partial streams.
 - Broader normalization into the eventual provider-neutral canonical Item
   model, including reasoning, refusal, annotations, and hosted Tools.
 - Reasoning, refusal, annotation, hosted-tool, and other Responses event kinds
   not listed above.
+- Anthropic Messages, template-specific DeepSeek and OpenCode Go execution,
+  Chat Completions refusal/reasoning and other delta kinds, and non-streaming
+  Provider responses.
 - Multiple Tool calls, parallel calls, persisted resumable Provider
   continuation data, and durable storage of a redacted Tool result reference.
 - Rich TUI/App Server Tool presentation, non-Windows credential backends, raw

@@ -1,0 +1,13 @@
+data: {"id":"chatcmpl_http_tool_2","object":"chat.completion.chunk","created":1786310401,"model":"fixture-model","choices":[{"index":0,"delta":{"role":"assistant","content":null},"finish_reason":null}],"service_tier":"default","usage":null}
+
+data: {"id":"chatcmpl_http_tool_2","object":"chat.completion.chunk","created":1786310401,"model":"fixture-model","choices":[{"index":0,"delta":{"content":"Echoed: "},"finish_reason":null}],"service_tier":"default","usage":null}
+
+data: {"id":"chatcmpl_http_tool_2","object":"chat.completion.chunk","created":1786310401,"model":"fixture-model","choices":[{"index":0,"delta":{"content":"tool says hi"},"finish_reason":null}],"service_tier":"default","usage":null}
+
+data: {"id":"chatcmpl_http_tool_2","object":"chat.completion.chunk","created":1786310401,"model":"fixture-model","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"service_tier":"default","usage":null}
+
+data: {"id":"chatcmpl_http_tool_2","object":"chat.completion.chunk","created":1786310401,"model":"fixture-model","choices":[],"service_tier":"default","usage":{"prompt_tokens":16,"completion_tokens":5,"total_tokens":21,"prompt_tokens_details":{"cached_tokens":4},"completion_tokens_details":{"reasoning_tokens":0}}}
+
+data: [DONE]
+
+: fixture-end

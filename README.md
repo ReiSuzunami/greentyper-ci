@@ -6,7 +6,7 @@ GreenTyper is a Windows-first coding-agent runtime written in Rust. It is design
 
 GreenTyper is an independent product with selected Codex-compatible protocol and Agent semantics. It is not a Codex CLI clone, a command-compatible replacement, or a wrapper around another agent process.
 
-> Status: feature implementation is active. The repository now contains deterministic Agent Team policy, a recoverable single-Agent headless spine, a bounded OpenAI Responses SSE decoder, and a core Tool Runtime seam with durable call identity, approval binding, prepared-effect ordering, and explicit reconciliation. It is not yet a complete coding-agent product.
+> Status: feature implementation is active. The repository now contains deterministic Agent Team policy, a recoverable single-Agent headless spine, bounded OpenAI Responses and Chat Completions SSE decoders, and a core Tool Runtime seam with durable call identity, approval binding, prepared-effect ordering, and explicit reconciliation. It is not yet a complete coding-agent product.
 
 > Repository topology: [`ReiSuzunami/greentyper`](https://github.com/ReiSuzunami/greentyper) is the private canonical repository. [`ReiSuzunami/greentyper-ci`](https://github.com/ReiSuzunami/greentyper-ci) is a temporary public, non-authoritative mirror used only for hosted CI and build artifacts. See the [repository policy](docs/repository-policy.md).
 
@@ -85,6 +85,10 @@ cargo run -p greentyper -- config get provider.model
 cargo run -p greentyper -- config test-provider
 ```
 
+For a configured OpenAI or openai-compatible Profile, `headless` accepts
+`--dialect responses` or `--dialect chat_completions`. The declared `messages`
+value currently fails closed because no Anthropic Messages adapter is installed.
+
 The core Agent Team policy, Config Runtime, recoverable single-Agent Runtime,
 and first Tool Runtime policy slice compile and run through interface-level and
 cross-process headless tests. Config currently includes versioned TOML, drafts,
@@ -113,16 +117,19 @@ explicit `approve` or `deny` decision from stdin, and acknowledges final output
 only after stdout is flushed. A restart before approval re-presents the durable
 request; a successful or ambiguous effect is never automatically repeated.
 
-Configured OpenAI-compatible Responses profiles now run through a no-proxy,
-no-redirect HTTPS client, origin-bound credential lookup, bounded streaming
-decode, and a fixed deadline. Config Runtime freezes the normalized origin,
-Responses route, dialect, pricing decision, and opaque credential reference in
-the Provider Epoch; `resume` reconstructs the adapter from that snapshot. A
-private loopback fixture retains synthetic authorization for deterministic
-transport tests. The core also normalizes one Responses function call, crosses
-durable Tool approval/effect policy, continues the Provider once, and prepares
-canonical output without repeating successful or ambiguous effects. Headless
-execution keeps the deterministic simulator when no custom profile is selected.
+Configured OpenAI-compatible Responses and Chat Completions profiles now run
+through no-proxy, no-redirect HTTPS clients, origin-bound credential lookup,
+bounded streaming decode, and a fixed deadline. Config Runtime freezes the
+normalized origin, selected-dialect route, dialect, pricing decision, and opaque
+credential reference in the Provider Epoch; adapter reconstruction uses that
+snapshot and never infers a different dialect. Private loopback fixtures retain
+synthetic authorization for deterministic transport tests. Each core decoder
+normalizes one function call, crosses durable Tool approval/effect policy,
+continues the Provider once with its dialect-specific wire shape, and prepares
+canonical output without repeating successful or ambiguous effects. Provider
+continuation correlation remains process-local, so restart after a completed
+Tool effect blocks instead of reconstructing or repeating it. Headless execution
+keeps the deterministic simulator when no custom profile is selected.
 Runtime Event schema 5 now brackets every Provider invocation with a durable
 Usage Attempt, records UTC start/completion and outcome, preserves exact,
 estimated, and unknown token classes, and rebuilds cached Turn, Thread, Agent,
@@ -177,11 +184,11 @@ conflicts leave the editor live. This is not an ANSI/VT backend, live keyboard
 loop, ConPTY integration, rendered Config Center, object-name dialog, or
 rendered template picker, starter-preset workflow, or live catalog discovery.
 Live credential-gated provider validation, configurable proxy policy,
-reconnect/retry, richer
-approval presentation, broader Provider and Tool adapters, Workspace, TUI, and
-App Server work remain. The loopback Provider tracer remains an internal
-harness; `local.echo` is intentionally a fixed opt-in command rather than a
-general process runner. The file Ledger remains
+reconnect/retry, Anthropic Messages, template-specific DeepSeek/OpenCode
+execution, richer approval presentation, broader Provider and Tool adapters,
+Workspace, TUI, and App Server work remain. The loopback Provider tracer remains
+an internal harness; `local.echo` is intentionally a fixed opt-in command rather
+than a general process runner. The file Ledger remains
 provisional. The acceptance runner can emit bound raw evidence,
 but is not yet a full Target Acceptance Run. Follow the
 [implementation plan](docs/implementation-plan.md).

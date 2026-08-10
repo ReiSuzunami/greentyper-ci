@@ -1,0 +1,17 @@
+data: {"id":"chatcmpl_fixture_1","object":"chat.completion.chunk","created":1786310400,"model":"fixture-chat-model","choices":[{"index":0,"delta":{"role":"assistant","content":null},"finish_reason":null}],"service_tier":"default","usage":null}
+
+data: {"id":"chatcmpl_fixture_1","object":"chat.completion.chunk","created":1786310400,"model":"fixture-chat-model","choices":[{"index":0,"delta":{"content":"Hello "},"finish_reason":null}],"service_tier":"default","usage":null}
+
+data: {"id":"chatcmpl_fixture_1","object":"chat.completion.chunk","created":1786310400,"model":"fixture-chat-model","choices":[{"index":0,"delta":{"content":"中"},"finish_reason":null}],"service_tier":"default","usage":null}
+
+data: {"id":"chatcmpl_fixture_1","object":"chat.completion.chunk","created":1786310400,"model":"fixture-chat-model","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_fixture_1","type":"function","function":{"name":"weather","arguments":"{\"city\":\""}}]},"finish_reason":null}],"service_tier":"default","usage":null}
+
+data: {"id":"chatcmpl_fixture_1","object":"chat.completion.chunk","created":1786310400,"model":"fixture-chat-model","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"香港\",\"unit\":\"c\"}"}}]},"finish_reason":null}],"service_tier":"default","usage":null}
+
+data: {"id":"chatcmpl_fixture_1","object":"chat.completion.chunk","created":1786310400,"model":"fixture-chat-model","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"service_tier":"default","usage":null}
+
+data: {"id":"chatcmpl_fixture_1","object":"chat.completion.chunk","created":1786310400,"model":"fixture-chat-model","choices":[],"service_tier":"default","usage":{"prompt_tokens":11,"completion_tokens":7,"total_tokens":18,"prompt_tokens_details":{"cached_tokens":3},"completion_tokens_details":{"reasoning_tokens":2}}}
+
+data: [DONE]
+
+: fixture-end

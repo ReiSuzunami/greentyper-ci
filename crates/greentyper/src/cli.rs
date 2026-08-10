@@ -12,7 +12,7 @@ use greentyper_core::config::{
 };
 use greentyper_core::model::DeliveryId;
 use greentyper_core::pricing::PriceScheduleBook;
-use greentyper_core::provider::ProviderError;
+use greentyper_core::provider::{ProviderDialect, ProviderError};
 use greentyper_core::provider_catalog::ProviderCatalog;
 use greentyper_core::runtime::{
     AcknowledgeOutcome, PreparedOutput, ProviderToolApproval, RecoveryStatus, RuntimeKernel,
@@ -46,13 +46,29 @@ pub fn run(arguments: impl Iterator<Item = String>) -> Result<(), CliError> {
             ledger,
             input,
             local_echo,
+            dialect,
         } => {
             let config = open_config_runtime(default_config_paths()?)?;
             let layers = config.config_layers()?.clone();
             let profile = config.selected_provider_profile()?;
             let usage_windows = config.resolved_usage_windows()?;
             let price_schedules = config.resolved_price_schedules()?;
-            let mut provider = ConfiguredProvider::for_new_turn(profile, PlatformCredentialVault)?;
+            let mut provider = match (profile, dialect) {
+                (Some(profile), Some(dialect)) => ConfiguredProvider::for_new_turn_with_dialect(
+                    profile,
+                    dialect,
+                    PlatformCredentialVault,
+                )?,
+                (profile, None) => {
+                    ConfiguredProvider::for_new_turn(profile, PlatformCredentialVault)?
+                }
+                (None, Some(_)) => {
+                    return Err(ProviderError::InvalidConfiguration(
+                        "simulator Provider cannot select a wire dialect",
+                    )
+                    .into());
+                }
+            };
             let has_product_state = has_product_driver_state(&ledger)?;
             if local_echo || has_product_state {
                 provider.enable_local_echo();
@@ -447,6 +463,7 @@ enum Command {
         ledger: PathBuf,
         input: String,
         local_echo: bool,
+        dialect: Option<ProviderDialect>,
     },
     Resume {
         ledger: PathBuf,
@@ -610,6 +627,7 @@ fn parse(mut arguments: impl Iterator<Item = String>) -> Result<Command, CliErro
     let mut input = None;
     let mut delivery = None;
     let mut tool = None;
+    let mut dialect = None;
     let mut at = None;
     let mut summary_only = false;
     let mut limit = None;
@@ -627,6 +645,7 @@ fn parse(mut arguments: impl Iterator<Item = String>) -> Result<Command, CliErro
             "--input" => &mut input,
             "--delivery" => &mut delivery,
             "--tool" => &mut tool,
+            "--dialect" => &mut dialect,
             "--at" => &mut at,
             "--limit" => &mut limit,
             "--cursor" => &mut cursor,
@@ -666,16 +685,19 @@ fn parse(mut arguments: impl Iterator<Item = String>) -> Result<Command, CliErro
         "headless" => {
             reject_option(&delivery, "--delivery is not valid for headless")?;
             reject_option(&at, "--at is not valid for headless")?;
+            let dialect = dialect.as_deref().map(parse_provider_dialect).transpose()?;
             Ok(Command::Headless {
                 ledger,
                 input: input.ok_or(CliError::Usage("headless requires --input"))?,
                 local_echo,
+                dialect,
             })
         }
         "resume" => {
             reject_option(&input, "--input is not valid for resume")?;
             reject_option(&delivery, "--delivery is not valid for resume")?;
             reject_option(&at, "--at is not valid for resume")?;
+            reject_option(&dialect, "--dialect is not valid for resume")?;
             Ok(Command::Resume { ledger, local_echo })
         }
         "status" => {
@@ -683,12 +705,14 @@ fn parse(mut arguments: impl Iterator<Item = String>) -> Result<Command, CliErro
             reject_option(&delivery, "--delivery is not valid for status")?;
             reject_option(&tool, "--tool is not valid for status")?;
             reject_option(&at, "--at is not valid for status")?;
+            reject_option(&dialect, "--dialect is not valid for status")?;
             Ok(Command::Status { ledger })
         }
         "stats" => {
             reject_option(&input, "--input is not valid for stats")?;
             reject_option(&delivery, "--delivery is not valid for stats")?;
             reject_option(&tool, "--tool is not valid for stats")?;
+            reject_option(&dialect, "--dialect is not valid for stats")?;
             let at = at
                 .map(|value| {
                     value
@@ -727,6 +751,7 @@ fn parse(mut arguments: impl Iterator<Item = String>) -> Result<Command, CliErro
             reject_option(&input, "--input is not valid for reconcile")?;
             reject_option(&tool, "--tool is not valid for reconcile")?;
             reject_option(&at, "--at is not valid for reconcile")?;
+            reject_option(&dialect, "--dialect is not valid for reconcile")?;
             let delivery = delivery
                 .ok_or(CliError::Usage("reconcile requires --delivery"))?
                 .parse::<u64>()
@@ -736,6 +761,17 @@ fn parse(mut arguments: impl Iterator<Item = String>) -> Result<Command, CliErro
             Ok(Command::Reconcile { ledger, delivery })
         }
         _ => Err(CliError::Usage("unknown command")),
+    }
+}
+
+fn parse_provider_dialect(value: &str) -> Result<ProviderDialect, CliError> {
+    match value {
+        "responses" => Ok(ProviderDialect::Responses),
+        "chat_completions" => Ok(ProviderDialect::ChatCompletions),
+        "messages" => Ok(ProviderDialect::Messages),
+        _ => Err(CliError::Usage(
+            "--dialect must be responses, chat_completions, or messages",
+        )),
     }
 }
 
@@ -1292,7 +1328,7 @@ const USAGE: &str = "\
 GreenTyper headless Runtime\n\
 \n\
 Usage:\n\
-  greentyper headless [--ledger PATH] [--tool local.echo] --input TEXT\n\
+  greentyper headless [--ledger PATH] [--dialect DIALECT] [--tool local.echo] --input TEXT\n\
   greentyper resume [--ledger PATH] [--tool local.echo]\n\
   greentyper status [--ledger PATH]\n\
   greentyper stats [--ledger PATH] [--at UNIX_MS] [--summary-only | --limit N [--cursor CURSOR]]\n\
@@ -1497,6 +1533,46 @@ mod tests {
             ),
             Ok(Command::Headless {
                 local_echo: true,
+                ..
+            })
+        ));
+        assert!(
+            parse(
+                [
+                    "headless".to_owned(),
+                    "--input".to_owned(),
+                    "hello".to_owned(),
+                    "--dialect".to_owned(),
+                    "future".to_owned(),
+                ]
+                .into_iter()
+            )
+            .is_err()
+        );
+        assert!(
+            parse(
+                [
+                    "resume".to_owned(),
+                    "--dialect".to_owned(),
+                    "chat_completions".to_owned(),
+                ]
+                .into_iter()
+            )
+            .is_err()
+        );
+        assert!(matches!(
+            parse(
+                [
+                    "headless".to_owned(),
+                    "--input".to_owned(),
+                    "hello".to_owned(),
+                    "--dialect".to_owned(),
+                    "chat_completions".to_owned(),
+                ]
+                .into_iter()
+            ),
+            Ok(Command::Headless {
+                dialect: Some(greentyper_core::provider::ProviderDialect::ChatCompletions),
                 ..
             })
         ));
