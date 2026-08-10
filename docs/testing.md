@@ -172,6 +172,11 @@ amount against the Config Epoch evidence, and retain schema 1-4 replay. Product
 tests prove resolved Config schedules reach admission, `stats` emits the frozen
 version/currency and per-currency rollup without user text, and the terminal-neutral
 statusline distinguishes known, mixed-unknown, estimated, and overflow cost facts.
+Stats compatibility tests keep the original complete JSON snapshot unchanged.
+Report tests cover summary-only output, bounded first and continuation pages,
+cursor-checksum corruption rejection, requested-instant mismatch, page-size limits,
+and stale-revision rejection after another Usage Attempt is appended; no page
+silently combines attempts from different Ledger heads.
 
 ### Crash and Recovery Tests
 

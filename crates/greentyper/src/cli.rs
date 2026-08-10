@@ -18,7 +18,9 @@ use greentyper_core::runtime::{
     AcknowledgeOutcome, PreparedOutput, ProviderToolApproval, RecoveryStatus, RuntimeKernel,
 };
 use greentyper_core::tool_runtime::ToolEffectExecutor;
-use greentyper_core::usage::{RuntimeUsageSnapshot, UsageError, UsageTimestamp, UsageWindow};
+use greentyper_core::usage::{
+    RuntimeUsageQuery, RuntimeUsageSnapshot, UsageCursor, UsageError, UsageTimestamp, UsageWindow,
+};
 
 use crate::credential_vault::{
     CredentialVault, CredentialVaultError, MAX_SECRET_BYTES, PlatformCredentialVault,
@@ -92,13 +94,21 @@ pub fn run(arguments: impl Iterator<Item = String>) -> Result<(), CliError> {
             let snapshot = RuntimeKernel::inspect(&ledger)?;
             print_status(&snapshot.status)
         }
-        Command::Stats { ledger, at } => {
+        Command::Stats { ledger, at, query } => {
             let at = match at {
                 Some(at) => at,
                 None => UsageTimestamp::now()?,
             };
-            let stats: RuntimeUsageSnapshot = RuntimeKernel::inspect_usage(&ledger, at)?;
-            write_json(&stats)
+            match query {
+                Some(query) => {
+                    let report = RuntimeKernel::inspect_usage_report(&ledger, at, query)?;
+                    write_json(&report)
+                }
+                None => {
+                    let stats: RuntimeUsageSnapshot = RuntimeKernel::inspect_usage(&ledger, at)?;
+                    write_json(&stats)
+                }
+            }
         }
         Command::Reconcile { ledger, delivery } => {
             let mut runtime = open_runtime(&ledger)?;
@@ -448,6 +458,7 @@ enum Command {
     Stats {
         ledger: PathBuf,
         at: Option<UsageTimestamp>,
+        query: Option<RuntimeUsageQuery>,
     },
     Reconcile {
         ledger: PathBuf,
@@ -600,13 +611,25 @@ fn parse(mut arguments: impl Iterator<Item = String>) -> Result<Command, CliErro
     let mut delivery = None;
     let mut tool = None;
     let mut at = None;
+    let mut summary_only = false;
+    let mut limit = None;
+    let mut cursor = None;
     while let Some(argument) = arguments.next() {
+        if argument == "--summary-only" {
+            if summary_only {
+                return Err(CliError::Usage("duplicate option"));
+            }
+            summary_only = true;
+            continue;
+        }
         let slot = match argument.as_str() {
             "--ledger" => &mut ledger,
             "--input" => &mut input,
             "--delivery" => &mut delivery,
             "--tool" => &mut tool,
             "--at" => &mut at,
+            "--limit" => &mut limit,
+            "--cursor" => &mut cursor,
             _ => return Err(CliError::Usage("unknown option")),
         };
         if slot.is_some() {
@@ -619,6 +642,13 @@ fn parse(mut arguments: impl Iterator<Item = String>) -> Result<Command, CliErro
             return Err(CliError::Usage("option is missing its value"));
         }
         *slot = Some(value);
+    }
+    if command != "stats" {
+        if summary_only {
+            return Err(CliError::Usage("--summary-only is only valid for stats"));
+        }
+        reject_option(&limit, "--limit is only valid for stats")?;
+        reject_option(&cursor, "--cursor is only valid for stats")?;
     }
     let ledger = match ledger {
         Some(path) if path.is_empty() => {
@@ -670,7 +700,28 @@ fn parse(mut arguments: impl Iterator<Item = String>) -> Result<Command, CliErro
                         })
                 })
                 .transpose()?;
-            Ok(Command::Stats { ledger, at })
+            if summary_only && (limit.is_some() || cursor.is_some()) {
+                return Err(CliError::Usage(
+                    "--summary-only cannot be combined with --limit or --cursor",
+                ));
+            }
+            if cursor.is_some() && limit.is_none() {
+                return Err(CliError::Usage("--cursor requires --limit"));
+            }
+            let query = if summary_only {
+                Some(RuntimeUsageQuery::summary_only())
+            } else if let Some(limit) = limit {
+                let limit = limit
+                    .parse::<usize>()
+                    .map_err(|_| CliError::Usage("--limit must be a positive integer"))?;
+                let cursor = cursor
+                    .map(|value| value.parse::<UsageCursor>())
+                    .transpose()?;
+                Some(RuntimeUsageQuery::page(limit, cursor)?)
+            } else {
+                None
+            };
+            Ok(Command::Stats { ledger, at, query })
         }
         "reconcile" => {
             reject_option(&input, "--input is not valid for reconcile")?;
@@ -1244,7 +1295,7 @@ Usage:\n\
   greentyper headless [--ledger PATH] [--tool local.echo] --input TEXT\n\
   greentyper resume [--ledger PATH] [--tool local.echo]\n\
   greentyper status [--ledger PATH]\n\
-  greentyper stats [--ledger PATH] [--at UNIX_MS]\n\
+  greentyper stats [--ledger PATH] [--at UNIX_MS] [--summary-only | --limit N [--cursor CURSOR]]\n\
   greentyper reconcile [--ledger PATH] --delivery ID\n\
   greentyper config schema\n\
   greentyper config catalog\n\
@@ -1476,6 +1527,60 @@ mod tests {
         ));
         assert!(
             parse(["stats".to_owned(), "--at".to_owned(), "later".to_owned()].into_iter()).is_err()
+        );
+    }
+
+    #[test]
+    fn parser_keeps_full_stats_as_default_and_bounds_explicit_reports() {
+        assert!(matches!(
+            parse(["stats".to_owned()].into_iter()),
+            Ok(Command::Stats { query: None, .. })
+        ));
+        assert!(matches!(
+            parse(["stats".to_owned(), "--summary-only".to_owned()].into_iter()),
+            Ok(Command::Stats { query: Some(_), .. })
+        ));
+        assert!(matches!(
+            parse(["stats".to_owned(), "--limit".to_owned(), "10".to_owned()].into_iter()),
+            Ok(Command::Stats { query: Some(_), .. })
+        ));
+        assert!(
+            parse(
+                [
+                    "stats".to_owned(),
+                    "--summary-only".to_owned(),
+                    "--limit".to_owned(),
+                    "10".to_owned(),
+                ]
+                .into_iter()
+            )
+            .is_err()
+        );
+        assert!(
+            parse(
+                [
+                    "stats".to_owned(),
+                    "--cursor".to_owned(),
+                    "invalid".to_owned(),
+                ]
+                .into_iter()
+            )
+            .is_err()
+        );
+        assert!(
+            parse(["stats".to_owned(), "--limit".to_owned(), "0".to_owned()].into_iter()).is_err()
+        );
+        assert!(
+            parse(
+                [
+                    "headless".to_owned(),
+                    "--input".to_owned(),
+                    "hello".to_owned(),
+                    "--summary-only".to_owned(),
+                ]
+                .into_iter()
+            )
+            .is_err()
         );
     }
 

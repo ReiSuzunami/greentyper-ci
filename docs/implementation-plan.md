@@ -234,6 +234,13 @@ and Product-driver Turns; `stats` and the terminal-neutral status projection
 surface immutable pay-as-you-go estimates without scanning history. Editable
 Config accepts manual provenance only; trusted template-rate and provider-charge
 ingestion remain separate future authority paths.
+The compatible bare `stats` command still emits its complete replayed snapshot.
+Explicit summary-only and bounded-page modes now avoid cloning or serializing
+the complete attempt list, stamp every report with the Ledger revision, bind
+checksummed cursors to that revision and requested instant, cap pages at 1,000
+attempts, and reject stale or malformed cursors. They still replay the bounded
+Ledger before building the cached projection; this slice is
+output/materialization pagination, not an indexed on-disk query engine.
 
 This does not complete Phase 3. VT/ConPTY rendering and input, the keyboard event
 loop and terminal-backed schema editors, rendered object-name and confirmation
@@ -242,8 +249,6 @@ live catalog discovery and Recent evidence, Context Pressure, provider-reported
 charge and subscription-quota accounting, richer observed Provider metadata,
 and the P0/P1/P2/P6
 performance evidence remain pending.
-Large-history statistics pagination and summary-only rendering also remain
-pending; the current command emits the complete replayed attempt projection.
 
 Exit criteria:
 

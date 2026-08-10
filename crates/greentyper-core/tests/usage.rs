@@ -12,7 +12,8 @@ use greentyper_core::provider::{
 };
 use greentyper_core::runtime::{RUNTIME_EVENT_SCHEMA, RuntimeError, RuntimeKernel};
 use greentyper_core::usage::{
-    MAX_USAGE_WINDOWS, UsageTimestamp, UsageTimezoneSource, UsageWeekday, UsageWindow,
+    MAX_USAGE_PAGE_SIZE, MAX_USAGE_WINDOWS, RuntimeUsageQuery, UsageCursor, UsageError,
+    UsageTimestamp, UsageTimezoneSource, UsageWeekday, UsageWindow,
 };
 use std::fs;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -464,7 +465,7 @@ reasoning_output_micros_per_million = 5
 }
 
 #[test]
-fn missing_runtime_has_an_empty_snapshot_at_the_requested_instant() {
+fn missing_runtime_has_empty_usage_views_at_the_requested_instant() {
     let temp = TempConfig::new();
     let ledger = temp.root.join("missing.ledger");
     let at = UsageTimestamp::from_unix_millis(123_456_789).unwrap();
@@ -473,4 +474,130 @@ fn missing_runtime_has_an_empty_snapshot_at_the_requested_instant() {
     assert!(snapshot.attempts().is_empty());
     assert!(snapshot.thread().is_none());
     assert!(!ledger.exists());
+
+    let report = RuntimeKernel::inspect_usage_report(
+        &ledger,
+        at,
+        RuntimeUsageQuery::page(10, None).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(report.revision().transaction(), 0);
+    assert_eq!(report.revision().sequence(), 0);
+    assert_eq!(report.summary().total().attempts(), 0);
+    assert!(report.page().unwrap().attempts().is_empty());
+    assert!(report.page().unwrap().next_cursor().is_none());
+    assert!(!ledger.exists());
+}
+
+#[test]
+fn usage_report_pages_attempts_and_rejects_stale_revision_cursors() {
+    let temp = TempConfig::new();
+    let ledger = temp.root.join("paged-runtime.ledger");
+    let mut runtime = RuntimeKernel::open(&ledger).unwrap();
+    let mut provider = DeterministicProvider::default();
+    for input in ["first", "second", "third"] {
+        let output = runtime
+            .execute_with_usage_windows(&ConfigLayers::default(), Vec::new(), input, &mut provider)
+            .unwrap();
+        runtime.acknowledge(output.delivery()).unwrap();
+    }
+    drop(runtime);
+
+    let at = UsageTimestamp::from_unix_millis(2_000_000_000_000).unwrap();
+    let summary =
+        RuntimeKernel::inspect_usage_report(&ledger, at, RuntimeUsageQuery::summary_only())
+            .unwrap();
+    assert_eq!(summary.summary().total().attempts(), 3);
+    assert!(summary.page().is_none());
+
+    let first =
+        RuntimeKernel::inspect_usage_report(&ledger, at, RuntimeUsageQuery::page(2, None).unwrap())
+            .unwrap();
+    assert_eq!(
+        first
+            .page()
+            .unwrap()
+            .attempts()
+            .iter()
+            .map(|attempt| attempt.turn())
+            .collect::<Vec<_>>(),
+        vec![1, 2]
+    );
+    let cursor = first
+        .page()
+        .unwrap()
+        .next_cursor()
+        .expect("next page cursor")
+        .clone();
+    let different_instant = UsageTimestamp::from_unix_millis(at.unix_millis() + 1).unwrap();
+    assert!(matches!(
+        RuntimeKernel::inspect_usage_report(
+            &ledger,
+            different_instant,
+            RuntimeUsageQuery::page(2, Some(cursor.clone())).unwrap(),
+        ),
+        Err(RuntimeError::Usage(UsageError::CursorQueryMismatch))
+    ));
+    let mut corrupted = cursor.to_string();
+    let replacement = if corrupted.ends_with('0') { '1' } else { '0' };
+    corrupted.pop();
+    corrupted.push(replacement);
+    assert!(matches!(
+        corrupted.parse::<UsageCursor>(),
+        Err(UsageError::InvalidCursor)
+    ));
+    let second = RuntimeKernel::inspect_usage_report(
+        &ledger,
+        at,
+        RuntimeUsageQuery::page(2, Some(cursor.clone())).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        second
+            .page()
+            .unwrap()
+            .attempts()
+            .iter()
+            .map(|attempt| attempt.turn())
+            .collect::<Vec<_>>(),
+        vec![3]
+    );
+    assert!(second.page().unwrap().next_cursor().is_none());
+
+    let mut runtime = RuntimeKernel::open(&ledger).unwrap();
+    let output = runtime
+        .execute_with_usage_windows(
+            &ConfigLayers::default(),
+            Vec::new(),
+            "fourth",
+            &mut provider,
+        )
+        .unwrap();
+    runtime.acknowledge(output.delivery()).unwrap();
+    drop(runtime);
+    assert!(matches!(
+        RuntimeKernel::inspect_usage_report(
+            &ledger,
+            at,
+            RuntimeUsageQuery::page(2, Some(cursor)).unwrap(),
+        ),
+        Err(RuntimeError::Usage(UsageError::StaleCursor))
+    ));
+    assert!(matches!(
+        RuntimeUsageQuery::page(0, None),
+        Err(UsageError::InvalidPageSize)
+    ));
+    assert!(matches!(
+        RuntimeUsageQuery::page(MAX_USAGE_PAGE_SIZE + 1, None),
+        Err(UsageError::InvalidPageSize)
+    ));
+    assert!(RuntimeUsageQuery::page(MAX_USAGE_PAGE_SIZE, None).is_ok());
+    assert!(matches!(
+        "非ascii".parse::<UsageCursor>(),
+        Err(UsageError::InvalidCursor)
+    ));
+    assert!(matches!(
+        "x".repeat(161).parse::<UsageCursor>(),
+        Err(UsageError::InvalidCursor)
+    ));
 }

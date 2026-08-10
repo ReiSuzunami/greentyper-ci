@@ -3,12 +3,15 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt;
+use std::fmt::Write as _;
+use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use jiff::Timestamp;
 use jiff::civil::Weekday as JiffWeekday;
 use jiff::tz::TimeZone;
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 
 use crate::pricing::{
     COST_SCALE_DECIMAL_PLACES, CostEstimate, CostEstimateOutcome, CostEstimateUnknownReason,
@@ -17,6 +20,8 @@ use crate::provider::{ProviderDialect, UsageAccuracy, UsageRecord};
 
 const MAX_USAGE_WINDOW_ID_BYTES: usize = 64;
 pub const MAX_USAGE_WINDOWS: usize = 128;
+pub const MAX_USAGE_PAGE_SIZE: usize = 1_000;
+const MAX_USAGE_CURSOR_BYTES: usize = 160;
 const MILLIS_PER_HOUR: i64 = 60 * 60 * 1_000;
 const MILLIS_PER_DAY: i64 = 24 * MILLIS_PER_HOUR;
 
@@ -990,6 +995,235 @@ impl RuntimeUsageSnapshot {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
+pub struct UsageRevision {
+    transaction: u64,
+    sequence: u64,
+}
+
+impl UsageRevision {
+    pub(crate) const fn new(transaction: u64, sequence: u64) -> Self {
+        Self {
+            transaction,
+            sequence,
+        }
+    }
+
+    #[must_use]
+    pub const fn transaction(self) -> u64 {
+        self.transaction
+    }
+
+    #[must_use]
+    pub const fn sequence(self) -> u64 {
+        self.sequence
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct UsageCursor(String);
+
+impl UsageCursor {
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    fn encode(revision: UsageRevision, as_of: UsageTimestamp, next_index: usize) -> Self {
+        let payload = format!(
+            "v1:{}:{}:{}:{next_index}",
+            revision.transaction,
+            revision.sequence,
+            as_of.unix_millis()
+        );
+        let digest = Sha256::digest(payload.as_bytes());
+        let mut checksum = String::with_capacity(digest.len() * 2);
+        for byte in digest {
+            write!(&mut checksum, "{byte:02x}").expect("write cursor checksum");
+        }
+        Self(format!("{payload}:{checksum}"))
+    }
+
+    fn decode(&self) -> Result<UsageCursorState, UsageError> {
+        if self.0.is_empty() || self.0.len() > MAX_USAGE_CURSOR_BYTES || !self.0.is_ascii() {
+            return Err(UsageError::InvalidCursor);
+        }
+        let mut parts = self.0.split(':');
+        let version = parts.next().ok_or(UsageError::InvalidCursor)?;
+        let transaction = parse_cursor_part(parts.next())?;
+        let sequence = parse_cursor_part(parts.next())?;
+        let as_of = parts
+            .next()
+            .ok_or(UsageError::InvalidCursor)?
+            .parse::<i64>()
+            .map_err(|_| UsageError::InvalidCursor)?;
+        let next_index = parts
+            .next()
+            .ok_or(UsageError::InvalidCursor)?
+            .parse::<usize>()
+            .map_err(|_| UsageError::InvalidCursor)?;
+        let checksum = parts.next().ok_or(UsageError::InvalidCursor)?;
+        if version != "v1" || parts.next().is_some() || checksum.len() != 64 {
+            return Err(UsageError::InvalidCursor);
+        }
+        let payload = format!("v1:{transaction}:{sequence}:{as_of}:{next_index}");
+        let digest = Sha256::digest(payload.as_bytes());
+        let mut expected = String::with_capacity(digest.len() * 2);
+        for byte in digest {
+            write!(&mut expected, "{byte:02x}").expect("write cursor checksum");
+        }
+        if checksum != expected {
+            return Err(UsageError::InvalidCursor);
+        }
+        Ok(UsageCursorState {
+            revision: UsageRevision::new(transaction, sequence),
+            as_of,
+            next_index,
+        })
+    }
+}
+
+impl fmt::Display for UsageCursor {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl FromStr for UsageCursor {
+    type Err = UsageError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let cursor = Self(value.to_owned());
+        cursor.decode()?;
+        Ok(cursor)
+    }
+}
+
+fn parse_cursor_part(value: Option<&str>) -> Result<u64, UsageError> {
+    value
+        .ok_or(UsageError::InvalidCursor)?
+        .parse::<u64>()
+        .map_err(|_| UsageError::InvalidCursor)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct UsageCursorState {
+    revision: UsageRevision,
+    as_of: i64,
+    next_index: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuntimeUsageQuery {
+    page_size: Option<usize>,
+    cursor: Option<UsageCursor>,
+}
+
+impl RuntimeUsageQuery {
+    #[must_use]
+    pub const fn summary_only() -> Self {
+        Self {
+            page_size: None,
+            cursor: None,
+        }
+    }
+
+    pub fn page(page_size: usize, cursor: Option<UsageCursor>) -> Result<Self, UsageError> {
+        if page_size == 0 || page_size > MAX_USAGE_PAGE_SIZE {
+            return Err(UsageError::InvalidPageSize);
+        }
+        Ok(Self {
+            page_size: Some(page_size),
+            cursor,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct RuntimeUsageSummary {
+    as_of: UsageTimestamp,
+    total: UsageRollup,
+    thread: Option<ScopedUsageRollup>,
+    team: Option<UsageRollup>,
+    rolling: RollingUsageRollups,
+    named_windows: Vec<NamedUsageRollup>,
+}
+
+impl RuntimeUsageSummary {
+    #[must_use]
+    pub const fn as_of(&self) -> UsageTimestamp {
+        self.as_of
+    }
+
+    #[must_use]
+    pub const fn total(&self) -> &UsageRollup {
+        &self.total
+    }
+
+    #[must_use]
+    pub const fn thread(&self) -> Option<&ScopedUsageRollup> {
+        self.thread.as_ref()
+    }
+
+    #[must_use]
+    pub const fn team(&self) -> Option<&UsageRollup> {
+        self.team.as_ref()
+    }
+
+    #[must_use]
+    pub const fn rolling(&self) -> &RollingUsageRollups {
+        &self.rolling
+    }
+
+    #[must_use]
+    pub fn named_windows(&self) -> &[NamedUsageRollup] {
+        &self.named_windows
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct UsageAttemptPage {
+    attempts: Vec<UsageAttempt>,
+    next_cursor: Option<UsageCursor>,
+}
+
+impl UsageAttemptPage {
+    #[must_use]
+    pub fn attempts(&self) -> &[UsageAttempt] {
+        &self.attempts
+    }
+
+    #[must_use]
+    pub const fn next_cursor(&self) -> Option<&UsageCursor> {
+        self.next_cursor.as_ref()
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct RuntimeUsageReport {
+    revision: UsageRevision,
+    summary: RuntimeUsageSummary,
+    page: Option<UsageAttemptPage>,
+}
+
+impl RuntimeUsageReport {
+    #[must_use]
+    pub const fn revision(&self) -> UsageRevision {
+        self.revision
+    }
+
+    #[must_use]
+    pub const fn summary(&self) -> &RuntimeUsageSummary {
+        &self.summary
+    }
+
+    #[must_use]
+    pub const fn page(&self) -> Option<&UsageAttemptPage> {
+        self.page.as_ref()
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub(crate) struct UsageProjection {
     attempts: Vec<UsageAttempt>,
@@ -1092,17 +1326,79 @@ impl UsageProjection {
         thread: Option<u64>,
         as_of: UsageTimestamp,
     ) -> RuntimeUsageSnapshot {
+        let RuntimeUsageSummary {
+            as_of,
+            total: _,
+            thread,
+            team,
+            rolling,
+            named_windows,
+        } = self.summary(thread, as_of);
         RuntimeUsageSnapshot {
             as_of,
             attempts: self.attempts.clone(),
+            thread,
+            turns: scoped(&self.turns),
+            agents: scoped(&self.agents),
+            team,
+            rolling,
+            named_windows,
+        }
+    }
+
+    pub(crate) fn report(
+        &self,
+        thread: Option<u64>,
+        as_of: UsageTimestamp,
+        revision: UsageRevision,
+        query: RuntimeUsageQuery,
+    ) -> Result<RuntimeUsageReport, UsageError> {
+        let summary = self.summary(thread, as_of);
+        let page = match query.page_size {
+            None => None,
+            Some(page_size) => {
+                let start = match query.cursor {
+                    None => 0,
+                    Some(cursor) => {
+                        let state = cursor.decode()?;
+                        if state.revision != revision {
+                            return Err(UsageError::StaleCursor);
+                        }
+                        if state.as_of != as_of.unix_millis() {
+                            return Err(UsageError::CursorQueryMismatch);
+                        }
+                        if state.next_index > self.attempts.len() {
+                            return Err(UsageError::InvalidCursor);
+                        }
+                        state.next_index
+                    }
+                };
+                let end = start.saturating_add(page_size).min(self.attempts.len());
+                let next_cursor =
+                    (end < self.attempts.len()).then(|| UsageCursor::encode(revision, as_of, end));
+                Some(UsageAttemptPage {
+                    attempts: self.attempts[start..end].to_vec(),
+                    next_cursor,
+                })
+            }
+        };
+        Ok(RuntimeUsageReport {
+            revision,
+            summary,
+            page,
+        })
+    }
+
+    fn summary(&self, thread: Option<u64>, as_of: UsageTimestamp) -> RuntimeUsageSummary {
+        RuntimeUsageSummary {
+            as_of,
+            total: self.total.clone(),
             thread: thread.and_then(|id| {
                 self.threads
                     .get(&id)
                     .cloned()
                     .map(|usage| ScopedUsageRollup { id, usage })
             }),
-            turns: scoped(&self.turns),
-            agents: scoped(&self.agents),
             team: (!self.agents.is_empty()).then(|| self.total.clone()),
             rolling: RollingUsageRollups {
                 one_hour: self.rolling(as_of, MILLIS_PER_HOUR),
@@ -1218,6 +1514,10 @@ pub enum UsageError {
     DuplicateAttempt,
     UnknownAttempt,
     DuplicateCostEvaluation,
+    InvalidPageSize,
+    InvalidCursor,
+    StaleCursor,
+    CursorQueryMismatch,
 }
 
 impl fmt::Display for UsageError {
@@ -1243,6 +1543,10 @@ impl fmt::Display for UsageError {
             Self::DuplicateCostEvaluation => {
                 "usage attempt Cost Estimate was recorded more than once"
             }
+            Self::InvalidPageSize => "usage page size is outside the supported range",
+            Self::InvalidCursor => "usage cursor is invalid",
+            Self::StaleCursor => "usage cursor refers to a stale Ledger revision",
+            Self::CursorQueryMismatch => "usage cursor does not match the requested instant",
         };
         formatter.write_str(message)
     }

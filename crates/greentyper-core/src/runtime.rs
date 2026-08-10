@@ -40,8 +40,9 @@ use crate::tool_runtime::{
     ToolSnapshot,
 };
 use crate::usage::{
-    MAX_USAGE_WINDOWS, RuntimeUsageSnapshot, UsageAttempt, UsageAttemptOutcome, UsageError,
-    UsageProjection, UsageTimestamp, UsageTimezoneSource, UsageWeekday, UsageWindow,
+    MAX_USAGE_WINDOWS, RuntimeUsageQuery, RuntimeUsageReport, RuntimeUsageSnapshot, UsageAttempt,
+    UsageAttemptOutcome, UsageError, UsageProjection, UsageRevision, UsageTimestamp,
+    UsageTimezoneSource, UsageWeekday, UsageWindow,
 };
 
 pub const RUNTIME_EVENT_SCHEMA: u16 = SchemaKind::RuntimeEvent.current().get();
@@ -452,6 +453,32 @@ impl RuntimeKernel {
         Ok(state.usage.snapshot(state.thread.map(ThreadId::get), as_of))
     }
 
+    pub fn inspect_usage_report(
+        path: impl AsRef<Path>,
+        as_of: UsageTimestamp,
+        query: RuntimeUsageQuery,
+    ) -> Result<RuntimeUsageReport, RuntimeError> {
+        let report = match FileLedger::inspect(path) {
+            Ok(report) => report,
+            Err(LedgerError::Io(source)) if source.kind() == std::io::ErrorKind::NotFound => {
+                return UsageProjection::default()
+                    .report(None, as_of, UsageRevision::default(), query)
+                    .map_err(RuntimeError::Usage);
+            }
+            Err(source) => return Err(RuntimeError::Ledger(source)),
+        };
+        let state = replay_runtime(&report.events)?;
+        state
+            .usage
+            .report(
+                state.thread.map(ThreadId::get),
+                as_of,
+                UsageRevision::new(report.head.transaction, report.head.sequence),
+                query,
+            )
+            .map_err(RuntimeError::Usage)
+    }
+
     #[must_use]
     pub fn snapshot(&self) -> RuntimeSnapshot {
         RuntimeSnapshot {
@@ -468,6 +495,23 @@ impl RuntimeKernel {
         self.state
             .usage
             .snapshot(self.state.thread.map(ThreadId::get), as_of)
+    }
+
+    pub fn usage_report(
+        &self,
+        as_of: UsageTimestamp,
+        query: RuntimeUsageQuery,
+    ) -> Result<RuntimeUsageReport, RuntimeError> {
+        let head = self.ledger.head();
+        self.state
+            .usage
+            .report(
+                self.state.thread.map(ThreadId::get),
+                as_of,
+                UsageRevision::new(head.transaction, head.sequence),
+                query,
+            )
+            .map_err(RuntimeError::Usage)
     }
 
     /// Returns the frozen Provider Epoch for the current non-terminal Turn.

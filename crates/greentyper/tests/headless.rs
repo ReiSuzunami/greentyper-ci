@@ -140,6 +140,97 @@ fn stats_reports_replayed_usage_without_user_text() {
 }
 
 #[test]
+fn stats_summary_and_pages_are_bounded_and_revision_bound() {
+    let path = temp_path("paged-stats");
+    for input in [
+        "paged-private-first",
+        "paged-private-second",
+        "paged-private-third",
+    ] {
+        let output = binary()
+            .args(["headless", "--ledger"])
+            .arg(&path)
+            .args(["--input", input])
+            .output()
+            .expect("run paged headless command");
+        assert!(output.status.success(), "{output:?}");
+    }
+    let at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time after epoch")
+        .as_millis()
+        .saturating_add(1)
+        .to_string();
+
+    let summary = binary()
+        .args(["stats", "--ledger"])
+        .arg(&path)
+        .args(["--at", at.as_str(), "--summary-only"])
+        .output()
+        .expect("run summary-only stats command");
+    assert!(summary.status.success(), "{summary:?}");
+    let summary_text = String::from_utf8(summary.stdout).expect("summary stats UTF-8");
+    assert!(!summary_text.contains("paged-private"), "{summary_text}");
+    let summary_json: serde_json::Value =
+        serde_json::from_str(&summary_text).expect("summary stats JSON");
+    assert_eq!(summary_json["summary"]["total"]["attempts"], 3);
+    assert_eq!(summary_json["page"], serde_json::Value::Null);
+
+    let first = binary()
+        .args(["stats", "--ledger"])
+        .arg(&path)
+        .args(["--at", at.as_str(), "--limit", "2"])
+        .output()
+        .expect("run first paged stats command");
+    assert!(first.status.success(), "{first:?}");
+    let first_json: serde_json::Value =
+        serde_json::from_slice(&first.stdout).expect("first page stats JSON");
+    assert_eq!(
+        first_json["page"]["attempts"].as_array().map(Vec::len),
+        Some(2)
+    );
+    let cursor = first_json["page"]["next_cursor"]
+        .as_str()
+        .expect("next page cursor");
+
+    let second = binary()
+        .args(["stats", "--ledger"])
+        .arg(&path)
+        .args(["--at", at.as_str(), "--limit", "2", "--cursor", cursor])
+        .output()
+        .expect("run second paged stats command");
+    assert!(second.status.success(), "{second:?}");
+    let second_json: serde_json::Value =
+        serde_json::from_slice(&second.stdout).expect("second page stats JSON");
+    assert_eq!(
+        second_json["page"]["attempts"].as_array().map(Vec::len),
+        Some(1)
+    );
+    assert_eq!(second_json["page"]["next_cursor"], serde_json::Value::Null);
+
+    let appended = binary()
+        .args(["headless", "--ledger"])
+        .arg(&path)
+        .args(["--input", "paged-private-fourth"])
+        .output()
+        .expect("append another usage attempt");
+    assert!(appended.status.success(), "{appended:?}");
+    let stale = binary()
+        .args(["stats", "--ledger"])
+        .arg(&path)
+        .args(["--at", at.as_str(), "--limit", "2", "--cursor", cursor])
+        .output()
+        .expect("run stale paged stats command");
+    assert!(!stale.status.success(), "{stale:?}");
+    let stale_error = String::from_utf8_lossy(&stale.stderr);
+    assert!(
+        stale_error.contains("stale Ledger revision"),
+        "{stale_error}"
+    );
+    fs::remove_file(path).expect("cleanup Runtime ledger");
+}
+
+#[test]
 fn stats_reports_the_frozen_payg_estimate_without_user_text() {
     let path = temp_path("priced-stats");
     let private_input = "priced-private-input-marker";

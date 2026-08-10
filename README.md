@@ -77,6 +77,8 @@ cargo run -p greentyper -- headless --ledger ./target/dev-runtime.ledger --input
 cargo run -p greentyper -- headless --ledger ./target/tool-runtime.ledger --tool local.echo --input "echo this"
 cargo run -p greentyper -- status --ledger ./target/dev-runtime.ledger
 cargo run -p greentyper -- stats --ledger ./target/dev-runtime.ledger
+cargo run -p greentyper -- stats --ledger ./target/dev-runtime.ledger --summary-only
+cargo run -p greentyper -- stats --ledger ./target/dev-runtime.ledger --limit 100
 cargo run -p greentyper -- config schema
 cargo run -p greentyper -- config catalog
 cargo run -p greentyper -- config get provider.model
@@ -131,6 +133,11 @@ in the same transaction, freezes the matching schedule, and records an exact,
 estimated, or explicit-unknown pay-as-you-go Cost Estimate with checked integer
 arithmetic. Replay recalculates the estimate from the frozen evidence and rejects
 tampering; `stats` reads the cached projection without exposing prompt text.
+The unchanged bare `stats` command preserves the complete legacy JSON snapshot.
+Explicit `--summary-only` and `--limit 1..1000` modes instead return a
+revision-stamped report; bounded pages carry a checksummed `next_cursor` tied to
+the Ledger head and requested instant, so an append makes an old cursor fail
+stale rather than mixing revisions.
 Editable Config schedules require manual provenance. Provider-reported charges,
 trusted template rates, and subscription quota values remain separate and are
 not inferred from these estimates.

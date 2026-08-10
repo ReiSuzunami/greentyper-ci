@@ -357,6 +357,15 @@ a half-open UTC effective interval. Its five rates are non-negative integer
 currency-microunits per million tokens for uncached input, cached input, cache
 write, visible output, and reasoning output:
 
+The bare `stats` command keeps the original complete JSON snapshot. Callers with
+large histories may explicitly request aggregate total, current Thread, Team,
+rolling, and named-window rollups with `--summary-only`, or walk bounded attempt
+pages with `--limit 1..1000` and the returned checksummed
+`next_cursor`. Reports carry the Ledger revision and requested instant; stale,
+malformed, or cross-instant cursors fail rather than combining snapshots. This
+currently bounds report cloning and output size, while Ledger replay remains
+bounded by the existing replay limits.
+
 ```toml
 [price_schedules.openai-sol]
 version = "2026-08-10.1"
