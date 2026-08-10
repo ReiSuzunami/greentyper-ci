@@ -88,9 +88,12 @@ cargo run -p greentyper -- config test-provider
 
 For a configured OpenAI or openai-compatible Profile, `headless` accepts
 `--dialect responses` or `--dialect chat_completions`. A configured DeepSeek
-Profile accepts `--dialect chat_completions` or `--dialect messages`; every
-other template/dialect pair fails closed unless the product has an explicit
-adapter for that exact identity.
+Profile accepts all three installed dialects. A DeepSeek Responses preference
+resolves against the release model record before admission: V4 Flash freezes
+Responses, while V4 Pro freezes Chat Completions because its Responses support
+is not yet available. This is capability resolution before network I/O, not a
+retry after partial output or Tool effects. Every other template/dialect pair
+fails closed unless the product has an explicit adapter for that exact identity.
 `headless --preset ID` resolves one configured Model Preset by exact ID and
 freezes its Profile, model, dialect, and optional output-token limit for the
 Turn. It cannot be combined with `--dialect`; missing IDs fail rather than
@@ -125,7 +128,7 @@ only after stdout is flushed. A restart before approval re-presents the durable
 request; a successful or ambiguous effect is never automatically repeated.
 
 Configured OpenAI-compatible Responses and Chat Completions profiles plus the
-official DeepSeek Chat Completions and Anthropic-compatible Messages profiles now run through
+official DeepSeek Responses, Chat Completions, and Anthropic-compatible Messages profiles now run through
 no-proxy, no-redirect HTTPS clients, origin-bound credential lookup, bounded
 streaming decode, and a fixed deadline. DeepSeek Chat uses Bearer authorization,
 the explicit `/chat/completions` route, `max_tokens`, and non-thinking mode; it
@@ -147,7 +150,13 @@ keeps the deterministic simulator when no custom profile is selected.
 Current configured Provider Epochs freeze an explicit dialect. Historical
 pre-dialect Epochs retain their schema-compatible Responses default and still
 must pass the frozen Profile's adapter and capability checks during replay.
-Runtime Event schema 7 freezes the selected Preset's optional output-token
+DeepSeek Responses uses Bearer authorization and `/responses`, supports only V4
+Flash, maps `max_output_tokens` plus `reasoning.effort` values `low`, `high`, and
+`max`, and rejects service tier before network I/O. Its stateless Tool
+continuation reconstructs bounded input items instead of using
+`previous_response_id`. Reasoning text is bounded and transition-validated by
+the dialect decoder but is not projected as visible output or persisted raw.
+Runtime Event schema 8 freezes the selected Preset's optional output-token
 limit, typed reasoning effort, and typed service tier in the Config Epoch.
 OpenAI Responses sends reasoning as `reasoning.effort`, OpenAI Chat Completions
 sends `reasoning_effort`, and both send `service_tier`; their output-token
@@ -159,7 +168,7 @@ Unset fields remain omitted, except Messages retains its 4096 token fallback.
 One in-process Tool continuation uses the same policy; replay reconstructs it
 after restart without making continuation resumable. Requested effort/tier
 enter durable Usage Attempts separately from observed Provider metadata.
-Schema 7 also preserves the schema-6 Usage and Cost contract, which
+Schema 8 also preserves the schema-7 request-policy and schema-6 Usage and Cost contract, which
 brackets every Provider invocation with a durable
 Usage Attempt, records UTC start/completion and outcome, preserves exact,
 estimated, and unknown token classes, and rebuilds cached Turn, Thread, Agent,
@@ -184,9 +193,14 @@ Provider call; soft and unknown projections preserve the existing path. The
 terminal-neutral status projection serializes the immutable facts and marks an
 estimate as `ctx ~N%`. Automatic Context View construction, reduction,
 compaction, checkpoints, and provider-native adapters remain Phase 6 work.
-Editable Config schedules require manual provenance. Provider-reported charges,
-trusted template rates, and subscription quota values remain separate and are
-not inferred from these estimates.
+Editable Config schedules require manual provenance. The bundled DeepSeek rate
+card supplies versioned official schedules. A custom DeepSeek origin with no
+pricing override defaults to an immutable `template_mirror` estimate; explicit
+`unknown`, `manual`, or `provider_reported` decisions win. Mirror provenance
+does not carry the official credential, endpoint authority, or a claim about a
+gateway's hidden backend. Templates without a bundled rate card still require
+an explicit custom-origin pricing decision. Provider-reported charges and
+subscription quota values remain separate from estimates.
 The first terminal-neutral presentation slice now derives a bounded hierarchical
 Slash Panel, configured-preset selector, adaptive status summary, and explicit
 Runtime, Team, Tool, and Config blockers from core snapshots. Config Schema
@@ -214,7 +228,7 @@ conflicts leave the editor live. This is not an ANSI/VT backend, live keyboard
 loop, ConPTY integration, rendered Config Center, object-name dialog, or
 rendered template picker, starter-preset workflow, or live catalog discovery.
 Live credential-gated provider validation, configurable proxy policy,
-reconnect/retry, DeepSeek Responses, all OpenCode Go execution,
+reconnect/retry, all OpenCode Go execution,
 Messages reasoning blocks, Preset context/fallback execution, richer approval
 presentation, broader Provider and Tool adapters,
 Workspace, TUI, and App Server work remain. The loopback Provider tracer remains

@@ -90,7 +90,7 @@ Checkpoint creation uses a Safe Barrier and event-range compare-and-swap. The Co
 
 Owns the Config Schema, layer resolution, validation, Config Drafts, atomic writes, backups, effective provenance, Config Epochs, and hierarchical Command Paths. TUI editors, CLI operations, and App Server operations call the same interface.
 
-Credentials are referenced by Config Objects but stored separately in Windows Credential Manager or DPAPI-protected storage. Changing a Provider Origin requires an explicit credential binding and pricing decision.
+Credentials are referenced by Config Objects but stored separately in Windows Credential Manager or DPAPI-protected storage. Changing a Provider Origin requires an explicit credential binding and a resolved pricing decision. A reviewed bundled rate card may supply only a distinctly provenanced mirror estimate; it does not transfer credential or origin authority.
 
 ### Presentation
 
@@ -114,7 +114,7 @@ Recovery replays the Ledger to the latest valid Safe Barrier, reconciles Tool Le
 
 ## Provider and Model Resolution
 
-Release-bundled Provider Templates cover OpenAI, DeepSeek, and OpenCode Go with official default routes. Every Provider Profile may override its base URL and declared routes for a gateway. Custom origins require an explicit credential binding, use unknown pricing by default, and are reported separately in statistics.
+Release-bundled Provider Templates cover OpenAI, DeepSeek, and OpenCode Go with official default routes. Every Provider Profile may override its base URL and declared routes for a gateway. Custom origins require an explicit credential binding and are reported separately in statistics. When a template has a reviewed bundled rate card, its custom origins default to a frozen `template_mirror` estimate; an explicit pricing choice overrides it, and templates without a bundled rate card still require one. A mirror never asserts credential, origin, or hidden-backend authority.
 
 The Model Catalog merges release seeds, lazy provider discovery, and explicit user overrides with field-level provenance and freshness. Remote catalog data may identify models and bounded metadata, but cannot inject credentials, arbitrary endpoints, instructions, or authority. Discovered models without a verified dialect remain visible but unavailable until configured.
 

@@ -18,6 +18,7 @@ const MAX_SERVICE_TIER_BYTES: usize = 64;
 #[serde(rename_all = "snake_case")]
 pub enum PriceScheduleSource {
     Template,
+    TemplateMirror,
     Manual,
     ProviderReported,
 }
@@ -27,6 +28,7 @@ impl PriceScheduleSource {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Template => "template",
+            Self::TemplateMirror => "template_mirror",
             Self::Manual => "manual",
             Self::ProviderReported => "provider_reported",
         }
@@ -308,18 +310,30 @@ impl PriceSchedule {
                 CostEstimateUnknownReason::MissingCachedInputTokens,
             );
         };
-        let Some(cache_write) = usage.cache_write_input_tokens() else {
-            return CostEstimateOutcome::Unknown(
-                CostEstimateUnknownReason::MissingCacheWriteInputTokens,
-            );
+        let cache_write = match usage.cache_write_input_tokens() {
+            Some(value) => value,
+            None if self.rates.cache_write_micros_per_million == 0 => 0,
+            None => {
+                return CostEstimateOutcome::Unknown(
+                    CostEstimateUnknownReason::MissingCacheWriteInputTokens,
+                );
+            }
         };
         let Some(output) = usage.output_tokens() else {
             return CostEstimateOutcome::Unknown(CostEstimateUnknownReason::MissingOutputTokens);
         };
-        let Some(reasoning_output) = usage.reasoning_output_tokens() else {
-            return CostEstimateOutcome::Unknown(
-                CostEstimateUnknownReason::MissingReasoningOutputTokens,
-            );
+        let reasoning_output = match usage.reasoning_output_tokens() {
+            Some(value) => value,
+            None if self.rates.reasoning_output_micros_per_million
+                == self.rates.output_micros_per_million =>
+            {
+                0
+            }
+            None => {
+                return CostEstimateOutcome::Unknown(
+                    CostEstimateUnknownReason::MissingReasoningOutputTokens,
+                );
+            }
         };
         let Some(uncached_input) = input
             .checked_sub(cached_input)
@@ -740,5 +754,6 @@ const fn source_tag(source: PriceScheduleSource) -> u8 {
         PriceScheduleSource::Template => 1,
         PriceScheduleSource::Manual => 2,
         PriceScheduleSource::ProviderReported => 3,
+        PriceScheduleSource::TemplateMirror => 4,
     }
 }

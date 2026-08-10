@@ -135,10 +135,11 @@ Migration tests replay a historical schema-1 Ledger before appending current
 events, decode historical schema-2 and schema-3 Provider Epoch shapes
 separately, and round-trip current Provider Profile, dialect, Config Usage
 Window, Usage Attempt, Price Schedule, selected output-token data, reasoning
-effort, and service tier while
+effort, service tier, and distinct template-mirror pricing provenance while
 rejecting fingerprint, outcome, timestamp, and transition tampering. A schema-5
-Config Epoch without the optional token field and a schema-6 Config Epoch
-without request-policy fields remain replayable.
+Config Epoch without the optional token field, a schema-6 Config Epoch without
+request-policy fields, and a schema-7 Config Epoch without template-mirror tags
+remain replayable under current Runtime Event schema 8.
 
 Product integration tests also run the configured Responses, Chat Completions,
 and Messages adapters against concrete loopback HTTP tracers. They resolve and
@@ -160,6 +161,12 @@ same frozen policy through one continuation, and rejects unsupported reasoning,
 service tier, a limit above 384K, or a serialized request above 128 KiB before
 network I/O. Responses continuation coverage also rejects a mismatched frozen
 dialect and a second Tool call at the adapter boundary.
+DeepSeek Responses coverage admits V4 Flash only, validates the exact
+`/responses` request and bounded reasoning stream without projecting raw
+reasoning text, rejects service tier or unsupported effort before network I/O,
+resolves a Pro Responses preference to Chat before admission, and proves one
+stateless Tool continuation with the effective Responses dialect frozen in the
+Provider Epoch.
 Messages coverage binds the exact DeepSeek template and frozen Messages route,
 uses a sensitive `x-api-key` plus pinned compatibility-version header without
 an `Authorization` header, disables unsupported thinking, and sends the frozen
@@ -168,7 +175,8 @@ Chat request fixtures assert their dialect-specific fields, and all three Tool
 continuation fixtures assert the initial and continuation requests retain one
 frozen output limit. OpenAI Responses and Chat fixtures additionally assert
 exact reasoning and service-tier fields on initial requests and continuations;
-both DeepSeek adapters prove either unsupported policy fails before network I/O. Coverage
+DeepSeek Chat and Messages prove either unsupported policy fails before network
+I/O, while DeepSeek Responses maps supported effort and rejects tier. Coverage
 also includes canonical text/usage, missing credential
 and unsupported-template rejection before network access, HTTP 503, wrong
 content type, provider error SSE redaction, and one exact `tool_use`/
@@ -283,8 +291,10 @@ when the selected Profile's credential is unavailable. Provider Catalog tests
 freeze the release schema and revision, sorted unique records, template/model
 referential integrity, exact dialect mappings, field provenance, and explicit
 unknown context/capability/price/availability facts. Config tests prove official
-defaults resolve before user overrides, custom origins cannot inherit template
-pricing, and release models bind only under template-enabled catalog modes. The
+defaults resolve before user overrides, custom DeepSeek origins default to a
+distinct mirror of the reviewed bundled rate card, explicit pricing choices
+override that mirror, templates without a bundled card still require a pricing
+decision, and release models bind only under template-enabled catalog modes. The
 read-only `config catalog` integration test proves the snapshot contains no
 local path or credential reference.
 
@@ -303,7 +313,9 @@ unknown usage fields, and retryable/fatal errors. The current Phase 1
 simulator implements deterministic bounded success; module tests inject
 malformed completion and process interruption after admission. The OpenAI
 Responses decoder has redacted fixtures for text, function calls, optional
-usage, failed, incomplete, and error terminals. The separate Chat Completions
+usage, failed, incomplete, and error terminals. A DeepSeek Responses fixture
+also proves bounded reasoning items are validated but not normalized into
+visible output. The separate Chat Completions
 decoder has redacted fixtures for fragmented text, one fragmented function call,
 usage-only completion, incomplete termination, and Tool continuation.
 The Anthropic Messages decoder has redacted fixtures for ordered message and
@@ -325,13 +337,16 @@ validation.
 The official OpenAI template identity is also exercised with an explicit
 loopback origin override through the Responses adapter and models probe. The
 test proves inherited routes and dialects cross the same endpoint and credential
-gates as an explicit compatible gateway. The Chat Completions adapter admits
-the OpenAI and explicit openai-compatible template identities plus the exact
+gates as an explicit compatible gateway. The Responses adapter admits OpenAI
+and explicit openai-compatible identities, plus the exact DeepSeek/V4-Flash
+pair. The Chat Completions adapter admits the OpenAI and explicit
+openai-compatible template identities plus the exact
 official DeepSeek identity with its DeepSeek-specific request policy. The
 Messages adapter admits only the official DeepSeek template identity and its
-explicit Messages route. DeepSeek Responses and all OpenCode Go execution remain
-outside this slice; a declared route or dialect is not treated as proof of wire
-compatibility.
+explicit Messages route. V4 Pro resolves a preferred Responses dialect to Chat
+before admission; this bounded capability resolution is not a network retry or
+general Preset fallback. All OpenCode Go execution remains outside this slice;
+a declared route or dialect is not treated as proof of wire compatibility.
 
 Live provider integration tests are not implemented yet. Planned opt-in,
 credential-gated tests will verify OpenAI, DeepSeek, and OpenCode Go without

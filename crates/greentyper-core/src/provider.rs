@@ -45,6 +45,7 @@ impl ProviderDialect {
 pub enum ProviderPricingSource {
     Unknown,
     Template,
+    TemplateMirror,
     Manual,
     ProviderReported,
 }
@@ -55,6 +56,7 @@ impl ProviderPricingSource {
         match self {
             Self::Unknown => "unknown",
             Self::Template => "template",
+            Self::TemplateMirror => "template_mirror",
             Self::Manual => "manual",
             Self::ProviderReported => "provider_reported",
         }
@@ -812,6 +814,7 @@ fn fingerprint_profile_snapshot(snapshot: &ProviderProfileSnapshot) -> u64 {
         Some(ProviderPricingSource::Template) => 2,
         Some(ProviderPricingSource::Manual) => 3,
         Some(ProviderPricingSource::ProviderReported) => 4,
+        Some(ProviderPricingSource::TemplateMirror) => 5,
     });
     hash.byte(u8::from(snapshot.allow_insecure_loopback));
     hash.finish()

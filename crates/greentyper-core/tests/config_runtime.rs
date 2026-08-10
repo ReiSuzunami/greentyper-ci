@@ -1534,7 +1534,7 @@ mode = "discovery"
 }
 
 #[test]
-fn custom_origin_inherits_template_routes_but_never_template_pricing() {
+fn custom_origin_inherits_template_routes_but_requires_an_available_rate_card() {
     let temp = TempTree::new("custom-origin-template-boundary");
     let paths = temp.paths();
     let runtime = ConfigRuntime::open(paths, ConfigDocument::empty()).expect("open Config Runtime");
@@ -1577,6 +1577,98 @@ fn custom_origin_inherits_template_routes_but_never_template_pricing() {
     assert_eq!(
         snapshot.pricing_source(),
         Some(ProviderPricingSource::Unknown)
+    );
+}
+
+#[test]
+fn deepseek_custom_origin_mirrors_official_rates_until_manual_pricing_overrides_them() {
+    let mirrored = ConfigDocument::parse(
+        r#"
+schema_version = 1
+
+[provider]
+profile = "gateway"
+model = "deepseek-v4-flash"
+
+[providers.gateway]
+template = "deepseek"
+credential = "synthetic-gateway-credential-reference"
+base_url = "https://gateway.example.com"
+"#,
+    )
+    .expect("parse mirrored DeepSeek gateway");
+    let runtime = ConfigRuntime::open(TempTree::new("deepseek-mirror").paths(), mirrored)
+        .expect("resolve mirrored DeepSeek gateway");
+    let snapshot = runtime
+        .selected_provider_profile()
+        .expect("resolve mirrored Profile")
+        .expect("external Profile");
+    assert_eq!(
+        snapshot.pricing_source(),
+        Some(ProviderPricingSource::TemplateMirror)
+    );
+    let schedules = runtime
+        .resolved_price_schedules()
+        .expect("resolve official mirror schedules");
+    let flash = schedules
+        .schedules()
+        .iter()
+        .find(|schedule| schedule.model() == "deepseek-v4-flash")
+        .expect("mirrored Flash schedule");
+    assert_eq!(flash.provider_profile(), "gateway");
+    assert_eq!(flash.source(), PriceScheduleSource::TemplateMirror);
+    assert_eq!(flash.rates().input_micros_per_million(), 140_000);
+    assert_eq!(flash.rates().cached_input_micros_per_million(), 2_800);
+    assert_eq!(flash.rates().output_micros_per_million(), 280_000);
+
+    let manual = ConfigDocument::parse(
+        r#"
+schema_version = 1
+
+[provider]
+profile = "gateway"
+model = "deepseek-v4-flash"
+
+[providers.gateway]
+template = "deepseek"
+credential = "synthetic-gateway-credential-reference"
+base_url = "https://gateway.example.com"
+
+[providers.gateway.pricing]
+source = "manual"
+
+[price_schedules.gateway-flash]
+version = "custom-1"
+currency = "USD"
+provider = "gateway"
+model = "deepseek-v4-flash"
+minimum_context_tokens = 0
+effective_from = "2026-08-10T00:00:00Z"
+source = "manual"
+source_ref = "synthetic-custom-rate-card"
+
+[price_schedules.gateway-flash.rates]
+input_micros_per_million = 1
+cached_input_micros_per_million = 2
+cache_write_micros_per_million = 3
+output_micros_per_million = 4
+reasoning_output_micros_per_million = 5
+"#,
+    )
+    .expect("parse manually priced DeepSeek gateway");
+    let runtime = ConfigRuntime::open(TempTree::new("deepseek-manual").paths(), manual)
+        .expect("resolve manually priced DeepSeek gateway");
+    let schedules = runtime
+        .resolved_price_schedules()
+        .expect("resolve manual schedules");
+    assert_eq!(schedules.schedules().len(), 1);
+    assert_eq!(
+        schedules.schedules()[0].source(),
+        PriceScheduleSource::Manual
+    );
+    assert_eq!(
+        schedules.schedules()[0].rates().input_micros_per_million(),
+        1
     );
 }
 

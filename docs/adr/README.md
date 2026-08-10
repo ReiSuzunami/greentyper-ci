@@ -44,7 +44,7 @@ GreenTyper records decisions here when they constrain later implementation. Each
 
 - [0024 - Separate Provider Templates, Model Catalogs, and Model Presets](0024-separate-provider-templates-catalogs-and-presets.md): keep connection defaults, model facts, and user choices independently replaceable.
 - [0025 - Record Usage before deriving cost and stats](0025-record-usage-before-deriving-cost-and-stats.md): preserve immutable usage evidence and derive changing views later.
-- [0026 - Bind Provider assumptions to origins](0026-bind-provider-assumptions-to-origins.md): do not transfer pricing or capabilities from an official API to an unknown gateway.
+- [0026 - Bind Provider assumptions to origins](0026-bind-provider-assumptions-to-origins.md): never transfer credential, capability, or origin authority; any mirrored rate card remains a distinctly provenanced estimate.
 - [0027 - Make every Config Object UI-editable](0027-make-every-config-object-ui-editable.md): generate safe UI and headless configuration surfaces from one schema.
 - [0028 - Keep slash commands hierarchical](0028-keep-slash-commands-hierarchical.md): keep the root panel small while making deep configuration discoverable.
 

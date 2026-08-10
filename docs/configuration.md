@@ -67,7 +67,9 @@ invalidates the prior check result.
 The release-bundled Provider Catalog now supplies schema-versioned OpenAI,
 DeepSeek, and OpenCode Go template defaults plus seed model facts with
 field-level provenance. Effective Profiles inherit those defaults unless the
-user overrides a field; custom origins never inherit template pricing.
+user overrides a field. A custom origin under a template with a bundled,
+versioned release rate card defaults to `template_mirror`; other custom origins
+still require an explicit pricing decision.
 Default/constraint/normalization/migration metadata in Config Schema, rendered
 TUI and App Server surfaces, live discovery, and starter-preset workflows remain
 later work. The product now provides origin-bound credential bind, replace,
@@ -82,7 +84,7 @@ access fails closed until another platform backend is implemented.
 | `providers.<id>.routes.<name>` | Path-only suffix for `responses`, `chat_completions`, `messages`, or `models` | Next Provider Epoch |
 | `providers.<id>.dialects` | Non-empty set of `responses`, `chat_completions`, and `messages` supported by that profile | Next Provider Epoch |
 | `providers.<id>.catalog.mode` | `template`, `discovery`, `template_and_discovery`, or `manual` | Next Provider Epoch |
-| `providers.<id>.pricing.source` | `unknown`, `template`, `manual`, or `provider_reported` | Next Provider Epoch |
+| `providers.<id>.pricing.source` | `unknown`, `template`, `template_mirror`, `manual`, or `provider_reported` | Next Provider Epoch |
 | `providers.<id>.allow_insecure_loopback` | Boolean; false by default and invalid for a non-loopback host | Next Provider Epoch |
 | `model_presets.<id>` | Provider, model, dialect, inference settings, context mode, and explicit fallback list | Next Turn and Provider Epoch when identity changes |
 | `price_schedules.<id>` | Version, currency, Provider Profile, model, optional dialect/service tier/context band, half-open UTC effective interval, provenance, and non-negative integer token-class rates | Next Config Epoch |
@@ -217,7 +219,7 @@ URL composition is intentionally not RFC relative-reference resolution. The runt
 Provider Template defaults are suggestions, not locked endpoints. Provider Origin changes have these effects:
 
 - The official credential is not carried to the new origin; a credential must be selected explicitly.
-- Official catalog pricing is not assumed. Pricing stays unknown until the user selects catalog inheritance, defines a Price Schedule, or the provider reports a trusted charge.
+- A bundled, versioned release rate card is mirrored by default when one exists for the selected template. The Profile and generated schedules record `template_mirror`, and an explicit `unknown`, `manual`, or `provider_reported` decision overrides it. A template with no bundled rate card still requires an explicit pricing decision.
 - HTTPS is required for remote origins. Plain HTTP is valid only for a loopback host and only when that profile sets `allow_insecure_loopback = true`.
 - The profile remains a distinct statistics dimension. A gateway's hidden backend is unknown unless trusted response metadata identifies it.
 - The next request starts a new Provider Epoch and cannot reuse incompatible continuation identity.
@@ -237,13 +239,15 @@ preset workflow remain pending.
 ## Model Catalog and Presets
 
 The current release-bundled Model Catalog is schema version 1, seed revision
-`2026-08-10.1`, observed at `2026-08-10T00:00:00Z`. Every record has a stable
+`2026-08-10.2`, observed at `2026-08-10T00:00:00Z`. Every record has a stable
 model key, provider-template identity, catalog schema version, seed revision,
 and observation time. Model identity, display name, primary and supported
 dialects, context limit, capabilities, price reference, and availability are
 represented as `{ value, provenance }`, where provenance carries source kind,
-source reference, and observation time. Unknown context, capability, price, and
-live-availability facts remain explicit rather than being inferred.
+source reference, and observation time. Unknown context, capability, and
+live-availability facts remain explicit rather than being inferred. DeepSeek
+seed records pin a versioned official price reference; other seed prices remain
+unknown.
 
 Config Runtime binds release records only to effective Profiles whose catalog
 mode includes template data. The terminal-neutral selector searches configured
@@ -255,22 +259,22 @@ and starter-preset acceptance remain target behavior. Pricing still resolves
 through a Price Schedule rather than becoming an unversioned catalog number.
 The installed execution matrix is deliberately closed: adapters accept
 `openai` and explicit `openai-compatible` Profiles for Responses and Chat
-Completions, and official `deepseek` Profiles for Chat Completions and Messages.
+Completions, and official `deepseek` Profiles for Responses, Chat Completions,
+and Messages.
 A Provider Template may still declare additional routes and dialect support as
-Config/catalog facts; DeepSeek Responses, every OpenCode Go pair, and OpenAI Messages
+Config/catalog facts; every OpenCode Go pair and OpenAI Messages
 remain unavailable until an exact adapter is installed. A catalog route or
 declared dialect alone never proves wire compatibility. Release-candidate
 compatibility remains tied to each record's primary dialect. DeepSeek V4 Pro is
-therefore compatible through its primary Chat dialect, while V4 Flash remains
-unavailable because its primary Responses adapter is still absent; the Messages
-adapter never silently rewrites either primary dialect.
+therefore compatible through its primary Chat dialect, while V4 Flash is
+compatible through its primary Responses dialect.
 The current release seed contains:
 
 | Provider Template | Seed family | Primary dialects |
 | --- | --- | --- |
 | OpenAI | GPT-5.6 Sol, Terra, Luna | OpenAI Responses |
 | DeepSeek | DeepSeek V4 Flash and Pro | Responses where supported; Chat Completions and Anthropic Messages as declared |
-| OpenCode Go | Go catalog observed for seed `2026-08-10.1` | Per-model Responses, Chat Completions, or Anthropic Messages |
+| OpenCode Go | Go catalog observed for seed `2026-08-10.2` | Per-model Responses, Chat Completions, or Anthropic Messages |
 
 Release work must refresh this snapshot from the [OpenAI model guide](https://developers.openai.com/api/docs/guides/latest-model), [DeepSeek API updates](https://api-docs.deepseek.com/updates), and [OpenCode Go catalog](https://opencode.ai/docs/go/). A release seed never claims to remain current indefinitely. `greentyper config catalog` emits the read-only bundled snapshot without reading Config, credentials, or the network.
 
@@ -293,7 +297,15 @@ favorite = true
 fallback = []
 ```
 
-A runnable preset must name its Provider Profile, model, and Provider Dialect. Its route is then resolved from that profile; there is no hidden dialect auto-selection. Presets may also define reasoning effort, reasoning mode where supported, service tier, output limit, context policy, and an explicit fallback chain. They never grant tools, approvals, credentials, or workspace authority.
+A runnable preset must name its Provider Profile, model, and preferred Provider
+Dialect. Its route is resolved from that profile; the only current
+model-capability resolution is official DeepSeek Responses preference: V4 Flash
+stays Responses and V4 Pro resolves to Chat Completions before admission. The
+effective dialect is frozen in the Provider Epoch. This is not transport retry
+or general fallback-chain execution. Presets may also define reasoning effort,
+reasoning mode where supported, service tier, output limit, context policy, and
+an explicit fallback chain. They never grant tools, approvals, credentials, or
+workspace authority.
 
 The current headless execution surface accepts `--preset ID`. It resolves the
 exact configured ID, applies its Profile/model/dialect, and freezes optional
@@ -301,9 +313,10 @@ exact configured ID, applies its Profile/model/dialect, and freezes optional
 Turn's Config Epoch. `--preset` and `--dialect` are mutually exclusive, and an
 unknown ID fails rather than triggering model-name inference. Responses maps
 reasoning to `reasoning.effort`; OpenAI Chat Completions uses
-`reasoning_effort`; both OpenAI adapters send `service_tier`. DeepSeek Chat and
-Messages map only the output limit and fail before network I/O when either
-unsupported policy field is selected. Initial requests and one
+`reasoning_effort`; both OpenAI adapters send `service_tier`. DeepSeek Responses
+maps `max_output_tokens` and supported `reasoning.effort`, but rejects service
+tier. DeepSeek Chat and Messages map only the output limit and fail before
+network I/O when either unsupported policy field is selected. Initial requests and one
 in-process Tool continuation retain the same frozen values; restart replay
 reconstructs them without making Tool continuation resumable. Requested Usage
 metadata records the same policy. The accepted reasoning values are `none`,
@@ -426,7 +439,7 @@ reasoning_output_micros_per_million = 3000000
 ```
 
 The resolved schedule book rejects duplicate or overlapping selectors. Config
-Epoch creation freezes the book and its fingerprints. Runtime Event schema 7
+Epoch creation freezes the book and its fingerprints. Runtime Event schema 8
 appends normalized Usage first and its cost evaluation second in one transaction;
 replay recomputes the result from that frozen evidence. Missing token classes,
 missing selectors, inconsistent accounting, and arithmetic overflow remain
@@ -436,8 +449,13 @@ estimated token evidence aggregate separately, and monetary totals use fixed
 
 Editable TOML schedules currently require `source = "manual"` and a Provider
 Profile whose pricing decision is also `manual`. A user-editable object cannot
-claim trusted template or provider-reported provenance. Authenticated template
-rate cards and provider-reported charges remain future dedicated ingestion paths.
+claim trusted template, template-mirror, or provider-reported provenance. The
+release bundle currently provides DeepSeek V4 Flash and Pro schedules from the
+official rate card. Official Profiles use `template`; custom DeepSeek origins
+without an explicit pricing override use `template_mirror`. Both freeze the
+rate-card version and source reference, but a mirror grants no credential,
+endpoint, or backend identity. Provider-reported charges remain a future
+dedicated ingestion path.
 
 Each Cost Estimate records the complete immutable schedule, including version,
 currency, provenance, rates, and fingerprint, so historical values are not

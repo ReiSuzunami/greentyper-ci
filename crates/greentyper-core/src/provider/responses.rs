@@ -315,6 +315,14 @@ impl ResponsesSseDecoder {
                 self.output_text_done(event.data())?;
                 None
             }
+            "response.reasoning_text.delta" => {
+                self.reasoning_text_delta(event.data())?;
+                None
+            }
+            "response.reasoning_text.done" => {
+                self.reasoning_text_done(event.data())?;
+                None
+            }
             "response.content_part.done" => {
                 self.content_part_done(event.data())?;
                 None
@@ -372,7 +380,15 @@ impl ResponsesSseDecoder {
         let state = match event.item.kind.as_str() {
             "message" => {
                 validate_status(event.item.status.as_deref(), "in_progress")?;
-                OutputItemState::Message(MessageState {
+                OutputItemState::Message(TextItemState {
+                    id: event.item.id,
+                    parts: BTreeMap::new(),
+                    done: false,
+                })
+            }
+            "reasoning" => {
+                validate_status(event.item.status.as_deref(), "in_progress")?;
+                OutputItemState::Reasoning(TextItemState {
                     id: event.item.id,
                     parts: BTreeMap::new(),
                     done: false,
@@ -407,16 +423,17 @@ impl ResponsesSseDecoder {
     fn content_part_added(&mut self, data: &str) -> Result<(), ResponsesError> {
         let event: WireContentPartEvent = decode_json(data)?;
         validate_content_index(event.content_index)?;
-        if event.part.kind != "output_text" {
+        let expected_kind = TextItemKind::from_content_part(&event.part.kind)?;
+        if self.text_item_kind(event.output_index, &event.item_id)? != expected_kind {
             return Err(ResponsesError::UnsupportedContentPart);
         }
         let text = event.part.text.ok_or(ResponsesError::MalformedEvent)?;
         self.reserve_text(text.len())?;
-        let message = self.message_mut(event.output_index, &event.item_id)?;
-        if message.done || message.parts.contains_key(&event.content_index) {
+        let item = self.text_item_mut(event.output_index, &event.item_id, expected_kind)?;
+        if item.done || item.parts.contains_key(&event.content_index) {
             return Err(ResponsesError::InvalidTransition);
         }
-        message.parts.insert(
+        item.parts.insert(
             event.content_index,
             TextPartState {
                 text,
@@ -436,7 +453,12 @@ impl ResponsesSseDecoder {
             return Err(ResponsesError::MalformedEvent);
         }
         self.reserve_text(event.delta.len())?;
-        let part = self.text_part_mut(event.output_index, event.content_index, &event.item_id)?;
+        let part = self.text_part_mut(
+            event.output_index,
+            event.content_index,
+            &event.item_id,
+            TextItemKind::Message,
+        )?;
         if part.output_done || part.content_done {
             return Err(ResponsesError::InvalidTransition);
         }
@@ -451,7 +473,46 @@ impl ResponsesSseDecoder {
 
     fn output_text_done(&mut self, data: &str) -> Result<(), ResponsesError> {
         let event: WireTextDoneEvent = decode_json(data)?;
-        let part = self.text_part_mut(event.output_index, event.content_index, &event.item_id)?;
+        let part = self.text_part_mut(
+            event.output_index,
+            event.content_index,
+            &event.item_id,
+            TextItemKind::Message,
+        )?;
+        if part.output_done || part.content_done || part.text != event.text {
+            return Err(ResponsesError::InvalidTransition);
+        }
+        part.output_done = true;
+        Ok(())
+    }
+
+    fn reasoning_text_delta(&mut self, data: &str) -> Result<(), ResponsesError> {
+        let event: WireTextDeltaEvent = decode_json(data)?;
+        if event.delta.is_empty() {
+            return Err(ResponsesError::MalformedEvent);
+        }
+        self.reserve_text(event.delta.len())?;
+        let part = self.text_part_mut(
+            event.output_index,
+            event.content_index,
+            &event.item_id,
+            TextItemKind::Reasoning,
+        )?;
+        if part.output_done || part.content_done {
+            return Err(ResponsesError::InvalidTransition);
+        }
+        part.text.push_str(&event.delta);
+        Ok(())
+    }
+
+    fn reasoning_text_done(&mut self, data: &str) -> Result<(), ResponsesError> {
+        let event: WireTextDoneEvent = decode_json(data)?;
+        let part = self.text_part_mut(
+            event.output_index,
+            event.content_index,
+            &event.item_id,
+            TextItemKind::Reasoning,
+        )?;
         if part.output_done || part.content_done || part.text != event.text {
             return Err(ResponsesError::InvalidTransition);
         }
@@ -461,11 +522,17 @@ impl ResponsesSseDecoder {
 
     fn content_part_done(&mut self, data: &str) -> Result<(), ResponsesError> {
         let event: WireContentPartEvent = decode_json(data)?;
-        if event.part.kind != "output_text" {
+        let expected_kind = TextItemKind::from_content_part(&event.part.kind)?;
+        if self.text_item_kind(event.output_index, &event.item_id)? != expected_kind {
             return Err(ResponsesError::UnsupportedContentPart);
         }
         let text = event.part.text.ok_or(ResponsesError::MalformedEvent)?;
-        let part = self.text_part_mut(event.output_index, event.content_index, &event.item_id)?;
+        let part = self.text_part_mut(
+            event.output_index,
+            event.content_index,
+            &event.item_id,
+            expected_kind,
+        )?;
         if !part.output_done || part.content_done || part.text != text {
             return Err(ResponsesError::InvalidTransition);
         }
@@ -533,8 +600,26 @@ impl ResponsesSseDecoder {
                 {
                     return Err(ResponsesError::InvalidTransition);
                 }
-                validate_message_content(&message.parts, &event.item.content)?;
+                validate_text_content(&message.parts, &event.item.content, "output_text")?;
                 message.done = true;
+                Ok(None)
+            }
+            OutputItemState::Reasoning(reasoning) => {
+                if reasoning.done || event.item.kind != "reasoning" || event.item.id != reasoning.id
+                {
+                    return Err(ResponsesError::InvalidTransition);
+                }
+                validate_status(event.item.status.as_deref(), "completed")?;
+                if reasoning.parts.is_empty()
+                    || reasoning
+                        .parts
+                        .values()
+                        .any(|part| !part.output_done || !part.content_done)
+                {
+                    return Err(ResponsesError::InvalidTransition);
+                }
+                validate_text_content(&reasoning.parts, &event.item.content, "reasoning_text")?;
+                reasoning.done = true;
                 Ok(None)
             }
             OutputItemState::FunctionCall(function) => {
@@ -651,15 +736,37 @@ impl ResponsesSseDecoder {
         Ok(())
     }
 
-    fn message_mut(
+    fn text_item_kind(
+        &self,
+        output_index: u32,
+        item_id: &str,
+    ) -> Result<TextItemKind, ResponsesError> {
+        validate_identifier(item_id)?;
+        match self.items.get(&output_index) {
+            Some(OutputItemState::Message(item)) if item.id == item_id => Ok(TextItemKind::Message),
+            Some(OutputItemState::Reasoning(item)) if item.id == item_id => {
+                Ok(TextItemKind::Reasoning)
+            }
+            _ => Err(ResponsesError::InvalidTransition),
+        }
+    }
+
+    fn text_item_mut(
         &mut self,
         output_index: u32,
         item_id: &str,
-    ) -> Result<&mut MessageState, ResponsesError> {
+        expected_kind: TextItemKind,
+    ) -> Result<&mut TextItemState, ResponsesError> {
         validate_identifier(item_id)?;
-        match self.items.get_mut(&output_index) {
-            Some(OutputItemState::Message(message)) if message.id == item_id => Ok(message),
-            _ => Err(ResponsesError::InvalidTransition),
+        match expected_kind {
+            TextItemKind::Message => match self.items.get_mut(&output_index) {
+                Some(OutputItemState::Message(item)) if item.id == item_id => Ok(item),
+                _ => Err(ResponsesError::InvalidTransition),
+            },
+            TextItemKind::Reasoning => match self.items.get_mut(&output_index) {
+                Some(OutputItemState::Reasoning(item)) if item.id == item_id => Ok(item),
+                _ => Err(ResponsesError::InvalidTransition),
+            },
         }
     }
 
@@ -668,14 +775,14 @@ impl ResponsesSseDecoder {
         output_index: u32,
         content_index: u32,
         item_id: &str,
+        expected_kind: TextItemKind,
     ) -> Result<&mut TextPartState, ResponsesError> {
         validate_content_index(content_index)?;
-        let message = self.message_mut(output_index, item_id)?;
-        if message.done {
+        let item = self.text_item_mut(output_index, item_id, expected_kind)?;
+        if item.done {
             return Err(ResponsesError::InvalidTransition);
         }
-        message
-            .parts
+        item.parts
             .get_mut(&content_index)
             .ok_or(ResponsesError::InvalidTransition)
     }
@@ -791,7 +898,8 @@ pub fn normalize_responses_events(
 }
 
 enum OutputItemState {
-    Message(MessageState),
+    Message(TextItemState),
+    Reasoning(TextItemState),
     FunctionCall(FunctionCallState),
 }
 
@@ -799,15 +907,32 @@ impl OutputItemState {
     const fn is_done(&self) -> bool {
         match self {
             Self::Message(message) => message.done,
+            Self::Reasoning(reasoning) => reasoning.done,
             Self::FunctionCall(function) => function.done,
         }
     }
 }
 
-struct MessageState {
+struct TextItemState {
     id: String,
     parts: BTreeMap<u32, TextPartState>,
     done: bool,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum TextItemKind {
+    Message,
+    Reasoning,
+}
+
+impl TextItemKind {
+    fn from_content_part(kind: &str) -> Result<Self, ResponsesError> {
+        match kind {
+            "output_text" => Ok(Self::Message),
+            "reasoning_text" => Ok(Self::Reasoning),
+            _ => Err(ResponsesError::UnsupportedContentPart),
+        }
+    }
 }
 
 struct TextPartState {
@@ -1013,9 +1138,10 @@ fn validate_argument_depth(value: &Value) -> Result<(), ResponsesError> {
     Ok(())
 }
 
-fn validate_message_content(
+fn validate_text_content(
     expected: &BTreeMap<u32, TextPartState>,
     actual: &[WireContentPart],
+    expected_kind: &str,
 ) -> Result<(), ResponsesError> {
     if expected.len() != actual.len() {
         return Err(ResponsesError::InvalidTransition);
@@ -1025,7 +1151,7 @@ fn validate_message_content(
         let expected = expected
             .get(&index)
             .ok_or(ResponsesError::InvalidTransition)?;
-        if part.kind != "output_text" || part.text.as_deref() != Some(expected.text.as_str()) {
+        if part.kind != expected_kind || part.text.as_deref() != Some(expected.text.as_str()) {
             return Err(ResponsesError::InvalidTransition);
         }
     }

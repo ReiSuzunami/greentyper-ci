@@ -121,12 +121,13 @@ existing durable Tool approval/effect state machine, feeds one successful UTF-8
 result into a Provider continuation, and durably prepares combined canonical
 output. Recovery tests prove stale Sessions cannot invoke the Provider,
 ambiguous effects cannot continue, and process death after a durable Tool
-success blocks rather than repeating the effect. Runtime Event schema 7 stores
+success blocks rather than repeating the effect. Runtime Event schema 8 stores
 durable Usage Attempt boundaries, frozen Usage Windows, Provider dialect, the
 expanded optional Usage Records, frozen Provider Profile snapshot, and the
 subsequent frozen Price Schedule cost evaluation plus an optional selected-Preset
-output-token limit and typed reasoning/service-tier policy while replaying
-historical schema 1 through schema 6.
+output-token limit, typed reasoning/service-tier policy, and distinct
+template-mirror pricing provenance while replaying historical schema 1 through
+schema 7.
 
 A product-private `local.echo` tracer now exercises the concrete process seam.
 It launches a fixed same-binary child without a shell, clears inherited
@@ -138,7 +139,7 @@ The product exposes it only through explicit `--tool local.echo` approval; it
 is one narrow local process Tool, not a general process sandbox or
 caller-selected command.
 
-Three configured dialect adapters now exercise four exact template/dialect
+Three configured dialect adapters now exercise five exact template/dialect
 pairs across the concrete Responses, Chat Completions, and Messages HTTP seams.
 Config Runtime resolves and freezes its typed Provider Profile, origin,
 selected-dialect route, dialect, pricing decision, and opaque credential
@@ -146,7 +147,12 @@ reference. Each adapter resolves a secret from the origin-bound product vault,
 requires HTTPS for remote origins, disables proxy discovery and redirects,
 sends a bounded canonical request, applies a fixed deadline, and streams the
 response through its core decoder into the real single-Agent Runtime. The
-DeepSeek Chat adapter uses Bearer authorization, `max_tokens`, a 384K output
+DeepSeek Responses adapter admits V4 Flash only, uses Bearer authorization,
+maps `max_output_tokens`, validates bounded reasoning without projecting raw
+reasoning text, and reconstructs its one stateless Tool continuation. A
+preferred Responses dialect for V4 Pro resolves to Chat before admission and
+freezes that effective dialect; this is not a network retry. The DeepSeek Chat
+adapter uses Bearer authorization, `max_tokens`, a 384K output
 ceiling, non-thinking mode, and an ordinary non-Beta Tool schema; it rejects
 unsupported reasoning/service-tier policy before network I/O. The DeepSeek
 Messages adapter uses `x-api-key`, pins the compatibility version,
@@ -159,8 +165,8 @@ missing credential failure before network access.
 
 The remaining slices are still policy, protocol, and fault-adapter work:
 live-provider validation, non-Windows credential backends, configurable proxy
-policy, live catalog discovery, template-specific DeepSeek Responses and all
-OpenCode Go execution, DeepSeek Chat/Messages reasoning blocks, Preset
+policy, live catalog discovery, all OpenCode Go execution, DeepSeek
+Chat/Messages reasoning blocks, general Preset
 context/fallback execution, broader canonical Items, multiple
 Tool calls,
 durable resumable Tool result references, richer TUI/App Server
@@ -180,7 +186,7 @@ Exit criteria:
 
 Add VT/ConPTY TUI, hierarchical Command Paths, global command palette, Config Schema-driven editors, Provider wizard, model selector, adaptive statusline, Context Pressure, Usage Records/Rollups, `/stats`, and named Usage Windows.
 
-The first observability slice is implemented. Runtime Event schema 7 durably
+The first observability slice is implemented. Runtime Event schema 8 durably
 brackets each Provider request and continuation with an immutable Usage Attempt,
 including UTC start/completion, outcome, Agent scope when present, frozen
 Provider Profile/model/dialect, exact or estimated Usage Records, and explicit
@@ -240,8 +246,10 @@ Draft change, and observed revision conflicts before a probe.
 A release-bundled Provider Catalog now freezes schema-versioned OpenAI,
 DeepSeek, and OpenCode Go template defaults and seed model facts with
 field-level source references and observation time. Config Runtime applies
-template defaults before explicit Profile overrides, refuses template pricing
-inheritance for custom origins, and binds release models only to Profiles whose
+template defaults before explicit Profile overrides, defaults custom origins to
+the distinct `template_mirror` source only when the template has a reviewed
+bundled rate card, preserves explicit pricing overrides, and binds release
+models only to Profiles whose
 catalog mode includes template data. The selector searches configured presets
 and release candidates, reports compatibility from frozen dialect support plus
 the installed product-adapter boundary, and keeps live availability and Recent
@@ -251,14 +259,18 @@ adapters accept the official OpenAI template through the same frozen capability,
 dialect, and endpoint checks as compatible gateways. The current Messages
 adapter accepts only the official DeepSeek template and its explicit frozen
 Messages route; no OpenCode Go wire compatibility is inferred from catalog data.
+The DeepSeek release records also carry reviewed, versioned Flash and Pro price
+cards; official origins freeze `template` provenance and custom origins freeze
+`template_mirror` provenance without inheriting credential or origin authority.
 Price Schedules are now a fourth typed Config Object with nested lifecycle and
 schema-generated editor routes. The Config Runtime validates provider/pricing
 provenance, effective intervals, selector overlap, and fixed integer rates before
 freezing the resolved book. Product admission passes that book into both plain
 and Product-driver Turns; `stats` and the terminal-neutral status projection
 surface immutable pay-as-you-go estimates without scanning history. Editable
-Config accepts manual provenance only; trusted template-rate and provider-charge
-ingestion remain separate future authority paths.
+Config accepts manual provenance only; bundled template-rate ingestion now has a
+dedicated frozen source, while provider-reported charge ingestion remains a
+separate future authority path.
 The compatible bare `stats` command still emits its complete replayed snapshot.
 Explicit summary-only and bounded-page modes now avoid cloning or serializing
 the complete attempt list, stamp every report with the Ledger revision, bind
@@ -294,18 +306,21 @@ Exit criteria:
 
 ## Phase 4: Provider Portability
 
-Continue the release templates and seed catalog with template-specific DeepSeek
-Responses and OpenCode Go adapter execution, lazy discovery,
+Continue the release templates and seed catalog with OpenCode Go adapter
+execution, lazy discovery,
 starter-preset acceptance, provider capability probes, explicit fallback
 chains, observed availability, and provider/model epoch switching. The
 OpenAI/openai-compatible Responses and Chat Completions adapters plus official
-DeepSeek Chat Completions and Messages adapters are implemented; custom gateway routes and
+DeepSeek Responses, Chat Completions, and Messages pairs are implemented; custom gateway routes and
 user-owned Model Presets can be selected explicitly by ID for headless Turns.
 Their Profile/model/dialect, optional output-token limit, typed reasoning effort,
 and typed service tier resolve through the frozen Config/Provider Epoch boundary.
-OpenAI Responses and Chat map the supported request fields; both DeepSeek
-adapters reject the two unsupported policy fields before network I/O. Rendered selection, context mode,
-and fallback execution are still pending.
+OpenAI Responses and Chat map the supported request fields. DeepSeek Responses
+maps its supported reasoning effort and rejects service tier, while DeepSeek
+Chat/Messages reject both unsupported policy fields before network I/O. Flash
+keeps a preferred Responses dialect and Pro resolves that preference to Chat
+before admission. Rendered selection, context mode, and general fallback
+execution are still pending.
 
 Exit criteria:
 

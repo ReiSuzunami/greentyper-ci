@@ -207,7 +207,7 @@ fn config_catalog_emits_the_versioned_public_release_seed_only() {
 
     let catalog = json(&output.stdout);
     assert_eq!(catalog["schema_version"], 1);
-    assert_eq!(catalog["seed_revision"], "2026-08-10.1");
+    assert_eq!(catalog["seed_revision"], "2026-08-10.2");
     assert_eq!(catalog["templates"].as_array().map(Vec::len), Some(3));
     assert!(catalog["models"].as_array().is_some_and(|models| {
         models

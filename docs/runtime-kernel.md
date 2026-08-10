@@ -157,7 +157,7 @@ descriptors while Tool Runtime remains the authority gate. Approval and
 `EffectPrepared` are durable before the injected executor runs. A successful
 UTF-8 result may then enter one Provider continuation. The final
 `OutputPrepared` transaction stores the combined canonical text and one or two
-bounded Usage Records. Runtime Event schema 7 also durably brackets every
+bounded Usage Records. Runtime Event schema 8 also durably brackets every
 Provider request or continuation with Usage Attempt start/finish Events and
 carries the Agent scope, Provider dialect, frozen Usage Windows, UTC times,
 outcome, exact/estimated marker, optional token/cache classes, service tier, and
@@ -165,7 +165,7 @@ frozen Provider Profile snapshot, then records one frozen Price Schedule cost
 evaluation plus optional selected-Preset output-token, typed reasoning-effort,
 and typed service-tier policy in the Config Epoch. Requested effort/tier are
 kept distinct from observed Provider metadata. Historical schema-1 through
-schema-6 Runtime transactions replay and can be followed by schema-7 transactions;
+schema-7 Runtime transactions replay and can be followed by schema-8 transactions;
 schema-1 token counts become explicitly estimated legacy attempts.
 
 This tracer bullet intentionally stores only the Tool result digest. If the
@@ -298,7 +298,7 @@ checkpoints, and stale-result CAS handling.
 
 Prompt/provider text and credential material are not part of the Usage domain.
 Requested or observed metadata not supplied by the current Provider remains
-unknown. Runtime Event schema 7 records `UsageAttemptFinished` before
+unknown. Runtime Event schema 8 records `UsageAttemptFinished` before
 `UsageAttemptCostEvaluated` in the same transaction. The Config Epoch freezes
 the resolved Price Schedule book; replay recomputes the cost claim from that
 book and the normalized Usage Record, rejecting a changed schedule fingerprint,
@@ -311,8 +311,10 @@ missing selectors, inconsistent accounting, and checked-arithmetic overflow stay
 explicitly unknown. Cached rollups aggregate fixed 12-decimal pico-currency
 units by currency. Provider-reported charges and subscription quota values are
 not inferred or merged into that estimate. Editable Config can define only a
-manual schedule; trusted template rates and provider-reported charges require
-future dedicated authority paths.
+manual schedule. Reviewed release-bundled rate cards use frozen `template`
+provenance on official origins and distinct `template_mirror` provenance on
+custom origins; neither carries credential or origin authority. Provider-reported
+charges still require a future dedicated authority path.
 
 ## Still Pending
 

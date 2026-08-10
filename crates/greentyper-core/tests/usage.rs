@@ -331,7 +331,7 @@ fn excessive_usage_windows_are_rejected_before_runtime_append() {
 
 #[test]
 fn runtime_persists_attempts_and_rebuilds_cached_rollups() {
-    assert_eq!(RUNTIME_EVENT_SCHEMA, 7);
+    assert_eq!(RUNTIME_EVENT_SCHEMA, 8);
     let temp = TempConfig::new();
     let ledger = temp.root.join("runtime.ledger");
     let mut runtime = RuntimeKernel::open(&ledger).unwrap();

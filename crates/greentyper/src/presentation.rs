@@ -2459,7 +2459,7 @@ credential = "synthetic-deepseek-credential-reference"
 
         let encoded = serde_json::to_string(&selector).expect("serialize model selector");
         assert!(encoded.contains("release_catalog"));
-        assert!(encoded.contains("2026-08-10.1"));
+        assert!(encoded.contains("2026-08-10.2"));
         assert!(!encoded.contains("synthetic-openai-credential-reference"));
 
         let deepseek = ModelSelectorView::build(&[], &catalog_models, "deepseek-v4-pro")
@@ -2475,15 +2475,15 @@ credential = "synthetic-deepseek-credential-reference"
 
         let deepseek_responses =
             ModelSelectorView::build(&[], &catalog_models, "deepseek-v4-flash")
-                .expect("catalog model without DeepSeek Responses adapter");
+                .expect("catalog model with DeepSeek Responses adapter");
         assert_eq!(deepseek_responses.all.len(), 1);
         assert_eq!(
             deepseek_responses.all[0].compatibility,
-            Availability::Known(false)
+            Availability::Known(true)
         );
         assert_eq!(
             deepseek_responses.compatible,
-            Availability::Known(Vec::new())
+            Availability::Known(deepseek_responses.all.clone())
         );
     }
 

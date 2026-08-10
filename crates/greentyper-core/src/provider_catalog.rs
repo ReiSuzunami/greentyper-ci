@@ -5,11 +5,15 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::pricing::{
+    PriceSchedule, PriceScheduleDefinition, PriceScheduleSource, PricingError, TokenRates,
+};
 use crate::provider::{ProviderDialect, ProviderPricingSource};
 use crate::schema::SchemaKind;
+use crate::usage::UsageTimestamp;
 
 pub const PROVIDER_CATALOG_SCHEMA_VERSION: u16 = SchemaKind::ProviderCatalog.current().get();
-pub const RELEASE_SEED_REVISION: &str = "2026-08-10.1";
+pub const RELEASE_SEED_REVISION: &str = "2026-08-10.2";
 pub const RELEASE_SEED_OBSERVED_AT: &str = "2026-08-10T00:00:00Z";
 
 const OPENAI_MODEL_SOURCE: &str = "https://developers.openai.com/api/docs/guides/latest-model";
@@ -17,6 +21,8 @@ const OPENAI_API_SOURCE: &str =
     "https://developers.openai.com/api/reference/resources/models/methods/list";
 const DEEPSEEK_API_SOURCE: &str = "https://api-docs.deepseek.com/";
 const DEEPSEEK_MODEL_SOURCE: &str = "https://api-docs.deepseek.com/updates/";
+const DEEPSEEK_PRICING_SOURCE: &str = "https://api-docs.deepseek.com/quick_start/pricing/";
+const RELEASE_PRICE_EFFECTIVE_FROM_UNIX_MS: i64 = 1_786_320_000_000;
 const OPENCODE_GO_SOURCE: &str = "https://opencode.ai/docs/go/";
 
 const RESPONSES: &[ProviderDialect] = &[ProviderDialect::Responses];
@@ -433,24 +439,47 @@ const fn model(
     }
 }
 
+const fn deepseek_priced_model(
+    key: &'static str,
+    provider_template: &'static str,
+    model_id: &'static str,
+    display_name: &'static str,
+    primary_dialect: ProviderDialect,
+    supported_dialects: &'static [ProviderDialect],
+    price_schedule_ref: &'static str,
+) -> ModelCatalogRecord {
+    let mut record = model(
+        key,
+        provider_template,
+        model_id,
+        display_name,
+        primary_dialect,
+        supported_dialects,
+        DEEPSEEK_MODEL_SOURCE,
+    );
+    record.price_schedule_ref =
+        CatalogField::release(Some(price_schedule_ref), DEEPSEEK_PRICING_SOURCE);
+    record
+}
+
 const MODEL_CATALOG: &[ModelCatalogRecord] = &[
-    model(
+    deepseek_priced_model(
         "deepseek/deepseek-v4-flash",
         "deepseek",
         "deepseek-v4-flash",
         "DeepSeek V4 Flash",
         ProviderDialect::Responses,
         ALL_DIALECTS,
-        DEEPSEEK_MODEL_SOURCE,
+        "deepseek-v4-flash-2026-08-10",
     ),
-    model(
+    deepseek_priced_model(
         "deepseek/deepseek-v4-pro",
         "deepseek",
         "deepseek-v4-pro",
         "DeepSeek V4 Pro",
         ProviderDialect::ChatCompletions,
         DEEPSEEK_PRO_DIALECTS,
-        DEEPSEEK_MODEL_SOURCE,
+        "deepseek-v4-pro-2026-08-10",
     ),
     model(
         "openai/gpt-5.6-luna",
@@ -650,3 +679,80 @@ const RELEASE_CATALOG: ProviderCatalog = ProviderCatalog {
     templates: PROVIDER_TEMPLATES,
     models: MODEL_CATALOG,
 };
+
+#[derive(Clone, Copy)]
+struct ReleasePriceScheduleSeed {
+    provider_template: &'static str,
+    model: &'static str,
+    version: &'static str,
+    source_ref: &'static str,
+    rates: TokenRates,
+}
+
+const RELEASE_PRICE_SCHEDULES: &[ReleasePriceScheduleSeed] = &[
+    ReleasePriceScheduleSeed {
+        provider_template: "deepseek",
+        model: "deepseek-v4-flash",
+        version: "2026-08-10.1",
+        source_ref: DEEPSEEK_PRICING_SOURCE,
+        rates: TokenRates::new(140_000, 2_800, 0, 280_000, 280_000),
+    },
+    ReleasePriceScheduleSeed {
+        provider_template: "deepseek",
+        model: "deepseek-v4-pro",
+        version: "2026-08-10.1",
+        source_ref: DEEPSEEK_PRICING_SOURCE,
+        rates: TokenRates::new(435_000, 3_625, 0, 870_000, 870_000),
+    },
+];
+
+pub(crate) fn release_price_schedules_for_profile(
+    provider_profile: &str,
+    provider_template: &str,
+    source: PriceScheduleSource,
+) -> Result<Vec<PriceSchedule>, PricingError> {
+    RELEASE_PRICE_SCHEDULES
+        .iter()
+        .filter(|seed| seed.provider_template == provider_template)
+        .map(|seed| {
+            PriceSchedule::new_trusted(PriceScheduleDefinition {
+                id: release_schedule_id(provider_profile, seed.model),
+                version: seed.version.to_owned(),
+                currency: "USD".to_owned(),
+                provider_profile: provider_profile.to_owned(),
+                model: seed.model.to_owned(),
+                dialect: None,
+                service_tier: None,
+                minimum_context_tokens: 0,
+                maximum_context_tokens: None,
+                effective_from: UsageTimestamp::from_unix_millis(
+                    RELEASE_PRICE_EFFECTIVE_FROM_UNIX_MS,
+                )
+                .expect("release Price Schedule timestamp is valid"),
+                effective_until: None,
+                source,
+                source_ref: seed.source_ref.to_owned(),
+                rates: seed.rates,
+            })
+        })
+        .collect()
+}
+
+pub(crate) fn has_release_price_schedules(provider_template: &str) -> bool {
+    RELEASE_PRICE_SCHEDULES
+        .iter()
+        .any(|seed| seed.provider_template == provider_template)
+}
+
+fn release_schedule_id(provider_profile: &str, model: &str) -> String {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for bytes in [provider_profile.as_bytes(), model.as_bytes()] {
+        hash ^= bytes.len() as u64;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        for byte in bytes {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+    format!("release-{hash:016x}")
+}

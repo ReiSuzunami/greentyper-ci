@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 
 use greentyper_core::config::{
     ConfigDocument, ConfigPaths, ConfigRuntime, ConfigRuntimeError, DEFAULT_MAX_OUTPUT_BYTES,
+    ReasoningEffort,
 };
 use greentyper_core::provider::chat_completions::{
     ChatCompletionsSseDecoder, normalize_chat_completions_events,
@@ -21,6 +22,7 @@ use greentyper_core::provider::{
     ProviderPricingSource, ProviderProfileSnapshot, ProviderRequest, ProviderRuntime,
     ProviderToolCall, ProviderToolOutput,
 };
+use greentyper_core::provider_catalog::ProviderCatalog;
 use greentyper_core::runtime::{RuntimeError, RuntimeKernel};
 use reqwest::blocking::{Client, ClientBuilder};
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
@@ -83,6 +85,20 @@ const TOOL_CONTINUATION_SSE: &[u8] =
     include_bytes!("../../../tests/fixtures/provider/responses/v1/http-tool-continuation.sse");
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ResponsesAdapter {
+    OpenAi,
+    DeepSeek,
+}
+
+fn responses_adapter(template: &str) -> Option<ResponsesAdapter> {
+    match template {
+        OPENAI_TEMPLATE | OPENAI_COMPATIBLE_TEMPLATE => Some(ResponsesAdapter::OpenAi),
+        DEEPSEEK_TEMPLATE => Some(ResponsesAdapter::DeepSeek),
+        _ => None,
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ChatCompletionsAdapter {
     OpenAi,
     DeepSeek,
@@ -98,9 +114,7 @@ fn chat_completions_adapter(template: &str) -> Option<ChatCompletionsAdapter> {
 
 pub(crate) fn has_provider_adapter(template: &str, dialect: ProviderDialect) -> bool {
     match dialect {
-        ProviderDialect::Responses => {
-            matches!(template, OPENAI_TEMPLATE | OPENAI_COMPATIBLE_TEMPLATE)
-        }
+        ProviderDialect::Responses => responses_adapter(template).is_some(),
         ProviderDialect::ChatCompletions => chat_completions_adapter(template).is_some(),
         ProviderDialect::Messages => template == DEEPSEEK_TEMPLATE,
     }
@@ -176,6 +190,47 @@ fn require_deepseek_chat_request_policy(request: &ProviderRequest) -> Result<(),
     Ok(())
 }
 
+fn require_deepseek_responses_request_policy(
+    request: &ProviderRequest,
+) -> Result<(), ProviderError> {
+    if request.provider.model() != "deepseek-v4-flash" {
+        return Err(ProviderError::InvalidRequest(
+            "DeepSeek Responses currently supports only deepseek-v4-flash",
+        ));
+    }
+    if request.config.resolved().service_tier().is_some() {
+        return Err(ProviderError::InvalidRequest(
+            "DeepSeek Responses does not support preset service tier",
+        ));
+    }
+    if request
+        .config
+        .resolved()
+        .reasoning_effort()
+        .is_some_and(|effort| {
+            !matches!(
+                *effort.value(),
+                ReasoningEffort::Low | ReasoningEffort::High | ReasoningEffort::Max
+            )
+        })
+    {
+        return Err(ProviderError::InvalidRequest(
+            "DeepSeek Responses reasoning effort is not supported by the selected model",
+        ));
+    }
+    if request
+        .config
+        .resolved()
+        .max_output_tokens()
+        .is_some_and(|limit| *limit.value() > DEEPSEEK_CHAT_MAX_TOKENS)
+    {
+        return Err(ProviderError::InvalidRequest(
+            "DeepSeek Responses output token limit exceeds the documented maximum",
+        ));
+    }
+    Ok(())
+}
+
 fn insert_deepseek_chat_request_policy(
     body: &mut serde_json::Value,
     request: &ProviderRequest,
@@ -233,6 +288,7 @@ pub(crate) struct ResponsesHttpProvider<V> {
     client: Client,
     endpoint: Url,
     profile: ProviderProfileSnapshot,
+    adapter: ResponsesAdapter,
     credential_scope: ProviderCredentialScope,
     vault: V,
     local_echo_enabled: bool,
@@ -242,6 +298,8 @@ pub(crate) struct ResponsesHttpProvider<V> {
 struct PendingContinuation {
     response_id: String,
     call_id: String,
+    input: String,
+    arguments_json: String,
 }
 
 impl<V> fmt::Debug for ResponsesHttpProvider<V> {
@@ -288,11 +346,10 @@ impl<V: CredentialVault> ResponsesHttpProvider<V> {
         timeout: Duration,
         client: ClientBuilder,
     ) -> Result<Self, ProviderError> {
-        if !has_provider_adapter(profile.template(), ProviderDialect::Responses) {
-            return Err(ProviderError::InvalidConfiguration(
+        let adapter =
+            responses_adapter(profile.template()).ok_or(ProviderError::InvalidConfiguration(
                 "Provider Profile template has no configured runtime adapter",
-            ));
-        }
+            ))?;
         if !profile.supports(ProviderDialect::Responses) {
             return Err(ProviderError::InvalidConfiguration(
                 "Responses Provider Profile does not declare Responses support",
@@ -320,6 +377,7 @@ impl<V: CredentialVault> ResponsesHttpProvider<V> {
             client,
             endpoint,
             profile,
+            adapter,
             credential_scope,
             vault,
             local_echo_enabled: false,
@@ -449,6 +507,9 @@ impl<V: CredentialVault> ProviderRuntime for ResponsesHttpProvider<V> {
 
     fn run(&mut self, request: &ProviderRequest) -> Result<Vec<ProviderEvent>, ProviderError> {
         self.require_request_identity(request)?;
+        if self.adapter == ResponsesAdapter::DeepSeek {
+            require_deepseek_responses_request_policy(request)?;
+        }
         let max_output_bytes =
             usize::try_from(*request.config.resolved().max_output_bytes().value())
                 .map_err(|_| ProviderError::InvalidConfiguration("output byte limit is invalid"))?;
@@ -459,7 +520,7 @@ impl<V: CredentialVault> ProviderRuntime for ResponsesHttpProvider<V> {
                 "model": request.provider.model(),
                 "stream": true,
                 "tool_choice": "auto",
-                "tools": [local_echo_tool_definition()],
+                "tools": [responses_local_echo_tool_definition(self.adapter)],
             })
         } else {
             serde_json::json!({
@@ -484,6 +545,8 @@ impl<V: CredentialVault> ProviderRuntime for ResponsesHttpProvider<V> {
             self.pending_continuation = Some(PendingContinuation {
                 response_id,
                 call_id: call.call_id().to_owned(),
+                input: request.input.clone(),
+                arguments_json: call.arguments_json().to_owned(),
             });
         }
         Ok(events)
@@ -500,22 +563,47 @@ impl<V: CredentialVault> ProviderRuntime for ResponsesHttpProvider<V> {
                 "Responses Provider has no enabled Tool continuation",
             ));
         }
+        if self.adapter == ResponsesAdapter::DeepSeek {
+            require_deepseek_responses_request_policy(request)?;
+        }
         let pending = self.take_pending_continuation(output.call_id())?;
         let max_output_bytes =
             usize::try_from(*request.config.resolved().max_output_bytes().value())
                 .map_err(|_| ProviderError::InvalidConfiguration("output byte limit is invalid"))?;
-        let mut body = serde_json::json!({
-            "input": [{
-                "type": "function_call_output",
-                "call_id": output.call_id(),
-                "output": output.output(),
-            }],
-            "model": request.provider.model(),
-            "previous_response_id": pending.response_id,
-            "stream": true,
-            "tool_choice": "none",
-            "tools": [local_echo_tool_definition()],
-        });
+        let mut body = match self.adapter {
+            ResponsesAdapter::OpenAi => serde_json::json!({
+                "input": [{
+                    "type": "function_call_output",
+                    "call_id": output.call_id(),
+                    "output": output.output(),
+                }],
+                "model": request.provider.model(),
+                "previous_response_id": pending.response_id,
+                "stream": true,
+                "tool_choice": "none",
+                "tools": [responses_local_echo_tool_definition(self.adapter)],
+            }),
+            ResponsesAdapter::DeepSeek => serde_json::json!({
+                "input": [
+                    {"role": "user", "content": pending.input},
+                    {
+                        "type": "function_call",
+                        "call_id": pending.call_id,
+                        "name": "local_echo",
+                        "arguments": pending.arguments_json,
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": output.call_id(),
+                        "output": output.output(),
+                    },
+                ],
+                "model": request.provider.model(),
+                "stream": true,
+                "tool_choice": "none",
+                "tools": [responses_local_echo_tool_definition(self.adapter)],
+            }),
+        };
         insert_output_token_limit(&mut body, "max_output_tokens", request);
         insert_responses_request_policy(&mut body, request);
         let (_, events) = self.send_request(body, max_output_bytes)?;
@@ -1144,8 +1232,8 @@ impl<V: CredentialVault> ProviderRuntime for MessagesHttpProvider<V> {
     }
 }
 
-fn local_echo_tool_definition() -> serde_json::Value {
-    serde_json::json!({
+fn responses_local_echo_tool_definition(adapter: ResponsesAdapter) -> serde_json::Value {
+    let mut definition = serde_json::json!({
         "type": "function",
         "name": "local_echo",
         "description": "Return the supplied message unchanged.",
@@ -1157,8 +1245,14 @@ fn local_echo_tool_definition() -> serde_json::Value {
             "required": ["message"],
             "additionalProperties": false,
         },
-        "strict": true,
-    })
+    });
+    if adapter == ResponsesAdapter::OpenAi {
+        definition
+            .as_object_mut()
+            .expect("Responses Tool definition must be an object")
+            .insert("strict".to_owned(), serde_json::Value::Bool(true));
+    }
+    definition
 }
 
 fn chat_local_echo_tool_definition(adapter: ChatCompletionsAdapter) -> serde_json::Value {
@@ -1229,6 +1323,42 @@ pub(crate) enum ConfiguredProvider<V> {
     Messages(Box<MessagesHttpProvider<V>>),
 }
 
+fn resolve_preferred_dialect(
+    profile: &ProviderProfileSnapshot,
+    model: &str,
+    preferred: ProviderDialect,
+) -> Result<ProviderDialect, ProviderError> {
+    if profile.template() != DEEPSEEK_TEMPLATE || preferred != ProviderDialect::Responses {
+        return Ok(preferred);
+    }
+    let key = format!("{DEEPSEEK_TEMPLATE}/{model}");
+    let record =
+        ProviderCatalog::release()
+            .model(&key)
+            .ok_or(ProviderError::InvalidConfiguration(
+                "DeepSeek Responses fallback requires a verified release model",
+            ))?;
+    if record
+        .supported_dialects()
+        .value()
+        .contains(&ProviderDialect::Responses)
+        && profile.supports(ProviderDialect::Responses)
+    {
+        return Ok(ProviderDialect::Responses);
+    }
+    if record
+        .supported_dialects()
+        .value()
+        .contains(&ProviderDialect::ChatCompletions)
+        && profile.supports(ProviderDialect::ChatCompletions)
+    {
+        return Ok(ProviderDialect::ChatCompletions);
+    }
+    Err(ProviderError::InvalidConfiguration(
+        "DeepSeek model has no compatible Responses fallback",
+    ))
+}
+
 impl<V: CredentialVault> ConfiguredProvider<V> {
     pub(crate) fn enable_local_echo(&mut self) {
         match self {
@@ -1267,6 +1397,16 @@ impl<V: CredentialVault> ConfiguredProvider<V> {
                 .map(Box::new)
                 .map(Self::Messages),
         }
+    }
+
+    pub(crate) fn for_new_turn_with_preferred_dialect(
+        profile: ProviderProfileSnapshot,
+        model: &str,
+        preferred: ProviderDialect,
+        vault: V,
+    ) -> Result<Self, ProviderError> {
+        let dialect = resolve_preferred_dialect(&profile, model, preferred)?;
+        Self::for_new_turn_with_dialect(profile, dialect, vault)
     }
 
     pub(crate) fn from_epoch(epoch: &ProviderEpoch, vault: V) -> Result<Self, ProviderError> {
@@ -2082,6 +2222,26 @@ mod tests {
         reasoning_effort: Option<ReasoningEffort>,
         service_tier: Option<ServiceTier>,
     ) -> ProviderRequest {
+        provider_request_with_model_policy(
+            profile,
+            FIXTURE_MODEL,
+            input,
+            dialect,
+            max_output_tokens,
+            reasoning_effort,
+            service_tier,
+        )
+    }
+
+    fn provider_request_with_model_policy(
+        profile: ProviderProfileSnapshot,
+        model: &str,
+        input: &str,
+        dialect: ProviderDialect,
+        max_output_tokens: impl Into<Option<u32>>,
+        reasoning_effort: Option<ReasoningEffort>,
+        service_tier: Option<ServiceTier>,
+    ) -> ProviderRequest {
         let mut layers = ConfigLayers::default();
         layers.cli.max_output_tokens = max_output_tokens.into();
         layers.cli.reasoning_effort = reasoning_effort;
@@ -2094,7 +2254,7 @@ mod tests {
             provider: ProviderEpoch::with_profile_snapshot_and_dialect(
                 ProviderEpochId::new(1).expect("Provider Epoch"),
                 profile.profile(),
-                FIXTURE_MODEL,
+                model,
                 profile.clone(),
                 Some(dialect),
             )
@@ -2179,6 +2339,40 @@ source = "unknown"
             .selected_provider_profile()
             .expect("resolve DeepSeek Chat Profile")
             .expect("external DeepSeek Chat Profile")
+    }
+
+    fn deepseek_dual_fixture_profile(base_url: &str, name: &str) -> ProviderProfileSnapshot {
+        let encoded_base_url = serde_json::to_string(base_url).expect("encode DeepSeek origin");
+        let document = ConfigDocument::parse(&format!(
+            r#"
+schema_version = 1
+
+[provider]
+profile = "deepseek-dual-loopback"
+model = "deepseek-v4-flash"
+
+[providers.deepseek-dual-loopback]
+template = "{DEEPSEEK_TEMPLATE}"
+credential = "deepseek-dual-loopback-synthetic"
+base_url = {encoded_base_url}
+dialects = ["responses", "chat_completions"]
+allow_insecure_loopback = true
+
+[providers.deepseek-dual-loopback.routes]
+responses = "/responses"
+chat_completions = "/chat/completions"
+models = "/models"
+
+[providers.deepseek-dual-loopback.pricing]
+source = "unknown"
+"#,
+        ))
+        .expect("parse dual DeepSeek fixture Config");
+        ConfigRuntime::open(test_config_paths(name), document)
+            .expect("resolve dual DeepSeek fixture Config")
+            .selected_provider_profile()
+            .expect("resolve dual DeepSeek Profile")
+            .expect("external dual DeepSeek Profile")
     }
 
     fn openai_dual_fixture_profile(base_url: &str, name: &str) -> ProviderProfileSnapshot {
@@ -2925,7 +3119,7 @@ source = "unknown"
             DEEPSEEK_TEMPLATE,
             ProviderDialect::ChatCompletions
         ));
-        assert!(!has_provider_adapter(
+        assert!(has_provider_adapter(
             DEEPSEEK_TEMPLATE,
             ProviderDialect::Responses
         ));
@@ -2955,6 +3149,318 @@ source = "unknown"
                     && usage.output_tokens() == Some(5)
         ));
         server.join().expect("join DeepSeek Chat server");
+    }
+
+    #[test]
+    fn deepseek_responses_adapter_runs_flash_with_exact_supported_policy() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("DeepSeek Responses listener");
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let profile = deepseek_dual_fixture_profile(&base_url, "deepseek-responses-adapter");
+        let vault = bound_chat_vault(&profile);
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener
+                .accept()
+                .expect("accept DeepSeek Responses request");
+            configure_fixture_stream(&stream).expect("configure DeepSeek Responses request");
+            let body = read_test_request_body_for(&mut stream, "/responses");
+            assert_eq!(
+                body,
+                serde_json::json!({
+                    "input": "hello DeepSeek Responses",
+                    "max_output_tokens": 3072,
+                    "model": "deepseek-v4-flash",
+                    "reasoning": {"effort": "high"},
+                    "stream": true,
+                })
+            );
+            write_fixture_response(
+                &mut stream,
+                "200 OK",
+                "text/event-stream",
+                SUCCESS_SSE,
+                true,
+            )
+            .expect("write DeepSeek Responses response");
+        });
+
+        let mut provider =
+            ResponsesHttpProvider::with_timeout(profile.clone(), vault, HTTP_TIMEOUT)
+                .expect("configured DeepSeek Responses provider");
+        let request = provider_request_with_model_policy(
+            profile,
+            "deepseek-v4-flash",
+            "hello DeepSeek Responses",
+            ProviderDialect::Responses,
+            3_072,
+            Some(ReasoningEffort::High),
+            None,
+        );
+        let events = provider.run(&request).expect("DeepSeek Responses response");
+        assert!(matches!(events.last(), Some(ProviderEvent::Completed(_))));
+        server.join().expect("join DeepSeek Responses server");
+    }
+
+    #[test]
+    fn deepseek_responses_preference_falls_back_to_chat_for_pro_before_network() {
+        let profile = deepseek_dual_fixture_profile(
+            "http://127.0.0.1:9",
+            "deepseek-responses-model-fallback",
+        );
+        let pro = ConfiguredProvider::for_new_turn_with_preferred_dialect(
+            profile.clone(),
+            "deepseek-v4-pro",
+            ProviderDialect::Responses,
+            bound_chat_vault(&profile),
+        )
+        .expect("Pro must resolve to Chat before admission");
+        assert_eq!(pro.dialect(), Some(ProviderDialect::ChatCompletions));
+
+        let flash = ConfiguredProvider::for_new_turn_with_preferred_dialect(
+            profile.clone(),
+            "deepseek-v4-flash",
+            ProviderDialect::Responses,
+            bound_chat_vault(&profile),
+        )
+        .expect("Flash must retain Responses");
+        assert_eq!(flash.dialect(), Some(ProviderDialect::Responses));
+
+        let chat_only =
+            deepseek_chat_fixture_profile("http://127.0.0.1:9", "deepseek-flash-profile-fallback");
+        let flash_on_chat_only_profile = ConfiguredProvider::for_new_turn_with_preferred_dialect(
+            chat_only.clone(),
+            "deepseek-v4-flash",
+            ProviderDialect::Responses,
+            bound_chat_vault(&chat_only),
+        )
+        .expect("Flash must fall back when its Profile excludes Responses");
+        assert_eq!(
+            flash_on_chat_only_profile.dialect(),
+            Some(ProviderDialect::ChatCompletions)
+        );
+
+        assert!(matches!(
+            ConfiguredProvider::for_new_turn_with_preferred_dialect(
+                profile,
+                "unverified-model",
+                ProviderDialect::Responses,
+                InMemoryCredentialVault::default(),
+            ),
+            Err(ProviderError::InvalidConfiguration(
+                "DeepSeek Responses fallback requires a verified release model"
+            ))
+        ));
+    }
+
+    #[test]
+    fn deepseek_responses_continues_one_tool_call_without_stateful_response_ids() {
+        let listener =
+            TcpListener::bind(("127.0.0.1", 0)).expect("DeepSeek Responses Tool listener");
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let server = thread::spawn(move || {
+            let (mut initial, _) = listener.accept().expect("accept initial Responses request");
+            configure_fixture_stream(&initial).expect("configure initial Responses request");
+            let initial_body = read_test_request_body_for(&mut initial, "/responses");
+            assert_eq!(initial_body["model"], "deepseek-v4-flash");
+            assert_eq!(initial_body["tool_choice"], "auto");
+            assert!(initial_body["tools"][0].get("strict").is_none());
+            write_fixture_response(
+                &mut initial,
+                "200 OK",
+                "text/event-stream",
+                TOOL_CALL_SSE,
+                true,
+            )
+            .expect("write DeepSeek Responses Tool call");
+
+            let (mut continuation, _) = listener.accept().expect("accept Responses continuation");
+            configure_fixture_stream(&continuation).expect("configure Responses continuation");
+            let continuation_body = read_test_request_body_for(&mut continuation, "/responses");
+            assert!(continuation_body.get("previous_response_id").is_none());
+            assert_eq!(continuation_body["model"], "deepseek-v4-flash");
+            assert_eq!(continuation_body["tool_choice"], "none");
+            assert_eq!(
+                continuation_body["input"],
+                serde_json::json!([
+                    {"role": "user", "content": "echo through DeepSeek Responses"},
+                    {
+                        "type": "function_call",
+                        "call_id": "call_http_echo_1",
+                        "name": "local_echo",
+                        "arguments": "{\"message\":\"tool says hi\"}",
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_http_echo_1",
+                        "output": "tool says hi",
+                    },
+                ])
+            );
+            assert!(continuation_body["tools"][0].get("strict").is_none());
+            write_fixture_response(
+                &mut continuation,
+                "200 OK",
+                "text/event-stream",
+                TOOL_CONTINUATION_SSE,
+                true,
+            )
+            .expect("write DeepSeek Responses continuation");
+        });
+
+        let profile = deepseek_dual_fixture_profile(&base_url, "deepseek-responses-tool");
+        let mut provider = ResponsesHttpProvider::with_timeout(
+            profile.clone(),
+            bound_chat_vault(&profile),
+            HTTP_TIMEOUT,
+        )
+        .expect("DeepSeek Responses provider");
+        provider.enable_local_echo();
+        let mut layers = ConfigLayers::default();
+        layers.cli.provider_profile = Some(profile.profile().to_owned());
+        layers.cli.provider_model = Some("deepseek-v4-flash".to_owned());
+        layers.cli.max_output_tokens = Some(6_000);
+
+        let runtime_path = test_ledger_path("deepseek-responses-tool", "runtime");
+        let team_path = test_ledger_path("deepseek-responses-tool", "team");
+        let tool_path = test_ledger_path("deepseek-responses-tool", "tool");
+        let (mut kernel, recovery) =
+            RuntimeKernel::open_with_team_and_tools(&runtime_path, &team_path, &tool_path, 1)
+                .expect("open Kernel");
+        assert!(recovery.into_sessions().is_empty());
+        let operation = kernel
+            .dispatch_team(TeamCommand::AdmitRoot {
+                task: TaskSpec::new(
+                    "exercise one stateless DeepSeek Responses Tool continuation",
+                    TaskScope::from_labels(["provider-deepseek-responses-tool-http"]),
+                ),
+                budget: ResourceBudget::new(1_000, 1),
+                capabilities: CapabilitySnapshot::from_capabilities([
+                    Capability::Tool("local.echo".into()),
+                    Capability::Process,
+                ]),
+            })
+            .expect("admit root");
+        kernel
+            .acknowledge_team_operation(operation.operation)
+            .expect("acknowledge root admission");
+        let root = match operation.commit.outcome {
+            CommandOutcome::RootAdmitted { session, .. } => session,
+            other => panic!("unexpected root outcome: {other:?}"),
+        };
+        let outcome = kernel
+            .execute_provider_turn(
+                root,
+                &layers,
+                "echo through DeepSeek Responses",
+                &mut provider,
+                |_| Ok(ToolResources::default().with_process("greentyper.local.echo.v1")),
+            )
+            .expect("prepare DeepSeek Responses Tool approval");
+        let approval = match outcome {
+            ProviderTurnOutcome::ApprovalRequired(approval) => approval,
+            other => panic!("unexpected Provider outcome: {other:?}"),
+        };
+        let output = kernel
+            .resolve_provider_tool_call(
+                approval,
+                ApprovalDecision::Grant {
+                    expires_at_unix_ms: u64::MAX,
+                },
+                &mut EchoExecutor,
+                &mut provider,
+            )
+            .expect("continue after DeepSeek Responses Tool output");
+        assert_eq!(output.text(), "Echoed: tool says hi");
+        assert_eq!(output.usage_records().len(), 2);
+        assert_eq!(
+            kernel
+                .pending_provider_epoch()
+                .expect("pending Provider Epoch")
+                .dialect(),
+            Some(ProviderDialect::Responses)
+        );
+        server.join().expect("join DeepSeek Responses Tool server");
+
+        drop(kernel);
+        fs::remove_file(runtime_path).expect("cleanup Runtime Ledger");
+        fs::remove_file(team_path).expect("cleanup Team Ledger");
+        fs::remove_file(tool_path).expect("cleanup Tool Ledger");
+    }
+
+    #[test]
+    fn deepseek_responses_rejects_unverified_model_and_unsupported_policy_before_network() {
+        let listener =
+            TcpListener::bind(("127.0.0.1", 0)).expect("DeepSeek Responses guard listener");
+        listener
+            .set_nonblocking(true)
+            .expect("nonblocking DeepSeek Responses guard listener");
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let profile = deepseek_dual_fixture_profile(&base_url, "deepseek-responses-guards");
+        let mut provider = ResponsesHttpProvider::with_timeout(
+            profile.clone(),
+            bound_chat_vault(&profile),
+            HTTP_TIMEOUT,
+        )
+        .expect("DeepSeek Responses provider");
+
+        let cases = [
+            (
+                provider_request_with_model_policy(
+                    profile.clone(),
+                    "deepseek-v4-pro",
+                    "must not send Pro",
+                    ProviderDialect::Responses,
+                    3_072,
+                    None,
+                    None,
+                ),
+                "DeepSeek Responses currently supports only deepseek-v4-flash",
+            ),
+            (
+                provider_request_with_model_policy(
+                    profile.clone(),
+                    "deepseek-v4-flash",
+                    "must not send tier",
+                    ProviderDialect::Responses,
+                    3_072,
+                    None,
+                    Some(ServiceTier::Default),
+                ),
+                "DeepSeek Responses does not support preset service tier",
+            ),
+            (
+                provider_request_with_model_policy(
+                    profile.clone(),
+                    "deepseek-v4-flash",
+                    "must not send unsupported effort",
+                    ProviderDialect::Responses,
+                    3_072,
+                    Some(ReasoningEffort::Medium),
+                    None,
+                ),
+                "DeepSeek Responses reasoning effort is not supported by the selected model",
+            ),
+            (
+                provider_request_with_model_policy(
+                    profile,
+                    "deepseek-v4-flash",
+                    "must not send excessive output",
+                    ProviderDialect::Responses,
+                    384 * 1024 + 1,
+                    None,
+                    None,
+                ),
+                "DeepSeek Responses output token limit exceeds the documented maximum",
+            ),
+        ];
+        for (request, expected) in cases {
+            assert!(matches!(
+                provider.run(&request),
+                Err(ProviderError::InvalidRequest(actual)) if actual == expected
+            ));
+        }
+        assert!(
+            matches!(listener.accept(), Err(error) if error.kind() == io::ErrorKind::WouldBlock)
+        );
     }
 
     #[test]
@@ -3682,17 +4188,17 @@ source = "unknown"
 schema_version = 1
 
 [provider]
-profile = "deepseek-main"
-model = "deepseek-v4-flash"
+profile = "opencode-main"
+model = "opencode-go/gpt-5.6-luna"
 
-[providers.deepseek-main]
-template = "deepseek"
-credential = "synthetic-deepseek-reference"
+[providers.opencode-main]
+template = "opencode-go"
+credential = "synthetic-opencode-reference"
 "#,
         )
-        .expect("parse DeepSeek catalog fixture");
-        let runtime = ConfigRuntime::open(test_config_paths("deepseek-adapter-gate"), document)
-            .expect("resolve DeepSeek template");
+        .expect("parse OpenCode catalog fixture");
+        let runtime = ConfigRuntime::open(test_config_paths("opencode-adapter-gate"), document)
+            .expect("resolve OpenCode template");
         let profile = runtime
             .selected_provider_profile()
             .expect("resolve DeepSeek Profile")
@@ -3702,7 +4208,7 @@ credential = "synthetic-deepseek-reference"
             InMemoryCredentialVault::default(),
             HTTP_TIMEOUT,
         )
-        .expect_err("DeepSeek must not route through the OpenAI Responses adapter");
+        .expect_err("OpenCode must not route through the OpenAI Responses adapter");
         assert_eq!(
             error,
             ProviderError::InvalidConfiguration(
@@ -3886,6 +4392,8 @@ credential = "synthetic-deepseek-reference"
         provider.pending_continuation = Some(PendingContinuation {
             response_id: "resp_pending_1".into(),
             call_id: "call_pending_1".into(),
+            input: "synthetic input".into(),
+            arguments_json: r#"{"message":"synthetic"}"#.into(),
         });
 
         assert!(matches!(

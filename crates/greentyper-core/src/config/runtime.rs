@@ -16,7 +16,10 @@ use crate::pricing::{
     PriceSchedule, PriceScheduleBook, PriceScheduleDefinition, PriceScheduleSource, TokenRates,
 };
 use crate::provider::{ProviderDialect, ProviderPricingSource, ProviderProfileSnapshot};
-use crate::provider_catalog::{ModelCatalogRecord, ProviderCatalog, ProviderCatalogMode};
+use crate::provider_catalog::{
+    ModelCatalogRecord, ProviderCatalog, ProviderCatalogMode, has_release_price_schedules,
+    release_price_schedules_for_profile,
+};
 use crate::schema::SchemaKind;
 use crate::usage::{MAX_USAGE_WINDOWS, UsageWeekday, UsageWindow};
 
@@ -1851,11 +1854,13 @@ fn provider_profile_snapshot(
     let dialects = definition.dialects.clone().unwrap_or_else(|| {
         defaults.map_or_else(Vec::new, |template| template.dialects().value().to_vec())
     });
-    let pricing_source = definition.pricing.source.or_else(|| {
-        (!custom_origin)
-            .then(|| defaults.map(|template| template.pricing_source().value()))
-            .flatten()
-    });
+    let pricing_source = resolve_provider_pricing_source(
+        profile,
+        &template,
+        definition.pricing.source,
+        custom_origin,
+        defaults.map(|template| template.pricing_source().value()),
+    )?;
     ProviderProfileSnapshot::from_parts(
         profile,
         template,
@@ -1872,14 +1877,70 @@ fn provider_profile_snapshot(
     .map_err(|source| invalid(format!("providers.{profile}"), source.to_string()))
 }
 
+fn resolve_provider_pricing_source(
+    profile: &str,
+    template: &str,
+    explicit: Option<ProviderPricingSource>,
+    custom_origin: bool,
+    template_default: Option<ProviderPricingSource>,
+) -> Result<Option<ProviderPricingSource>, ConfigRuntimeError> {
+    let has_release_rate_card = has_release_price_schedules(template);
+    match (explicit, custom_origin) {
+        (Some(ProviderPricingSource::Template), true) if has_release_rate_card => {
+            Ok(Some(ProviderPricingSource::TemplateMirror))
+        }
+        (Some(ProviderPricingSource::Template | ProviderPricingSource::TemplateMirror), true) => {
+            Err(invalid(
+                format!("providers.{profile}.pricing.source"),
+                "template mirror pricing requires a bundled release rate card",
+            ))
+        }
+        (Some(ProviderPricingSource::TemplateMirror), false) => Err(invalid(
+            format!("providers.{profile}.pricing.source"),
+            "template_mirror pricing requires a custom Provider origin",
+        )),
+        (Some(source), _) => Ok(Some(source)),
+        (None, true) if has_release_rate_card => Ok(Some(ProviderPricingSource::TemplateMirror)),
+        (None, true) => Ok(None),
+        (None, false) => Ok(template_default),
+    }
+}
+
 fn resolve_price_schedule_book(
     document: &ConfigDocument,
 ) -> Result<PriceScheduleBook, ConfigRuntimeError> {
-    let schedules = document
+    let mut schedules = document
         .price_schedules
         .iter()
         .map(|(id, layer)| resolve_price_schedule(document, id, layer))
         .collect::<Result<Vec<_>, _>>()?;
+    for (profile, definition) in &document.providers {
+        let Some(template) = definition.template.as_deref() else {
+            continue;
+        };
+        let defaults = ProviderCatalog::release().template(template);
+        let pricing_source = resolve_provider_pricing_source(
+            profile,
+            template,
+            definition.pricing.source,
+            definition.base_url.is_some(),
+            defaults.map(|template| template.pricing_source().value()),
+        )?;
+        if matches!(
+            pricing_source,
+            Some(ProviderPricingSource::Template | ProviderPricingSource::TemplateMirror)
+        ) {
+            let source = match pricing_source {
+                Some(ProviderPricingSource::Template) => PriceScheduleSource::Template,
+                Some(ProviderPricingSource::TemplateMirror) => PriceScheduleSource::TemplateMirror,
+                _ => unreachable!("matched release Price Schedule source"),
+            };
+            schedules.extend(
+                release_price_schedules_for_profile(profile, template, source)
+                    .map_err(|source| invalid("price_schedules", source.to_string()))?,
+            );
+        }
+    }
     PriceScheduleBook::new(schedules)
         .map_err(|source| invalid("price_schedules", source.to_string()))
 }
@@ -2533,6 +2594,7 @@ fn parse_pricing_source(
     match value {
         "unknown" => Ok(ProviderPricingSource::Unknown),
         "template" => Ok(ProviderPricingSource::Template),
+        "template_mirror" => Ok(ProviderPricingSource::TemplateMirror),
         "manual" => Ok(ProviderPricingSource::Manual),
         "provider_reported" => Ok(ProviderPricingSource::ProviderReported),
         _ => Err(invalid(path, "unknown pricing source")),
@@ -2545,6 +2607,7 @@ fn parse_price_schedule_source(
 ) -> Result<PriceScheduleSource, ConfigRuntimeError> {
     match value {
         "template" => Ok(PriceScheduleSource::Template),
+        "template_mirror" => Ok(PriceScheduleSource::TemplateMirror),
         "manual" => Ok(PriceScheduleSource::Manual),
         "provider_reported" => Ok(PriceScheduleSource::ProviderReported),
         _ => Err(invalid(path, "unknown Price Schedule source")),
@@ -2855,10 +2918,14 @@ fn validate_effective(document: &ConfigDocument) -> Result<(), ConfigRuntimeErro
                     "custom origin requires an explicit credential binding",
                 ));
             }
-            if profile.pricing.source.is_none() {
+            let has_template_mirror = profile
+                .template
+                .as_deref()
+                .is_some_and(has_release_price_schedules);
+            if profile.pricing.source.is_none() && !has_template_mirror {
                 return Err(invalid(
                     format!("{prefix}.pricing.source"),
-                    "custom origin requires an explicit pricing decision",
+                    "custom origin without a release rate card requires an explicit pricing decision",
                 ));
             }
         }

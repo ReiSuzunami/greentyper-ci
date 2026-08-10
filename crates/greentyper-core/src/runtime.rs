@@ -2941,7 +2941,7 @@ fn decode_provider_epoch(
     let model = decoder.string(MAX_PROVIDER_ID_BYTES)?;
     let snapshot = match decoder.u8()? {
         0 => None,
-        1 => Some(decode_provider_profile_snapshot(decoder, &profile)?),
+        1 => Some(decode_provider_profile_snapshot(decoder, &profile, schema)?),
         _ => {
             return Err(RuntimeError::CorruptEvent(
                 "invalid Provider Profile snapshot tag",
@@ -2997,6 +2997,7 @@ fn encode_provider_profile_snapshot(
         Some(ProviderPricingSource::Template) => 2,
         Some(ProviderPricingSource::Manual) => 3,
         Some(ProviderPricingSource::ProviderReported) => 4,
+        Some(ProviderPricingSource::TemplateMirror) => 5,
     });
     encoder.u8(u8::from(snapshot.allow_insecure_loopback()));
     Ok(())
@@ -3005,6 +3006,7 @@ fn encode_provider_profile_snapshot(
 fn decode_provider_profile_snapshot(
     decoder: &mut Decoder<'_>,
     profile: &str,
+    schema: u16,
 ) -> Result<ProviderProfileSnapshot, RuntimeError> {
     let fingerprint = decoder.u64()?;
     let template = decoder.string(MAX_PROVIDER_ID_BYTES)?;
@@ -3036,6 +3038,7 @@ fn decode_provider_profile_snapshot(
         2 => Some(ProviderPricingSource::Template),
         3 => Some(ProviderPricingSource::Manual),
         4 => Some(ProviderPricingSource::ProviderReported),
+        5 if schema >= 8 => Some(ProviderPricingSource::TemplateMirror),
         _ => {
             return Err(RuntimeError::CorruptEvent(
                 "invalid Provider pricing source tag",
@@ -3139,14 +3142,16 @@ const fn price_schedule_source_tag(source: PriceScheduleSource) -> u8 {
         PriceScheduleSource::Template => 1,
         PriceScheduleSource::Manual => 2,
         PriceScheduleSource::ProviderReported => 3,
+        PriceScheduleSource::TemplateMirror => 4,
     }
 }
 
-fn decode_price_schedule_source(tag: u8) -> Result<PriceScheduleSource, RuntimeError> {
+fn decode_price_schedule_source(tag: u8, schema: u16) -> Result<PriceScheduleSource, RuntimeError> {
     match tag {
         1 => Ok(PriceScheduleSource::Template),
         2 => Ok(PriceScheduleSource::Manual),
         3 => Ok(PriceScheduleSource::ProviderReported),
+        4 if schema >= 8 => Ok(PriceScheduleSource::TemplateMirror),
         _ => Err(RuntimeError::CorruptEvent(
             "invalid Price Schedule source tag",
         )),
@@ -3345,7 +3350,7 @@ fn decode_config_epoch(
         }
         PriceScheduleBook::new(
             (0..count)
-                .map(|_| decode_price_schedule(decoder))
+                .map(|_| decode_price_schedule(decoder, schema))
                 .collect::<Result<Vec<_>, _>>()?,
         )
         .map_err(|_| RuntimeError::CorruptEvent("invalid Config Epoch Price Schedules"))?
@@ -3441,7 +3446,10 @@ fn encode_price_schedule(
     Ok(())
 }
 
-fn decode_price_schedule(decoder: &mut Decoder<'_>) -> Result<PriceSchedule, RuntimeError> {
+fn decode_price_schedule(
+    decoder: &mut Decoder<'_>,
+    schema: u16,
+) -> Result<PriceSchedule, RuntimeError> {
     let fingerprint = decoder.u64()?;
     let schedule = PriceSchedule::new_trusted(PriceScheduleDefinition {
         id: decoder.string(MAX_PROVIDER_ID_BYTES)?,
@@ -3462,7 +3470,7 @@ fn decode_price_schedule(decoder: &mut Decoder<'_>) -> Result<PriceSchedule, Run
             .map(UsageTimestamp::from_unix_millis)
             .transpose()
             .map_err(RuntimeError::Usage)?,
-        source: decode_price_schedule_source(decoder.u8()?)?,
+        source: decode_price_schedule_source(decoder.u8()?, schema)?,
         source_ref: decoder.string(MAX_CONFIG_STRING_BYTES)?,
         rates: TokenRates::new(
             decoder.u64()?,
@@ -3841,7 +3849,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_seven_config_epoch_freezes_request_policy_and_schema_six_remains_replayable() {
+    fn schema_eight_config_epoch_preserves_schema_seven_policy_and_schema_six_replay() {
         let legacy_epoch = ConfigEpoch::freeze(
             ConfigEpochId::new(1).expect("Config Epoch id"),
             &ConfigLayers::default(),
@@ -3852,7 +3860,7 @@ mod tests {
         }
         .encode()
         .expect("encode Config Epoch");
-        assert_eq!(schema_six.schema, 7);
+        assert_eq!(schema_six.schema, 8);
         assert_eq!(schema_six.payload.pop(), Some(0));
         assert_eq!(schema_six.payload.pop(), Some(0));
         schema_six.schema = 6;
@@ -3875,6 +3883,15 @@ mod tests {
         }
         .encode()
         .expect("encode request-policy Config Epoch");
+        let mut schema_seven = encoded.clone();
+        schema_seven.schema = 7;
+        assert_eq!(
+            RuntimeEvent::decode(&stored_runtime_event(schema_seven))
+                .expect("decode schema-seven request policy"),
+            RuntimeEvent::ConfigFrozen {
+                epoch: epoch.clone()
+            }
+        );
         assert_eq!(
             RuntimeEvent::decode(&stored_runtime_event(encoded.clone()))
                 .expect("decode request-policy Config Epoch"),
@@ -3982,6 +3999,98 @@ mod tests {
             RuntimeEvent::decode(&stored_runtime_event(snapshot_tamper)),
             Err(RuntimeError::CorruptEvent(
                 "Provider Profile fingerprint mismatch"
+            ))
+        ));
+    }
+
+    #[test]
+    fn schema_eight_round_trips_template_mirror_without_relabeling_historical_sources() {
+        let mirrored_profile = ProviderProfileSnapshot::from_parts(
+            "gateway",
+            "deepseek",
+            Some("gateway-credential".to_owned()),
+            Some("https://gateway.example.com".to_owned()),
+            Some("/responses".to_owned()),
+            Some("/chat/completions".to_owned()),
+            Some("/anthropic/v1/messages".to_owned()),
+            Some("/models".to_owned()),
+            [ProviderDialect::Responses, ProviderDialect::ChatCompletions],
+            Some(ProviderPricingSource::TemplateMirror),
+            false,
+        )
+        .expect("mirrored Provider Profile");
+        let epoch = ProviderEpoch::with_profile_snapshot_and_dialect(
+            ProviderEpochId::new(1).expect("Provider Epoch id"),
+            "gateway",
+            "deepseek-v4-flash",
+            mirrored_profile,
+            Some(ProviderDialect::Responses),
+        )
+        .expect("mirrored Provider Epoch");
+        let encoded = RuntimeEvent::ProviderFrozen {
+            epoch: Box::new(epoch.clone()),
+        }
+        .encode()
+        .expect("encode mirrored Provider Epoch");
+        assert_eq!(encoded.schema, 8);
+        assert_eq!(
+            RuntimeEvent::decode(&stored_runtime_event(encoded.clone()))
+                .expect("decode mirrored Provider Epoch"),
+            RuntimeEvent::ProviderFrozen {
+                epoch: Box::new(epoch)
+            }
+        );
+
+        let mut falsely_historical = encoded;
+        falsely_historical.schema = 7;
+        assert!(matches!(
+            RuntimeEvent::decode(&stored_runtime_event(falsely_historical)),
+            Err(RuntimeError::CorruptEvent(
+                "invalid Provider pricing source tag"
+            ))
+        ));
+
+        let schedule = PriceSchedule::new_trusted(PriceScheduleDefinition {
+            id: "release-mirror".to_owned(),
+            version: "2026-08-10.1".to_owned(),
+            currency: "USD".to_owned(),
+            provider_profile: "gateway".to_owned(),
+            model: "deepseek-v4-flash".to_owned(),
+            dialect: Some(ProviderDialect::Responses),
+            service_tier: None,
+            minimum_context_tokens: 0,
+            maximum_context_tokens: None,
+            effective_from: UsageTimestamp::from_unix_millis(0).expect("timestamp"),
+            effective_until: None,
+            source: PriceScheduleSource::TemplateMirror,
+            source_ref: "https://api-docs.deepseek.com/quick_start/pricing/".to_owned(),
+            rates: TokenRates::new(140_000, 2_800, 0, 280_000, 280_000),
+        })
+        .expect("mirrored Price Schedule");
+        let config = ConfigEpoch::freeze_with_observability(
+            ConfigEpochId::new(2).expect("Config Epoch id"),
+            &ConfigLayers::default(),
+            Vec::new(),
+            PriceScheduleBook::new(vec![schedule]).expect("Price Schedule book"),
+        )
+        .expect("mirrored Config Epoch");
+        let encoded = RuntimeEvent::ConfigFrozen {
+            epoch: config.clone(),
+        }
+        .encode()
+        .expect("encode mirrored Config Epoch");
+        assert_eq!(
+            RuntimeEvent::decode(&stored_runtime_event(encoded.clone()))
+                .expect("decode mirrored Config Epoch"),
+            RuntimeEvent::ConfigFrozen { epoch: config }
+        );
+
+        let mut falsely_historical = encoded;
+        falsely_historical.schema = 7;
+        assert!(matches!(
+            RuntimeEvent::decode(&stored_runtime_event(falsely_historical)),
+            Err(RuntimeError::CorruptEvent(
+                "invalid Price Schedule source tag"
             ))
         ));
     }

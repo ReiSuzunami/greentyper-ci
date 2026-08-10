@@ -12,7 +12,9 @@ simulator test. Versioned Responses, Chat Completions, and Messages fixtures now
 exercise their bounded dialect decoders, canonical normalization, HTTP request
 shapes, one Tool continuation, and fixed failure handling. Chat fixtures
 preserve both OpenAI nested and DeepSeek top-level cache usage
-while rejecting contradictory reports. Persistent Ledger
+while rejecting contradictory reports. The DeepSeek Responses fixture also
+freezes bounded reasoning-item transitions and proves raw reasoning text is not
+normalized into visible output. Persistent Ledger
 corruption is generated at exact frame boundaries by core tests; broader
 Config, Provider, and Memory fixtures land with the first vertical slice that
 consumes them.

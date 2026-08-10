@@ -180,6 +180,37 @@ fn price_schedule_preserves_missing_usage_and_arithmetic_overflow_as_unknown() {
 }
 
 #[test]
+fn zero_cost_token_classes_do_not_require_unreported_usage_breakdowns() {
+    let book = PriceScheduleBook::new(vec![schedule(
+        "2026-08-10.1",
+        TokenRates::new(140_000, 2_800, 0, 280_000, 280_000),
+    )])
+    .unwrap();
+    let usage = UsageRecord::new(
+        Some(1_000),
+        Some(250),
+        None,
+        Some(100),
+        None,
+        Some(1_100),
+        Some("standard".to_owned()),
+    )
+    .unwrap();
+
+    let CostEstimateOutcome::Known(estimate) = book.estimate_attempt(
+        "openai-main",
+        "gpt-5.6-sol",
+        Some(ProviderDialect::Responses),
+        timestamp(2_000),
+        &usage,
+    ) else {
+        panic!("zero-cost missing token classes must not hide a deterministic estimate");
+    };
+    assert_eq!(estimate.breakdown().cache_write_pico_units(), 0);
+    assert_eq!(estimate.breakdown().reasoning_output_pico_units(), 0);
+}
+
+#[test]
 fn historical_estimate_keeps_the_schedule_version_used_for_calculation() {
     let first = PriceScheduleBook::new(vec![schedule(
         "2026-08-10.1",

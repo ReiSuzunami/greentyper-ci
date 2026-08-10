@@ -9,7 +9,7 @@ fn release_catalog_freezes_versioned_templates_and_seed_provenance() {
     let catalog = ProviderCatalog::release();
 
     assert_eq!(catalog.schema_version(), PROVIDER_CATALOG_SCHEMA_VERSION);
-    assert_eq!(catalog.seed_revision(), "2026-08-10.1");
+    assert_eq!(catalog.seed_revision(), "2026-08-10.2");
     assert_eq!(catalog.observed_at(), "2026-08-10T00:00:00Z");
     assert_eq!(
         catalog
@@ -113,7 +113,10 @@ fn release_catalog_freezes_versioned_templates_and_seed_provenance() {
         CatalogAvailability::Unverified
     );
     assert_eq!(flash.context_window_tokens().value(), None);
-    assert_eq!(flash.price_schedule_ref().value(), None);
+    assert_eq!(
+        flash.price_schedule_ref().value(),
+        Some("deepseek-v4-flash-2026-08-10")
+    );
     assert_eq!(
         flash.primary_dialect().provenance().source_kind(),
         CatalogSourceKind::ReleaseSeed
@@ -151,6 +154,25 @@ fn opencode_seed_preserves_per_model_dialects_without_gateway_inference() {
 }
 
 #[test]
+fn deepseek_release_models_pin_the_official_rate_card_revision() {
+    let catalog = ProviderCatalog::release();
+    let pro = catalog
+        .model("deepseek/deepseek-v4-pro")
+        .expect("DeepSeek Pro seed");
+
+    assert_eq!(
+        pro.price_schedule_ref().value(),
+        Some("deepseek-v4-pro-2026-08-10")
+    );
+    assert!(
+        pro.price_schedule_ref()
+            .provenance()
+            .source_ref()
+            .starts_with("https://api-docs.deepseek.com/quick_start/pricing")
+    );
+}
+
+#[test]
 fn release_catalog_records_are_referentially_complete_and_explicitly_unknown() {
     let catalog = ProviderCatalog::release();
 
@@ -171,7 +193,9 @@ fn release_catalog_records_are_referentially_complete_and_explicitly_unknown() {
         assert_eq!(model.observed_at(), catalog.observed_at());
         assert_eq!(model.context_window_tokens().value(), None);
         assert_eq!(model.capabilities().value(), None);
-        assert_eq!(model.price_schedule_ref().value(), None);
+        if model.provider_template() != "deepseek" {
+            assert_eq!(model.price_schedule_ref().value(), None);
+        }
         assert_eq!(
             model.availability().value(),
             CatalogAvailability::Unverified

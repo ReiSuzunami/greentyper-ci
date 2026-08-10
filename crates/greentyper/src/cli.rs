@@ -66,14 +66,24 @@ pub fn run(arguments: impl Iterator<Item = String>) -> Result<(), CliError> {
             };
             let usage_windows = config.resolved_usage_windows()?;
             let price_schedules = config.resolved_price_schedules()?;
+            let selected_model = layers
+                .resolve()
+                .map_err(|_| {
+                    ProviderError::InvalidConfiguration(
+                        "selected Provider model configuration is invalid",
+                    )
+                })?
+                .provider_model()
+                .value()
+                .clone();
             let mut provider = match (profile, dialect) {
-                (Some(profile), Some(dialect)) => ConfiguredProvider::for_new_turn_with_dialect(
-                    profile,
-                    dialect,
-                    PlatformCredentialVault,
-                )?,
-                (profile, None) => {
-                    ConfiguredProvider::for_new_turn(profile, PlatformCredentialVault)?
+                (Some(profile), dialect) => {
+                    ConfiguredProvider::for_new_turn_with_preferred_dialect(
+                        profile,
+                        &selected_model,
+                        dialect.unwrap_or(ProviderDialect::Responses),
+                        PlatformCredentialVault,
+                    )?
                 }
                 (None, Some(_)) => {
                     return Err(ProviderError::InvalidConfiguration(
@@ -81,6 +91,7 @@ pub fn run(arguments: impl Iterator<Item = String>) -> Result<(), CliError> {
                     )
                     .into());
                 }
+                (None, None) => ConfiguredProvider::for_new_turn(None, PlatformCredentialVault)?,
             };
             let has_product_state = has_product_driver_state(&ledger)?;
             if local_echo || has_product_state {

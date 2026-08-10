@@ -20,6 +20,10 @@ const ERROR: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../tests/fixtures/provider/responses/v1/error.sse"
 ));
+const DEEPSEEK_REASONING: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../tests/fixtures/provider/responses/v1/deepseek-reasoning.sse"
+));
 
 fn decode(stream: &[u8]) -> Result<Vec<ResponsesEvent>, ResponsesError> {
     let mut decoder = ResponsesSseDecoder::new(512 * 1024)?;
@@ -131,6 +135,79 @@ fn responses_normalization_preserves_canonical_facts_and_redacts_terminal_failur
         .expect_err("failed Responses stream must not normalize as output");
     assert_eq!(error.to_string(), "provider unavailable");
     assert!(!error.to_string().contains("synthetic fixture failure"));
+}
+
+#[test]
+fn responses_validates_deepseek_reasoning_without_projecting_chain_of_thought() {
+    let events = decode(DEEPSEEK_REASONING).expect("complete DeepSeek Responses stream");
+    assert_eq!(events.len(), 3);
+    let normalized =
+        normalize_responses_events(&events).expect("normalize visible Responses facts");
+    assert_eq!(normalized.len(), 2);
+    assert!(matches!(
+        &normalized[0],
+        ProviderEvent::TextDelta(delta) if delta == "Visible answer"
+    ));
+    let ProviderEvent::Completed(usage) = &normalized[1] else {
+        panic!("normalized stream did not end in usage");
+    };
+    assert_eq!(usage.reasoning_output_tokens(), Some(4));
+
+    let debug = format!("{events:?}");
+    assert!(!debug.contains("private synthetic thought"));
+}
+
+#[test]
+fn responses_rejects_mismatched_and_oversized_reasoning_parts() {
+    let mut decoder = ResponsesSseDecoder::new(4).expect("decoder");
+    push_json(
+        &mut decoder,
+        "response.created",
+        r#"{"type":"response.created","sequence_number":1,"response":{"id":"resp_reasoning","status":"in_progress"}}"#,
+    )
+    .expect("created");
+    push_json(
+        &mut decoder,
+        "response.output_item.added",
+        r#"{"type":"response.output_item.added","sequence_number":2,"output_index":0,"item":{"id":"rs_1","type":"reasoning","status":"in_progress","content":[]}}"#,
+    )
+    .expect("reasoning item");
+    push_json(
+        &mut decoder,
+        "response.content_part.added",
+        r#"{"type":"response.content_part.added","sequence_number":3,"item_id":"rs_1","output_index":0,"content_index":0,"part":{"type":"reasoning_text","text":""}}"#,
+    )
+    .expect("reasoning part");
+    assert_eq!(
+        push_json(
+            &mut decoder,
+            "response.reasoning_text.delta",
+            r#"{"type":"response.reasoning_text.delta","sequence_number":4,"item_id":"rs_1","output_index":0,"content_index":0,"delta":"12345"}"#,
+        ),
+        Err(ResponsesError::OutputLimitExceeded)
+    );
+
+    let mut decoder = ResponsesSseDecoder::new(1024).expect("decoder");
+    push_json(
+        &mut decoder,
+        "response.created",
+        r#"{"type":"response.created","sequence_number":1,"response":{"id":"resp_reasoning","status":"in_progress"}}"#,
+    )
+    .expect("created");
+    push_json(
+        &mut decoder,
+        "response.output_item.added",
+        r#"{"type":"response.output_item.added","sequence_number":2,"output_index":0,"item":{"id":"rs_1","type":"reasoning","status":"in_progress","content":[]}}"#,
+    )
+    .expect("reasoning item");
+    assert_eq!(
+        push_json(
+            &mut decoder,
+            "response.content_part.added",
+            r#"{"type":"response.content_part.added","sequence_number":3,"item_id":"rs_1","output_index":0,"content_index":0,"part":{"type":"output_text","text":""}}"#,
+        ),
+        Err(ResponsesError::UnsupportedContentPart)
+    );
 }
 
 #[test]
