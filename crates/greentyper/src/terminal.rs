@@ -470,6 +470,7 @@ enum TerminalIntent {
     MoveConfigField(isize),
     MoveConfigChoice(isize),
     TestProviderConnection,
+    ConfirmConfigDelete,
     PreviewConfig,
     CommitConfig,
     DiscardConfig,
@@ -492,6 +493,7 @@ enum TerminalInputContext {
     ConfigChoice,
     ConfigText,
     ConfigCredentialReference,
+    ConfigDeleteConfirmation,
     DiscardConfirmation,
     Other,
 }
@@ -647,6 +649,16 @@ impl TerminalInputState {
             }
             TerminalInputEvent::Escape if context == TerminalInputContext::DiscardConfirmation => {
                 TerminalIntent::CancelDiscard
+            }
+            TerminalInputEvent::Enter
+                if context == TerminalInputContext::ConfigDeleteConfirmation =>
+            {
+                TerminalIntent::ConfirmConfigDelete
+            }
+            TerminalInputEvent::Escape
+                if context == TerminalInputContext::ConfigDeleteConfirmation =>
+            {
+                TerminalIntent::DiscardConfig
             }
             TerminalInputEvent::Escape if context == TerminalInputContext::SlashPanel => {
                 TerminalIntent::Quit
@@ -840,6 +852,24 @@ impl TerminalSession {
                 }
                 Ok(TerminalLoopOutcome::Redraw)
             }
+            TerminalIntent::ConfirmConfigDelete => {
+                if !self.controller.is_config_object_delete() {
+                    return Ok(TerminalLoopOutcome::Noop);
+                }
+                let runtime = runtime.ok_or(TerminalError::ConfigRuntimeRequired)?;
+                match self.controller.preview_config(runtime) {
+                    Ok(_) => match self.controller.commit_config(runtime) {
+                        Ok(_) => {
+                            self.validated_config_choice = None;
+                            self.clear_config_text();
+                            self.notice = None;
+                        }
+                        Err(source) => self.notice = Some(presentation_notice(&source)),
+                    },
+                    Err(source) => self.notice = Some(presentation_notice(&source)),
+                }
+                Ok(TerminalLoopOutcome::Redraw)
+            }
             TerminalIntent::PreviewConfig => {
                 let runtime = runtime.ok_or(TerminalError::ConfigRuntimeRequired)?;
                 let choice = self.config_choice().map(str::to_owned);
@@ -946,6 +976,8 @@ impl TerminalSession {
             TerminalInputContext::ConfigObjectId
         } else if self.controller.is_config_object_selector() {
             TerminalInputContext::ConfigObject
+        } else if self.controller.is_config_object_delete() {
+            TerminalInputContext::ConfigDeleteConfirmation
         } else if let Some(field) = self.controller.config_editor_field() {
             match field.interaction {
                 ConfigFieldInteraction::Choice { .. } => TerminalInputContext::ConfigChoice,
@@ -1637,6 +1669,20 @@ mod tests {
             input.apply(
                 TerminalInputEvent::Enter,
                 TerminalInputContext::DiscardConfirmation,
+            ),
+            TerminalIntent::DiscardConfig
+        );
+        assert_eq!(
+            input.apply(
+                TerminalInputEvent::Enter,
+                TerminalInputContext::ConfigDeleteConfirmation,
+            ),
+            TerminalIntent::ConfirmConfigDelete
+        );
+        assert_eq!(
+            input.apply(
+                TerminalInputEvent::Escape,
+                TerminalInputContext::ConfigDeleteConfirmation,
             ),
             TerminalIntent::DiscardConfig
         );
@@ -2465,6 +2511,132 @@ mod tests {
         assert_eq!(profile.template(), "openai");
         assert_eq!(profile.credential_reference(), Some(credential_reference));
         assert!(!ledger.exists());
+        std::fs::remove_dir_all(root).expect("remove test config");
+    }
+
+    #[test]
+    fn terminal_loop_confirms_provider_deletion_and_reopens() {
+        let root = terminal_test_root("provider-delete-loop");
+        let ledger = root.join("runtime.ledger");
+        let paths = ConfigPaths::new(root.join("user.toml"), root.join("project.toml"));
+        write_terminal_provider_config(&paths);
+        let object = ConfigObjectRef::new(ConfigObjectKind::ProviderProfile, "edge");
+        let mut config =
+            ConfigRuntime::open(paths.clone(), ConfigDocument::empty()).expect("config runtime");
+        let view = build_terminal_view(&ledger, &config, "/").expect("terminal view");
+        let mut events: VecDeque<_> = "config provider remove"
+            .chars()
+            .map(|character| {
+                Event::Key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
+            })
+            .collect();
+        events.extend([
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL)),
+        ]);
+
+        let output = run_terminal_loop(
+            Vec::new(),
+            FakeTerminalMode::default(),
+            &mut config,
+            &view,
+            80,
+            24,
+            move || Ok(events.pop_front().expect("bounded event sequence")),
+        )
+        .expect("terminal loop");
+
+        assert!(output.starts_with(ENTER_TERMINAL));
+        assert!(output.ends_with(LEAVE_TERMINAL));
+        assert!(!config.addressable_objects().unwrap().contains(&object));
+        drop(config);
+        let reopened = ConfigRuntime::open(paths, ConfigDocument::empty()).expect("reopen config");
+        assert!(!reopened.addressable_objects().unwrap().contains(&object));
+        assert!(!ledger.exists());
+        std::fs::remove_dir_all(root).expect("remove test config");
+    }
+
+    #[test]
+    fn terminal_provider_deletion_cancels_and_survives_cas_conflict() {
+        let root = terminal_test_root("provider-delete-recovery");
+        let paths = ConfigPaths::new(root.join("user.toml"), root.join("project.toml"));
+        write_terminal_provider_config(&paths);
+        let object = ConfigObjectRef::new(ConfigObjectKind::ProviderProfile, "edge");
+        let mut config =
+            ConfigRuntime::open(paths, ConfigDocument::empty()).expect("config runtime");
+        let mut session =
+            TerminalSession::new("/config provider remove", 80, 24).expect("terminal session");
+
+        session
+            .handle(TerminalInputEvent::Enter, Some(&mut config))
+            .expect("open provider selector");
+        session
+            .handle(TerminalInputEvent::Enter, Some(&mut config))
+            .expect("open provider deletion confirmation");
+        assert_eq!(
+            session.input_context(),
+            TerminalInputContext::ConfigDeleteConfirmation
+        );
+        let smoke = build_smoke_view("/").expect("view");
+        let layout = session
+            .layout(Some(&config), smoke.view())
+            .expect("deletion layout");
+        assert!(
+            layout
+                .body()
+                .iter()
+                .any(|row| row.text() == "Delete provider edge")
+        );
+        session
+            .handle(TerminalInputEvent::Escape, Some(&mut config))
+            .expect("cancel provider deletion");
+        assert!(session.controller.is_slash_panel());
+        assert!(config.addressable_objects().unwrap().contains(&object));
+
+        session
+            .handle(TerminalInputEvent::Enter, Some(&mut config))
+            .expect("reopen provider selector");
+        session
+            .handle(TerminalInputEvent::Enter, Some(&mut config))
+            .expect("reopen provider deletion confirmation");
+        let mut winner = ConfigEditorSession::open_from_query(
+            &config,
+            ConfigScope::User,
+            "/config statusline preset",
+            0,
+            None,
+        )
+        .expect("winner editor");
+        winner
+            .stage_raw("diagnostic")
+            .expect("stage winning change");
+        winner.commit(&mut config).expect("commit winning change");
+
+        session
+            .handle(TerminalInputEvent::Enter, Some(&mut config))
+            .expect("stale deletion remains live");
+        assert_eq!(
+            session.notice.as_deref(),
+            Some("Config changed; discard and reopen the editor")
+        );
+        assert_eq!(
+            session.input_context(),
+            TerminalInputContext::ConfigDeleteConfirmation
+        );
+        assert!(config.addressable_objects().unwrap().contains(&object));
+        assert_eq!(
+            session
+                .handle(TerminalInputEvent::Quit, Some(&mut config))
+                .expect("dirty quit is blocked"),
+            TerminalLoopOutcome::Redraw
+        );
+        session
+            .handle(TerminalInputEvent::Escape, Some(&mut config))
+            .expect("discard stale deletion");
+        assert!(session.controller.is_slash_panel());
+        assert!(config.addressable_objects().unwrap().contains(&object));
         std::fs::remove_dir_all(root).expect("remove test config");
     }
 

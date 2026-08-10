@@ -55,8 +55,9 @@ statusline-preset and statusline-expansion choice editors, and one existing-
 Provider base-URL text editor over the existing Config Runtime. It also owns a
 bounded Provider Profile ID prompt, release-template/opaque-reference creation
 flow, status-only existing-reference editor, and an F5 control that invokes the
-bounded Provider candidate connection tester; secret storage stays behind the
-credential adapter. Remaining
+bounded Provider candidate connection tester. Section-filtered typed remove
+routes render exact Config Object deletion confirmations; secret storage stays
+behind the credential adapter. Remaining
 mutable terminal editors, approval interaction, live refresh, the App Server, and an audited Windows
 ConPTY wrapper remain pending. Platform wrappers for process,
 credential, transport, and eventually terminal facilities remain private to

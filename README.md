@@ -114,8 +114,9 @@ availability explicit. A first Direct VT product tracer now renders the Slash
 Panel, controller screens, and adaptive status rows through `greentyper tui` and
 includes narrow mutable user-scope editors for the statusline preset, statusline
 expansion policy, an existing Provider Profile's base URL and opaque credential
-reference, plus a bounded Provider Profile creation wizard. Remaining rendered
-TUI/App Server editors remain pending. The product CLI can bind,
+reference, plus a bounded Provider Profile creation wizard and typed Config
+Object deletion confirmations. Remaining rendered TUI/App Server editors remain
+pending. The product CLI can bind,
 replace, test, and forget origin-bound credential references without
 putting secret material in arguments, Config, or Ledgers. Windows stores values
 in the current user's Credential Manager; other platforms currently fail
@@ -286,10 +287,16 @@ ephemeral, a staged change resets it, and a stale revision stops before the
 tester. The action does not commit Config, mutate a Provider Epoch, merge a
 catalog, expose the credential reference, or grant execution authority. The
 current terminal action runs synchronously under the tester's 10-second timeout.
+The typed `/config provider|model|pricing|stats-window remove` routes carry the
+pending command into a section-filtered object selector and then render an exact
+target confirmation. Enter dry-runs and CAS-commits the deletion; Escape cancels
+it. Reference validation or revision conflict leaves the confirmation live, and
+a real-key test reopens Config to prove the selected object is absent. The
+delete action does not write a Ledger or grant Runtime or Provider authority.
 Outside these narrow workflows the tracer remains snapshot-based and read-only. It is not a
 general mutable terminal editor, approval surface, live refresh loop, audited
-ConPTY integration, non-Provider object-creation or deletion-confirmation
-dialog, secret-entry/bind surface, starter-preset
+ConPTY integration, non-Provider object-creation dialog, secret-entry/bind
+surface, starter-preset
 workflow, or persistent live catalog discovery. Live inference conformance,
 reconnect/retry, OpenCode Go Messages execution,
 Messages reasoning blocks, Preset context/fallback execution, richer approval

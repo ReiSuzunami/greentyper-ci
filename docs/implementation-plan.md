@@ -336,10 +336,15 @@ stale revision fails before the tester runs. Secret bind/replace remains outside
 the TUI. This slice adds no Runtime, Tool, secret-store, catalog, Provider Epoch,
 or approval authority and does not rebuild the frozen status projection after
 commit.
+Typed `/config provider|model|pricing|stats-window remove` routes now carry the
+pending command into a section-filtered selector and render an exact object
+confirmation. Enter dry-runs and CAS-commits the target-layer deletion; Escape
+cancels it. Reference-validation and stale-revision failures keep the
+confirmation live, and a real-key test reopens Config to prove persistence.
 
 This does not complete Phase 3. Audited Windows ConPTY behavior, remaining
 terminal-backed schema editing and approval interaction, live snapshot refresh,
-remaining object-name and confirmation dialogs, rendered secret binding,
+remaining object-name dialogs, rendered secret binding,
 custom-template/starter-preset workflow, live catalog discovery and Recent
 evidence, automatic Context View/token-source
 projection, provider-reported

@@ -336,10 +336,11 @@ charges still require a future dedicated authority path.
   The Direct VT tracer carries no approval authority; its mutable surface is
   limited to the user-scope statusline-preset, statusline-expansion, and
   existing-Provider base-URL/opaque-credential-reference Config Drafts plus the
-  bounded Provider Profile creation workflow described below. F5 can run the
-  existing bounded connection/model-list tester against that revision-bound
-  candidate and render its ephemeral status. It never reads back a credential
-  reference, commits through that action, or mutates a secret store.
+  bounded Provider Profile creation workflow and typed target-layer Config
+  Object deletion confirmations described below. F5 can run the existing
+  bounded connection/model-list tester against that revision-bound candidate
+  and render its ephemeral status. It never reads back a credential reference,
+  commits through that action, or mutates a secret store.
 - Complete Config Schema default/constraint/normalization/migration metadata,
   remaining mutable rendered TUI/App Server editors, live catalog discovery, and the rendered
   template-picker/starter-preset workflow. Release Provider Template defaults
@@ -357,7 +358,8 @@ charges still require a future dedicated authority path.
   are present. The first Direct VT tracer renders those frozen rows and can
   persist the statusline-preset, statusline-expansion, and existing-Provider
   base-URL/credential-reference fields plus a release-template Provider Profile,
-  but it does not rebuild the frozen row projection in-process.
+  and can confirm typed target-layer Config Object deletion, but it does not
+  rebuild the frozen row projection in-process.
 - Live inference conformance, non-Windows credential backends, configurable proxy
   policy, broader TLS platform evidence, reconnect policy, multiple or parallel
   Tool calls, resumable result references, broader canonical Items, and the

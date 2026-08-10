@@ -324,6 +324,14 @@ dirty Draft across a retryable failure, reset the observation after the next
 edit, and reject a stale revision before invoking the tester. These tests assert that dirty
 Escape/quit is blocked, a failed preview
 is rendered without ending the loop, and a no-change commit creates no file.
+Another real-key loop carries `/config provider remove` through the
+section-filtered object selector and exact deletion confirmation, commits, and
+reopens Config to prove the target is absent. Focused tests freeze the
+confirmation layout and Enter/Escape mapping; cancellation preserves the
+object, while a competing revision keeps the confirmation live, blocks dirty
+quit, and requires explicit discard. A short-viewport regression keeps the
+selected object visible before destructive activation. Core Config tests
+continue to freeze target-layer and dangling-reference deletion rules.
 They do not constitute real ConPTY, panic-abort cleanup, secret-store UI,
 remaining mutable editors, approval, live-refresh, or resource evidence.
 Context Pressure tests freeze exact 65%/90% threshold transitions, estimated and

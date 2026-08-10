@@ -101,8 +101,9 @@ a terminal-neutral hierarchical Command Path registry generated from Config
 Schema metadata, provenance-aware field views, typed nested object lifecycle
 actions, and a reusable Config Runtime editor session for focused multi-field
 draft validation, atomic create/edit/delete, and commit. The Direct VT product
-TUI now connects three focused non-secret editors and one Provider-creation
-workflow to that real session in the user scope.
+TUI now connects three focused non-secret editors, one Provider-creation
+workflow, and typed Config Object deletion confirmations to that real session in
+the user scope.
 `/config statusline preset` stages a bounded enum choice with Up/Down, previews
 with Enter, commits the currently previewed choice with `c`, and explicitly
 discards with `d`. `/config statusline expansion` uses the same interaction,
@@ -125,17 +126,22 @@ failure states render in the wizard; any staged change resets the observation
 to untested. A stale revision is rejected before the tester runs, and the action
 does not commit Config or grant Provider authority. The current Direct VT action
 runs synchronously under the tester's 10-second timeout.
+`/config provider|model|pricing|stats-window remove` carries the typed delete
+route into a section-filtered object selector and renders an exact target
+confirmation. Enter runs the real dry-run preview and then CAS-commits the
+deletion; Escape cancels it. Reference-validation and revision-conflict failures
+leave the confirmation live without deleting the object.
 Validation and revision-conflict failures stay visible without consuming the
 Draft; Escape and quit keys cannot discard a dirty Draft, and a no-change commit
 does not create a Config file. The committed value is verified by reopening the
 Config Runtime. The running TUI still uses its frozen startup snapshot, so live
-statusline reconstruction is not claimed by this slice. Object deletion is
+statusline reconstruction is not claimed by this slice. Object deletion remains
 target-layer explicit and fails when the resulting effective configuration has
 dangling references. The snapshot-based `tui` tracer renders controller screens
 reachable from the Slash Panel, including the top-level Config Center; only the
 workflows above mutate a Draft. It does not yet ship remaining schema-driven
-terminal editor dialogs, non-Provider object-name or deletion-confirmation
-forms, secret-entry/bind UI, or the App Server surface
+terminal editor dialogs, non-Provider object-name or creation forms,
+secret-entry/bind UI, or the App Server surface
 described below. The current
 terminal-neutral Provider Profile wizard resolves release template defaults into
 user-configured Profile Drafts and supports the explicit bounded connection and
@@ -280,8 +286,9 @@ fixed failure category for an invalid response, never exposes response bodies,
 does not commit Config or mutate a Provider Epoch, and is not yet a commit gate.
 The rendered TUI now supplies the narrow release-template and opaque
 credential-reference creation flow plus the explicit F5 connection-test control
-described above. Secure credential secret binding, custom template editing, and
-the starter preset workflow remain pending.
+and typed target-layer deletion confirmation described above. Secure credential
+secret binding, custom template editing, and the starter preset workflow remain
+pending.
 
 ## Model Catalog and Presets
 

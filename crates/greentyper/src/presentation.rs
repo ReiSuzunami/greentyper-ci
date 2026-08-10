@@ -620,6 +620,14 @@ impl PresentationController {
         self.editor.as_ref().is_some_and(|editor| editor.dirty)
     }
 
+    pub(crate) fn is_config_object_delete(&self) -> bool {
+        self.state == PresentationState::ConfigEditor
+            && self
+                .editor
+                .as_ref()
+                .is_some_and(|editor| editor.session.operation() == ConfigEditorOperation::Delete)
+    }
+
     pub(crate) fn set_slash_query(
         &mut self,
         query: &str,
@@ -722,7 +730,14 @@ impl PresentationController {
                 self.object_create = None;
             }
             CommandTarget::ConfigObjectDelete { kind } => {
-                let object = object.ok_or(ConfigEditorError::ConfigObjectRequired)?;
+                let Some(object) = object else {
+                    self.state = PresentationState::ConfigCenter {
+                        section: Some(object_section(kind)),
+                        selected: 0,
+                        pending_query: Some(entry.canonical),
+                    };
+                    return Ok(());
+                };
                 if object.kind() != kind {
                     return Err(ConfigEditorError::ConfigObjectMismatch.into());
                 }
@@ -1103,7 +1118,11 @@ impl PresentationController {
             StatuslineLayoutView::build(&view.statusline, viewport.width, viewport.height);
         let body_capacity = usize::from(viewport.height).saturating_sub(statusline.rows.len());
         let mut body = screen_rows(&screen, view);
-        body.truncate(body_capacity);
+        if matches!(screen, PresentationScreenView::ConfigCenter { .. }) {
+            truncate_rows_keeping_selection(&mut body, body_capacity);
+        } else {
+            body.truncate(body_capacity);
+        }
         for row in &mut body {
             row.text = fit_text(&row.text, usize::from(viewport.width));
         }
@@ -1271,6 +1290,37 @@ impl PresentationLayoutView {
     pub(crate) fn statusline_rows(&self) -> &[LayoutRowView] {
         &self.statusline.rows
     }
+}
+
+fn truncate_rows_keeping_selection(rows: &mut Vec<LayoutRowView>, capacity: usize) {
+    if rows.len() <= capacity {
+        return;
+    }
+    if capacity == 0 {
+        rows.clear();
+        return;
+    }
+    let Some(selected) = rows.iter().position(LayoutRowView::is_selected) else {
+        rows.truncate(capacity);
+        return;
+    };
+    if selected < capacity {
+        rows.truncate(capacity);
+        return;
+    }
+    if capacity == 1 {
+        let selected = rows[selected].clone();
+        rows.clear();
+        rows.push(selected);
+        return;
+    }
+
+    let tail_capacity = capacity - 1;
+    let start = selected + 1 - tail_capacity;
+    let mut visible = Vec::with_capacity(capacity);
+    visible.push(rows[0].clone());
+    visible.extend_from_slice(&rows[start..=selected]);
+    *rows = visible;
 }
 
 struct StatusSegment {
@@ -1522,6 +1572,15 @@ fn screen_rows(screen: &PresentationScreenView, view: &TuiViewModel) -> Vec<Layo
             rows
         }
         PresentationScreenView::ConfigEditor {
+            object,
+            operation,
+            editor,
+            dirty,
+            validated,
+        } if *operation == ConfigEditorOperation::Delete => {
+            config_delete_rows(object.as_ref(), *dirty, *validated)
+        }
+        PresentationScreenView::ConfigEditor {
             operation,
             editor,
             dirty,
@@ -1562,6 +1621,29 @@ fn screen_rows(screen: &PresentationScreenView, view: &TuiViewModel) -> Vec<Layo
         PresentationScreenView::Stats => vec![LayoutRowView::new("Stats", false)],
         PresentationScreenView::AgentCenter => vec![LayoutRowView::new("Agents", false)],
     }
+}
+
+fn config_delete_rows(
+    object: Option<&ConfigObjectRef>,
+    dirty: bool,
+    validated: bool,
+) -> Vec<LayoutRowView> {
+    let target = object.map_or_else(
+        || "Config Object".to_owned(),
+        |object| format!("{} {}", config_object_label(object.kind()), object.id()),
+    );
+    vec![
+        LayoutRowView::new(format!("Delete {target}"), false),
+        LayoutRowView::new("> Confirm deletion", true),
+        LayoutRowView::new(
+            match (dirty, validated) {
+                (false, _) => "draft clean",
+                (true, true) => "draft validated",
+                (true, false) => "draft pending",
+            },
+            false,
+        ),
+    ]
 }
 
 fn config_editor_rows(
@@ -3406,6 +3488,55 @@ credential = "synthetic-deepseek-credential-reference"
             .expect("one-cell layout");
         assert_eq!(one_cell.statusline.rows[0].text, "…");
         assert_eq!(display_width(&one_cell.statusline.rows[0].text), 1);
+    }
+
+    #[test]
+    fn config_center_keeps_the_selected_object_visible_in_a_short_viewport() {
+        let temp = TempTree::new("config-center-short-viewport");
+        fs::write(
+            temp.paths().project(),
+            r#"schema_version = 1
+
+[providers.alpha]
+template = "openai"
+
+[providers.bravo]
+template = "openai"
+
+[providers.charlie]
+template = "openai"
+"#,
+        )
+        .expect("write provider choices");
+        let mut runtime = ConfigRuntime::open(temp.paths(), ConfigDocument::empty())
+            .expect("open Config Runtime");
+        let mut controller = PresentationController::new();
+        controller
+            .set_slash_query("/config provider remove")
+            .expect("set delete query");
+        controller
+            .activate(&mut runtime, ConfigScope::Project, None)
+            .expect("open provider selector");
+        controller
+            .move_config_object_selection(&runtime, 2)
+            .expect("select last provider");
+
+        let smoke = super::build_smoke_view("/").expect("smoke view");
+        let layout = controller
+            .layout(
+                Some(&runtime),
+                smoke.view(),
+                Viewport::new(80, 3).expect("short viewport"),
+            )
+            .expect("short Config Center layout");
+
+        assert!(
+            layout
+                .body()
+                .iter()
+                .any(|row| row.is_selected() && row.text() == "> provider charlie"),
+            "selected object must remain visible before destructive activation"
+        );
     }
 
     #[test]
