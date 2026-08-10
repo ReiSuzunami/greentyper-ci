@@ -12,6 +12,9 @@ use sha2::{Digest, Sha256};
 use url::{Host, Url};
 
 use super::{ConfigLayer, ConfigLayers};
+use crate::pricing::{
+    PriceSchedule, PriceScheduleBook, PriceScheduleDefinition, PriceScheduleSource, TokenRates,
+};
 use crate::provider::{ProviderDialect, ProviderPricingSource, ProviderProfileSnapshot};
 use crate::provider_catalog::{ModelCatalogRecord, ProviderCatalog, ProviderCatalogMode};
 use crate::schema::SchemaKind;
@@ -65,6 +68,7 @@ pub enum ConfigApplicationTiming {
 pub enum ConfigValueKind {
     String,
     PositiveInteger,
+    NonNegativeInteger,
     Boolean,
     StringList,
 }
@@ -297,6 +301,159 @@ const CONFIG_SCHEMA: &[ConfigSchemaEntry] = &[
         "preset_list",
     ),
     schema_entry(
+        "price_schedules.<id>.version",
+        "/config pricing version",
+        ConfigValueKind::String,
+        FILE_SCOPES,
+        ConfigApplicationTiming::NextConfigEpoch,
+        false,
+        "price_schedule_version",
+    ),
+    schema_entry(
+        "price_schedules.<id>.currency",
+        "/config pricing currency",
+        ConfigValueKind::String,
+        FILE_SCOPES,
+        ConfigApplicationTiming::NextConfigEpoch,
+        false,
+        "currency",
+    ),
+    schema_entry(
+        "price_schedules.<id>.provider",
+        "/config pricing provider",
+        ConfigValueKind::String,
+        FILE_SCOPES,
+        ConfigApplicationTiming::NextConfigEpoch,
+        false,
+        "provider_selector",
+    ),
+    schema_entry(
+        "price_schedules.<id>.model",
+        "/config pricing model",
+        ConfigValueKind::String,
+        FILE_SCOPES,
+        ConfigApplicationTiming::NextConfigEpoch,
+        false,
+        "model_selector",
+    ),
+    schema_entry(
+        "price_schedules.<id>.dialect",
+        "/config pricing dialect",
+        ConfigValueKind::String,
+        FILE_SCOPES,
+        ConfigApplicationTiming::NextConfigEpoch,
+        false,
+        "dialect",
+    ),
+    schema_entry(
+        "price_schedules.<id>.service_tier",
+        "/config pricing service-tier",
+        ConfigValueKind::String,
+        FILE_SCOPES,
+        ConfigApplicationTiming::NextConfigEpoch,
+        false,
+        "service_tier",
+    ),
+    schema_entry(
+        "price_schedules.<id>.minimum_context_tokens",
+        "/config pricing context-min",
+        ConfigValueKind::NonNegativeInteger,
+        FILE_SCOPES,
+        ConfigApplicationTiming::NextConfigEpoch,
+        false,
+        "non_negative_integer",
+    ),
+    schema_entry(
+        "price_schedules.<id>.maximum_context_tokens",
+        "/config pricing context-max",
+        ConfigValueKind::NonNegativeInteger,
+        FILE_SCOPES,
+        ConfigApplicationTiming::NextConfigEpoch,
+        false,
+        "non_negative_integer",
+    ),
+    schema_entry(
+        "price_schedules.<id>.effective_from",
+        "/config pricing effective-from",
+        ConfigValueKind::String,
+        FILE_SCOPES,
+        ConfigApplicationTiming::NextConfigEpoch,
+        false,
+        "utc_timestamp",
+    ),
+    schema_entry(
+        "price_schedules.<id>.effective_until",
+        "/config pricing effective-until",
+        ConfigValueKind::String,
+        FILE_SCOPES,
+        ConfigApplicationTiming::NextConfigEpoch,
+        false,
+        "utc_timestamp",
+    ),
+    schema_entry(
+        "price_schedules.<id>.source",
+        "/config pricing source",
+        ConfigValueKind::String,
+        FILE_SCOPES,
+        ConfigApplicationTiming::NextConfigEpoch,
+        false,
+        "pricing_source",
+    ),
+    schema_entry(
+        "price_schedules.<id>.source_ref",
+        "/config pricing source-ref",
+        ConfigValueKind::String,
+        FILE_SCOPES,
+        ConfigApplicationTiming::NextConfigEpoch,
+        false,
+        "source_reference",
+    ),
+    schema_entry(
+        "price_schedules.<id>.rates.input_micros_per_million",
+        "/config pricing rate-input",
+        ConfigValueKind::NonNegativeInteger,
+        FILE_SCOPES,
+        ConfigApplicationTiming::NextConfigEpoch,
+        false,
+        "price_rate",
+    ),
+    schema_entry(
+        "price_schedules.<id>.rates.cached_input_micros_per_million",
+        "/config pricing rate-cached-input",
+        ConfigValueKind::NonNegativeInteger,
+        FILE_SCOPES,
+        ConfigApplicationTiming::NextConfigEpoch,
+        false,
+        "price_rate",
+    ),
+    schema_entry(
+        "price_schedules.<id>.rates.cache_write_micros_per_million",
+        "/config pricing rate-cache-write",
+        ConfigValueKind::NonNegativeInteger,
+        FILE_SCOPES,
+        ConfigApplicationTiming::NextConfigEpoch,
+        false,
+        "price_rate",
+    ),
+    schema_entry(
+        "price_schedules.<id>.rates.output_micros_per_million",
+        "/config pricing rate-output",
+        ConfigValueKind::NonNegativeInteger,
+        FILE_SCOPES,
+        ConfigApplicationTiming::NextConfigEpoch,
+        false,
+        "price_rate",
+    ),
+    schema_entry(
+        "price_schedules.<id>.rates.reasoning_output_micros_per_million",
+        "/config pricing rate-reasoning",
+        ConfigValueKind::NonNegativeInteger,
+        FILE_SCOPES,
+        ConfigApplicationTiming::NextConfigEpoch,
+        false,
+        "price_rate",
+    ),
+    schema_entry(
         "ui.statusline.preset",
         "/config statusline preset",
         ConfigValueKind::String,
@@ -409,6 +566,7 @@ pub const fn config_schema() -> &'static [ConfigSchemaEntry] {
 pub enum ConfigValue {
     String(String),
     PositiveInteger(u32),
+    NonNegativeInteger(u64),
     Boolean(bool),
     StringList(Vec<String>),
 }
@@ -418,6 +576,7 @@ impl ConfigValue {
         match self {
             Self::String(_) => ConfigValueKind::String,
             Self::PositiveInteger(_) => ConfigValueKind::PositiveInteger,
+            Self::NonNegativeInteger(_) => ConfigValueKind::NonNegativeInteger,
             Self::Boolean(_) => ConfigValueKind::Boolean,
             Self::StringList(_) => ConfigValueKind::StringList,
         }
@@ -437,6 +596,7 @@ pub enum ConfigObjectKind {
     ProviderProfile,
     ModelPreset,
     UsageWindow,
+    PriceSchedule,
 }
 
 impl ConfigObjectKind {
@@ -445,6 +605,7 @@ impl ConfigObjectKind {
             Self::ProviderProfile => "providers.<id>.",
             Self::ModelPreset => "model_presets.<id>.",
             Self::UsageWindow => "stats.windows.<id>.",
+            Self::PriceSchedule => "price_schedules.<id>.",
         }
     }
 
@@ -651,6 +812,8 @@ pub struct ConfigDocument {
     providers: BTreeMap<String, ProviderProfileLayer>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     model_presets: BTreeMap<String, ModelPresetLayer>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    price_schedules: BTreeMap<String, PriceScheduleLayer>,
     #[serde(default, skip_serializing_if = "UiLayer::is_empty")]
     ui: UiLayer,
     #[serde(default, skip_serializing_if = "StatsLayer::is_empty")]
@@ -672,6 +835,7 @@ impl ConfigDocument {
             runtime: RuntimeLayer::default(),
             providers: BTreeMap::new(),
             model_presets: BTreeMap::new(),
+            price_schedules: BTreeMap::new(),
             ui: UiLayer::default(),
             stats: StatsLayer::default(),
         }
@@ -838,6 +1002,80 @@ impl ModelPresetLayer {
             && self.context_mode.is_none()
             && self.favorite.is_none()
             && self.fallback.is_none()
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+struct PriceScheduleLayer {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    currency: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provider: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dialect: Option<ProviderDialect>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    service_tier: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    minimum_context_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    maximum_context_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    effective_from: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    effective_until: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source: Option<PriceScheduleSource>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_ref: Option<String>,
+    #[serde(skip_serializing_if = "PriceRatesLayer::is_empty")]
+    rates: PriceRatesLayer,
+}
+
+impl PriceScheduleLayer {
+    fn is_empty(&self) -> bool {
+        self.version.is_none()
+            && self.currency.is_none()
+            && self.provider.is_none()
+            && self.model.is_none()
+            && self.dialect.is_none()
+            && self.service_tier.is_none()
+            && self.minimum_context_tokens.is_none()
+            && self.maximum_context_tokens.is_none()
+            && self.effective_from.is_none()
+            && self.effective_until.is_none()
+            && self.source.is_none()
+            && self.source_ref.is_none()
+            && self.rates.is_empty()
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+struct PriceRatesLayer {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    input_micros_per_million: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cached_input_micros_per_million: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cache_write_micros_per_million: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    output_micros_per_million: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_output_micros_per_million: Option<u64>,
+}
+
+impl PriceRatesLayer {
+    fn is_empty(&self) -> bool {
+        self.input_micros_per_million.is_none()
+            && self.cached_input_micros_per_million.is_none()
+            && self.cache_write_micros_per_million.is_none()
+            && self.output_micros_per_million.is_none()
+            && self.reasoning_output_micros_per_million.is_none()
     }
 }
 
@@ -1024,19 +1262,25 @@ impl ConfigRuntime {
             .last_valid
             .as_ref()
             .ok_or_else(|| ConfigRuntimeError::RepairRequired(self.status().issues))?;
-        let mut objects = resolved
-            .document
-            .providers
-            .keys()
-            .map(|id| ConfigObjectRef::new(ConfigObjectKind::ProviderProfile, id.clone()))
-            .chain(
-                resolved
-                    .document
-                    .model_presets
-                    .keys()
-                    .map(|id| ConfigObjectRef::new(ConfigObjectKind::ModelPreset, id.clone())),
-            )
-            .collect::<Vec<_>>();
+        let mut objects =
+            resolved
+                .document
+                .providers
+                .keys()
+                .map(|id| ConfigObjectRef::new(ConfigObjectKind::ProviderProfile, id.clone()))
+                .chain(
+                    resolved
+                        .document
+                        .model_presets
+                        .keys()
+                        .map(|id| ConfigObjectRef::new(ConfigObjectKind::ModelPreset, id.clone())),
+                )
+                .chain(
+                    resolved.document.price_schedules.keys().map(|id| {
+                        ConfigObjectRef::new(ConfigObjectKind::PriceSchedule, id.clone())
+                    }),
+                )
+                .collect::<Vec<_>>();
         if let Some(windows) = &resolved.document.stats.windows {
             objects.extend(
                 windows
@@ -1303,6 +1547,14 @@ impl ConfigRuntime {
             .flatten()
             .map(resolve_usage_window)
             .collect()
+    }
+
+    pub fn resolved_price_schedules(&self) -> Result<PriceScheduleBook, ConfigRuntimeError> {
+        let resolved = self
+            .last_valid
+            .as_ref()
+            .ok_or_else(|| ConfigRuntimeError::RepairRequired(self.status().issues))?;
+        resolve_price_schedule_book(&resolved.document)
     }
 
     pub fn begin_draft(&self, scope: ConfigScope) -> Result<ConfigDraft, ConfigRuntimeError> {
@@ -1574,6 +1826,139 @@ fn provider_profile_snapshot(
         definition.allow_insecure_loopback.unwrap_or(false),
     )
     .map_err(|source| invalid(format!("providers.{profile}"), source.to_string()))
+}
+
+fn resolve_price_schedule_book(
+    document: &ConfigDocument,
+) -> Result<PriceScheduleBook, ConfigRuntimeError> {
+    let schedules = document
+        .price_schedules
+        .iter()
+        .map(|(id, layer)| resolve_price_schedule(document, id, layer))
+        .collect::<Result<Vec<_>, _>>()?;
+    PriceScheduleBook::new(schedules)
+        .map_err(|source| invalid("price_schedules", source.to_string()))
+}
+
+fn resolve_price_schedule(
+    document: &ConfigDocument,
+    id: &str,
+    layer: &PriceScheduleLayer,
+) -> Result<PriceSchedule, ConfigRuntimeError> {
+    let prefix = format!("price_schedules.{id}");
+    let required_string = |field: &str, value: &Option<String>| {
+        value.clone().ok_or_else(|| {
+            invalid(
+                format!("{prefix}.{field}"),
+                "Price Schedule field is required",
+            )
+        })
+    };
+    let required_integer = |field: &str, value: Option<u64>| {
+        value.ok_or_else(|| {
+            invalid(
+                format!("{prefix}.rates.{field}"),
+                "Price Schedule rate is required",
+            )
+        })
+    };
+    let provider = required_string("provider", &layer.provider)?;
+    validate_id(&format!("{prefix}.provider"), &provider)?;
+    let profile = document.providers.get(&provider).ok_or_else(|| {
+        invalid(
+            format!("{prefix}.provider"),
+            "Price Schedule references an unknown Provider Profile",
+        )
+    })?;
+    let source = layer.source.ok_or_else(|| {
+        invalid(
+            format!("{prefix}.source"),
+            "Price Schedule source is required",
+        )
+    })?;
+    if source != PriceScheduleSource::Manual {
+        return Err(invalid(
+            format!("{prefix}.source"),
+            "editable Price Schedules currently require manual provenance",
+        ));
+    }
+    let resolved_pricing_source = provider_profile_snapshot(document, &provider)?.pricing_source();
+    let source_matches = resolved_pricing_source == Some(ProviderPricingSource::Manual);
+    if !source_matches {
+        return Err(invalid(
+            format!("{prefix}.source"),
+            "Price Schedule source conflicts with the Provider Profile pricing decision",
+        ));
+    }
+    if profile.template.is_none() {
+        return Err(invalid(
+            format!("providers.{provider}.template"),
+            "provider profile requires a template",
+        ));
+    }
+    let effective_from = parse_price_timestamp(
+        &format!("{prefix}.effective_from"),
+        &required_string("effective_from", &layer.effective_from)?,
+    )?;
+    let effective_until = layer
+        .effective_until
+        .as_deref()
+        .map(|value| parse_price_timestamp(&format!("{prefix}.effective_until"), value))
+        .transpose()?;
+    PriceSchedule::new(PriceScheduleDefinition {
+        id: id.to_owned(),
+        version: required_string("version", &layer.version)?,
+        currency: required_string("currency", &layer.currency)?,
+        provider_profile: provider,
+        model: required_string("model", &layer.model)?,
+        dialect: layer.dialect,
+        service_tier: layer.service_tier.clone(),
+        minimum_context_tokens: layer.minimum_context_tokens.ok_or_else(|| {
+            invalid(
+                format!("{prefix}.minimum_context_tokens"),
+                "Price Schedule context range start is required",
+            )
+        })?,
+        maximum_context_tokens: layer.maximum_context_tokens,
+        effective_from,
+        effective_until,
+        source,
+        source_ref: required_string("source_ref", &layer.source_ref)?,
+        rates: TokenRates::new(
+            required_integer(
+                "input_micros_per_million",
+                layer.rates.input_micros_per_million,
+            )?,
+            required_integer(
+                "cached_input_micros_per_million",
+                layer.rates.cached_input_micros_per_million,
+            )?,
+            required_integer(
+                "cache_write_micros_per_million",
+                layer.rates.cache_write_micros_per_million,
+            )?,
+            required_integer(
+                "output_micros_per_million",
+                layer.rates.output_micros_per_million,
+            )?,
+            required_integer(
+                "reasoning_output_micros_per_million",
+                layer.rates.reasoning_output_micros_per_million,
+            )?,
+        ),
+    })
+    .map_err(|source| invalid(prefix, source.to_string()))
+}
+
+fn parse_price_timestamp(
+    path: &str,
+    value: &str,
+) -> Result<crate::usage::UsageTimestamp, ConfigRuntimeError> {
+    let timestamp: jiff::Timestamp = value
+        .parse()
+        .map_err(|_| invalid(path, "expected an RFC 3339 timestamp"))?;
+    crate::usage::UsageTimestamp::from_unix_millis(timestamp.as_millisecond())
+        .map_err(|source| invalid(path, source.to_string()))
 }
 
 fn resolve_documents(
@@ -2110,6 +2495,18 @@ fn parse_pricing_source(
     }
 }
 
+fn parse_price_schedule_source(
+    path: &str,
+    value: &str,
+) -> Result<PriceScheduleSource, ConfigRuntimeError> {
+    match value {
+        "template" => Ok(PriceScheduleSource::Template),
+        "manual" => Ok(PriceScheduleSource::Manual),
+        "provider_reported" => Ok(PriceScheduleSource::ProviderReported),
+        _ => Err(invalid(path, "unknown Price Schedule source")),
+    }
+}
+
 fn parse_statusline_preset(
     path: &str,
     value: &str,
@@ -2158,6 +2555,13 @@ fn take_string(value: ConfigValue) -> String {
 fn take_positive_integer(value: ConfigValue) -> u32 {
     match value {
         ConfigValue::PositiveInteger(value) => value,
+        _ => unreachable!("value kind checked before mutation"),
+    }
+}
+
+fn take_non_negative_integer(value: ConfigValue) -> u64 {
+    match value {
+        ConfigValue::NonNegativeInteger(value) => value,
         _ => unreachable!("value kind checked before mutation"),
     }
 }
@@ -2244,6 +2648,10 @@ pub fn parse_config_value(path: &str, raw: &str) -> Result<ConfigValue, ConfigRu
             .filter(|value| *value > 0)
             .map(ConfigValue::PositiveInteger)
             .ok_or_else(|| invalid(path, "expected a positive 32-bit integer")),
+        ConfigValueKind::NonNegativeInteger => raw
+            .parse::<u64>()
+            .map(ConfigValue::NonNegativeInteger)
+            .map_err(|_| invalid(path, "expected a non-negative 64-bit integer")),
         ConfigValueKind::Boolean => match raw {
             "true" => Ok(ConfigValue::Boolean(true)),
             "false" => Ok(ConfigValue::Boolean(false)),
@@ -2274,6 +2682,7 @@ fn validate_value(path: &str, value: &ConfigValue) -> Result<(), ConfigRuntimeEr
                 Ok(())
             }
         }
+        ConfigValue::NonNegativeInteger(_) => Ok(()),
         ConfigValue::Boolean(_) => Ok(()),
         ConfigValue::StringList(values) => {
             if values.len() > MAX_CONFIG_LIST_ITEMS {
@@ -2402,6 +2811,7 @@ fn validate_effective(document: &ConfigDocument) -> Result<(), ConfigRuntimeErro
             ));
         }
     }
+    resolve_price_schedule_book(document)?;
 
     for (id, preset) in &document.model_presets {
         let prefix = format!("model_presets.{id}");
@@ -2799,6 +3209,7 @@ impl ConfigDocument {
         Ok(match object.kind() {
             ConfigObjectKind::ProviderProfile => self.providers.contains_key(object.id()),
             ConfigObjectKind::ModelPreset => self.model_presets.contains_key(object.id()),
+            ConfigObjectKind::PriceSchedule => self.price_schedules.contains_key(object.id()),
             ConfigObjectKind::UsageWindow => self
                 .stats
                 .windows
@@ -2812,6 +3223,7 @@ impl ConfigDocument {
         let removed = match object.kind() {
             ConfigObjectKind::ProviderProfile => self.providers.remove(object.id()).is_some(),
             ConfigObjectKind::ModelPreset => self.model_presets.remove(object.id()).is_some(),
+            ConfigObjectKind::PriceSchedule => self.price_schedules.remove(object.id()).is_some(),
             ConfigObjectKind::UsageWindow => {
                 let Some(windows) = self.stats.windows.as_mut() else {
                     return Err(ConfigRuntimeError::UnknownObject(
@@ -2929,6 +3341,57 @@ impl ConfigDocument {
                     _ => return Err(ConfigRuntimeError::UnknownObject(path.to_owned())),
                 }
             }
+            ["price_schedules", id, field] => {
+                validate_id("price_schedules.<id>", id)?;
+                let schedule = self.price_schedules.entry((*id).to_owned()).or_default();
+                match *field {
+                    "version" => schedule.version = Some(take_string(value)),
+                    "currency" => schedule.currency = Some(take_string(value)),
+                    "provider" => schedule.provider = Some(take_string(value)),
+                    "model" => schedule.model = Some(take_string(value)),
+                    "dialect" => {
+                        schedule.dialect = Some(parse_dialect(path, &take_string(value))?);
+                    }
+                    "service_tier" => schedule.service_tier = Some(take_string(value)),
+                    "minimum_context_tokens" => {
+                        schedule.minimum_context_tokens = Some(take_non_negative_integer(value));
+                    }
+                    "maximum_context_tokens" => {
+                        schedule.maximum_context_tokens = Some(take_non_negative_integer(value));
+                    }
+                    "effective_from" => schedule.effective_from = Some(take_string(value)),
+                    "effective_until" => schedule.effective_until = Some(take_string(value)),
+                    "source" => {
+                        schedule.source =
+                            Some(parse_price_schedule_source(path, &take_string(value))?);
+                    }
+                    "source_ref" => schedule.source_ref = Some(take_string(value)),
+                    _ => return Err(ConfigRuntimeError::UnknownObject(path.to_owned())),
+                }
+            }
+            ["price_schedules", id, "rates", rate] => {
+                validate_id("price_schedules.<id>", id)?;
+                let rates = &mut self
+                    .price_schedules
+                    .entry((*id).to_owned())
+                    .or_default()
+                    .rates;
+                let value = Some(take_non_negative_integer(value));
+                match *rate {
+                    "input_micros_per_million" => rates.input_micros_per_million = value,
+                    "cached_input_micros_per_million" => {
+                        rates.cached_input_micros_per_million = value;
+                    }
+                    "cache_write_micros_per_million" => {
+                        rates.cache_write_micros_per_million = value;
+                    }
+                    "output_micros_per_million" => rates.output_micros_per_million = value,
+                    "reasoning_output_micros_per_million" => {
+                        rates.reasoning_output_micros_per_million = value;
+                    }
+                    _ => return Err(ConfigRuntimeError::UnknownObject(path.to_owned())),
+                }
+            }
             ["ui", "statusline", field] => match *field {
                 "preset" => {
                     self.ui.statusline.preset =
@@ -3032,6 +3495,49 @@ impl ConfigDocument {
                     _ => return Err(ConfigRuntimeError::UnknownObject(path.to_owned())),
                 }
             }
+            ["price_schedules", id, field] => {
+                let Some(schedule) = self.price_schedules.get_mut(*id) else {
+                    return Ok(());
+                };
+                match *field {
+                    "version" => schedule.version = None,
+                    "currency" => schedule.currency = None,
+                    "provider" => schedule.provider = None,
+                    "model" => schedule.model = None,
+                    "dialect" => schedule.dialect = None,
+                    "service_tier" => schedule.service_tier = None,
+                    "minimum_context_tokens" => schedule.minimum_context_tokens = None,
+                    "maximum_context_tokens" => schedule.maximum_context_tokens = None,
+                    "effective_from" => schedule.effective_from = None,
+                    "effective_until" => schedule.effective_until = None,
+                    "source" => schedule.source = None,
+                    "source_ref" => schedule.source_ref = None,
+                    _ => return Err(ConfigRuntimeError::UnknownObject(path.to_owned())),
+                }
+            }
+            ["price_schedules", id, "rates", rate] => {
+                let Some(schedule) = self.price_schedules.get_mut(*id) else {
+                    return Ok(());
+                };
+                match *rate {
+                    "input_micros_per_million" => {
+                        schedule.rates.input_micros_per_million = None;
+                    }
+                    "cached_input_micros_per_million" => {
+                        schedule.rates.cached_input_micros_per_million = None;
+                    }
+                    "cache_write_micros_per_million" => {
+                        schedule.rates.cache_write_micros_per_million = None;
+                    }
+                    "output_micros_per_million" => {
+                        schedule.rates.output_micros_per_million = None;
+                    }
+                    "reasoning_output_micros_per_million" => {
+                        schedule.rates.reasoning_output_micros_per_million = None;
+                    }
+                    _ => return Err(ConfigRuntimeError::UnknownObject(path.to_owned())),
+                }
+            }
             ["ui", "statusline", field] => match *field {
                 "preset" => self.ui.statusline.preset = None,
                 "expand" => self.ui.statusline.expand = None,
@@ -3087,6 +3593,8 @@ impl ConfigDocument {
     fn prune_empty(&mut self) {
         self.providers.retain(|_, profile| !profile.is_empty());
         self.model_presets.retain(|_, preset| !preset.is_empty());
+        self.price_schedules
+            .retain(|_, schedule| !schedule.is_empty());
         if let Some(windows) = &mut self.stats.windows {
             windows.retain(|window| !window.is_empty_except_id());
             if windows.is_empty() {
@@ -3144,6 +3652,9 @@ impl ConfigDocument {
         for id in self.model_presets.keys() {
             validate_id("model_presets.<id>", id)?;
         }
+        for id in self.price_schedules.keys() {
+            validate_id("price_schedules.<id>", id)?;
+        }
         let mut window_ids = BTreeSet::new();
         for window in self.stats.windows.iter().flatten() {
             validate_id("stats.windows.<id>", &window.id)?;
@@ -3175,6 +3686,12 @@ impl ConfigDocument {
                 .entry(id.clone())
                 .or_default()
                 .merge_from(overlay_preset);
+        }
+        for (id, overlay_schedule) in &overlay.price_schedules {
+            self.price_schedules
+                .entry(id.clone())
+                .or_default()
+                .merge_from(overlay_schedule);
         }
         self.ui.merge_from(&overlay.ui);
         self.stats.merge_from(&overlay.stats);
@@ -3294,6 +3811,93 @@ impl ConfigDocument {
                 );
             }
         }
+        for (id, schedule) in &self.price_schedules {
+            let prefix = format!("price_schedules.{id}");
+            insert_string(&mut values, &format!("{prefix}.version"), &schedule.version);
+            insert_string(
+                &mut values,
+                &format!("{prefix}.currency"),
+                &schedule.currency,
+            );
+            insert_string(
+                &mut values,
+                &format!("{prefix}.provider"),
+                &schedule.provider,
+            );
+            insert_string(&mut values, &format!("{prefix}.model"), &schedule.model);
+            if let Some(dialect) = schedule.dialect {
+                values.insert(
+                    format!("{prefix}.dialect"),
+                    ConfigValue::String(dialect.as_str().to_owned()),
+                );
+            }
+            insert_string(
+                &mut values,
+                &format!("{prefix}.service_tier"),
+                &schedule.service_tier,
+            );
+            for (field, value) in [
+                ("minimum_context_tokens", schedule.minimum_context_tokens),
+                ("maximum_context_tokens", schedule.maximum_context_tokens),
+            ] {
+                if let Some(value) = value {
+                    values.insert(
+                        format!("{prefix}.{field}"),
+                        ConfigValue::NonNegativeInteger(value),
+                    );
+                }
+            }
+            insert_string(
+                &mut values,
+                &format!("{prefix}.effective_from"),
+                &schedule.effective_from,
+            );
+            insert_string(
+                &mut values,
+                &format!("{prefix}.effective_until"),
+                &schedule.effective_until,
+            );
+            if let Some(source) = schedule.source {
+                values.insert(
+                    format!("{prefix}.source"),
+                    ConfigValue::String(source.as_str().to_owned()),
+                );
+            }
+            insert_string(
+                &mut values,
+                &format!("{prefix}.source_ref"),
+                &schedule.source_ref,
+            );
+            for (field, value) in [
+                (
+                    "input_micros_per_million",
+                    schedule.rates.input_micros_per_million,
+                ),
+                (
+                    "cached_input_micros_per_million",
+                    schedule.rates.cached_input_micros_per_million,
+                ),
+                (
+                    "cache_write_micros_per_million",
+                    schedule.rates.cache_write_micros_per_million,
+                ),
+                (
+                    "output_micros_per_million",
+                    schedule.rates.output_micros_per_million,
+                ),
+                (
+                    "reasoning_output_micros_per_million",
+                    schedule.rates.reasoning_output_micros_per_million,
+                ),
+            ] {
+                if let Some(value) = value {
+                    values.insert(
+                        format!("{prefix}.rates.{field}"),
+                        ConfigValue::NonNegativeInteger(value),
+                    );
+                }
+            }
+        }
         if let Some(preset) = self.ui.statusline.preset {
             values.insert(
                 "ui.statusline.preset".to_owned(),
@@ -3377,6 +3981,55 @@ impl ModelPresetLayer {
         merge_option(&mut self.context_mode, &overlay.context_mode);
         merge_option(&mut self.favorite, &overlay.favorite);
         merge_option(&mut self.fallback, &overlay.fallback);
+    }
+}
+
+impl PriceScheduleLayer {
+    fn merge_from(&mut self, overlay: &Self) {
+        merge_option(&mut self.version, &overlay.version);
+        merge_option(&mut self.currency, &overlay.currency);
+        merge_option(&mut self.provider, &overlay.provider);
+        merge_option(&mut self.model, &overlay.model);
+        merge_option(&mut self.dialect, &overlay.dialect);
+        merge_option(&mut self.service_tier, &overlay.service_tier);
+        merge_option(
+            &mut self.minimum_context_tokens,
+            &overlay.minimum_context_tokens,
+        );
+        merge_option(
+            &mut self.maximum_context_tokens,
+            &overlay.maximum_context_tokens,
+        );
+        merge_option(&mut self.effective_from, &overlay.effective_from);
+        merge_option(&mut self.effective_until, &overlay.effective_until);
+        merge_option(&mut self.source, &overlay.source);
+        merge_option(&mut self.source_ref, &overlay.source_ref);
+        self.rates.merge_from(&overlay.rates);
+    }
+}
+
+impl PriceRatesLayer {
+    fn merge_from(&mut self, overlay: &Self) {
+        merge_option(
+            &mut self.input_micros_per_million,
+            &overlay.input_micros_per_million,
+        );
+        merge_option(
+            &mut self.cached_input_micros_per_million,
+            &overlay.cached_input_micros_per_million,
+        );
+        merge_option(
+            &mut self.cache_write_micros_per_million,
+            &overlay.cache_write_micros_per_million,
+        );
+        merge_option(
+            &mut self.output_micros_per_million,
+            &overlay.output_micros_per_million,
+        );
+        merge_option(
+            &mut self.reasoning_output_micros_per_million,
+            &overlay.reasoning_output_micros_per_million,
+        );
     }
 }
 

@@ -43,19 +43,19 @@ Before implementation, the following names and types are the normative v1 design
 Implementation status: the current Phase 1 Config Runtime parses and emits
 schema-version-1 TOML for user and project layers, resolves effective values
 with provenance, and exposes the addressable Provider Profile, Model Preset,
-statusline, and Usage Window fields listed below. Typed drafts support dry-run,
+Price Schedule, statusline, and Usage Window fields listed below. Typed drafts support dry-run,
 revision compare-and-swap, atomic replacement, one recoverable backup, and a
 last-valid repair state. The headless Runtime freezes the bootstrap projection
 (`provider.profile`, `provider.model`, and `runtime.max_output_bytes`) for each
 new Turn and freezes resolved Usage Windows with concrete IANA identity and the
-bundled time-zone rule-set version. The schema registry currently exposes
+bundled time-zone rule-set version plus the resolved Price Schedule book. The schema registry currently exposes
 identity, type, writable scopes, application timing, credential-reference
 status, and editor identity. A terminal-neutral Config editor session resolves
 a Command Path plus selected object into one revision-bound Config Draft,
 exposes the focused field without credential read-back, previews the normalized
 diff through full validation and locking, and commits through the existing
 atomic compare-and-swap path. The same session now creates Provider Profiles,
-Model Presets, and Usage Windows through schema-owned multi-field drafts, and
+Model Presets, Price Schedules, and Usage Windows through schema-owned multi-field drafts, and
 deletes whole target-layer objects only after full reference validation. Typed
 `add` and `remove` Command Paths stay nested beneath their Config sections;
 failed validation or revision compare-and-swap leaves the draft live.
@@ -85,6 +85,7 @@ access fails closed until another platform backend is implemented.
 | `providers.<id>.pricing.source` | `unknown`, `template`, `manual`, or `provider_reported` | Next Provider Epoch |
 | `providers.<id>.allow_insecure_loopback` | Boolean; false by default and invalid for a non-loopback host | Next Provider Epoch |
 | `model_presets.<id>` | Provider, model, dialect, inference settings, context mode, and explicit fallback list | Next Turn and Provider Epoch when identity changes |
+| `price_schedules.<id>` | Version, currency, Provider Profile, model, optional dialect/service tier/context band, half-open UTC effective interval, provenance, and non-negative integer token-class rates | Next Config Epoch |
 | `ui.statusline` | Preset, expansion policy, segments, and optional named Usage Window reference | Immediate presentation update |
 | `stats.windows[]` | Unique ID, local start/end, day set, and resolvable time-zone ID | Next Config Epoch |
 
@@ -114,6 +115,7 @@ The root Slash Panel exposes `/config` as one Command Path. It does not register
 |  |- edit <profile>
 |  `- remove <profile>
 |- model
+|- pricing
 |- statusline
 |- stats-window
 |- agent
@@ -347,13 +349,54 @@ Usage Windows are half-open intervals: the example includes 10:00 and excludes 2
 
 The statusline may show a compact selected window such as `work 87.2K/$1.43`. `/stats` presents Turn, Thread, Agent, Team, rolling, and named-window views with model, Provider Profile, reasoning effort, service tier, token class, and cache distributions.
 
-The current Runtime implements the underlying durable Usage Attempts, cached
-rollups, and headless JSON projection. It records missing requested/observed
-metadata and all costs as unknown rather than inferring them. Price Schedules,
-charge/estimate/subscription separation, and statusline/TUI rendering remain
-pending.
+The current Runtime implements durable Usage Attempts, cached rollups, the
+headless JSON projection, schema-owned Price Schedule objects, and immutable
+pay-as-you-go Cost Estimates. A schedule selects one Provider Profile and model,
+optionally narrows dialect, service tier, and input-context band, and applies over
+a half-open UTC effective interval. Its five rates are non-negative integer
+currency-microunits per million tokens for uncached input, cached input, cache
+write, visible output, and reasoning output:
 
-A Cost Estimate records its Price Schedule version and currency. Historical values are not recomputed after a price change. Provider-reported charge, estimated pay-as-you-go cost, and subscription quota value remain separate; OpenCode Go quota value is not labeled as cash paid.
+```toml
+[price_schedules.openai-sol]
+version = "2026-08-10.1"
+currency = "USD"
+provider = "openai-main"
+model = "gpt-5.6-sol"
+dialect = "responses"
+minimum_context_tokens = 0
+effective_from = "2026-08-10T00:00:00Z"
+source = "manual"
+source_ref = "rate-card-2026-08"
+
+[price_schedules.openai-sol.rates]
+input_micros_per_million = 1000000
+cached_input_micros_per_million = 500000
+cache_write_micros_per_million = 0
+output_micros_per_million = 2000000
+reasoning_output_micros_per_million = 3000000
+```
+
+The resolved schedule book rejects duplicate or overlapping selectors. Config
+Epoch creation freezes the book and its fingerprints. Runtime Event schema 5
+appends normalized Usage first and its cost evaluation second in one transaction;
+replay recomputes the result from that frozen evidence. Missing token classes,
+missing selectors, inconsistent accounting, and arithmetic overflow remain
+explicit unknown reasons rather than becoming zero or wrapping. Exact and
+estimated token evidence aggregate separately, and monetary totals use fixed
+12-decimal pico-currency units without floating point.
+
+Editable TOML schedules currently require `source = "manual"` and a Provider
+Profile whose pricing decision is also `manual`. A user-editable object cannot
+claim trusted template or provider-reported provenance. Authenticated template
+rate cards and provider-reported charges remain future dedicated ingestion paths.
+
+Each Cost Estimate records the complete immutable schedule, including version,
+currency, provenance, rates, and fingerprint, so historical values are not
+recomputed after a price change. Provider-reported charge, estimated
+pay-as-you-go cost, and subscription quota value remain separate; only the
+pay-as-you-go estimate is implemented today. OpenCode Go quota value is never
+labeled as cash paid. Rich terminal-backed cost presentation remains pending.
 
 ## Credentials
 

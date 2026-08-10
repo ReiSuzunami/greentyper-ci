@@ -58,7 +58,7 @@ and later Team commands are blocked. Duplicate acknowledgement is idempotent;
 operation IDs remain non-authorizing inspection identities.
 
 The Config Runtime now adds versioned user/project TOML, addressable Provider
-Profile/Model Preset/statusline/Usage Window fields, effective provenance,
+Profile/Model Preset/Price Schedule/statusline/Usage Window fields, effective provenance,
 typed single-operation drafts, dry-run, revision conflict detection, atomic
 replacement, backup repair, and last-valid behavior for invalid external
 edits. It is wired into new headless Turn admission through the immutable
@@ -111,10 +111,11 @@ existing durable Tool approval/effect state machine, feeds one successful UTF-8
 result into a Provider continuation, and durably prepares combined canonical
 output. Recovery tests prove stale Sessions cannot invoke the Provider,
 ambiguous effects cannot continue, and process death after a durable Tool
-success blocks rather than repeating the effect. Runtime Event schema 4 stores
+success blocks rather than repeating the effect. Runtime Event schema 5 stores
 durable Usage Attempt boundaries, frozen Usage Windows, Provider dialect, the
-expanded optional Usage Records, and the frozen Provider Profile snapshot while
-replaying historical schema 1, schema 2, and schema 3.
+expanded optional Usage Records, frozen Provider Profile snapshot, and the
+subsequent frozen Price Schedule cost evaluation while replaying historical
+schema 1, schema 2, schema 3, and schema 4.
 
 A product-private `local.echo` tracer now exercises the concrete process seam.
 It launches a fixed same-binary child without a shell, clears inherited
@@ -156,7 +157,7 @@ Exit criteria:
 
 Add VT/ConPTY TUI, hierarchical Command Paths, global command palette, Config Schema-driven editors, Provider wizard, model selector, adaptive statusline, Context Pressure, Usage Records/Rollups, `/stats`, and named Usage Windows.
 
-The first observability slice is implemented. Runtime Event schema 4 durably
+The first observability slice is implemented. Runtime Event schema 5 durably
 brackets each Provider request and continuation with an immutable Usage Attempt,
 including UTC start/completion, outcome, Agent scope when present, frozen
 Provider Profile/model/dialect, exact or estimated Usage Records, and explicit
@@ -168,7 +169,13 @@ prompt text. Config Epochs freeze half-open/cross-midnight Usage Windows with a
 concrete IANA identity and bundled rule-set version. Tests cover aggregation,
 overflow-to-unknown, historical schema replay, repeated/skipped DST hours,
 local-zone resolution, changed same-name windows, Product-driver Agent/Team
-scope, and statistics redaction.
+scope, and statistics redaction. Schema-owned Price Schedule Config Objects now
+resolve into each Config Epoch. Every Usage completion is followed in the same
+transaction by a frozen cost-evaluation event; replay recalculates its exact,
+estimated, or explicit-unknown pay-as-you-go estimate from the frozen schedule
+and rejects tampering. Cached rollups retain per-currency fixed-point totals and
+unknown/overflow facts, while provider-reported charges and subscription quota
+values remain distinct and unimplemented.
 
 The terminal-neutral presentation and editor slices are also implemented. Config
 Schema metadata now owns the bounded hierarchical Command Path registry and one
@@ -219,12 +226,21 @@ unknown. `greentyper config catalog` emits the static snapshot without Config,
 credential, or network access. The current
 Responses adapter accepts the official OpenAI template through the same frozen
 capability and endpoint checks as compatible gateways.
+Price Schedules are now a fourth typed Config Object with nested lifecycle and
+schema-generated editor routes. The Config Runtime validates provider/pricing
+provenance, effective intervals, selector overlap, and fixed integer rates before
+freezing the resolved book. Product admission passes that book into both plain
+and Product-driver Turns; `stats` and the terminal-neutral status projection
+surface immutable pay-as-you-go estimates without scanning history. Editable
+Config accepts manual provenance only; trusted template-rate and provider-charge
+ingestion remain separate future authority paths.
 
 This does not complete Phase 3. VT/ConPTY rendering and input, the keyboard event
 loop and terminal-backed schema editors, rendered object-name and confirmation
 dialogs, rendered credential binding and template-picker/starter-preset workflow,
-live catalog discovery and Recent evidence, Context Pressure, Price Schedules and
-cost calculation, richer observed Provider metadata, and the P0/P1/P2/P6
+live catalog discovery and Recent evidence, Context Pressure, provider-reported
+charge and subscription-quota accounting, richer observed Provider metadata,
+and the P0/P1/P2/P6
 performance evidence remain pending.
 Large-history statistics pagination and summary-only rendering also remain
 pending; the current command emits the complete replayed attempt projection.

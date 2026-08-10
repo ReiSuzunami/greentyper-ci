@@ -121,24 +121,30 @@ transport tests. The core also normalizes one Responses function call, crosses
 durable Tool approval/effect policy, continues the Provider once, and prepares
 canonical output without repeating successful or ambiguous effects. Headless
 execution keeps the deterministic simulator when no custom profile is selected.
-Runtime Event schema 4 now brackets every Provider invocation with a durable
+Runtime Event schema 5 now brackets every Provider invocation with a durable
 Usage Attempt, records UTC start/completion and outcome, preserves exact,
 estimated, and unknown token classes, and rebuilds cached Turn, Thread, Agent,
 Team, rolling, and named-window rollups. Config Epochs freeze normalized Usage
-Windows with concrete IANA identity and rule-set provenance; `stats` reads the
-projection without exposing prompt text. Price Schedules and provider charge
-calculation are not implemented, so cost provenance remains explicitly unknown.
+Windows with concrete IANA identity and rule-set provenance plus resolved,
+versioned Price Schedules. A cost-evaluation event follows each Usage Attempt
+in the same transaction, freezes the matching schedule, and records an exact,
+estimated, or explicit-unknown pay-as-you-go Cost Estimate with checked integer
+arithmetic. Replay recalculates the estimate from the frozen evidence and rejects
+tampering; `stats` reads the cached projection without exposing prompt text.
+Editable Config schedules require manual provenance. Provider-reported charges,
+trusted template rates, and subscription quota values remain separate and are
+not inferred from these estimates.
 The first terminal-neutral presentation slice now derives a bounded hierarchical
 Slash Panel, configured-preset selector, adaptive status summary, and explicit
 Runtime, Team, Tool, and Config blockers from core snapshots. Config Schema
 metadata supplies every field-level editor route and the Config Runtime exposes
 provenanced, credential-safe field views for existing Provider Profiles, Model
-Presets, and Usage Windows. Config Runtime can now open a selected field route as
+Presets, Price Schedules, and Usage Windows. Config Runtime can now open a selected field route as
 one revision-bound draft, preview the normalized diff through the real validation
 and locking path, reset it, and commit it atomically. Credential routes expose
 binding state and require the separate secure credential operation. The product
 now also has typed nested Config Object add/remove routes. One schema-driven
-Draft can create a Profile, Preset, or Usage Window across multiple focused
+Draft can create a Profile, Preset, Price Schedule, or Usage Window across multiple focused
 fields; whole-object deletion is target-layer explicit and reference validated.
 The terminal-neutral interaction controller projects these operations alongside
 deterministic 40/80/160 column row layouts with Unicode-safe fitting and adaptive

@@ -13,13 +13,19 @@ use crate::agent_team::{
     TeamOperationAcknowledgeOutcome, TeamOperationCommit, TeamOperationId, TeamOperationRecord,
     TeamOperationStatus, TeamSnapshot,
 };
-use crate::config::{ConfigEpoch, ConfigError, ConfigLayer, ConfigLayers, ConfigSource};
+use crate::config::{
+    ConfigEpoch, ConfigError, ConfigLayer, ConfigLayers, ConfigSource, MAX_CONFIG_STRING_BYTES,
+};
 use crate::ledger::{
     DurabilityReceipt, EventData, FileLedger, LedgerError, LedgerHead, StoredEvent,
 };
 use crate::model::{
     CanonicalItem, ConfigEpochId, DeliveryId, ItemId, ItemRole, ModelError, ProviderEpochId,
     ThreadId, TurnId,
+};
+use crate::pricing::{
+    CostEstimateOutcome, CostEstimateUnknownReason, MAX_PRICE_SCHEDULES, PriceSchedule,
+    PriceScheduleBook, PriceScheduleDefinition, PriceScheduleSource, TokenRates,
 };
 use crate::provider::{
     MAX_PROVIDER_ID_BYTES, MAX_SERVICE_TIER_BYTES, ProviderDialect, ProviderEpoch, ProviderError,
@@ -247,6 +253,15 @@ pub struct RuntimeKernel {
     recovered_tail_bytes: u64,
     team: Option<KernelTeam>,
     tools: Option<DurableToolRuntime>,
+}
+
+struct TurnAdmission {
+    usage_windows: Vec<UsageWindow>,
+    price_schedules: PriceScheduleBook,
+    input: String,
+    provider_snapshot: Option<ProviderProfileSnapshot>,
+    provider_dialect: Option<ProviderDialect>,
+    agent: Option<AgentId>,
 }
 
 struct KernelTeam {
@@ -563,13 +578,33 @@ impl RuntimeKernel {
         input: impl Into<String>,
         provider: &mut impl ProviderRuntime,
     ) -> Result<PreparedOutput, RuntimeError> {
-        self.admit_turn(
+        self.execute_with_observability(
             layers,
             usage_windows,
-            input.into(),
-            provider.profile_snapshot().cloned(),
-            provider.dialect(),
-            None,
+            PriceScheduleBook::default(),
+            input,
+            provider,
+        )
+    }
+
+    pub fn execute_with_observability(
+        &mut self,
+        layers: &ConfigLayers,
+        usage_windows: Vec<UsageWindow>,
+        price_schedules: PriceScheduleBook,
+        input: impl Into<String>,
+        provider: &mut impl ProviderRuntime,
+    ) -> Result<PreparedOutput, RuntimeError> {
+        self.admit_turn(
+            layers,
+            TurnAdmission {
+                usage_windows,
+                price_schedules,
+                input: input.into(),
+                provider_snapshot: provider.profile_snapshot().cloned(),
+                provider_dialect: provider.dialect(),
+                agent: None,
+            },
         )?;
         self.drive_pending(provider)
     }
@@ -612,14 +647,42 @@ impl RuntimeKernel {
     where
         ResolveResources: FnOnce(&ProviderToolCall) -> Result<ToolResources, RuntimeError>,
     {
+        self.execute_provider_turn_with_observability(
+            session,
+            layers,
+            usage_windows,
+            PriceScheduleBook::default(),
+            input,
+            provider,
+            map_resources,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_provider_turn_with_observability<ResolveResources>(
+        &mut self,
+        session: AgentSession,
+        layers: &ConfigLayers,
+        usage_windows: Vec<UsageWindow>,
+        price_schedules: PriceScheduleBook,
+        input: impl Into<String>,
+        provider: &mut impl ProviderRuntime,
+        map_resources: ResolveResources,
+    ) -> Result<ProviderTurnOutcome, RuntimeError>
+    where
+        ResolveResources: FnOnce(&ProviderToolCall) -> Result<ToolResources, RuntimeError>,
+    {
         self.require_provider_session(session)?;
         self.admit_turn(
             layers,
-            usage_windows,
-            input.into(),
-            provider.profile_snapshot().cloned(),
-            provider.dialect(),
-            Some(session.agent()),
+            TurnAdmission {
+                usage_windows,
+                price_schedules,
+                input: input.into(),
+                provider_snapshot: provider.profile_snapshot().cloned(),
+                provider_dialect: provider.dialect(),
+                agent: Some(session.agent()),
+            },
         )?;
         self.drive_provider_turn(session, provider, map_resources)
     }
@@ -825,12 +888,16 @@ impl RuntimeKernel {
     fn admit_turn(
         &mut self,
         layers: &ConfigLayers,
-        usage_windows: Vec<UsageWindow>,
-        input: String,
-        provider_snapshot: Option<ProviderProfileSnapshot>,
-        provider_dialect: Option<ProviderDialect>,
-        agent: Option<AgentId>,
+        admission: TurnAdmission,
     ) -> Result<(), RuntimeError> {
+        let TurnAdmission {
+            usage_windows,
+            price_schedules,
+            input,
+            provider_snapshot,
+            provider_dialect,
+            agent,
+        } = admission;
         self.require_ready()?;
         self.require_no_tool_reconciliation()?;
         validate_input(&input)?;
@@ -849,8 +916,13 @@ impl RuntimeKernel {
                 .require_current_ruleset()
                 .map_err(RuntimeError::Usage)?;
         }
-        let config = ConfigEpoch::freeze_with_usage_windows(config_id, layers, usage_windows)
-            .map_err(RuntimeError::Config)?;
+        let config = ConfigEpoch::freeze_with_observability(
+            config_id,
+            layers,
+            usage_windows,
+            price_schedules,
+        )
+        .map_err(RuntimeError::Config)?;
         let profile = config.resolved().provider_profile().value().clone();
         let model = config.resolved().provider_model().value().clone();
         let provider_epoch = match provider_snapshot {
@@ -1190,15 +1262,15 @@ impl RuntimeKernel {
         let assistant_item = ItemId::new(self.state.next_item).map_err(RuntimeError::Model)?;
         let delivery = DeliveryId::new(self.state.next_delivery).map_err(RuntimeError::Model)?;
         let completed_at = UsageTimestamp::now().map_err(RuntimeError::Usage)?;
-        let finish = self.usage_attempt_finish_event(
+        let finish = self.usage_attempt_finish_events(
             turn,
             attempt,
             completed_at,
             UsageAttemptOutcome::Succeeded,
             Some(current_usage),
         )?;
-        let mut events = Vec::with_capacity(deltas.len() + 3);
-        events.push(finish);
+        let mut events = Vec::with_capacity(deltas.len() + 4);
+        events.extend(finish);
         events.push(RuntimeEvent::AssistantItemStarted {
             turn,
             item: assistant_item,
@@ -1251,7 +1323,7 @@ impl RuntimeKernel {
         let attempt = pending.next_usage_attempt;
         let mut events = Vec::with_capacity(2);
         if let Some(open) = pending.open_usage_attempt {
-            events.push(self.usage_attempt_finish_event(
+            events.extend(self.usage_attempt_finish_events(
                 turn,
                 open.attempt,
                 started_at,
@@ -1276,8 +1348,9 @@ impl RuntimeKernel {
         usage: Option<UsageRecord>,
     ) -> Result<(), RuntimeError> {
         let completed_at = UsageTimestamp::now().map_err(RuntimeError::Usage)?;
-        let event = self.usage_attempt_finish_event(turn, attempt, completed_at, outcome, usage)?;
-        self.commit(&[event])?;
+        let events =
+            self.usage_attempt_finish_events(turn, attempt, completed_at, outcome, usage)?;
+        self.commit(&events)?;
         Ok(())
     }
 
@@ -1290,26 +1363,24 @@ impl RuntimeKernel {
         reason: &str,
     ) -> Result<(), RuntimeError> {
         let completed_at = UsageTimestamp::now().map_err(RuntimeError::Usage)?;
-        let finish =
-            self.usage_attempt_finish_event(turn, attempt, completed_at, outcome, usage)?;
-        self.commit(&[
-            finish,
-            RuntimeEvent::TurnBlocked {
-                turn,
-                reason: bounded_reason(reason),
-            },
-        ])?;
+        let mut events =
+            self.usage_attempt_finish_events(turn, attempt, completed_at, outcome, usage)?;
+        events.push(RuntimeEvent::TurnBlocked {
+            turn,
+            reason: bounded_reason(reason),
+        });
+        self.commit(&events)?;
         Ok(())
     }
 
-    fn usage_attempt_finish_event(
+    fn usage_attempt_finish_events(
         &self,
         turn: TurnId,
         attempt: u32,
         completed_at: UsageTimestamp,
         outcome: UsageAttemptOutcome,
         usage: Option<UsageRecord>,
-    ) -> Result<RuntimeEvent, RuntimeError> {
+    ) -> Result<Vec<RuntimeEvent>, RuntimeError> {
         let pending = self
             .state
             .pending
@@ -1337,14 +1408,35 @@ impl RuntimeKernel {
                 named_windows.push(window.id().to_owned());
             }
         }
-        Ok(RuntimeEvent::UsageAttemptFinished {
-            turn,
-            attempt,
-            completed_at,
-            outcome,
-            usage,
-            named_windows,
-        })
+        let context = self.state.usage_context(turn)?;
+        let cost = usage.as_ref().map_or(
+            CostEstimateOutcome::Unknown(CostEstimateUnknownReason::MissingUsageRecord),
+            |usage| {
+                config.price_schedules().estimate_attempt(
+                    &context.profile,
+                    &context.model,
+                    context.dialect,
+                    open.started_at,
+                    usage,
+                )
+            },
+        );
+        Ok(vec![
+            RuntimeEvent::UsageAttemptFinished {
+                turn,
+                attempt,
+                completed_at,
+                outcome,
+                usage,
+                named_windows,
+                cost_evaluation_required: true,
+            },
+            RuntimeEvent::UsageAttemptCostEvaluated {
+                turn,
+                attempt,
+                evaluation: FrozenCostEvaluation::from_outcome(&cost),
+            },
+        ])
     }
 
     fn block_pending(&mut self, turn: TurnId, reason: &str) -> Result<(), RuntimeError> {
@@ -1534,6 +1626,48 @@ fn bounded_reason(reason: &str) -> String {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+enum FrozenCostEvaluation {
+    Known {
+        schedule_id: String,
+        schedule_fingerprint: u64,
+        amount_pico_units: u64,
+    },
+    Unknown(CostEstimateUnknownReason),
+}
+
+impl FrozenCostEvaluation {
+    fn from_outcome(outcome: &CostEstimateOutcome) -> Self {
+        match outcome {
+            CostEstimateOutcome::Known(estimate) => Self::Known {
+                schedule_id: estimate.schedule().id().to_owned(),
+                schedule_fingerprint: estimate.schedule().fingerprint(),
+                amount_pico_units: estimate.amount_pico_units(),
+            },
+            CostEstimateOutcome::Unknown(reason) => Self::Unknown(*reason),
+        }
+    }
+
+    fn matches(&self, outcome: &CostEstimateOutcome) -> bool {
+        match (self, outcome) {
+            (
+                Self::Known {
+                    schedule_id,
+                    schedule_fingerprint,
+                    amount_pico_units,
+                },
+                CostEstimateOutcome::Known(estimate),
+            ) => {
+                schedule_id == estimate.schedule().id()
+                    && *schedule_fingerprint == estimate.schedule().fingerprint()
+                    && *amount_pico_units == estimate.amount_pico_units()
+            }
+            (Self::Unknown(left), CostEstimateOutcome::Unknown(right)) => left == right,
+            _ => false,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 enum RuntimeEvent {
     ThreadCreated {
         thread: ThreadId,
@@ -1593,6 +1727,12 @@ enum RuntimeEvent {
         outcome: UsageAttemptOutcome,
         usage: Option<UsageRecord>,
         named_windows: Vec<String>,
+        cost_evaluation_required: bool,
+    },
+    UsageAttemptCostEvaluated {
+        turn: TurnId,
+        attempt: u32,
+        evaluation: FrozenCostEvaluation,
     },
 }
 
@@ -1693,6 +1833,7 @@ impl RuntimeEvent {
                 outcome,
                 usage,
                 named_windows,
+                cost_evaluation_required: _,
             } => {
                 payload.u64(turn.get());
                 payload.u32(*attempt);
@@ -1713,6 +1854,31 @@ impl RuntimeEvent {
                     payload.string(window)?;
                 }
                 12
+            }
+            Self::UsageAttemptCostEvaluated {
+                turn,
+                attempt,
+                evaluation,
+            } => {
+                payload.u64(turn.get());
+                payload.u32(*attempt);
+                match evaluation {
+                    FrozenCostEvaluation::Known {
+                        schedule_id,
+                        schedule_fingerprint,
+                        amount_pico_units,
+                    } => {
+                        payload.u8(1);
+                        payload.string(schedule_id)?;
+                        payload.u64(*schedule_fingerprint);
+                        payload.u64(*amount_pico_units);
+                    }
+                    FrozenCostEvaluation::Unknown(reason) => {
+                        payload.u8(2);
+                        payload.u8(cost_unknown_reason_tag(*reason));
+                    }
+                }
+                13
             }
         };
         Ok(EventData {
@@ -1830,6 +1996,29 @@ impl RuntimeEvent {
                     outcome,
                     usage,
                     named_windows,
+                    cost_evaluation_required: event.data.schema >= 5,
+                }
+            }
+            13 if event.data.schema >= 5 => {
+                let turn = TurnId::new(payload.u64()?).map_err(RuntimeError::Model)?;
+                let attempt = payload.u32()?;
+                let evaluation = match payload.u8()? {
+                    1 => FrozenCostEvaluation::Known {
+                        schedule_id: payload.string(MAX_PROVIDER_ID_BYTES)?,
+                        schedule_fingerprint: payload.u64()?,
+                        amount_pico_units: payload.u64()?,
+                    },
+                    2 => FrozenCostEvaluation::Unknown(decode_cost_unknown_reason(payload.u8()?)?),
+                    _ => {
+                        return Err(RuntimeError::CorruptEvent(
+                            "invalid Cost Estimate outcome tag",
+                        ));
+                    }
+                };
+                Self::UsageAttemptCostEvaluated {
+                    turn,
+                    attempt,
+                    evaluation,
                 }
             }
             _ => return Err(RuntimeError::CorruptEvent("unknown Runtime Event kind")),
@@ -1906,6 +2095,7 @@ struct RuntimeState {
     pending: Option<PendingTurn>,
     acknowledged: BTreeSet<DeliveryId>,
     usage: UsageProjection,
+    pending_cost_evaluation: Option<(TurnId, u32)>,
     next_thread: u64,
     next_turn: u64,
     next_item: u64,
@@ -1925,6 +2115,7 @@ impl Default for RuntimeState {
             pending: None,
             acknowledged: BTreeSet::new(),
             usage: UsageProjection::default(),
+            pending_cost_evaluation: None,
             next_thread: 1,
             next_turn: 1,
             next_item: 1,
@@ -1961,6 +2152,17 @@ impl RuntimeState {
     }
 
     fn apply(&mut self, event: RuntimeEvent) -> Result<(), RuntimeError> {
+        if let Some((pending_turn, pending_attempt)) = self.pending_cost_evaluation
+            && !matches!(
+                &event,
+                RuntimeEvent::UsageAttemptCostEvaluated { turn, attempt, .. }
+                    if *turn == pending_turn && *attempt == pending_attempt
+            )
+        {
+            return Err(RuntimeError::CorruptState(
+                "Usage cost evaluation must immediately follow its attempt",
+            ));
+        }
         match event {
             RuntimeEvent::ThreadCreated { thread } => {
                 if self.thread.replace(thread).is_some() || !self.turns.is_empty() {
@@ -2254,6 +2456,7 @@ impl RuntimeState {
                 outcome,
                 usage,
                 named_windows,
+                cost_evaluation_required,
             } => {
                 if matches!(outcome, UsageAttemptOutcome::Succeeded) != usage.is_some() {
                     return Err(RuntimeError::CorruptState(
@@ -2321,6 +2524,64 @@ impl RuntimeState {
                 self.usage
                     .record(usage_attempt)
                     .map_err(RuntimeError::Usage)?;
+                if cost_evaluation_required {
+                    self.pending_cost_evaluation = Some((turn, attempt));
+                }
+            }
+            RuntimeEvent::UsageAttemptCostEvaluated {
+                turn,
+                attempt,
+                evaluation,
+            } => {
+                if self.pending_cost_evaluation != Some((turn, attempt)) {
+                    return Err(RuntimeError::CorruptState(
+                        "Cost Estimate has no pending Usage Attempt",
+                    ));
+                }
+                let context = self.usage_context(turn)?;
+                let config = self
+                    .turns
+                    .get(&turn)
+                    .map(|record| record.config)
+                    .and_then(|config| self.configs.get(&config))
+                    .ok_or(RuntimeError::CorruptState(
+                        "Cost Estimate Config Epoch is missing",
+                    ))?;
+                let attempt_record =
+                    self.usage
+                        .attempt(turn.get(), attempt)
+                        .ok_or(RuntimeError::CorruptState(
+                            "Cost Estimate usage attempt is missing",
+                        ))?;
+                let expected = match attempt_record.usage() {
+                    None => {
+                        CostEstimateOutcome::Unknown(CostEstimateUnknownReason::MissingUsageRecord)
+                    }
+                    Some(usage) => {
+                        let started_at =
+                            attempt_record
+                                .started_at()
+                                .ok_or(RuntimeError::CorruptState(
+                                    "Cost Estimate usage attempt has no start instant",
+                                ))?;
+                        config.price_schedules().estimate_attempt(
+                            &context.profile,
+                            &context.model,
+                            context.dialect,
+                            started_at,
+                            usage,
+                        )
+                    }
+                };
+                if !evaluation.matches(&expected) {
+                    return Err(RuntimeError::CorruptState(
+                        "Cost Estimate does not match frozen usage and pricing evidence",
+                    ));
+                }
+                self.usage
+                    .record_cost_evaluation(turn.get(), attempt, expected)
+                    .map_err(RuntimeError::Usage)?;
+                self.pending_cost_evaluation = None;
             }
         }
         Ok(())
@@ -2343,6 +2604,11 @@ impl RuntimeState {
         ) {
             return Err(RuntimeError::CorruptState(
                 "output transaction ended while streaming",
+            ));
+        }
+        if self.pending_cost_evaluation.is_some() {
+            return Err(RuntimeError::CorruptState(
+                "Usage transaction ended before cost evaluation",
             ));
         }
         for (turn, record) in &self.turns {
@@ -2509,10 +2775,28 @@ fn encode_optional_u64(encoder: &mut Encoder, value: Option<u64>) {
     }
 }
 
+fn encode_optional_i64(encoder: &mut Encoder, value: Option<i64>) {
+    match value {
+        Some(value) => {
+            encoder.u8(1);
+            encoder.i64(value);
+        }
+        None => encoder.u8(0),
+    }
+}
+
 fn decode_optional_u64(decoder: &mut Decoder<'_>) -> Result<Option<u64>, RuntimeError> {
     match decoder.u8()? {
         0 => Ok(None),
         1 => Ok(Some(decoder.u64()?)),
+        _ => Err(RuntimeError::CorruptEvent("invalid optional integer tag")),
+    }
+}
+
+fn decode_optional_i64(decoder: &mut Decoder<'_>) -> Result<Option<i64>, RuntimeError> {
+    match decoder.u8()? {
+        0 => Ok(None),
+        1 => Ok(Some(decoder.i64()?)),
         _ => Err(RuntimeError::CorruptEvent("invalid optional integer tag")),
     }
 }
@@ -2747,6 +3031,25 @@ fn decode_provider_dialect(tag: u8) -> Result<ProviderDialect, RuntimeError> {
     }
 }
 
+const fn price_schedule_source_tag(source: PriceScheduleSource) -> u8 {
+    match source {
+        PriceScheduleSource::Template => 1,
+        PriceScheduleSource::Manual => 2,
+        PriceScheduleSource::ProviderReported => 3,
+    }
+}
+
+fn decode_price_schedule_source(tag: u8) -> Result<PriceScheduleSource, RuntimeError> {
+    match tag {
+        1 => Ok(PriceScheduleSource::Template),
+        2 => Ok(PriceScheduleSource::Manual),
+        3 => Ok(PriceScheduleSource::ProviderReported),
+        _ => Err(RuntimeError::CorruptEvent(
+            "invalid Price Schedule source tag",
+        )),
+    }
+}
+
 fn encode_optional_agent(encoder: &mut Encoder, agent: Option<AgentId>) {
     match agent {
         None => encoder.u8(0),
@@ -2783,6 +3086,41 @@ fn decode_usage_attempt_outcome(tag: u8) -> Result<UsageAttemptOutcome, RuntimeE
         2 => Ok(UsageAttemptOutcome::Failed),
         3 => Ok(UsageAttemptOutcome::Interrupted),
         _ => Err(RuntimeError::CorruptEvent("invalid usage attempt outcome")),
+    }
+}
+
+const fn cost_unknown_reason_tag(reason: CostEstimateUnknownReason) -> u8 {
+    match reason {
+        CostEstimateUnknownReason::MissingUsageRecord => 1,
+        CostEstimateUnknownReason::NoMatchingSchedule => 2,
+        CostEstimateUnknownReason::MissingInputTokens => 3,
+        CostEstimateUnknownReason::MissingCachedInputTokens => 4,
+        CostEstimateUnknownReason::MissingCacheWriteInputTokens => 5,
+        CostEstimateUnknownReason::MissingOutputTokens => 6,
+        CostEstimateUnknownReason::MissingReasoningOutputTokens => 7,
+        CostEstimateUnknownReason::InconsistentInputAccounting => 8,
+        CostEstimateUnknownReason::InconsistentOutputAccounting => 9,
+        CostEstimateUnknownReason::ArithmeticOverflow => 10,
+        CostEstimateUnknownReason::MissingServiceTier => 11,
+    }
+}
+
+fn decode_cost_unknown_reason(tag: u8) -> Result<CostEstimateUnknownReason, RuntimeError> {
+    match tag {
+        1 => Ok(CostEstimateUnknownReason::MissingUsageRecord),
+        2 => Ok(CostEstimateUnknownReason::NoMatchingSchedule),
+        3 => Ok(CostEstimateUnknownReason::MissingInputTokens),
+        4 => Ok(CostEstimateUnknownReason::MissingCachedInputTokens),
+        5 => Ok(CostEstimateUnknownReason::MissingCacheWriteInputTokens),
+        6 => Ok(CostEstimateUnknownReason::MissingOutputTokens),
+        7 => Ok(CostEstimateUnknownReason::MissingReasoningOutputTokens),
+        8 => Ok(CostEstimateUnknownReason::InconsistentInputAccounting),
+        9 => Ok(CostEstimateUnknownReason::InconsistentOutputAccounting),
+        10 => Ok(CostEstimateUnknownReason::ArithmeticOverflow),
+        11 => Ok(CostEstimateUnknownReason::MissingServiceTier),
+        _ => Err(RuntimeError::CorruptEvent(
+            "invalid Cost Estimate unknown reason",
+        )),
     }
 }
 
@@ -2827,6 +3165,13 @@ fn encode_config_epoch(encoder: &mut Encoder, epoch: &ConfigEpoch) -> Result<(),
     for window in epoch.usage_windows() {
         encode_usage_window(encoder, window)?;
     }
+    encoder.u32(
+        u32::try_from(epoch.price_schedules().schedules().len())
+            .map_err(|_| RuntimeError::IntegerOverflow)?,
+    );
+    for schedule in epoch.price_schedules().schedules() {
+        encode_price_schedule(encoder, schedule)?;
+    }
     Ok(())
 }
 
@@ -2864,7 +3209,23 @@ fn decode_config_epoch(
     } else {
         Vec::new()
     };
-    let epoch = ConfigEpoch::freeze_with_usage_windows(id, &layers, usage_windows)
+    let price_schedules = if schema >= 5 {
+        let count = decoder.u32()? as usize;
+        if count > MAX_PRICE_SCHEDULES {
+            return Err(RuntimeError::CorruptEvent(
+                "Config Epoch Price Schedule count is invalid",
+            ));
+        }
+        PriceScheduleBook::new(
+            (0..count)
+                .map(|_| decode_price_schedule(decoder))
+                .collect::<Result<Vec<_>, _>>()?,
+        )
+        .map_err(|_| RuntimeError::CorruptEvent("invalid Config Epoch Price Schedules"))?
+    } else {
+        PriceScheduleBook::default()
+    };
+    let epoch = ConfigEpoch::freeze_with_observability(id, &layers, usage_windows, price_schedules)
         .map_err(RuntimeError::Config)?;
     if epoch.fingerprint() != fingerprint {
         return Err(RuntimeError::CorruptEvent(
@@ -2872,6 +3233,76 @@ fn decode_config_epoch(
         ));
     }
     Ok(epoch)
+}
+
+fn encode_price_schedule(
+    encoder: &mut Encoder,
+    schedule: &PriceSchedule,
+) -> Result<(), RuntimeError> {
+    encoder.u64(schedule.fingerprint());
+    encoder.string(schedule.id())?;
+    encoder.string(schedule.version())?;
+    encoder.string(schedule.currency())?;
+    encoder.string(schedule.provider_profile())?;
+    encoder.string(schedule.model())?;
+    encoder.u8(schedule.dialect().map_or(0, provider_dialect_tag));
+    encode_optional_string(encoder, schedule.service_tier())?;
+    encoder.u64(schedule.minimum_context_tokens());
+    encode_optional_u64(encoder, schedule.maximum_context_tokens());
+    encoder.i64(schedule.effective_from().unix_millis());
+    encode_optional_i64(
+        encoder,
+        schedule.effective_until().map(UsageTimestamp::unix_millis),
+    );
+    encoder.u8(price_schedule_source_tag(schedule.source()));
+    encoder.string(schedule.source_ref())?;
+    let rates = schedule.rates();
+    encoder.u64(rates.input_micros_per_million());
+    encoder.u64(rates.cached_input_micros_per_million());
+    encoder.u64(rates.cache_write_micros_per_million());
+    encoder.u64(rates.output_micros_per_million());
+    encoder.u64(rates.reasoning_output_micros_per_million());
+    Ok(())
+}
+
+fn decode_price_schedule(decoder: &mut Decoder<'_>) -> Result<PriceSchedule, RuntimeError> {
+    let fingerprint = decoder.u64()?;
+    let schedule = PriceSchedule::new_trusted(PriceScheduleDefinition {
+        id: decoder.string(MAX_PROVIDER_ID_BYTES)?,
+        version: decoder.string(MAX_CONFIG_STRING_BYTES)?,
+        currency: decoder.string(3)?,
+        provider_profile: decoder.string(MAX_CONFIG_STRING_BYTES)?,
+        model: decoder.string(MAX_CONFIG_STRING_BYTES)?,
+        dialect: match decoder.u8()? {
+            0 => None,
+            tag => Some(decode_provider_dialect(tag)?),
+        },
+        service_tier: decode_optional_string(decoder, MAX_SERVICE_TIER_BYTES)?,
+        minimum_context_tokens: decoder.u64()?,
+        maximum_context_tokens: decode_optional_u64(decoder)?,
+        effective_from: UsageTimestamp::from_unix_millis(decoder.i64()?)
+            .map_err(RuntimeError::Usage)?,
+        effective_until: decode_optional_i64(decoder)?
+            .map(UsageTimestamp::from_unix_millis)
+            .transpose()
+            .map_err(RuntimeError::Usage)?,
+        source: decode_price_schedule_source(decoder.u8()?)?,
+        source_ref: decoder.string(MAX_CONFIG_STRING_BYTES)?,
+        rates: TokenRates::new(
+            decoder.u64()?,
+            decoder.u64()?,
+            decoder.u64()?,
+            decoder.u64()?,
+            decoder.u64()?,
+        ),
+    })
+    .map_err(|_| RuntimeError::CorruptEvent("invalid Config Epoch Price Schedule"))?;
+    if schedule.fingerprint() != fingerprint {
+        return Err(RuntimeError::CorruptEvent(
+            "Price Schedule fingerprint mismatch",
+        ));
+    }
+    Ok(schedule)
 }
 
 fn encode_usage_window(encoder: &mut Encoder, window: &UsageWindow) -> Result<(), RuntimeError> {
@@ -3259,7 +3690,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_three_provider_epoch_replays_and_schema_four_rejects_fingerprint_tampering() {
+    fn schema_three_provider_epoch_replays_and_current_schema_rejects_fingerprint_tampering() {
         let epoch = ProviderEpoch::with_profile_snapshot(
             ProviderEpochId::new(1).expect("Provider Epoch id"),
             "edge",
@@ -3272,7 +3703,7 @@ mod tests {
         }
         .encode()
         .expect("encode Provider Epoch");
-        assert_eq!(encoded.schema, 4);
+        assert_eq!(encoded.schema, 5);
         let mut schema_three = encoded.clone();
         schema_three.schema = 3;
         assert_eq!(schema_three.payload.pop(), Some(0));
@@ -3314,7 +3745,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_four_usage_attempt_codec_is_bounded_and_fail_closed() {
+    fn schema_four_and_current_usage_attempt_codec_is_bounded_and_fail_closed() {
         let turn = TurnId::new(1).expect("Turn id");
         let started = RuntimeEvent::UsageAttemptStarted {
             turn,
@@ -3335,6 +3766,7 @@ mod tests {
             outcome: UsageAttemptOutcome::Succeeded,
             usage: Some(UsageRecord::estimated(2, 3)),
             named_windows: vec!["workday".to_owned()],
+            cost_evaluation_required: true,
         };
         let encoded_finish = finished.clone().encode().expect("encode attempt finish");
         assert_eq!(
@@ -3356,6 +3788,119 @@ mod tests {
             RuntimeEvent::decode(&stored_runtime_event(invalid_outcome)),
             Err(RuntimeError::CorruptEvent("invalid usage attempt outcome"))
         ));
+    }
+
+    #[test]
+    fn schema_five_cost_evaluation_rejects_tampered_amount_against_frozen_evidence() {
+        let thread = ThreadId::new(1).expect("Thread id");
+        let turn = TurnId::new(1).expect("Turn id");
+        let config_id = ConfigEpochId::new(1).expect("Config Epoch id");
+        let provider_id = ProviderEpochId::new(1).expect("Provider Epoch id");
+        let schedule = PriceSchedule::new(PriceScheduleDefinition {
+            id: "simulator-standard".to_owned(),
+            version: "2026-08-10".to_owned(),
+            currency: "USD".to_owned(),
+            provider_profile: "simulator".to_owned(),
+            model: "deterministic-v1".to_owned(),
+            dialect: None,
+            service_tier: None,
+            minimum_context_tokens: 0,
+            maximum_context_tokens: None,
+            effective_from: UsageTimestamp::from_unix_millis(0).expect("timestamp"),
+            effective_until: None,
+            source: PriceScheduleSource::Manual,
+            source_ref: "synthetic-runtime-rate-card".to_owned(),
+            rates: TokenRates::new(1, 0, 0, 0, 0),
+        })
+        .expect("Price Schedule");
+        let schedule_fingerprint = schedule.fingerprint();
+        let config = ConfigEpoch::freeze_with_observability(
+            config_id,
+            &ConfigLayers::default(),
+            Vec::new(),
+            PriceScheduleBook::new(vec![schedule]).expect("Price Schedule book"),
+        )
+        .expect("Config Epoch");
+        let provider = ProviderEpoch::new(provider_id, "simulator", "deterministic-v1")
+            .expect("Provider Epoch");
+        let mut state = RuntimeState::default();
+        for event in [
+            RuntimeEvent::ThreadCreated { thread },
+            RuntimeEvent::ConfigFrozen { epoch: config },
+            RuntimeEvent::ProviderFrozen {
+                epoch: Box::new(provider),
+            },
+            RuntimeEvent::TurnAdmitted {
+                thread,
+                turn,
+                user_item: ItemId::new(1).expect("Item id"),
+                config: config_id,
+                provider: provider_id,
+                agent: None,
+                input: "input".to_owned(),
+            },
+            RuntimeEvent::UsageAttemptStarted {
+                turn,
+                attempt: 1,
+                started_at: UsageTimestamp::from_unix_millis(1).expect("timestamp"),
+            },
+            RuntimeEvent::UsageAttemptFinished {
+                turn,
+                attempt: 1,
+                completed_at: UsageTimestamp::from_unix_millis(2).expect("timestamp"),
+                outcome: UsageAttemptOutcome::Succeeded,
+                usage: Some(
+                    UsageRecord::new(Some(1), Some(0), Some(0), Some(0), Some(0), Some(1), None)
+                        .expect("usage"),
+                ),
+                named_windows: Vec::new(),
+                cost_evaluation_required: true,
+            },
+        ] {
+            state.apply(event).expect("valid Runtime transition");
+        }
+        assert!(matches!(
+            state.validate_quiescent(),
+            Err(RuntimeError::CorruptState(
+                "Usage transaction ended before cost evaluation"
+            ))
+        ));
+        let tampered = RuntimeEvent::UsageAttemptCostEvaluated {
+            turn,
+            attempt: 1,
+            evaluation: FrozenCostEvaluation::Known {
+                schedule_id: "simulator-standard".to_owned(),
+                schedule_fingerprint,
+                amount_pico_units: 2,
+            },
+        };
+        let encoded = tampered.clone().encode().expect("encode Cost Estimate");
+        assert_eq!(encoded.schema, 5);
+        assert_eq!(encoded.kind, 13);
+        assert_eq!(
+            RuntimeEvent::decode(&stored_runtime_event(encoded)).expect("decode Cost Estimate"),
+            tampered
+        );
+        assert!(matches!(
+            state.apply(tampered),
+            Err(RuntimeError::CorruptState(
+                "Cost Estimate does not match frozen usage and pricing evidence"
+            ))
+        ));
+        state
+            .apply(RuntimeEvent::UsageAttemptCostEvaluated {
+                turn,
+                attempt: 1,
+                evaluation: FrozenCostEvaluation::Known {
+                    schedule_id: "simulator-standard".to_owned(),
+                    schedule_fingerprint,
+                    amount_pico_units: 1,
+                },
+            })
+            .expect("matching Cost Estimate completes the Usage transaction");
+        state
+            .validate_quiescent()
+            .expect("completed Usage transaction is quiescent");
     }
 
     #[test]

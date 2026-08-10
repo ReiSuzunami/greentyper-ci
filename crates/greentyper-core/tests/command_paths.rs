@@ -69,6 +69,7 @@ fn root_actions_and_config_sections_remain_semantically_distinct() {
     let sections = [
         ("provider", ConfigSection::Provider),
         ("model", ConfigSection::Model),
+        ("pricing", ConfigSection::Pricing),
         ("statusline", ConfigSection::Statusline),
         ("stats-window", ConfigSection::StatsWindow),
         ("agent", ConfigSection::Agent),
@@ -112,6 +113,18 @@ fn config_object_lifecycle_actions_remain_nested_and_typed() {
             "/config model remove",
             CommandTarget::ConfigObjectDelete {
                 kind: greentyper_core::config::ConfigObjectKind::ModelPreset,
+            },
+        ),
+        (
+            "/config pricing add",
+            CommandTarget::ConfigObjectCreate {
+                kind: greentyper_core::config::ConfigObjectKind::PriceSchedule,
+            },
+        ),
+        (
+            "/config pricing remove",
+            CommandTarget::ConfigObjectDelete {
+                kind: greentyper_core::config::ConfigObjectKind::PriceSchedule,
             },
         ),
         (

@@ -9,6 +9,7 @@ use greentyper_core::config::{
     ConfigObjectRef, ConfigPaths, ConfigRuntime, ConfigRuntimeError, ConfigScope, ConfigValue,
     ConfigValueKind, config_schema, parse_config_value,
 };
+use greentyper_core::pricing::PriceScheduleSource;
 use greentyper_core::provider::{ProviderDialect, ProviderPricingSource};
 use greentyper_core::provider_catalog::{CatalogAvailability, CatalogSourceKind};
 
@@ -60,6 +61,207 @@ fn write(path: &Path, contents: &str) {
 
 fn value_string(value: &str) -> ConfigValue {
     ConfigValue::String(value.to_owned())
+}
+
+fn stage_price_schedule(
+    draft: &mut greentyper_core::config::ConfigDraft,
+    id: &str,
+    effective_from: &str,
+) {
+    for (field, value) in [
+        ("version", "2026-08-10.1"),
+        ("currency", "USD"),
+        ("provider", "openai-main"),
+        ("model", "gpt-5.6-sol"),
+        ("dialect", "responses"),
+        ("service_tier", "standard"),
+        ("minimum_context_tokens", "0"),
+        ("maximum_context_tokens", "200000"),
+        ("effective_from", effective_from),
+        ("source", "manual"),
+        ("source_ref", "synthetic-manual-rate-card"),
+    ] {
+        draft
+            .set_raw(&format!("price_schedules.{id}.{field}"), value)
+            .expect("stage Price Schedule field");
+    }
+    for (field, value) in [
+        ("input_micros_per_million", "1000000"),
+        ("cached_input_micros_per_million", "500000"),
+        ("cache_write_micros_per_million", "0"),
+        ("output_micros_per_million", "2000000"),
+        ("reasoning_output_micros_per_million", "3000000"),
+    ] {
+        draft
+            .set_raw(&format!("price_schedules.{id}.rates.{field}"), value)
+            .expect("stage Price Schedule rate");
+    }
+}
+
+#[test]
+fn price_schedule_is_a_schema_owned_resolved_config_object() {
+    let temp = TempTree::new("price-schedule-object");
+    let config = ConfigDocument::parse(
+        r#"
+schema_version = 1
+
+[providers.openai-main]
+template = "openai"
+credential = "synthetic-openai-credential-reference"
+
+[providers.openai-main.pricing]
+source = "manual"
+
+[price_schedules.openai-sol]
+version = "2026-08-10.1"
+currency = "USD"
+provider = "openai-main"
+model = "gpt-5.6-sol"
+dialect = "responses"
+service_tier = "standard"
+minimum_context_tokens = 0
+maximum_context_tokens = 200000
+effective_from = "2026-08-10T00:00:00Z"
+source = "manual"
+source_ref = "synthetic-manual-rate-card"
+
+[price_schedules.openai-sol.rates]
+input_micros_per_million = 1000000
+cached_input_micros_per_million = 500000
+cache_write_micros_per_million = 0
+output_micros_per_million = 2000000
+reasoning_output_micros_per_million = 3000000
+"#,
+    )
+    .expect("parse Price Schedule");
+    let runtime = ConfigRuntime::open(temp.paths(), config).expect("resolve Price Schedule");
+    let book = runtime
+        .resolved_price_schedules()
+        .expect("resolved Price Schedule book");
+    assert_eq!(book.schedules().len(), 1);
+    let schedule = &book.schedules()[0];
+    assert_eq!(schedule.id(), "openai-sol");
+    assert_eq!(schedule.version(), "2026-08-10.1");
+    assert_eq!(schedule.currency(), "USD");
+    assert_eq!(schedule.provider_profile(), "openai-main");
+    assert_eq!(schedule.model(), "gpt-5.6-sol");
+    assert_eq!(schedule.source(), PriceScheduleSource::Manual);
+    assert_eq!(schedule.rates().cache_write_micros_per_million(), 0);
+
+    assert!(
+        runtime
+            .addressable_objects()
+            .unwrap()
+            .contains(&ConfigObjectRef::new(
+                ConfigObjectKind::PriceSchedule,
+                "openai-sol",
+            ))
+    );
+    let rate = config_schema()
+        .iter()
+        .find(|entry| entry.path_pattern == "price_schedules.<id>.rates.input_micros_per_million")
+        .expect("schema-owned input rate");
+    assert_eq!(rate.value_kind, ConfigValueKind::NonNegativeInteger);
+    assert_eq!(rate.timing, ConfigApplicationTiming::NextConfigEpoch);
+    assert_eq!(
+        parse_config_value(
+            "price_schedules.openai-sol.rates.cache_write_micros_per_million",
+            "0",
+        )
+        .unwrap(),
+        ConfigValue::NonNegativeInteger(0)
+    );
+}
+
+#[test]
+fn editable_price_schedule_cannot_claim_template_or_provider_provenance() {
+    for source in ["template", "provider_reported"] {
+        let temp = TempTree::new("price-schedule-provenance");
+        let paths = temp.paths();
+        write(
+            paths.user(),
+            r#"
+schema_version = 1
+
+[providers.openai-main]
+template = "openai"
+credential = "synthetic-openai-credential-reference"
+"#,
+        );
+        let mut runtime =
+            ConfigRuntime::open(paths, ConfigDocument::empty()).expect("open provenance fixture");
+        let mut draft = runtime
+            .begin_draft(ConfigScope::Project)
+            .expect("begin untrusted provenance draft");
+        stage_price_schedule(&mut draft, "openai-sol", "2026-08-10T00:00:00Z");
+        draft
+            .set_raw("price_schedules.openai-sol.source", source)
+            .expect("stage untrusted provenance label");
+        assert!(matches!(
+            runtime.commit(draft, true),
+            Err(ConfigRuntimeError::InvalidValue { path, .. })
+                if path == "price_schedules.openai-sol.source"
+        ));
+    }
+}
+
+#[test]
+fn price_schedule_overlap_is_rejected_by_draft_validation_without_mutation() {
+    let temp = TempTree::new("price-schedule-overlap");
+    write(
+        temp.paths().user(),
+        r#"schema_version = 1
+
+[providers.openai-main]
+template = "openai"
+credential = "synthetic-openai-credential-reference"
+
+[providers.openai-main.pricing]
+source = "manual"
+
+[price_schedules.first]
+version = "2026-08-10.1"
+currency = "USD"
+provider = "openai-main"
+model = "gpt-5.6-sol"
+dialect = "responses"
+service_tier = "standard"
+minimum_context_tokens = 0
+maximum_context_tokens = 200000
+effective_from = "2026-08-10T00:00:00Z"
+source = "manual"
+source_ref = "synthetic-manual-rate-card"
+
+[price_schedules.first.rates]
+input_micros_per_million = 1000000
+cached_input_micros_per_million = 500000
+cache_write_micros_per_million = 0
+output_micros_per_million = 2000000
+reasoning_output_micros_per_million = 3000000
+"#,
+    );
+    write(temp.paths().project(), "schema_version = 1\n");
+    let before = fs::read(temp.paths().project()).expect("read project layer");
+    let mut runtime = ConfigRuntime::open(temp.paths(), ConfigDocument::empty()).unwrap();
+    let mut draft = runtime.begin_draft(ConfigScope::Project).unwrap();
+    stage_price_schedule(&mut draft, "second", "2026-08-11T00:00:00Z");
+    assert!(matches!(
+        runtime.validate_draft(&draft),
+        Err(ConfigRuntimeError::InvalidValue { path, .. }) if path == "price_schedules"
+    ));
+    assert!(matches!(
+        runtime.commit(draft, false),
+        Err(ConfigRuntimeError::InvalidValue { path, .. }) if path == "price_schedules"
+    ));
+    assert_eq!(fs::read(temp.paths().project()).unwrap(), before);
+    assert_eq!(
+        runtime
+            .resolved_price_schedules()
+            .unwrap()
+            .schedules()
+            .len(),
+        1
+    );
 }
 
 #[test]
@@ -568,6 +770,85 @@ fn config_editor_creates_and_deletes_a_usage_window_as_one_object() {
     delete
         .commit(&mut runtime)
         .expect("commit usage window deletion");
+    assert!(!runtime.addressable_objects().unwrap().contains(&object));
+}
+
+#[test]
+fn config_editor_creates_and_deletes_a_price_schedule_as_one_object() {
+    let temp = TempTree::new("price-schedule-lifecycle");
+    let paths = temp.paths();
+    write(
+        paths.project(),
+        r#"
+schema_version = 1
+
+[providers.openai-main]
+template = "openai"
+credential = "synthetic-openai-credential-reference"
+
+[providers.openai-main.pricing]
+source = "manual"
+"#,
+    );
+    let mut runtime =
+        ConfigRuntime::open(paths, ConfigDocument::empty()).expect("open config runtime");
+    let object = ConfigObjectRef::new(ConfigObjectKind::PriceSchedule, "openai-sol");
+    let mut create =
+        ConfigEditorSession::create_object(&runtime, ConfigScope::Project, object.clone())
+            .expect("begin Price Schedule creation");
+
+    create.stage_raw("2026-08-10.1").expect("stage version");
+    for (query, value) in [
+        ("/config pricing currency", "USD"),
+        ("/config pricing provider", "openai-main"),
+        ("/config pricing model", "gpt-5.6-sol"),
+        ("/config pricing dialect", "responses"),
+        ("/config pricing context-min", "0"),
+        ("/config pricing effective-from", "2026-08-10T00:00:00Z"),
+        ("/config pricing source", "manual"),
+        ("/config pricing source-ref", "synthetic-manual-rate-card"),
+        ("/config pricing rate-input", "1000000"),
+        ("/config pricing rate-cached-input", "500000"),
+        ("/config pricing rate-cache-write", "0"),
+        ("/config pricing rate-output", "2000000"),
+        ("/config pricing rate-reasoning", "3000000"),
+    ] {
+        create
+            .focus_from_query(&runtime, query, 0)
+            .expect("focus Price Schedule field");
+        create.stage_raw(value).expect("stage Price Schedule field");
+    }
+    assert_eq!(
+        create
+            .preview(&mut runtime)
+            .expect("preview Price Schedule")
+            .changes
+            .len(),
+        14
+    );
+    create.commit(&mut runtime).expect("commit Price Schedule");
+    assert_eq!(
+        runtime
+            .resolved_price_schedules()
+            .expect("resolved Price Schedule")
+            .schedules()[0]
+            .id(),
+        object.id()
+    );
+
+    let delete = ConfigEditorSession::delete_object(&runtime, ConfigScope::Project, object.clone())
+        .expect("stage Price Schedule deletion");
+    assert_eq!(
+        delete
+            .preview(&mut runtime)
+            .expect("preview Price Schedule deletion")
+            .changes
+            .len(),
+        14
+    );
+    delete
+        .commit(&mut runtime)
+        .expect("commit Price Schedule deletion");
     assert!(!runtime.addressable_objects().unwrap().contains(&object));
 }
 

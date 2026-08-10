@@ -14,6 +14,7 @@ use greentyper_core::agent_team::{
 };
 use greentyper_core::config::ConfigLayers;
 use greentyper_core::model::DeliveryId;
+use greentyper_core::pricing::PriceScheduleBook;
 use greentyper_core::provider::{ProviderEpoch, ProviderRuntime};
 #[cfg(test)]
 use greentyper_core::runtime::RuntimeSnapshot;
@@ -102,21 +103,31 @@ impl<E: ToolEffectExecutor> ProductDriver<E> {
         provider: &mut impl ProviderRuntime,
         interaction: &mut impl ProductInteraction,
     ) -> Result<PreparedOutput, ProductDriverError> {
-        self.execute_with_usage_windows(layers, Vec::new(), input, provider, interaction)
+        self.execute_with_observability(
+            layers,
+            Vec::new(),
+            PriceScheduleBook::default(),
+            input,
+            provider,
+            interaction,
+        )
     }
 
-    pub(crate) fn execute_with_usage_windows(
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn execute_with_observability(
         &mut self,
         layers: &ConfigLayers,
         usage_windows: Vec<UsageWindow>,
+        price_schedules: PriceScheduleBook,
         input: impl Into<String>,
         provider: &mut impl ProviderRuntime,
         interaction: &mut impl ProductInteraction,
     ) -> Result<PreparedOutput, ProductDriverError> {
-        let outcome = self.kernel.execute_provider_turn_with_usage_windows(
+        let outcome = self.kernel.execute_provider_turn_with_observability(
             self.session,
             layers,
             usage_windows,
+            price_schedules,
             input,
             provider,
             local_echo_resources,

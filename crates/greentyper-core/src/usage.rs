@@ -10,6 +10,9 @@ use jiff::civil::Weekday as JiffWeekday;
 use jiff::tz::TimeZone;
 use serde::Serialize;
 
+use crate::pricing::{
+    COST_SCALE_DECIMAL_PLACES, CostEstimate, CostEstimateOutcome, CostEstimateUnknownReason,
+};
 use crate::provider::{ProviderDialect, UsageAccuracy, UsageRecord};
 
 const MAX_USAGE_WINDOW_ID_BYTES: usize = 64;
@@ -250,6 +253,17 @@ pub enum UsageAttemptOutcome {
 #[serde(rename_all = "snake_case")]
 pub enum UsageCostProvenance {
     Unknown,
+    PriceSchedule,
+}
+
+impl UsageCostProvenance {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Unknown => "unknown",
+            Self::PriceSchedule => "price_schedule",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -271,6 +285,9 @@ pub struct UsageAttempt {
     outcome: UsageAttemptOutcome,
     usage: Option<UsageRecord>,
     cost_provenance: UsageCostProvenance,
+    #[serde(rename = "payg_cost_estimate")]
+    cost_estimate: Option<CostEstimate>,
+    cost_unknown_reason: Option<CostEstimateUnknownReason>,
     named_windows: Vec<UsageWindow>,
 }
 
@@ -324,6 +341,8 @@ impl UsageAttempt {
             outcome,
             usage,
             cost_provenance: UsageCostProvenance::Unknown,
+            cost_estimate: None,
+            cost_unknown_reason: None,
             named_windows,
         })
     }
@@ -413,6 +432,32 @@ impl UsageAttempt {
         self.cost_provenance
     }
 
+    #[must_use]
+    pub const fn cost_estimate(&self) -> Option<&CostEstimate> {
+        self.cost_estimate.as_ref()
+    }
+
+    #[must_use]
+    pub const fn cost_unknown_reason(&self) -> Option<CostEstimateUnknownReason> {
+        self.cost_unknown_reason
+    }
+
+    fn record_cost_evaluation(&mut self, outcome: CostEstimateOutcome) -> Result<(), UsageError> {
+        if self.cost_estimate.is_some() || self.cost_unknown_reason.is_some() {
+            return Err(UsageError::DuplicateCostEvaluation);
+        }
+        match outcome {
+            CostEstimateOutcome::Known(estimate) => {
+                self.cost_provenance = UsageCostProvenance::PriceSchedule;
+                self.cost_estimate = Some(*estimate);
+            }
+            CostEstimateOutcome::Unknown(reason) => {
+                self.cost_unknown_reason = Some(reason);
+            }
+        }
+        Ok(())
+    }
+
     pub fn named_windows(&self) -> impl ExactSizeIterator<Item = &UsageWindow> {
         self.named_windows.iter()
     }
@@ -423,6 +468,7 @@ pub struct UsageQuantity {
     exact: Option<u64>,
     estimated: Option<u64>,
     unknown_records: u64,
+    overflowed: bool,
 }
 
 impl Default for UsageQuantity {
@@ -431,6 +477,7 @@ impl Default for UsageQuantity {
             exact: Some(0),
             estimated: Some(0),
             unknown_records: 0,
+            overflowed: false,
         }
     }
 }
@@ -451,6 +498,11 @@ impl UsageQuantity {
         self.unknown_records
     }
 
+    #[must_use]
+    pub const fn overflowed(&self) -> bool {
+        self.overflowed
+    }
+
     fn observe(&mut self, value: Option<u64>, accuracy: UsageAccuracy) {
         let Some(value) = value else {
             self.unknown_records = self.unknown_records.saturating_add(1);
@@ -460,7 +512,11 @@ impl UsageQuantity {
             UsageAccuracy::Exact => &mut self.exact,
             UsageAccuracy::Estimated => &mut self.estimated,
         };
-        *target = target.and_then(|current| current.checked_add(value));
+        let next = target.and_then(|current| current.checked_add(value));
+        if next.is_none() {
+            self.overflowed = true;
+        }
+        *target = next;
     }
 
     fn merge(&mut self, other: &Self) {
@@ -473,6 +529,85 @@ impl UsageQuantity {
             .zip(other.estimated)
             .and_then(|(a, b)| a.checked_add(b));
         self.unknown_records = self.unknown_records.saturating_add(other.unknown_records);
+        self.overflowed =
+            self.overflowed || other.overflowed || self.exact.is_none() || self.estimated.is_none();
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct CostQuantity {
+    scale_decimal_places: u8,
+    exact_pico_units: Option<u64>,
+    estimated_pico_units: Option<u64>,
+    records: u64,
+    overflowed: bool,
+}
+
+impl Default for CostQuantity {
+    fn default() -> Self {
+        Self {
+            scale_decimal_places: COST_SCALE_DECIMAL_PLACES,
+            exact_pico_units: Some(0),
+            estimated_pico_units: Some(0),
+            records: 0,
+            overflowed: false,
+        }
+    }
+}
+
+impl CostQuantity {
+    #[must_use]
+    pub const fn scale_decimal_places(&self) -> u8 {
+        self.scale_decimal_places
+    }
+
+    #[must_use]
+    pub const fn exact_pico_units(&self) -> Option<u64> {
+        self.exact_pico_units
+    }
+
+    #[must_use]
+    pub const fn estimated_pico_units(&self) -> Option<u64> {
+        self.estimated_pico_units
+    }
+
+    #[must_use]
+    pub const fn records(&self) -> u64 {
+        self.records
+    }
+
+    #[must_use]
+    pub const fn overflowed(&self) -> bool {
+        self.overflowed
+    }
+
+    fn observe(&mut self, amount_pico_units: u64, accuracy: UsageAccuracy) {
+        self.records = self.records.saturating_add(1);
+        let target = match accuracy {
+            UsageAccuracy::Exact => &mut self.exact_pico_units,
+            UsageAccuracy::Estimated => &mut self.estimated_pico_units,
+        };
+        let next = target.and_then(|current| current.checked_add(amount_pico_units));
+        if next.is_none() {
+            self.overflowed = true;
+        }
+        *target = next;
+    }
+
+    fn merge(&mut self, other: &Self) {
+        self.exact_pico_units = self
+            .exact_pico_units
+            .zip(other.exact_pico_units)
+            .and_then(|(left, right)| left.checked_add(right));
+        self.estimated_pico_units = self
+            .estimated_pico_units
+            .zip(other.estimated_pico_units)
+            .and_then(|(left, right)| left.checked_add(right));
+        self.records = self.records.saturating_add(other.records);
+        self.overflowed = self.overflowed
+            || other.overflowed
+            || self.exact_pico_units.is_none()
+            || self.estimated_pico_units.is_none();
     }
 }
 
@@ -533,6 +668,7 @@ pub struct UsageRollup {
     observed_reasoning_efforts: UsageDistribution,
     requested_service_tiers: UsageDistribution,
     service_tiers: UsageDistribution,
+    payg_cost_estimates: BTreeMap<String, CostQuantity>,
     cost_unknown_attempts: u64,
 }
 
@@ -637,6 +773,11 @@ impl UsageRollup {
         self.cost_unknown_attempts
     }
 
+    #[must_use]
+    pub const fn payg_cost_estimates(&self) -> &BTreeMap<String, CostQuantity> {
+        &self.payg_cost_estimates
+    }
+
     fn observe(&mut self, attempt: &UsageAttempt) {
         self.attempts = self.attempts.saturating_add(1);
         match attempt.outcome {
@@ -688,6 +829,16 @@ impl UsageRollup {
         self.service_tiers.observe(usage.service_tier());
     }
 
+    fn observe_cost_evaluation(&mut self, outcome: &CostEstimateOutcome) {
+        if let CostEstimateOutcome::Known(estimate) = outcome {
+            self.cost_unknown_attempts = self.cost_unknown_attempts.saturating_sub(1);
+            self.payg_cost_estimates
+                .entry(estimate.currency().to_owned())
+                .or_default()
+                .observe(estimate.amount_pico_units(), estimate.usage_accuracy());
+        }
+    }
+
     fn merge(&mut self, other: &Self) {
         self.attempts = self.attempts.saturating_add(other.attempts);
         self.succeeded = self.succeeded.saturating_add(other.succeeded);
@@ -713,6 +864,12 @@ impl UsageRollup {
         self.requested_service_tiers
             .merge(&other.requested_service_tiers);
         self.service_tiers.merge(&other.service_tiers);
+        for (currency, quantity) in &other.payg_cost_estimates {
+            self.payg_cost_estimates
+                .entry(currency.clone())
+                .or_default()
+                .merge(quantity);
+        }
         self.cost_unknown_attempts = self
             .cost_unknown_attempts
             .saturating_add(other.cost_unknown_attempts);
@@ -845,6 +1002,12 @@ pub(crate) struct UsageProjection {
 }
 
 impl UsageProjection {
+    pub(crate) fn attempt(&self, turn: u64, attempt: u32) -> Option<&UsageAttempt> {
+        self.attempts
+            .iter()
+            .find(|candidate| candidate.turn == turn && candidate.attempt == attempt)
+    }
+
     pub(crate) fn record(&mut self, attempt: UsageAttempt) -> Result<(), UsageError> {
         if self
             .attempts
@@ -878,6 +1041,49 @@ impl UsageProjection {
                 .observe(&attempt);
         }
         self.attempts.push(attempt);
+        Ok(())
+    }
+
+    pub(crate) fn record_cost_evaluation(
+        &mut self,
+        turn: u64,
+        attempt: u32,
+        outcome: CostEstimateOutcome,
+    ) -> Result<(), UsageError> {
+        let usage_attempt = self
+            .attempts
+            .iter_mut()
+            .find(|candidate| candidate.turn == turn && candidate.attempt == attempt)
+            .ok_or(UsageError::UnknownAttempt)?;
+        usage_attempt.record_cost_evaluation(outcome.clone())?;
+        let usage_attempt = usage_attempt.clone();
+        self.total.observe_cost_evaluation(&outcome);
+        self.threads
+            .get_mut(&usage_attempt.thread)
+            .ok_or(UsageError::UnknownAttempt)?
+            .observe_cost_evaluation(&outcome);
+        self.turns
+            .get_mut(&usage_attempt.turn)
+            .ok_or(UsageError::UnknownAttempt)?
+            .observe_cost_evaluation(&outcome);
+        if let Some(agent) = usage_attempt.agent {
+            self.agents
+                .get_mut(&agent)
+                .ok_or(UsageError::UnknownAttempt)?
+                .observe_cost_evaluation(&outcome);
+        }
+        for window in &usage_attempt.named_windows {
+            self.named_windows
+                .get_mut(window)
+                .ok_or(UsageError::UnknownAttempt)?
+                .observe_cost_evaluation(&outcome);
+        }
+        if let Some(started_at) = usage_attempt.started_at {
+            self.instants
+                .get_mut(&started_at.unix_millis())
+                .ok_or(UsageError::UnknownAttempt)?
+                .observe_cost_evaluation(&outcome);
+        }
         Ok(())
     }
 
@@ -1010,6 +1216,8 @@ pub enum UsageError {
     CompletionBeforeStart,
     DuplicateWindow,
     DuplicateAttempt,
+    UnknownAttempt,
+    DuplicateCostEvaluation,
 }
 
 impl fmt::Display for UsageError {
@@ -1031,6 +1239,10 @@ impl fmt::Display for UsageError {
             Self::CompletionBeforeStart => "usage attempt completed before it started",
             Self::DuplicateWindow => "usage attempt contains a duplicate named window",
             Self::DuplicateAttempt => "usage attempt identity was recorded more than once",
+            Self::UnknownAttempt => "usage attempt identity is unknown",
+            Self::DuplicateCostEvaluation => {
+                "usage attempt Cost Estimate was recorded more than once"
+            }
         };
         formatter.write_str(message)
     }

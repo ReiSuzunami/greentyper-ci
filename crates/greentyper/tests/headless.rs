@@ -5,10 +5,15 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use greentyper_core::config::ConfigLayers;
+use greentyper_core::pricing::{
+    PriceSchedule, PriceScheduleBook, PriceScheduleDefinition, PriceScheduleSource, TokenRates,
+};
 use greentyper_core::provider::{
     DeterministicProvider, ProviderError, ProviderEvent, ProviderRequest, ProviderRuntime,
+    UsageRecord,
 };
 use greentyper_core::runtime::RuntimeKernel;
+use greentyper_core::usage::UsageTimestamp;
 
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(1);
 
@@ -132,6 +137,63 @@ fn stats_reports_replayed_usage_without_user_text() {
     assert_eq!(document["thread"]["usage"]["attempts"], 1);
     assert_eq!(document["team"], serde_json::Value::Null);
     fs::remove_file(path).expect("cleanup Runtime ledger");
+}
+
+#[test]
+fn stats_reports_the_frozen_payg_estimate_without_user_text() {
+    let path = temp_path("priced-stats");
+    let private_input = "priced-private-input-marker";
+    let mut runtime = RuntimeKernel::open(&path).expect("open priced Runtime");
+    let mut provider = CompleteUsageProvider;
+    let prepared = runtime
+        .execute_with_observability(
+            &ConfigLayers::default(),
+            Vec::new(),
+            simulator_price_book(),
+            private_input,
+            &mut provider,
+        )
+        .expect("execute priced Turn");
+    runtime
+        .acknowledge(prepared.delivery())
+        .expect("acknowledge priced output");
+    drop(runtime);
+
+    let at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time after epoch")
+        .as_millis()
+        .saturating_add(1)
+        .to_string();
+    let stats = binary()
+        .args(["stats", "--ledger"])
+        .arg(&path)
+        .args(["--at", at.as_str()])
+        .output()
+        .expect("run priced stats command");
+    assert!(stats.status.success(), "{stats:?}");
+    let text = String::from_utf8(stats.stdout).expect("priced stats UTF-8");
+    assert!(!text.contains(private_input), "{text}");
+    let document: serde_json::Value = serde_json::from_str(&text).expect("priced stats JSON");
+    assert_eq!(document["attempts"][0]["cost_provenance"], "price_schedule");
+    assert_eq!(
+        document["attempts"][0]["payg_cost_estimate"]["schedule"]["version"],
+        "2026-08-10"
+    );
+    assert_eq!(
+        document["attempts"][0]["payg_cost_estimate"]["schedule"]["currency"],
+        "USD"
+    );
+    assert_eq!(
+        document["attempts"][0]["payg_cost_estimate"]["amount_pico_units"],
+        202
+    );
+    assert_eq!(
+        document["thread"]["usage"]["payg_cost_estimates"]["USD"]["exact_pico_units"],
+        202
+    );
+    assert_eq!(document["thread"]["usage"]["cost_unknown_attempts"], 0);
+    fs::remove_file(path).expect("cleanup priced Runtime ledger");
 }
 
 #[test]
@@ -316,6 +378,51 @@ impl ProviderRuntime for PanicProvider {
     fn run(&mut self, _request: &ProviderRequest) -> Result<Vec<ProviderEvent>, ProviderError> {
         panic!("injected crash after admission")
     }
+}
+
+struct CompleteUsageProvider;
+
+impl ProviderRuntime for CompleteUsageProvider {
+    fn run(&mut self, _request: &ProviderRequest) -> Result<Vec<ProviderEvent>, ProviderError> {
+        Ok(vec![
+            ProviderEvent::TextDelta("priced".to_owned()),
+            ProviderEvent::Completed(
+                UsageRecord::new(
+                    Some(100),
+                    Some(10),
+                    Some(5),
+                    Some(20),
+                    Some(2),
+                    Some(120),
+                    None,
+                )
+                .expect("valid complete Usage Record"),
+            ),
+        ])
+    }
+}
+
+fn simulator_price_book() -> PriceScheduleBook {
+    PriceScheduleBook::new(vec![
+        PriceSchedule::new(PriceScheduleDefinition {
+            id: "synthetic-simulator-price".to_owned(),
+            version: "2026-08-10".to_owned(),
+            currency: "USD".to_owned(),
+            provider_profile: "simulator".to_owned(),
+            model: "deterministic-v1".to_owned(),
+            dialect: None,
+            service_tier: None,
+            minimum_context_tokens: 0,
+            maximum_context_tokens: None,
+            effective_from: UsageTimestamp::from_unix_millis(0).expect("valid schedule start"),
+            effective_until: None,
+            source: PriceScheduleSource::Manual,
+            source_ref: "synthetic-price-source".to_owned(),
+            rates: TokenRates::new(1, 2, 3, 4, 5),
+        })
+        .expect("valid synthetic Price Schedule"),
+    ])
+    .expect("valid synthetic Price Schedule book")
 }
 
 fn sidecar(path: &Path, kind: &str) -> PathBuf {

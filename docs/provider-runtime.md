@@ -33,6 +33,11 @@ The Kernel durably brackets each request and continuation as a separate Usage
 Attempt before invoking this adapter, so transport failure, interruption,
 successful usage, and replay remain distinguishable without persisting raw
 Provider events.
+When Config supplies a matching Price Schedule, the Runtime freezes the resolved
+schedule book in the Config Epoch and appends a separate pay-as-you-go cost
+evaluation after normalized Usage. This is provider-neutral accounting: the HTTP
+adapter neither calculates cost nor turns a catalog price or subscription quota
+into a provider-reported charge.
 
 ## Interface
 

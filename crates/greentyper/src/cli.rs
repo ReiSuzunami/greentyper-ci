@@ -11,6 +11,7 @@ use greentyper_core::config::{
     ConfigScope, config_schema,
 };
 use greentyper_core::model::DeliveryId;
+use greentyper_core::pricing::PriceScheduleBook;
 use greentyper_core::provider::ProviderError;
 use greentyper_core::provider_catalog::ProviderCatalog;
 use greentyper_core::runtime::{
@@ -48,16 +49,25 @@ pub fn run(arguments: impl Iterator<Item = String>) -> Result<(), CliError> {
             let layers = config.config_layers()?.clone();
             let profile = config.selected_provider_profile()?;
             let usage_windows = config.resolved_usage_windows()?;
+            let price_schedules = config.resolved_price_schedules()?;
             let mut provider = ConfiguredProvider::for_new_turn(profile, PlatformCredentialVault)?;
             let has_product_state = has_product_driver_state(&ledger)?;
             if local_echo || has_product_state {
                 provider.enable_local_echo();
-                run_product_turn(&ledger, &layers, usage_windows, input, &mut provider)
-            } else {
-                let mut runtime = open_runtime(&ledger)?;
-                let output = runtime.execute_with_usage_windows(
+                run_product_turn(
+                    &ledger,
                     &layers,
                     usage_windows,
+                    price_schedules,
+                    input,
+                    &mut provider,
+                )
+            } else {
+                let mut runtime = open_runtime(&ledger)?;
+                let output = runtime.execute_with_observability(
+                    &layers,
+                    usage_windows,
+                    price_schedules,
                     input,
                     &mut provider,
                 )?;
@@ -270,6 +280,7 @@ fn run_product_turn(
     ledger: &Path,
     layers: &greentyper_core::config::ConfigLayers,
     usage_windows: Vec<UsageWindow>,
+    price_schedules: PriceScheduleBook,
     input: String,
     provider: &mut ConfiguredProvider<PlatformCredentialVault>,
 ) -> Result<(), CliError> {
@@ -281,9 +292,10 @@ fn run_product_turn(
     };
     let executor = LocalProcessExecutor::current()?;
     let mut driver = ProductDriver::open_with_executor(ledger, executor, &mut interaction)?;
-    let output = driver.execute_with_usage_windows(
+    let output = driver.execute_with_observability(
         layers,
         usage_windows,
+        price_schedules,
         input,
         provider,
         &mut interaction,

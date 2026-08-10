@@ -292,7 +292,7 @@ fn unsupported_runtime_event_schema_fails_closed() {
         .append(
             LedgerHead::default(),
             &[EventData {
-                schema: 5,
+                schema: 6,
                 kind: 1,
                 payload: 1_u64.to_le_bytes().to_vec(),
             }],
@@ -302,15 +302,15 @@ fn unsupported_runtime_event_schema_fails_closed() {
     assert!(matches!(
         RuntimeKernel::open(&path),
         Err(RuntimeError::UnsupportedRuntimeEventSchema {
-            supported: 4,
-            actual: 5
+            supported: 5,
+            actual: 6
         })
     ));
     fs::remove_file(path).expect("cleanup Runtime ledger");
 }
 
 #[test]
-fn schema_one_runtime_turn_replays_and_can_continue_with_schema_four() {
+fn schema_one_runtime_turn_replays_and_can_continue_with_current_schema() {
     let path = temp_path("schema-one-replay");
     let layers = ConfigLayers::default();
     let config = greentyper_core::config::ConfigEpoch::freeze(

@@ -1,6 +1,7 @@
 //! Terminal-neutral product presentation model.
 
 use std::borrow::Cow;
+use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
 
@@ -16,7 +17,7 @@ use greentyper_core::ledger::LedgerHead;
 use greentyper_core::provider_catalog::CatalogAvailability;
 use greentyper_core::runtime::{KernelTeamSnapshot, RecoveryStatus, RuntimeSnapshot};
 use greentyper_core::tool_runtime::{ToolCallStatus, ToolSnapshot};
-use greentyper_core::usage::{RuntimeUsageSnapshot, UsageQuantity, UsageRollup};
+use greentyper_core::usage::{CostQuantity, RuntimeUsageSnapshot, UsageQuantity, UsageRollup};
 use serde::Serialize;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
@@ -104,6 +105,7 @@ pub(crate) struct UsageQuantityView {
     exact: Option<u64>,
     estimated: Option<u64>,
     unknown_records: u64,
+    overflowed: bool,
 }
 
 impl From<&UsageQuantity> for UsageQuantityView {
@@ -112,6 +114,28 @@ impl From<&UsageQuantity> for UsageQuantityView {
             exact: quantity.exact(),
             estimated: quantity.estimated(),
             unknown_records: quantity.unknown_records(),
+            overflowed: quantity.overflowed(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub(crate) struct CostQuantityView {
+    scale_decimal_places: u8,
+    exact_pico_units: Option<u64>,
+    estimated_pico_units: Option<u64>,
+    records: u64,
+    overflowed: bool,
+}
+
+impl From<&CostQuantity> for CostQuantityView {
+    fn from(quantity: &CostQuantity) -> Self {
+        Self {
+            scale_decimal_places: quantity.scale_decimal_places(),
+            exact_pico_units: quantity.exact_pico_units(),
+            estimated_pico_units: quantity.estimated_pico_units(),
+            records: quantity.records(),
+            overflowed: quantity.overflowed(),
         }
     }
 }
@@ -120,6 +144,7 @@ impl From<&UsageQuantity> for UsageQuantityView {
 pub(crate) struct UsageSummaryView {
     attempts: u64,
     total_tokens: UsageQuantityView,
+    payg_cost_estimates: BTreeMap<String, CostQuantityView>,
     cost_unknown_attempts: u64,
 }
 
@@ -128,6 +153,11 @@ impl From<&UsageRollup> for UsageSummaryView {
         Self {
             attempts: rollup.attempts(),
             total_tokens: rollup.total_tokens().into(),
+            payg_cost_estimates: rollup
+                .payg_cost_estimates()
+                .iter()
+                .map(|(currency, quantity)| (currency.clone(), quantity.into()))
+                .collect(),
             cost_unknown_attempts: rollup.cost_unknown_attempts(),
         }
     }
@@ -947,6 +977,7 @@ pub(crate) enum StatusSegmentKind {
     Model,
     Context,
     Usage,
+    Cost,
     Agents,
     Provider,
     Config,
@@ -1024,6 +1055,11 @@ fn status_segments(status: &StatuslineView) -> Vec<StatusSegment> {
             kind: StatusSegmentKind::Usage,
             text: usage_label(&status.one_hour_usage),
             preferred_width: 18,
+        },
+        StatusSegment {
+            kind: StatusSegmentKind::Cost,
+            text: cost_label(&status.one_hour_usage),
+            preferred_width: 24,
         },
         StatusSegment {
             kind: StatusSegmentKind::Agents,
@@ -1114,6 +1150,68 @@ fn usage_label(usage: &Availability<UsageSummaryView>) -> String {
         (None, None, 0) => "1h 0t".to_owned(),
         (None, None, _) => "1h ?".to_owned(),
     }
+}
+
+fn cost_label(usage: &Availability<UsageSummaryView>) -> String {
+    let Availability::Known(usage) = usage else {
+        return "cost ?".to_owned();
+    };
+    let mut costs = usage.payg_cost_estimates.iter();
+    let Some((currency, quantity)) = costs.next() else {
+        return if usage.cost_unknown_attempts == 0 {
+            "cost 0".to_owned()
+        } else {
+            "cost ?".to_owned()
+        };
+    };
+    if costs.next().is_some() {
+        return if usage.cost_unknown_attempts == 0 {
+            "cost mixed".to_owned()
+        } else {
+            "cost mixed+?".to_owned()
+        };
+    }
+    let amount = match (
+        quantity.exact_pico_units,
+        quantity.estimated_pico_units,
+        quantity.overflowed,
+    ) {
+        (_, _, true) => "overflow".to_owned(),
+        (Some(0), Some(estimated), false) if estimated > 0 => {
+            format!("~{}", format_cost(estimated, quantity.scale_decimal_places))
+        }
+        (Some(exact), Some(estimated), false) if estimated > 0 => {
+            format!(
+                "{}+~{}",
+                format_cost(exact, quantity.scale_decimal_places),
+                format_cost(estimated, quantity.scale_decimal_places)
+            )
+        }
+        (Some(exact), _, false) => format_cost(exact, quantity.scale_decimal_places),
+        (None, Some(estimated), false) => {
+            format!("~{}", format_cost(estimated, quantity.scale_decimal_places))
+        }
+        (None, None, false) => "?".to_owned(),
+    };
+    let unknown = if usage.cost_unknown_attempts == 0 {
+        ""
+    } else {
+        "+?"
+    };
+    format!("{currency} {amount}{unknown}")
+}
+
+fn format_cost(units: u64, decimal_places: u8) -> String {
+    if decimal_places == 0 {
+        return units.to_string();
+    }
+    let scale = 10_u64.pow(u32::from(decimal_places));
+    format!(
+        "{}.{:0width$}",
+        units / scale,
+        units % scale,
+        width = usize::from(decimal_places)
+    )
 }
 
 fn screen_rows(screen: &PresentationScreenView, view: &TuiViewModel) -> Vec<LayoutRowView> {
@@ -1263,6 +1361,7 @@ fn config_value_label(value: Option<&ConfigValue>) -> String {
     match value {
         Some(ConfigValue::String(value)) => value.clone(),
         Some(ConfigValue::PositiveInteger(value)) => value.to_string(),
+        Some(ConfigValue::NonNegativeInteger(value)) => value.to_string(),
         Some(ConfigValue::Boolean(value)) => value.to_string(),
         Some(ConfigValue::StringList(value)) => value.join(", "),
         None => "inherited".to_owned(),
@@ -1281,6 +1380,7 @@ fn config_section_label(section: ConfigSection) -> &'static str {
     match section {
         ConfigSection::Provider => "provider",
         ConfigSection::Model => "model",
+        ConfigSection::Pricing => "pricing",
         ConfigSection::Statusline => "statusline",
         ConfigSection::StatsWindow => "stats-window",
         ConfigSection::Agent => "agent",
@@ -1294,6 +1394,7 @@ fn config_object_label(kind: ConfigObjectKind) -> &'static str {
     match kind {
         ConfigObjectKind::ProviderProfile => "provider",
         ConfigObjectKind::ModelPreset => "model",
+        ConfigObjectKind::PriceSchedule => "pricing",
         ConfigObjectKind::UsageWindow => "stats-window",
     }
 }
@@ -1302,6 +1403,7 @@ fn object_section(kind: ConfigObjectKind) -> ConfigSection {
     match kind {
         ConfigObjectKind::ProviderProfile => ConfigSection::Provider,
         ConfigObjectKind::ModelPreset => ConfigSection::Model,
+        ConfigObjectKind::PriceSchedule => ConfigSection::Pricing,
         ConfigObjectKind::UsageWindow => ConfigSection::StatsWindow,
     }
 }
@@ -1644,6 +1746,7 @@ impl From<ViewportError> for PresentationSmokeError {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::fs;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -1668,9 +1771,10 @@ mod tests {
     use crate::provider_connection::{ProviderConnectionTestStatus, ProviderConnectionTester};
 
     use super::{
-        Availability, BlockerView, ModelSelectorView, PresentationController,
+        Availability, BlockerView, CostQuantityView, ModelSelectorView, PresentationController,
         PresentationControllerError, PresentationScreenView, PresentationSources, RecoveryBadge,
-        SlashPanelView, TuiViewModel, Viewport, display_width, fit_text,
+        SlashPanelView, TuiViewModel, UsageQuantityView, UsageSummaryView, Viewport, cost_label,
+        display_width, fit_text,
     };
 
     static NEXT_TEMP: AtomicU64 = AtomicU64::new(1);
@@ -2134,6 +2238,60 @@ source = "unknown"
         assert_eq!(&view.statusline.one_hour_usage, &Availability::Unknown);
         assert_eq!(view.statusline.active_agents, Availability::Unknown);
         assert_eq!(view.statusline.blocker_count, Availability::Unknown);
+    }
+
+    #[test]
+    fn statusline_formats_known_payg_cost_without_hiding_unknown_attempts() {
+        let summary = UsageSummaryView {
+            attempts: 2,
+            total_tokens: UsageQuantityView {
+                exact: Some(120),
+                estimated: Some(0),
+                unknown_records: 0,
+                overflowed: false,
+            },
+            payg_cost_estimates: BTreeMap::from([(
+                "USD".to_owned(),
+                CostQuantityView {
+                    scale_decimal_places: 12,
+                    exact_pico_units: Some(202),
+                    estimated_pico_units: Some(0),
+                    records: 1,
+                    overflowed: false,
+                },
+            )]),
+            cost_unknown_attempts: 1,
+        };
+        assert_eq!(
+            cost_label(&Availability::Known(summary.clone())),
+            "USD 0.000000000202+?"
+        );
+
+        let mut estimated = summary.clone();
+        estimated.cost_unknown_attempts = 0;
+        estimated
+            .payg_cost_estimates
+            .get_mut("USD")
+            .expect("USD estimate")
+            .exact_pico_units = Some(0);
+        estimated
+            .payg_cost_estimates
+            .get_mut("USD")
+            .expect("USD estimate")
+            .estimated_pico_units = Some(303);
+        assert_eq!(
+            cost_label(&Availability::Known(estimated)),
+            "USD ~0.000000000303"
+        );
+
+        let mut overflowed = summary;
+        overflowed.cost_unknown_attempts = 0;
+        overflowed
+            .payg_cost_estimates
+            .get_mut("USD")
+            .expect("USD estimate")
+            .overflowed = true;
+        assert_eq!(cost_label(&Availability::Known(overflowed)), "USD overflow");
     }
 
     #[test]
@@ -2693,6 +2851,7 @@ credential = "synthetic-deepseek-credential-reference"
             vec![
                 super::StatusSegmentKind::Context,
                 super::StatusSegmentKind::Usage,
+                super::StatusSegmentKind::Cost,
                 super::StatusSegmentKind::Agents,
                 super::StatusSegmentKind::Provider,
                 super::StatusSegmentKind::Config,
@@ -2700,16 +2859,19 @@ credential = "synthetic-deepseek-credential-reference"
         );
         assert_eq!(
             layouts[1].statusline.rows[0].text,
-            "ready | blockers ? | model deterministic-v1 | ctx ? | 1h ? | agents ? | provide…"
+            "ready | blockers ? | model deterministic-v1 | ctx ? | 1h ? | cost ? | agents ?"
         );
         assert_eq!(
             layouts[1].statusline.hidden,
-            vec![super::StatusSegmentKind::Config]
+            vec![
+                super::StatusSegmentKind::Provider,
+                super::StatusSegmentKind::Config,
+            ]
         );
         assert_eq!(layouts[2].statusline.rows.len(), 2);
         assert_eq!(
             layouts[2].statusline.rows[0].text,
-            "ready | blockers ? | model deterministic-v1 | ctx ? | 1h ? | agents ? | provider fixture-provider | config ok"
+            "ready | blockers ? | model deterministic-v1 | ctx ? | 1h ? | cost ? | agents ? | provider fixture-provider | config ok"
         );
         assert_eq!(
             layouts[2].statusline.rows[1].text,

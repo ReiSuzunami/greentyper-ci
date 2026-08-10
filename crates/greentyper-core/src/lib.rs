@@ -6,6 +6,7 @@ pub mod agent_team;
 pub mod config;
 pub mod ledger;
 pub mod model;
+pub mod pricing;
 pub mod provider;
 pub mod provider_catalog;
 pub mod runtime;

@@ -428,7 +428,8 @@ impl UsageRecord {
         }
     }
 
-    pub(crate) fn with_accuracy(mut self, accuracy: UsageAccuracy) -> Self {
+    #[must_use]
+    pub fn with_accuracy(mut self, accuracy: UsageAccuracy) -> Self {
         self.accuracy = accuracy;
         self
     }

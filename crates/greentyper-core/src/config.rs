@@ -4,6 +4,7 @@ use std::error::Error;
 use std::fmt;
 
 use crate::model::ConfigEpochId;
+use crate::pricing::PriceScheduleBook;
 use crate::schema::SchemaKind;
 use crate::usage::{MAX_USAGE_WINDOWS, UsageTimezoneSource, UsageWeekday, UsageWindow};
 
@@ -112,6 +113,7 @@ pub struct ConfigEpoch {
     fingerprint: u64,
     resolved: ResolvedConfig,
     usage_windows: Vec<UsageWindow>,
+    price_schedules: PriceScheduleBook,
 }
 
 impl ConfigEpoch {
@@ -122,7 +124,16 @@ impl ConfigEpoch {
     pub fn freeze_with_usage_windows(
         id: ConfigEpochId,
         layers: &ConfigLayers,
+        usage_windows: Vec<UsageWindow>,
+    ) -> Result<Self, ConfigError> {
+        Self::freeze_with_observability(id, layers, usage_windows, PriceScheduleBook::default())
+    }
+
+    pub fn freeze_with_observability(
+        id: ConfigEpochId,
+        layers: &ConfigLayers,
         mut usage_windows: Vec<UsageWindow>,
+        price_schedules: PriceScheduleBook,
     ) -> Result<Self, ConfigError> {
         let resolved = layers.resolve()?;
         if usage_windows.len() > MAX_USAGE_WINDOWS {
@@ -135,12 +146,13 @@ impl ConfigEpoch {
         {
             return Err(ConfigError::DuplicateUsageWindow);
         }
-        let fingerprint = fingerprint(&resolved, &usage_windows);
+        let fingerprint = fingerprint(&resolved, &usage_windows, &price_schedules);
         Ok(Self {
             id,
             fingerprint,
             resolved,
             usage_windows,
+            price_schedules,
         })
     }
 
@@ -162,6 +174,11 @@ impl ConfigEpoch {
     #[must_use]
     pub fn usage_windows(&self) -> &[UsageWindow] {
         &self.usage_windows
+    }
+
+    #[must_use]
+    pub const fn price_schedules(&self) -> &PriceScheduleBook {
+        &self.price_schedules
     }
 }
 
@@ -269,7 +286,11 @@ fn resolve_u32<const N: usize>(
         .ok_or(ConfigError::MissingRequired(key))
 }
 
-fn fingerprint(config: &ResolvedConfig, usage_windows: &[UsageWindow]) -> u64 {
+fn fingerprint(
+    config: &ResolvedConfig,
+    usage_windows: &[UsageWindow],
+    price_schedules: &PriceScheduleBook,
+) -> u64 {
     let mut hash = 0xcbf2_9ce4_8422_2325_u64;
     for bytes in [
         CONFIG_SCHEMA_VERSION.to_le_bytes().as_slice(),
@@ -305,6 +326,15 @@ fn fingerprint(config: &ResolvedConfig, usage_windows: &[UsageWindow]) -> u64 {
         }
         for day in window.days() {
             hash ^= u64::from(usage_weekday_tag(day));
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+    for schedule in price_schedules.schedules() {
+        let bytes = schedule.fingerprint().to_le_bytes();
+        hash ^= bytes.len() as u64;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        for byte in bytes {
+            hash ^= u64::from(byte);
             hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
         }
     }

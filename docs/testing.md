@@ -162,6 +162,16 @@ cross-midnight membership, both repeated DST instants, skipped local hours,
 concrete `local` IANA resolution, pinned rule-set provenance, duplicate-window
 rejection, and changed definitions under one name. Product tests verify Agent
 and Team scope after replay, and the `stats` JSON excludes user input.
+Price Schedule tests cover schema ownership and nested routes, zero-valued fixed
+integer rates, provider/pricing provenance, half-open effective intervals,
+selector-overlap rejection without Config mutation, exact token-class arithmetic,
+missing evidence, inconsistent accounting, checked overflow, and historical
+schedule immutability. Runtime tests require Usage kind 12 before cost kind 13 in
+one transaction, rebuild the same frozen estimate after reopen, reject a tampered
+amount against the Config Epoch evidence, and retain schema 1-4 replay. Product
+tests prove resolved Config schedules reach admission, `stats` emits the frozen
+version/currency and per-currency rollup without user text, and the terminal-neutral
+statusline distinguishes known, mixed-unknown, estimated, and overflow cost facts.
 
 ### Crash and Recovery Tests
 

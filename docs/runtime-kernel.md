@@ -156,12 +156,13 @@ descriptors while Tool Runtime remains the authority gate. Approval and
 `EffectPrepared` are durable before the injected executor runs. A successful
 UTF-8 result may then enter one Provider continuation. The final
 `OutputPrepared` transaction stores the combined canonical text and one or two
-bounded Usage Records. Runtime Event schema 4 also durably brackets every
+bounded Usage Records. Runtime Event schema 5 also durably brackets every
 Provider request or continuation with Usage Attempt start/finish Events and
 carries the Agent scope, Provider dialect, frozen Usage Windows, UTC times,
 outcome, exact/estimated marker, optional token/cache classes, service tier, and
-frozen Provider Profile snapshot. Historical schema-1, schema-2, and schema-3
-Runtime transactions replay and can be followed by schema-4 transactions;
+frozen Provider Profile snapshot, then records one frozen Price Schedule cost
+evaluation. Historical schema-1 through schema-4 Runtime transactions replay and
+can be followed by schema-5 transactions;
 schema-1 token counts become explicitly estimated legacy attempts.
 
 This tracer bullet intentionally stores only the Tool result digest. If the
@@ -211,10 +212,11 @@ new Turn:
 - `provider.model`;
 - `runtime.max_output_bytes`;
 - resolved named Usage Windows, including concrete IANA identity and bundled
-  rule-set version.
+  rule-set version; and
+- the resolved versioned Price Schedule book and schedule fingerprints.
 
 The Config Runtime also owns versioned TOML and addressable Provider Profile,
-Model Preset, statusline, and Usage Window fields. Layers resolve in
+Model Preset, Price Schedule, statusline, and Usage Window fields. Layers resolve in
 `built-in < user < project < CLI` order. Effective values retain provenance,
 reject invalid values, and the Runtime projection freezes into a read-only
 `ConfigEpoch` with a deterministic fingerprint that binds schema, value, and
@@ -265,8 +267,21 @@ flushed before acknowledgement; the decision is read from stdin as exactly
 one JSON snapshot. It includes immutable attempts plus Turn, Thread, Agent,
 Team, rolling, and versioned named-window rollups. Prompt/provider text and
 credential material are not part of the Usage domain. Requested or observed
-metadata not supplied by the current Provider remains unknown; costs remain
-unknown until a versioned Price Schedule is implemented.
+metadata not supplied by the current Provider remains unknown. Runtime Event
+schema 5 records `UsageAttemptFinished` before `UsageAttemptCostEvaluated` in
+the same transaction. The Config Epoch freezes the resolved Price Schedule book;
+replay recomputes the cost claim from that book and the normalized Usage Record,
+rejecting a changed schedule fingerprint, amount, or unknown reason.
+
+The implemented Cost Estimate is a pay-as-you-go estimate only. It freezes the
+complete selected schedule, currency, version, provenance, rates, fingerprint,
+token-class breakdown, and exact/estimated Usage accuracy. Missing token classes,
+missing selectors, inconsistent accounting, and checked-arithmetic overflow stay
+explicitly unknown. Cached rollups aggregate fixed 12-decimal pico-currency
+units by currency. Provider-reported charges and subscription quota values are
+not inferred or merged into that estimate. Editable Config can define only a
+manual schedule; trusted template rates and provider-reported charges require
+future dedicated authority paths.
 
 ## Still Pending
 
@@ -282,8 +297,8 @@ unknown until a versioned Price Schedule is implemented.
   dry-run validation, atomic commit path, interaction controller, Provider
   Profile candidate/connection-test flow, and deterministic viewport-row
   projection are present.
-- Terminal-backed TUI/statusline Usage presentation, Price Schedules and separated provider
-  charge/pay-as-you-go/subscription values, richer observed model/effort/tier
+- Terminal-backed TUI/statusline Usage presentation, provider-reported charge
+  and subscription-quota values, richer observed model/effort/tier
   metadata, and FMDev P6 measurements. The durable attempts, cached rollups,
   pinned Usage Windows, headless `stats` projection, and terminal-neutral
   width-degradation contract are present.

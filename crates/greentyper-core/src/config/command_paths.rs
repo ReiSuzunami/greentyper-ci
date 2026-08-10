@@ -23,6 +23,7 @@ pub enum ConfigReadback {
 pub enum ConfigSection {
     Provider,
     Model,
+    Pricing,
     Statusline,
     StatsWindow,
     Agent,
@@ -177,6 +178,19 @@ const NAVIGATION_PATHS: &[CommandPath] = &[
         "/config model remove",
         CommandTarget::ConfigObjectDelete {
             kind: ConfigObjectKind::ModelPreset,
+        },
+    ),
+    section("/config pricing", ConfigSection::Pricing),
+    nested(
+        "/config pricing add",
+        CommandTarget::ConfigObjectCreate {
+            kind: ConfigObjectKind::PriceSchedule,
+        },
+    ),
+    nested(
+        "/config pricing remove",
+        CommandTarget::ConfigObjectDelete {
+            kind: ConfigObjectKind::PriceSchedule,
         },
     ),
     section("/config statusline", ConfigSection::Statusline),
