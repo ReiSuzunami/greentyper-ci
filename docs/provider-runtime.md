@@ -19,6 +19,10 @@ a no-proxy, no-redirect blocking client, streams the response through this
 decoder, and drives the single-Agent Runtime. Config Runtime resolves the
 selected Provider Profile and freezes its normalized origin, Responses route,
 dialect, pricing source, and opaque credential reference in the Provider Epoch.
+The release-bundled OpenAI template now supplies those defaults; the adapter
+admits it and explicit compatible gateways only after the frozen Profile declares
+Responses support and a Responses endpoint. Release DeepSeek and OpenCode Go
+records remain catalog facts until their selected dialect has a product adapter.
 Before each request, the adapter resolves secret material from an origin-bound
 product vault; remote origins require HTTPS. The headless CLI uses this adapter
 for configured profiles and retains the deterministic simulator only when no
@@ -198,11 +202,11 @@ The event shapes are checked against the official
 
 ## Still Pending
 
-- Live credential-gated provider validation, Provider Template defaults/catalogs, configurable
-  proxy policy, broader TLS platform evidence, reconnect classification, and
-  retry policy. The current adapter disables proxy discovery and redirects and
-  classifies one complete request; it does not reconnect or retry partial
-  streams.
+- Live credential-gated provider validation, live catalog discovery/refresh,
+  starter-preset acceptance, configurable proxy policy, broader TLS platform
+  evidence, reconnect classification, and retry policy. Release Provider
+  Template defaults and seed catalog facts are bundled, but the current adapter
+  does not reconnect or retry partial streams.
 - Broader normalization into the eventual provider-neutral canonical Item
   model, including reasoning, refusal, annotations, and hosted Tools.
 - Reasoning, refusal, annotation, hosted-tool, and other Responses event kinds

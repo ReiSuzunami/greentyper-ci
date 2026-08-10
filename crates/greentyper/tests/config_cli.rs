@@ -196,6 +196,32 @@ fn config_cli_dry_run_commit_get_repair_and_headless_gate_are_wired() {
 }
 
 #[test]
+fn config_catalog_emits_the_versioned_public_release_seed_only() {
+    let temp = TempTree::new();
+    let output = temp
+        .command()
+        .args(["config", "catalog"])
+        .output()
+        .expect("run config catalog");
+    assert_success(&output);
+
+    let catalog = json(&output.stdout);
+    assert_eq!(catalog["schema_version"], 1);
+    assert_eq!(catalog["seed_revision"], "2026-08-10.1");
+    assert_eq!(catalog["templates"].as_array().map(Vec::len), Some(3));
+    assert!(catalog["models"].as_array().is_some_and(|models| {
+        models
+            .iter()
+            .any(|model| model["key"] == "openai/gpt-5.6-sol")
+    }));
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(!stdout.contains(temp.root.to_string_lossy().as_ref()));
+    assert!(!stdout.contains("credential"));
+    assert!(output.stderr.is_empty(), "{output:?}");
+}
+
+#[test]
 fn config_get_reports_only_credential_binding_policy_without_reference_readback() {
     let temp = TempTree::new();
     for (path, value) in [

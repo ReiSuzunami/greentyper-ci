@@ -78,6 +78,7 @@ cargo run -p greentyper -- headless --ledger ./target/tool-runtime.ledger --tool
 cargo run -p greentyper -- status --ledger ./target/dev-runtime.ledger
 cargo run -p greentyper -- stats --ledger ./target/dev-runtime.ledger
 cargo run -p greentyper -- config schema
+cargo run -p greentyper -- config catalog
 cargo run -p greentyper -- config get provider.model
 cargo run -p greentyper -- config test-provider
 ```
@@ -86,9 +87,12 @@ The core Agent Team policy, Config Runtime, recoverable single-Agent Runtime,
 and first Tool Runtime policy slice compile and run through interface-level and
 cross-process headless tests. Config currently includes versioned TOML, drafts,
 provenance, atomic replacement, repair, typed Provider Profile snapshots, and a
-terminal-neutral schema-driven editor session and Provider Profile wizard, but
-not rendered TUI/App Server editors or catalogs. The product CLI can
-bind, replace, test, and forget origin-bound credential references without
+terminal-neutral schema-driven editor session and Provider Profile wizard. A
+release-bundled Provider Catalog now supplies versioned OpenAI, DeepSeek, and
+OpenCode Go template defaults plus seed model facts with field provenance. The
+selector exposes compatible release candidates while keeping unverified live
+availability explicit. Rendered TUI/App Server editors remain pending. The product
+CLI can bind, replace, test, and forget origin-bound credential references without
 putting secret material in arguments, Config, or Ledgers. Windows stores values
 in the current user's Credential Manager; other platforms currently fail
 closed. Tool call identity, argument hashing, approval binding, independent
@@ -149,7 +153,7 @@ through `config test-provider`.
 Dirty drafts cannot be discarded implicitly, and failed validation or revision
 conflicts leave the editor live. This is not an ANSI/VT backend, live keyboard
 loop, ConPTY integration, rendered Config Center, object-name dialog, or
-official-template/catalog wizard.
+rendered template picker, starter-preset workflow, or live catalog discovery.
 Live credential-gated provider validation, configurable proxy policy,
 reconnect/retry, richer
 approval presentation, broader Provider and Tool adapters, Workspace, TUI, and

@@ -64,11 +64,10 @@ replacement, backup repair, and last-valid behavior for invalid external
 edits. It is wired into new headless Turn admission through the immutable
 bootstrap projection.
 
-This does not complete Phase 1. Complete schema metadata and generated editor
-surfaces, Provider Templates/catalogs, non-Windows credential storage, product
-Team/Tool driving and user-visible receipt delivery, the exhaustive
-byte-offset Runtime/effect crash-fault matrix, storage migration, and headless
-FMDev/Target idle resource evidence remain pending. See
+This does not complete Phase 1. Complete schema default/constraint/migration
+metadata and rendered generated editor surfaces, non-Windows credential
+storage, the exhaustive byte-offset Runtime/effect crash-fault matrix, storage
+migration, and headless FMDev/Target idle resource evidence remain pending. See
 [Recoverable Single-Agent Runtime](runtime-kernel.md).
 
 Exit criteria:
@@ -140,8 +139,8 @@ trusted and untrusted TLS, and missing credential failure before network access.
 
 The remaining slices are still policy, protocol, and fault-adapter work:
 live-provider validation, non-Windows credential backends, configurable proxy
-policy, Provider Template defaults/catalogs, broader canonical Items, multiple
-Tool calls, durable resumable Tool result references, richer TUI/App Server
+policy, live catalog discovery, broader canonical Items, multiple Tool calls,
+durable resumable Tool result references, richer TUI/App Server
 approval/delivery, caller-selected process policy, complete Windows Job
 lifetime/resource evidence, reconnect/retry behavior, and the cross-process
 Tool crash matrix remain pending.
@@ -208,13 +207,25 @@ adapter powers `greentyper config test-provider` for the selected committed
 Profile. Tests cover success, missing credentials before network access, redacted
 upstream 503 classification, candidate non-mutation, result invalidation after a
 Draft change, and observed revision conflicts before a probe.
+A release-bundled Provider Catalog now freezes schema-versioned OpenAI,
+DeepSeek, and OpenCode Go template defaults and seed model facts with
+field-level source references and observation time. Config Runtime applies
+template defaults before explicit Profile overrides, refuses template pricing
+inheritance for custom origins, and binds release models only to Profiles whose
+catalog mode includes template data. The selector searches configured presets
+and release candidates, reports compatibility from frozen dialect support plus
+the installed product-adapter boundary, and keeps live availability and Recent
+unknown. `greentyper config catalog` emits the static snapshot without Config,
+credential, or network access. The current
+Responses adapter accepts the official OpenAI template through the same frozen
+capability and endpoint checks as compatible gateways.
 
 This does not complete Phase 3. VT/ConPTY rendering and input, the keyboard event
 loop and terminal-backed schema editors, rendered object-name and confirmation
-dialogs, rendered credential binding and official-template-backed Provider wizard,
-catalog-backed Recent/Compatible model views, Context Pressure, Price
-Schedules/cost calculation, richer observed Provider metadata, and the
-P0/P1/P2/P6 performance evidence remain pending.
+dialogs, rendered credential binding and template-picker/starter-preset workflow,
+live catalog discovery and Recent evidence, Context Pressure, Price Schedules and
+cost calculation, richer observed Provider metadata, and the P0/P1/P2/P6
+performance evidence remain pending.
 Large-history statistics pagination and summary-only rendering also remain
 pending; the current command emits the complete replayed attempt projection.
 
@@ -228,7 +239,11 @@ Exit criteria:
 
 ## Phase 4: Provider Portability
 
-Add Provider Templates and seed catalogs for OpenAI, DeepSeek, and OpenCode Go; Chat Completions and Anthropic Messages adapters; lazy discovery; custom gateway routes; Model Presets; capability probes; explicit fallback chains; and provider/model epoch switching.
+Extend the release templates and seed catalog with Chat Completions and
+Anthropic Messages adapters, lazy discovery, starter-preset acceptance,
+provider capability probes, explicit fallback chains, observed availability,
+and provider/model epoch switching. Custom gateway routes and user-owned Model
+Presets already resolve through the frozen Config/Provider Epoch boundary.
 
 Exit criteria:
 

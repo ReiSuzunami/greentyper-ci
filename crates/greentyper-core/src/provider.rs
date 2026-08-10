@@ -214,7 +214,7 @@ impl fmt::Debug for ProviderProfileSnapshot {
                 "has_credential_reference",
                 &self.credential_reference.is_some(),
             )
-            .field("has_custom_origin", &self.base_url.is_some())
+            .field("has_origin", &self.base_url.is_some())
             .field("fingerprint", &self.fingerprint)
             .finish()
     }

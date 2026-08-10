@@ -64,12 +64,15 @@ wizard over that same Draft. The wizard can derive the candidate's normalized,
 typed Profile snapshot without writing Config and can explicitly run one bounded
 status-only check against its configured `models` route. Any staged change
 invalidates the prior check result.
-Default/constraint/normalization/migration
-metadata, rendered TUI and App Server surfaces, and Provider Templates/catalogs
-remain later work. The
-product now provides origin-bound credential bind, replace, test, and forget
-operations backed by Windows Credential Manager; non-Windows access fails
-closed until another platform backend is implemented.
+The release-bundled Provider Catalog now supplies schema-versioned OpenAI,
+DeepSeek, and OpenCode Go template defaults plus seed model facts with
+field-level provenance. Effective Profiles inherit those defaults unless the
+user overrides a field; custom origins never inherit template pricing.
+Default/constraint/normalization/migration metadata in Config Schema, rendered
+TUI and App Server surfaces, live discovery, and starter-preset workflows remain
+later work. The product now provides origin-bound credential bind, replace,
+test, and forget operations backed by Windows Credential Manager; non-Windows
+access fails closed until another platform backend is implemented.
 
 | Config Object | Type and constraint | Application timing |
 | --- | --- | --- |
@@ -96,10 +99,11 @@ actions, and a reusable Config Runtime editor session for focused multi-field
 draft validation, atomic create/edit/delete, and commit. Object deletion is
 target-layer explicit and fails when the resulting effective configuration has
 dangling references. It does not yet ship the rendered interactive Config
-Center, terminal editor dialogs, object-name input form, official-template-backed
-Provider wizard, or App Server surface described below. The current
-terminal-neutral Provider Profile wizard handles only user-configured Profile
-Drafts and the explicit status-only connection check described below.
+Center, terminal editor dialogs, object-name input form, rendered Provider
+template picker, or App Server surface described below. The current
+terminal-neutral Provider Profile wizard resolves release template defaults into
+user-configured Profile Drafts and supports the explicit status-only connection
+check described below; it does not discover models or install starter presets.
 
 The root Slash Panel exposes `/config` as one Command Path. It does not register one flat command for every field.
 
@@ -161,11 +165,13 @@ All surfaces share stable error categories: `unknown_object`, `wrong_type`, `inv
 
 ## Provider Profiles
 
-The target Provider Template catalog supplies official defaults for OpenAI,
-DeepSeek, and OpenCode Go. That catalog and its template-backed wizard are not
-implemented yet. The current terminal-neutral wizard edits user-defined Profile
-Drafts without supplying official defaults. Once the catalog is present, a
-normal official profile usually requires only a credential binding:
+Provider Catalog schema 1 currently supplies versioned official defaults for
+OpenAI, DeepSeek, and OpenCode Go. Config Runtime resolves those defaults into a
+user-defined Profile Draft and freezes the resulting origin, routes, dialects,
+and pricing source in the Provider Profile snapshot. Catalog mode controls the
+Config projection but is not Provider wire identity. Explicit Profile fields
+win over template fields. A normal official profile therefore
+usually requires only a credential binding:
 
 ```toml
 schema_version = 1
@@ -223,30 +229,41 @@ bounded GET to the configured `models` route, disables proxy discovery and
 redirects, uses the origin-bound credential, reads no response body, and returns
 only a fixed success/failure category plus retryability. It neither discovers
 models nor commits Config, and a successful test is not yet a commit gate. The
-rendered wizard, secure credential binding dialog, official defaults, and model
-catalog workflow remain pending.
+rendered wizard, secure credential binding dialog, template picker, and starter
+preset workflow remain pending.
 
 ## Model Catalog and Presets
 
-The following is the target catalog contract. The current Config Runtime stores
-and validates user-defined Model Presets, and the terminal-neutral presentation
-model can search them and identify favorites. Seed catalogs, discovery,
-compatibility evidence, recent selections, and freshness data are not
-implemented yet.
+The current release-bundled Model Catalog is schema version 1, seed revision
+`2026-08-10.1`, observed at `2026-08-10T00:00:00Z`. Every record has a stable
+model key, provider-template identity, catalog schema version, seed revision,
+and observation time. Model identity, display name, primary and supported
+dialects, context limit, capabilities, price reference, and availability are
+represented as `{ value, provenance }`, where provenance carries source kind,
+source reference, and observation time. Unknown context, capability, price, and
+live-availability facts remain explicit rather than being inferred.
 
-The release will ship a seed Model Catalog and mark every field with its source and freshness. Each catalog record has a stable model key, provider-template identity, catalog schema version, seed revision, and observation time. Every capability, limit, dialect, and price reference is represented as `{ value, source_kind, source_ref, observed_at }`; an explicit user field outranks discovery, which outranks the release seed. Pricing still resolves through a Price Schedule rather than becoming an unversioned catalog number. The initial catalog targets, as verified during design on 2026-08-09, are:
+Config Runtime binds release records only to effective Profiles whose catalog
+mode includes template data. The terminal-neutral selector searches configured
+presets and those bound release candidates. It derives compatibility only from
+the frozen Profile's declared support for the record's primary dialect and the
+product adapters currently installed for that template/dialect pair; live
+availability and Recent remain unknown. User/discovery precedence, lazy refresh,
+and starter-preset acceptance remain target behavior. Pricing still resolves
+through a Price Schedule rather than becoming an unversioned catalog number.
+The current release seed contains:
 
 | Provider Template | Seed family | Primary dialects |
 | --- | --- | --- |
 | OpenAI | GPT-5.6 Sol, Terra, Luna | OpenAI Responses |
 | DeepSeek | DeepSeek V4 Flash and Pro | Responses where supported; Chat Completions and Anthropic Messages as declared |
-| OpenCode Go | Current Go catalog | Per-model Responses, Chat Completions, or Anthropic Messages |
+| OpenCode Go | Go catalog observed for seed `2026-08-10.1` | Per-model Responses, Chat Completions, or Anthropic Messages |
 
-Release work must refresh this snapshot from the [OpenAI model guide](https://developers.openai.com/api/docs/guides/latest-model), [DeepSeek API updates](https://api-docs.deepseek.com/updates), and [OpenCode Go catalog](https://opencode.ai/docs/go/). A release seed never claims to remain current indefinitely.
+Release work must refresh this snapshot from the [OpenAI model guide](https://developers.openai.com/api/docs/guides/latest-model), [DeepSeek API updates](https://api-docs.deepseek.com/updates), and [OpenCode Go catalog](https://opencode.ai/docs/go/). A release seed never claims to remain current indefinitely. `greentyper config catalog` emits the read-only bundled snapshot without reading Config, credentials, or the network.
 
-Provider discovery runs lazily when the model selector opens or the user requests refresh. It never runs as an idle background task. Discovered records augment seed fields with provenance; a model with no verified dialect remains visible but unavailable until an explicit override supplies one. Remote discovery cannot add credentials, arbitrary endpoints, instructions, or capabilities.
+Target Provider discovery runs lazily when the model selector opens or the user requests refresh. It never runs as an idle background task. Discovered records augment seed fields with provenance; a model with no verified dialect remains visible but unavailable until an explicit override supplies one. Remote discovery cannot add credentials, arbitrary endpoints, instructions, or capabilities. Discovery is not implemented yet.
 
-When an official Provider Profile is created, its wizard offers versioned starter Model Presets copied from the release snapshot and bound to that profile. The release set covers GPT-5.6 Sol, Terra, and Luna for OpenAI plus DeepSeek V4 Flash and Pro using only the dialects verified for each model at release time. OpenCode Go starter choices come from its heterogeneous per-model catalog. Accepting the starters writes ordinary user-owned presets; later catalog refreshes may offer an update but never rewrite them silently.
+Target rendered Provider Profile creation offers versioned starter Model Presets copied from the release snapshot and bound to that profile. The release set covers GPT-5.6 Sol, Terra, and Luna for OpenAI plus DeepSeek V4 Flash and Pro using only the dialects verified for each model at release time. OpenCode Go starter choices come from its heterogeneous per-model catalog. Accepting starters will write ordinary user-owned presets; later catalog refreshes may offer an update but never rewrite them silently. This starter workflow is not implemented yet.
 
 A Model Preset is a runnable choice rather than catalog metadata:
 

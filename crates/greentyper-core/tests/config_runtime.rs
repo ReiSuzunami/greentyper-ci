@@ -10,6 +10,7 @@ use greentyper_core::config::{
     ConfigValueKind, config_schema, parse_config_value,
 };
 use greentyper_core::provider::{ProviderDialect, ProviderPricingSource};
+use greentyper_core::provider_catalog::{CatalogAvailability, CatalogSourceKind};
 
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(1);
 
@@ -1085,6 +1086,165 @@ source = "unknown"
             .selected_provider_profile()
             .expect("resolve simulator profile"),
         None
+    );
+}
+
+#[test]
+fn official_provider_template_resolves_defaults_without_copying_authority() {
+    let temp = TempTree::new("official-provider-template");
+    let config = ConfigDocument::parse(
+        r#"
+schema_version = 1
+
+[provider]
+profile = "openai-main"
+model = "gpt-5.6-sol"
+
+[providers.openai-main]
+template = "openai"
+credential = "synthetic-openai-credential-reference"
+"#,
+    )
+    .expect("parse official Provider profile");
+    let runtime = ConfigRuntime::open(temp.paths(), config).expect("resolve official profile");
+    let snapshot = runtime
+        .selected_provider_profile()
+        .expect("resolve Provider snapshot")
+        .expect("non-simulator snapshot");
+
+    assert_eq!(snapshot.template(), "openai");
+    assert_eq!(snapshot.base_url(), Some("https://api.openai.com/v1"));
+    assert_eq!(
+        snapshot.endpoint(ProviderDialect::Responses).as_deref(),
+        Some("https://api.openai.com/v1/responses")
+    );
+    assert_eq!(snapshot.models_route(), Some("/models"));
+    assert!(snapshot.supports(ProviderDialect::Responses));
+    assert!(snapshot.supports(ProviderDialect::ChatCompletions));
+    assert!(!snapshot.supports(ProviderDialect::Messages));
+    assert_eq!(
+        snapshot.pricing_source(),
+        Some(ProviderPricingSource::Template)
+    );
+    assert_eq!(
+        snapshot.credential_reference(),
+        Some("synthetic-openai-credential-reference")
+    );
+
+    let debug = format!("{snapshot:?}");
+    assert!(!debug.contains("synthetic-openai-credential-reference"));
+    assert!(!debug.contains("api.openai.com"));
+}
+
+#[test]
+fn release_catalog_models_bind_to_profiles_without_becoming_user_presets() {
+    let temp = TempTree::new("release-catalog-models");
+    let config = ConfigDocument::parse(
+        r#"
+schema_version = 1
+
+[providers.openai-main]
+template = "openai"
+credential = "synthetic-openai-credential-reference"
+
+[providers.manual-openai]
+template = "openai"
+credential = "synthetic-manual-credential-reference"
+
+[providers.manual-openai.catalog]
+mode = "manual"
+
+[providers.discovery-openai]
+template = "openai"
+credential = "synthetic-discovery-credential-reference"
+
+[providers.discovery-openai.catalog]
+mode = "discovery"
+"#,
+    )
+    .expect("parse catalog-backed profiles");
+    let runtime = ConfigRuntime::open(temp.paths(), config).expect("resolve catalog profiles");
+
+    let models = runtime.catalog_models().expect("catalog model candidates");
+    assert_eq!(
+        models
+            .iter()
+            .map(|model| (model.provider(), model.record().key()))
+            .collect::<Vec<_>>(),
+        vec![
+            ("openai-main", "openai/gpt-5.6-luna"),
+            ("openai-main", "openai/gpt-5.6-sol"),
+            ("openai-main", "openai/gpt-5.6-terra"),
+        ]
+    );
+    for model in &models {
+        assert!(model.profile_compatible());
+        assert_eq!(
+            model.record().availability().value(),
+            CatalogAvailability::Unverified
+        );
+        assert_eq!(
+            model.record().model_id().provenance().source_kind(),
+            CatalogSourceKind::ReleaseSeed
+        );
+    }
+    assert!(runtime.model_presets().expect("user presets").is_empty());
+    assert!(
+        models
+            .iter()
+            .all(|model| model.provider() != "manual-openai")
+    );
+    assert!(
+        models
+            .iter()
+            .all(|model| model.provider() != "discovery-openai")
+    );
+}
+
+#[test]
+fn custom_origin_inherits_template_routes_but_never_template_pricing() {
+    let temp = TempTree::new("custom-origin-template-boundary");
+    let paths = temp.paths();
+    let runtime = ConfigRuntime::open(paths, ConfigDocument::empty()).expect("open Config Runtime");
+    let object = ConfigObjectRef::new(ConfigObjectKind::ProviderProfile, "gateway");
+    let mut editor = ConfigEditorSession::create_object(&runtime, ConfigScope::Project, object)
+        .expect("create gateway profile");
+    editor.stage_raw("openai").expect("stage official template");
+    editor
+        .focus_from_query(&runtime, "/config provider credential", 0)
+        .expect("focus credential");
+    editor
+        .stage_credential_reference("synthetic-gateway-credential-reference")
+        .expect("stage credential binding");
+    editor
+        .focus_from_query(&runtime, "/config provider url", 0)
+        .expect("focus custom origin");
+    editor
+        .stage_raw("https://gateway.example.com/v1")
+        .expect("stage custom origin");
+
+    assert!(matches!(
+        editor.provider_profile(&runtime),
+        Err(ConfigEditorError::Config(ConfigRuntimeError::InvalidValue { path, .. }))
+            if path == "providers.gateway.pricing.source"
+    ));
+
+    editor
+        .focus_from_query(&runtime, "/config provider pricing", 0)
+        .expect("focus pricing decision");
+    editor.stage_raw("unknown").expect("stage unknown pricing");
+    let snapshot = editor
+        .provider_profile(&runtime)
+        .expect("resolve custom gateway snapshot");
+    assert_eq!(snapshot.base_url(), Some("https://gateway.example.com/v1"));
+    assert_eq!(
+        snapshot.endpoint(ProviderDialect::Responses).as_deref(),
+        Some("https://gateway.example.com/v1/responses")
+    );
+    assert!(snapshot.supports(ProviderDialect::ChatCompletions));
+    assert_eq!(
+        snapshot.pricing_source(),
+        Some(ProviderPricingSource::Unknown)
     );
 }
 

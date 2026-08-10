@@ -9,10 +9,11 @@ use greentyper_core::config::{
     CommandMatchKind, CommandQueryError, CommandTarget, ConfigCommit, ConfigEditorError,
     ConfigEditorOperation, ConfigEditorSession, ConfigEditorView, ConfigErrorCategory,
     ConfigFieldContents, ConfigObjectKind, ConfigObjectRef, ConfigRuntime, ConfigRuntimeError,
-    ConfigRuntimeStatus, ConfigScope, ConfigSection, ConfigValue, ModelPresetView,
-    match_command_paths,
+    ConfigRuntimeStatus, ConfigScope, ConfigSection, ConfigValue, ModelCatalogView,
+    ModelPresetView, match_command_paths,
 };
 use greentyper_core::ledger::LedgerHead;
+use greentyper_core::provider_catalog::CatalogAvailability;
 use greentyper_core::runtime::{KernelTeamSnapshot, RecoveryStatus, RuntimeSnapshot};
 use greentyper_core::tool_runtime::{ToolCallStatus, ToolSnapshot};
 use greentyper_core::usage::{RuntimeUsageSnapshot, UsageQuantity, UsageRollup};
@@ -21,6 +22,7 @@ use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 use crate::provider_connection::{ProviderConnectionTestStatus, ProviderConnectionTester};
+use crate::provider_http::has_provider_adapter;
 
 const MAX_SLASH_RESULTS: usize = 12;
 const MAX_MODEL_QUERY_BYTES: usize = 256;
@@ -195,9 +197,80 @@ pub(crate) enum BlockerView {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(tag = "source", rename_all = "snake_case")]
+pub(crate) enum ModelSelectorChoiceView {
+    ConfiguredPreset { preset: ModelPresetView },
+    ReleaseCatalog { model: ModelCatalogView },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub(crate) struct ModelSelectorEntryView {
-    preset: ModelPresetView,
+    choice: ModelSelectorChoiceView,
     compatibility: Availability<bool>,
+    availability: Availability<bool>,
+}
+
+impl ModelSelectorEntryView {
+    fn configured_preset(preset: ModelPresetView) -> Self {
+        Self {
+            choice: ModelSelectorChoiceView::ConfiguredPreset { preset },
+            compatibility: Availability::Unknown,
+            availability: Availability::Unknown,
+        }
+    }
+
+    fn release_catalog(model: ModelCatalogView) -> Self {
+        let availability = match model.record().availability().value() {
+            CatalogAvailability::Unverified => Availability::Unknown,
+            CatalogAvailability::Available => Availability::Known(true),
+            CatalogAvailability::Unavailable => Availability::Known(false),
+        };
+        let compatibility = Availability::Known(
+            model.profile_compatible()
+                && has_provider_adapter(
+                    model.record().provider_template(),
+                    model.record().primary_dialect().value(),
+                ),
+        );
+        Self {
+            choice: ModelSelectorChoiceView::ReleaseCatalog { model },
+            compatibility,
+            availability,
+        }
+    }
+
+    fn id(&self) -> &str {
+        match &self.choice {
+            ModelSelectorChoiceView::ConfiguredPreset { preset } => &preset.id,
+            ModelSelectorChoiceView::ReleaseCatalog { model } => model.record().key(),
+        }
+    }
+
+    fn provider(&self) -> &str {
+        match &self.choice {
+            ModelSelectorChoiceView::ConfiguredPreset { preset } => &preset.provider,
+            ModelSelectorChoiceView::ReleaseCatalog { model } => model.provider(),
+        }
+    }
+
+    fn model(&self) -> &str {
+        match &self.choice {
+            ModelSelectorChoiceView::ConfiguredPreset { preset } => &preset.model,
+            ModelSelectorChoiceView::ReleaseCatalog { model } => model.record().model_id().value(),
+        }
+    }
+
+    fn favorite(&self) -> bool {
+        matches!(
+            &self.choice,
+            ModelSelectorChoiceView::ConfiguredPreset { preset } if preset.favorite
+        )
+    }
+
+    #[cfg(test)]
+    fn is_release_catalog(&self) -> bool {
+        matches!(self.choice, ModelSelectorChoiceView::ReleaseCatalog { .. })
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -211,6 +284,7 @@ pub(crate) struct ModelSelectorView {
 impl ModelSelectorView {
     pub(crate) fn build(
         presets: &[ModelPresetView],
+        catalog_models: &[ModelCatalogView],
         query: &str,
     ) -> Result<Self, PresentationError> {
         if query.len() > MAX_MODEL_QUERY_BYTES
@@ -224,37 +298,70 @@ impl ModelSelectorView {
             .collect::<Vec<_>>();
         let all = presets
             .iter()
-            .filter(|preset| model_matches(preset, &tokens))
             .cloned()
-            .map(|preset| ModelSelectorEntryView {
-                preset,
-                compatibility: Availability::Unknown,
-            })
+            .map(ModelSelectorEntryView::configured_preset)
+            .chain(
+                catalog_models
+                    .iter()
+                    .cloned()
+                    .map(ModelSelectorEntryView::release_catalog),
+            )
+            .filter(|entry| model_matches(entry, &tokens))
             .collect::<Vec<_>>();
         let favorites = all
             .iter()
-            .filter(|entry| entry.preset.favorite)
+            .filter(|entry| entry.favorite())
             .cloned()
             .collect();
+        let compatible = if catalog_models.is_empty() {
+            Availability::Unknown
+        } else {
+            Availability::Known(
+                all.iter()
+                    .filter(|entry| entry.compatibility == Availability::Known(true))
+                    .cloned()
+                    .collect(),
+            )
+        };
         Ok(Self {
             favorites,
             recent: Availability::Unknown,
-            compatible: Availability::Unknown,
+            compatible,
             all,
         })
     }
 }
 
-fn model_matches(preset: &ModelPresetView, tokens: &[String]) -> bool {
-    let dialect = preset.dialect.as_str();
+fn model_matches(entry: &ModelSelectorEntryView, tokens: &[String]) -> bool {
+    let (dialect, display_name, template, reasoning_effort, service_tier, context_mode) =
+        match &entry.choice {
+            ModelSelectorChoiceView::ConfiguredPreset { preset } => (
+                preset.dialect.as_str(),
+                None,
+                None,
+                preset.reasoning_effort.as_deref(),
+                preset.service_tier.as_deref(),
+                preset.context_mode.as_deref(),
+            ),
+            ModelSelectorChoiceView::ReleaseCatalog { model } => (
+                model.record().primary_dialect().value().as_str(),
+                Some(model.record().display_name().value()),
+                Some(model.record().provider_template()),
+                None,
+                None,
+                None,
+            ),
+        };
     let fields = [
-        Some(preset.id.as_str()),
-        Some(preset.provider.as_str()),
-        Some(preset.model.as_str()),
+        Some(entry.id()),
+        Some(entry.provider()),
+        Some(entry.model()),
         Some(dialect),
-        preset.reasoning_effort.as_deref(),
-        preset.service_tier.as_deref(),
-        preset.context_mode.as_deref(),
+        display_name,
+        template,
+        reasoning_effort,
+        service_tier,
+        context_mode,
     ];
     tokens.iter().all(|token| {
         fields.iter().flatten().any(|field| {
@@ -285,6 +392,7 @@ pub(crate) struct PresentationSources<'a> {
     pub(crate) model: Option<&'a str>,
     pub(crate) context_pressure_percent: Option<u8>,
     pub(crate) model_presets: &'a [ModelPresetView],
+    pub(crate) catalog_models: &'a [ModelCatalogView],
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -309,7 +417,8 @@ impl TuiViewModel {
             return Err(PresentationError::InvalidContextPressure);
         }
         let slash = SlashPanelView::build(slash_query, selected)?;
-        let models = ModelSelectorView::build(sources.model_presets, model_query)?;
+        let models =
+            ModelSelectorView::build(sources.model_presets, sources.catalog_models, model_query)?;
         let blockers = build_blockers(&sources);
         let blocker_count = if sources.team.is_some() && sources.tools.is_some() {
             Availability::Known(blockers.len())
@@ -459,7 +568,7 @@ impl PresentationController {
     }
 
     pub(crate) fn set_model_query(&mut self, query: &str) -> Result<(), PresentationError> {
-        ModelSelectorView::build(&[], query)?;
+        ModelSelectorView::build(&[], &[], query)?;
         self.model_query = query.to_owned();
         Ok(())
     }
@@ -1063,9 +1172,9 @@ fn screen_rows(screen: &PresentationScreenView, view: &TuiViewModel) -> Vec<Layo
                     format!(
                         "{} {} / {} / {}",
                         if index == 0 { '>' } else { ' ' },
-                        entry.preset.id,
-                        entry.preset.provider,
-                        entry.preset.model
+                        entry.id(),
+                        entry.provider(),
+                        entry.model()
                     ),
                     index == 0,
                 )
@@ -1345,6 +1454,7 @@ pub(crate) fn build_smoke_view(
             model: Some("deterministic-v1"),
             context_pressure_percent: None,
             model_presets: &[],
+            catalog_models: &[],
         },
     )?;
     let mut controller = PresentationController::new();
@@ -1558,9 +1668,9 @@ mod tests {
     use crate::provider_connection::{ProviderConnectionTestStatus, ProviderConnectionTester};
 
     use super::{
-        Availability, BlockerView, PresentationController, PresentationControllerError,
-        PresentationScreenView, PresentationSources, RecoveryBadge, SlashPanelView, TuiViewModel,
-        Viewport, display_width, fit_text,
+        Availability, BlockerView, ModelSelectorView, PresentationController,
+        PresentationControllerError, PresentationScreenView, PresentationSources, RecoveryBadge,
+        SlashPanelView, TuiViewModel, Viewport, display_width, fit_text,
     };
 
     static NEXT_TEMP: AtomicU64 = AtomicU64::new(1);
@@ -1948,6 +2058,7 @@ source = "unknown"
                 model: None,
                 context_pressure_percent: None,
                 model_presets: &[],
+                catalog_models: &[],
             },
         )
         .expect("view model");
@@ -2002,6 +2113,7 @@ source = "unknown"
                 model: None,
                 context_pressure_percent: None,
                 model_presets: &[],
+                catalog_models: &[],
             },
         )
         .expect("view model");
@@ -2071,16 +2183,68 @@ source = "unknown"
                 model: None,
                 context_pressure_percent: None,
                 model_presets: &presets,
+                catalog_models: &[],
             },
         )
         .expect("model selector")
         .models;
         assert_eq!(selector.all.len(), 1);
-        assert_eq!(selector.all[0].preset.id, "fast");
+        assert_eq!(selector.all[0].id(), "fast");
         assert_eq!(selector.favorites.len(), 1);
         assert_eq!(selector.recent, Availability::Unknown);
         assert_eq!(selector.compatible, Availability::Unknown);
         assert_eq!(selector.all[0].compatibility, Availability::Unknown);
+    }
+
+    #[test]
+    fn model_selector_projects_release_catalog_compatibility_without_live_availability() {
+        let temp = TempTree::new("catalog-model-selector");
+        let config = ConfigDocument::parse(
+            r#"
+schema_version = 1
+
+[providers.openai-main]
+template = "openai"
+credential = "synthetic-openai-credential-reference"
+
+[providers.deepseek-main]
+template = "deepseek"
+credential = "synthetic-deepseek-credential-reference"
+"#,
+        )
+        .expect("parse official provider profile");
+        let runtime = ConfigRuntime::open(temp.paths(), config).expect("open Config Runtime");
+        let catalog_models = runtime.catalog_models().expect("catalog model candidates");
+
+        let selector = ModelSelectorView::build(&[], &catalog_models, "terra")
+            .expect("catalog-backed selector");
+        assert!(selector.favorites.is_empty());
+        assert_eq!(selector.recent, Availability::Unknown);
+        assert_eq!(selector.all.len(), 1);
+        let entry = &selector.all[0];
+        assert!(entry.is_release_catalog());
+        assert_eq!(entry.id(), "openai/gpt-5.6-terra");
+        assert_eq!(entry.provider(), "openai-main");
+        assert_eq!(entry.model(), "gpt-5.6-terra");
+        assert_eq!(entry.compatibility, Availability::Known(true));
+        assert_eq!(entry.availability, Availability::Unknown);
+        assert_eq!(
+            selector.compatible,
+            Availability::Known(selector.all.clone())
+        );
+
+        let encoded = serde_json::to_string(&selector).expect("serialize model selector");
+        assert!(encoded.contains("release_catalog"));
+        assert!(encoded.contains("2026-08-10.1"));
+        assert!(!encoded.contains("synthetic-openai-credential-reference"));
+
+        let deepseek = ModelSelectorView::build(&[], &catalog_models, "deepseek-v4-pro")
+            .expect("catalog model without product adapter");
+        assert_eq!(deepseek.all.len(), 1);
+        assert_eq!(deepseek.all[0].compatibility, Availability::Known(false));
+        assert_eq!(deepseek.compatible, Availability::Known(Vec::new()));
+        let encoded = serde_json::to_string(&deepseek).expect("serialize DeepSeek selector");
+        assert!(!encoded.contains("synthetic-deepseek-credential-reference"));
     }
 
     #[test]
@@ -2484,6 +2648,7 @@ source = "unknown"
                 model: Some("deterministic-v1"),
                 context_pressure_percent: None,
                 model_presets: &[],
+                catalog_models: &[],
             },
         )
         .expect("view model");

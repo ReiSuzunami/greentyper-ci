@@ -7,6 +7,7 @@ pub mod config;
 pub mod ledger;
 pub mod model;
 pub mod provider;
+pub mod provider_catalog;
 pub mod runtime;
 pub mod schema;
 pub mod tool_runtime;

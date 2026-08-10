@@ -275,7 +275,9 @@ unknown until a versioned Price Schedule is implemented.
   operation receipt before acknowledgement and consumes only the complete
   Kernel-rebound Session bundle; it exposes no Agent-ID-to-session conversion.
 - Complete Config Schema default/constraint/normalization/migration metadata,
-  rendered TUI/App Server editors, and Provider Templates/catalogs. The
+  rendered TUI/App Server editors, live catalog discovery, and the rendered
+  template-picker/starter-preset workflow. Release Provider Template defaults
+  and seed catalog facts are present. The
   terminal-neutral schema route, field view, revision-bound editor session,
   dry-run validation, atomic commit path, interaction controller, Provider
   Profile candidate/connection-test flow, and deterministic viewport-row

@@ -12,6 +12,7 @@ use greentyper_core::config::{
 };
 use greentyper_core::model::DeliveryId;
 use greentyper_core::provider::ProviderError;
+use greentyper_core::provider_catalog::ProviderCatalog;
 use greentyper_core::runtime::{
     AcknowledgeOutcome, PreparedOutput, ProviderToolApproval, RecoveryStatus, RuntimeKernel,
 };
@@ -176,6 +177,7 @@ fn run_config(command: ConfigCommand) -> Result<(), CliError> {
             "schema_version": CONFIG_FILE_SCHEMA_VERSION,
             "entries": config_schema(),
         })),
+        ConfigCommand::Catalog => write_json(ProviderCatalog::release()),
         ConfigCommand::Get { paths, path } => {
             let runtime = open_config_runtime(paths)?;
             let entry = runtime.get_effective(&path)?;
@@ -463,6 +465,7 @@ enum Command {
 #[derive(Debug, Eq, PartialEq)]
 enum ConfigCommand {
     Schema,
+    Catalog,
     Get {
         paths: ConfigPaths,
         path: String,
@@ -927,6 +930,10 @@ fn parse_config(mut arguments: impl Iterator<Item = String>) -> Result<ConfigCom
         require_no_arguments(arguments)?;
         return Ok(ConfigCommand::Schema);
     }
+    if action == "catalog" {
+        require_no_arguments(arguments)?;
+        return Ok(ConfigCommand::Catalog);
+    }
 
     let mut positionals = Vec::new();
     let mut scope = None;
@@ -1228,6 +1235,7 @@ Usage:\n\
   greentyper stats [--ledger PATH] [--at UNIX_MS]\n\
   greentyper reconcile [--ledger PATH] --delivery ID\n\
   greentyper config schema\n\
+  greentyper config catalog\n\
   greentyper config get PATH [--user-config PATH] [--project-config PATH]\n\
   greentyper config set PATH VALUE --scope user|project [--dry-run]\n\
   greentyper config reset PATH --scope user|project [--dry-run]\n\

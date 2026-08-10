@@ -434,6 +434,7 @@ mod tests {
                 model: None,
                 context_pressure_percent: None,
                 model_presets: &[],
+                catalog_models: &[],
             },
         )
         .expect("approval presentation");

@@ -13,6 +13,7 @@ use url::{Host, Url};
 
 use super::{ConfigLayer, ConfigLayers};
 use crate::provider::{ProviderDialect, ProviderPricingSource, ProviderProfileSnapshot};
+use crate::provider_catalog::{ModelCatalogRecord, ProviderCatalog, ProviderCatalogMode};
 use crate::schema::SchemaKind;
 use crate::usage::{MAX_USAGE_WINDOWS, UsageWeekday, UsageWindow};
 
@@ -472,6 +473,30 @@ pub struct ModelPresetView {
     pub fallback: Vec<String>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct ModelCatalogView {
+    provider: String,
+    record: &'static ModelCatalogRecord,
+    profile_compatible: bool,
+}
+
+impl ModelCatalogView {
+    #[must_use]
+    pub fn provider(&self) -> &str {
+        &self.provider
+    }
+
+    #[must_use]
+    pub const fn record(&self) -> &'static ModelCatalogRecord {
+        self.record
+    }
+
+    #[must_use]
+    pub const fn profile_compatible(&self) -> bool {
+        self.profile_compatible
+    }
+}
+
 impl ConfigObjectRef {
     #[must_use]
     pub fn new(kind: ConfigObjectKind, id: impl Into<String>) -> Self {
@@ -757,7 +782,7 @@ impl ProviderRoutesLayer {
 #[serde(default, deny_unknown_fields)]
 struct CatalogLayer {
     #[serde(skip_serializing_if = "Option::is_none")]
-    mode: Option<CatalogMode>,
+    mode: Option<ProviderCatalogMode>,
 }
 
 impl CatalogLayer {
@@ -777,15 +802,6 @@ impl PricingLayer {
     fn is_empty(&self) -> bool {
         self.source.is_none()
     }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
-enum CatalogMode {
-    Template,
-    Discovery,
-    TemplateAndDiscovery,
-    Manual,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
@@ -1074,6 +1090,43 @@ impl ConfigRuntime {
                 })
             })
             .collect()
+    }
+
+    pub fn catalog_models(&self) -> Result<Vec<ModelCatalogView>, ConfigRuntimeError> {
+        let resolved = self
+            .last_valid
+            .as_ref()
+            .ok_or_else(|| ConfigRuntimeError::RepairRequired(self.status().issues))?;
+        let catalog = ProviderCatalog::release();
+        let mut models = Vec::new();
+        for (profile, definition) in &resolved.document.providers {
+            let Some(template_id) = definition.template.as_deref() else {
+                continue;
+            };
+            let Some(template) = catalog.template(template_id) else {
+                continue;
+            };
+            let catalog_mode = definition
+                .catalog
+                .mode
+                .unwrap_or(template.catalog_mode().value());
+            if !catalog_mode.includes_release_seed() {
+                continue;
+            }
+            let snapshot = provider_profile_snapshot(&resolved.document, profile)?;
+            models.extend(
+                catalog
+                    .models()
+                    .iter()
+                    .filter(|record| record.provider_template() == template_id)
+                    .map(|record| ModelCatalogView {
+                        provider: profile.clone(),
+                        record,
+                        profile_compatible: snapshot.supports(record.primary_dialect().value()),
+                    }),
+            );
+        }
+        Ok(models)
     }
 
     pub fn inspect_field(
@@ -1481,17 +1534,43 @@ fn provider_profile_snapshot(
             "provider profile requires a template",
         )
     })?;
+    let defaults = ProviderCatalog::release().template(&template);
+    let custom_origin = definition.base_url.is_some();
+    let base_url = definition
+        .base_url
+        .clone()
+        .or_else(|| defaults.map(|template| template.base_url().value().to_owned()));
+    let responses_route = definition.routes.responses.clone().or_else(|| {
+        defaults.and_then(|template| template.responses_route().value().map(str::to_owned))
+    });
+    let chat_completions_route = definition.routes.chat_completions.clone().or_else(|| {
+        defaults.and_then(|template| template.chat_completions_route().value().map(str::to_owned))
+    });
+    let messages_route = definition.routes.messages.clone().or_else(|| {
+        defaults.and_then(|template| template.messages_route().value().map(str::to_owned))
+    });
+    let models_route = definition.routes.models.clone().or_else(|| {
+        defaults.and_then(|template| template.models_route().value().map(str::to_owned))
+    });
+    let dialects = definition.dialects.clone().unwrap_or_else(|| {
+        defaults.map_or_else(Vec::new, |template| template.dialects().value().to_vec())
+    });
+    let pricing_source = definition.pricing.source.or_else(|| {
+        (!custom_origin)
+            .then(|| defaults.map(|template| template.pricing_source().value()))
+            .flatten()
+    });
     ProviderProfileSnapshot::from_parts(
         profile,
         template,
         definition.credential.clone(),
-        definition.base_url.clone(),
-        definition.routes.responses.clone(),
-        definition.routes.chat_completions.clone(),
-        definition.routes.messages.clone(),
-        definition.routes.models.clone(),
-        definition.dialects.clone().unwrap_or_default(),
-        definition.pricing.source,
+        base_url,
+        responses_route,
+        chat_completions_route,
+        messages_route,
+        models_route,
+        dialects,
+        pricing_source,
         definition.allow_insecure_loopback.unwrap_or(false),
     )
     .map_err(|source| invalid(format!("providers.{profile}"), source.to_string()))
@@ -1964,17 +2043,6 @@ impl Error for ConfigRuntimeError {
     }
 }
 
-impl CatalogMode {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::Template => "template",
-            Self::Discovery => "discovery",
-            Self::TemplateAndDiscovery => "template_and_discovery",
-            Self::Manual => "manual",
-        }
-    }
-}
-
 impl StatuslinePreset {
     const fn as_str(self) -> &'static str {
         match self {
@@ -2019,12 +2087,12 @@ fn parse_dialect(path: &str, value: &str) -> Result<ProviderDialect, ConfigRunti
     }
 }
 
-fn parse_catalog_mode(path: &str, value: &str) -> Result<CatalogMode, ConfigRuntimeError> {
+fn parse_catalog_mode(path: &str, value: &str) -> Result<ProviderCatalogMode, ConfigRuntimeError> {
     match value {
-        "template" => Ok(CatalogMode::Template),
-        "discovery" => Ok(CatalogMode::Discovery),
-        "template_and_discovery" => Ok(CatalogMode::TemplateAndDiscovery),
-        "manual" => Ok(CatalogMode::Manual),
+        "template" => Ok(ProviderCatalogMode::Template),
+        "discovery" => Ok(ProviderCatalogMode::Discovery),
+        "template_and_discovery" => Ok(ProviderCatalogMode::TemplateAndDiscovery),
+        "manual" => Ok(ProviderCatalogMode::Manual),
         _ => Err(invalid(path, "unknown catalog mode")),
     }
 }

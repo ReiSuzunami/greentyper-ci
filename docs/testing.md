@@ -209,9 +209,10 @@ Fuzz failures become minimized regression fixtures.
 Current pure tests freeze the four root Command Paths, nested Config routes,
 token-prefix/fuzzy resolution, raw query limits, schema-to-editor-route
 completeness, and credential binding-status-only readback. Terminal-neutral
-presentation tests cover bounded Slash results, configured-preset search and
-unknown compatibility, recovery/blocker projection, Config repair redaction,
-and a pure in-memory subprocess smoke with no filesystem path input. Config
+presentation tests cover bounded Slash results, configured-preset and release
+catalog search, known primary-dialect compatibility, explicit unknown live
+availability, product-adapter gating, recovery/blocker projection, Config repair
+redaction, and a pure in-memory subprocess smoke with no filesystem path input. Config
 editor tests route `/config pro url` to one concrete Profile field, exercise
 staged preview/reset/commit, retain an invalid draft for correction, reject
 generic credential mutation and read-back, and prove a stale revision cannot
@@ -230,7 +231,14 @@ Draft, keep credential references out of serialized screens, leave Config
 untouched during the connection check, invalidate a prior result after any staged
 change, and reject an observed stale revision before invoking the tester. CLI
 tests prove `config test-provider` returns only a fixed pre-network failure status
-when the selected Profile's credential is unavailable.
+when the selected Profile's credential is unavailable. Provider Catalog tests
+freeze the release schema and revision, sorted unique records, template/model
+referential integrity, exact dialect mappings, field provenance, and explicit
+unknown context/capability/price/availability facts. Config tests prove official
+defaults resolve before user overrides, custom origins cannot inherit template
+pricing, and release models bind only under template-enabled catalog modes. The
+read-only `config catalog` integration test proves the snapshot contains no
+local path or credential reference.
 
 Remaining terminal-backend goldens cover real resize and stale-cell clearing,
 hierarchical input events, rendered Config dialogs, model selector states,
@@ -260,10 +268,17 @@ keep endpoint and credential data out of the serialized result.
 This is a configuration/status probe, not model discovery or live-provider
 validation.
 
+The official OpenAI template identity is also exercised with an explicit
+loopback origin override through the current Responses adapter and models probe.
+The test proves inherited routes and dialects cross the same endpoint and
+credential gates as an explicit compatible gateway. DeepSeek and OpenCode Go
+Chat Completions/Messages execution remains outside this slice.
+
 Live provider integration tests are not implemented yet. Planned opt-in,
 credential-gated tests will verify OpenAI, DeepSeek, and OpenCode Go without
-running on untrusted pull requests or gating local performance. Model-catalog
-refresh work records the source URL and observation date.
+running on untrusted pull requests or gating local performance. Future
+model-catalog refresh and discovery work records the source URL and observation
+date; the current release seed already freezes both.
 
 ## Performance Testing
 

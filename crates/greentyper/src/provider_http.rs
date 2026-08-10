@@ -31,7 +31,8 @@ use crate::provider_http_policy::{bearer_header, validate_provider_endpoint};
 const FIXTURE_PROFILE: &str = "responses-loopback";
 const FIXTURE_MODEL: &str = "fixture-model";
 const FIXTURE_ROUTE: &str = "/v1/responses";
-const FIXTURE_TEMPLATE: &str = "openai-compatible";
+const OPENAI_TEMPLATE: &str = "openai";
+const OPENAI_COMPATIBLE_TEMPLATE: &str = "openai-compatible";
 const FIXTURE_CREDENTIAL_REFERENCE: &str = "responses-loopback-synthetic";
 const SYNTHETIC_AUTHORIZATION: &str = "Bearer greentyper-synthetic-provider-token-v1";
 const SYNTHETIC_SECRET: &[u8] = b"greentyper-synthetic-provider-token-v1";
@@ -50,6 +51,11 @@ const TOOL_CALL_SSE: &[u8] =
 #[cfg(test)]
 const TOOL_CONTINUATION_SSE: &[u8] =
     include_bytes!("../../../tests/fixtures/provider/responses/v1/http-tool-continuation.sse");
+
+pub(crate) fn has_provider_adapter(template: &str, dialect: ProviderDialect) -> bool {
+    dialect == ProviderDialect::Responses
+        && (template == OPENAI_TEMPLATE || template == OPENAI_COMPATIBLE_TEMPLATE)
+}
 
 pub(crate) struct ResponsesHttpProvider<V> {
     client: Client,
@@ -110,9 +116,14 @@ impl<V: CredentialVault> ResponsesHttpProvider<V> {
         timeout: Duration,
         client: ClientBuilder,
     ) -> Result<Self, ProviderError> {
-        if profile.template() != FIXTURE_TEMPLATE || !profile.supports(ProviderDialect::Responses) {
+        if !has_provider_adapter(profile.template(), ProviderDialect::Responses) {
             return Err(ProviderError::InvalidConfiguration(
-                "Responses Provider Profile is not OpenAI-compatible",
+                "Provider Profile template has no configured runtime adapter",
+            ));
+        }
+        if !profile.supports(ProviderDialect::Responses) {
+            return Err(ProviderError::InvalidConfiguration(
+                "Responses Provider Profile does not declare Responses support",
             ));
         }
         let endpoint = profile.endpoint(ProviderDialect::Responses).ok_or(
@@ -459,7 +470,7 @@ impl fmt::Debug for LoopbackResponsesProvider {
 impl LoopbackResponsesProvider {
     fn new(profile: ProviderProfileSnapshot) -> Result<Self, ProviderError> {
         if profile.profile() != FIXTURE_PROFILE
-            || profile.template() != FIXTURE_TEMPLATE
+            || profile.template() != OPENAI_COMPATIBLE_TEMPLATE
             || profile.credential_reference() != Some(FIXTURE_CREDENTIAL_REFERENCE)
             || profile.pricing_source() != Some(ProviderPricingSource::Unknown)
             || !profile.allow_insecure_loopback()
@@ -674,7 +685,7 @@ model = "{FIXTURE_MODEL}"
 max_output_bytes = {DEFAULT_MAX_OUTPUT_BYTES}
 
 [providers.{FIXTURE_PROFILE}]
-template = "{FIXTURE_TEMPLATE}"
+template = "{OPENAI_COMPATIBLE_TEMPLATE}"
 credential = "{FIXTURE_CREDENTIAL_REFERENCE}"
 base_url = {base_url}
 dialects = ["responses"]
@@ -1176,6 +1187,112 @@ mod tests {
         assert!(!encoded.contains(std::str::from_utf8(SYNTHETIC_SECRET).unwrap()));
         assert!(!encoded.contains(&base_url));
         server.join().expect("join models server");
+    }
+
+    #[test]
+    fn official_openai_template_is_runnable_through_the_current_responses_adapter() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("official template listener");
+        let base_url = format!("http://{}/v1", listener.local_addr().unwrap());
+        let encoded_base_url = serde_json::to_string(&base_url).expect("encode fixture origin");
+        let document = ConfigDocument::parse(&format!(
+            r#"
+schema_version = 1
+
+[provider]
+profile = "official-openai"
+model = "gpt-5.6-sol"
+
+[providers.official-openai]
+template = "openai"
+credential = "synthetic-official-openai-reference"
+base_url = {encoded_base_url}
+allow_insecure_loopback = true
+
+[providers.official-openai.pricing]
+source = "unknown"
+"#,
+        ))
+        .expect("parse official OpenAI fixture");
+        let runtime = ConfigRuntime::open(test_config_paths("official-openai-template"), document)
+            .expect("resolve official OpenAI template");
+        let profile = runtime
+            .selected_provider_profile()
+            .expect("resolve official OpenAI Profile")
+            .expect("external Profile");
+        let scope = ProviderCredentialScope::from_profile(&profile).expect("credential scope");
+
+        let mut provider_vault = InMemoryCredentialVault::default();
+        provider_vault
+            .bind(
+                &scope,
+                SecretValue::new(SYNTHETIC_SECRET.to_vec()).expect("synthetic secret"),
+            )
+            .expect("bind adapter credential");
+        ResponsesHttpProvider::with_timeout(profile.clone(), provider_vault, HTTP_TIMEOUT)
+            .expect("official OpenAI Profile must construct Responses adapter");
+
+        let mut probe_vault = InMemoryCredentialVault::default();
+        probe_vault
+            .bind(
+                &scope,
+                SecretValue::new(SYNTHETIC_SECRET.to_vec()).expect("synthetic secret"),
+            )
+            .expect("bind probe credential");
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept official models probe");
+            let headers = read_request_head(&mut stream);
+            assert!(headers.starts_with("GET /v1/models HTTP/1.1\r\n"));
+            write_fixture_response(
+                &mut stream,
+                "200 OK",
+                "application/json",
+                br#"{"data":[]}"#,
+                false,
+            )
+            .expect("write official models response");
+        });
+        let mut tester = ModelsHttpConnectionTester::with_timeout(&probe_vault, HTTP_TIMEOUT);
+        assert!(matches!(
+            tester.test(&profile),
+            ProviderConnectionTestStatus::Succeeded { .. }
+        ));
+        server.join().expect("join official models server");
+    }
+
+    #[test]
+    fn catalog_templates_without_a_product_adapter_fail_before_credential_lookup() {
+        let document = ConfigDocument::parse(
+            r#"
+schema_version = 1
+
+[provider]
+profile = "deepseek-main"
+model = "deepseek-v4-flash"
+
+[providers.deepseek-main]
+template = "deepseek"
+credential = "synthetic-deepseek-reference"
+"#,
+        )
+        .expect("parse DeepSeek catalog fixture");
+        let runtime = ConfigRuntime::open(test_config_paths("deepseek-adapter-gate"), document)
+            .expect("resolve DeepSeek template");
+        let profile = runtime
+            .selected_provider_profile()
+            .expect("resolve DeepSeek Profile")
+            .expect("external Profile");
+        let error = ResponsesHttpProvider::with_timeout(
+            profile,
+            InMemoryCredentialVault::default(),
+            HTTP_TIMEOUT,
+        )
+        .expect_err("DeepSeek must not route through the OpenAI Responses adapter");
+        assert_eq!(
+            error,
+            ProviderError::InvalidConfiguration(
+                "Provider Profile template has no configured runtime adapter"
+            )
+        );
     }
 
     #[test]

@@ -28,6 +28,7 @@ pub enum SchemaKind {
     ConfigEpoch,
     DeterministicFixture,
     LedgerFormat,
+    ProviderCatalog,
     RuntimeEvent,
     TeamEvent,
     ToolEvent,
@@ -42,6 +43,7 @@ impl SchemaKind {
             | Self::ConfigEpoch
             | Self::DeterministicFixture
             | Self::LedgerFormat
+            | Self::ProviderCatalog
             | Self::ToolEvent => SchemaVersion(1),
             Self::RuntimeEvent => SchemaVersion(4),
             Self::TeamEvent => SchemaVersion(2),

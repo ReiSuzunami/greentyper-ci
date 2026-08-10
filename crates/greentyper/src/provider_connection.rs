@@ -11,12 +11,9 @@ use serde::Serialize;
 use crate::credential_vault::{CredentialVault, CredentialVaultError, ProviderCredentialScope};
 use crate::provider_http_policy::{bearer_header, validate_provider_endpoint};
 
-const OPENAI_COMPATIBLE_TEMPLATE: &str = "openai-compatible";
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ProviderConnectionFailureCategory {
-    UnsupportedProfile,
     MissingModelsRoute,
     InvalidConfiguration,
     CredentialMissing,
@@ -76,9 +73,6 @@ impl<'a, V: CredentialVault> ModelsHttpConnectionTester<'a, V> {
 
 impl<V: CredentialVault> ProviderConnectionTester for ModelsHttpConnectionTester<'_, V> {
     fn test(&mut self, profile: &ProviderProfileSnapshot) -> ProviderConnectionTestStatus {
-        if profile.template() != OPENAI_COMPATIBLE_TEMPLATE {
-            return Self::failed(ProviderConnectionFailureCategory::UnsupportedProfile, false);
-        }
         let Some(endpoint) = profile.models_endpoint() else {
             return Self::failed(ProviderConnectionFailureCategory::MissingModelsRoute, false);
         };
