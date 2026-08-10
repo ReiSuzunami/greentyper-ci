@@ -1610,6 +1610,7 @@ base_url = "https://gateway.example.com"
     let schedules = runtime
         .resolved_price_schedules()
         .expect("resolve official mirror schedules");
+    assert_eq!(schedules.schedules().len(), 2);
     let flash = schedules
         .schedules()
         .iter()
@@ -1620,6 +1621,19 @@ base_url = "https://gateway.example.com"
     assert_eq!(flash.rates().input_micros_per_million(), 140_000);
     assert_eq!(flash.rates().cached_input_micros_per_million(), 2_800);
     assert_eq!(flash.rates().output_micros_per_million(), 280_000);
+
+    let pro = schedules
+        .schedules()
+        .iter()
+        .find(|schedule| schedule.model() == "deepseek-v4-pro")
+        .expect("mirrored Pro schedule");
+    assert_eq!(pro.provider_profile(), "gateway");
+    assert_eq!(pro.source(), PriceScheduleSource::TemplateMirror);
+    assert_eq!(pro.rates().input_micros_per_million(), 435_000);
+    assert_eq!(pro.rates().cached_input_micros_per_million(), 3_625);
+    assert_eq!(pro.rates().cache_write_micros_per_million(), 0);
+    assert_eq!(pro.rates().output_micros_per_million(), 870_000);
+    assert_eq!(pro.rates().reasoning_output_micros_per_million(), 870_000);
 
     let manual = ConfigDocument::parse(
         r#"

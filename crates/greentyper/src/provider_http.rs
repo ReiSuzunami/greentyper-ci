@@ -4077,6 +4077,70 @@ source = "unknown"
     }
 
     #[test]
+    fn deepseek_responses_preference_executes_pro_over_chat_completions() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("DeepSeek fallback listener");
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let profile = deepseek_dual_fixture_profile(&base_url, "deepseek-pro-chat-fallback");
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener
+                .accept()
+                .expect("accept DeepSeek Pro fallback request");
+            configure_fixture_stream(&stream).expect("configure DeepSeek Pro fallback request");
+            let body = read_test_request_body_for(&mut stream, "/chat/completions");
+            assert_eq!(
+                body,
+                serde_json::json!({
+                    "max_tokens": 3072,
+                    "messages": [{"role": "user", "content": "hello DeepSeek Pro"}],
+                    "model": "deepseek-v4-pro",
+                    "stream": true,
+                    "stream_options": {"include_usage": true},
+                    "thinking": {"type": "disabled"},
+                })
+            );
+            write_fixture_response(
+                &mut stream,
+                "200 OK",
+                "text/event-stream",
+                DEEPSEEK_CHAT_TEXT_SSE,
+                true,
+            )
+            .expect("write DeepSeek Pro fallback response");
+        });
+
+        let mut provider = ConfiguredProvider::for_new_turn_with_preferred_dialect(
+            profile.clone(),
+            "deepseek-v4-pro",
+            ProviderDialect::Responses,
+            bound_chat_vault(&profile),
+        )
+        .expect("configure DeepSeek Pro fallback provider");
+        assert_eq!(provider.dialect(), Some(ProviderDialect::ChatCompletions));
+        let request = provider_request_with_model_policy(
+            profile.clone(),
+            "deepseek-v4-pro",
+            "hello DeepSeek Pro",
+            ProviderDialect::ChatCompletions,
+            3_072,
+            None,
+            None,
+        );
+        let events = provider.run(&request).expect("DeepSeek Pro Chat response");
+        assert!(matches!(
+            events.as_slice(),
+            [ProviderEvent::TextDelta(text), ProviderEvent::Completed(usage)]
+                if text == "DeepSeek"
+                    && usage.input_tokens() == Some(11)
+                    && usage.cached_input_tokens() == Some(3)
+                    && usage.output_tokens() == Some(5)
+        ));
+        let resumed = ConfiguredProvider::from_epoch(&request.provider, bound_chat_vault(&profile))
+            .expect("reconstruct frozen DeepSeek Pro fallback provider");
+        assert_eq!(resumed.dialect(), Some(ProviderDialect::ChatCompletions));
+        server.join().expect("join DeepSeek Pro fallback server");
+    }
+
+    #[test]
     fn deepseek_responses_continues_one_tool_call_without_stateful_response_ids() {
         let listener =
             TcpListener::bind(("127.0.0.1", 0)).expect("DeepSeek Responses Tool listener");
