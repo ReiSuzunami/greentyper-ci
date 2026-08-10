@@ -102,7 +102,7 @@ Provider output, Tool effects, approvals, Workspace Leases, Read Sets, merge out
 
 ## Next Slices
 
-1. Harden the configured remote Responses path with live-provider validation,
+1. Harden the configured remote Responses path with live inference conformance,
    broader TLS platform evidence, configurable proxy policy, and explicit
    reconnect/retry rules; broaden the fixed public `local.echo` path only after
    caller-selected process policy and complete Windows Job evidence can fail

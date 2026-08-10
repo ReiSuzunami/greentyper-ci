@@ -2236,7 +2236,8 @@ mod tests {
 
     use crate::credential_vault::InMemoryCredentialVault;
     use crate::provider_connection::{
-        ModelsHttpConnectionTester, ProviderConnectionFailureCategory,
+        MAX_MODEL_ID_BYTES, MAX_MODELS_RESPONSE_BYTES, MAX_OBSERVED_MODELS,
+        ModelsHttpConnectionTester, ObservedProviderModel, ProviderConnectionFailureCategory,
         ProviderConnectionTestStatus, ProviderConnectionTester,
     };
 
@@ -2690,6 +2691,38 @@ source = "unknown"
             .to_owned()
     }
 
+    fn models_probe_outcome(
+        name: &str,
+        content_type: &str,
+        body: &[u8],
+    ) -> ProviderConnectionTestStatus {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("models probe listener");
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let profile = opencode_go_responses_fixture_profile(&base_url, name, "gpt-5.6-luna");
+        let vault = bound_chat_vault(&profile);
+        let content_type = content_type.to_owned();
+        let body = body.to_vec();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept models probe");
+            let headers = read_request_head(&mut stream);
+            assert!(headers.starts_with("GET /models HTTP/1.1\r\n"));
+            assert!(headers.contains(&format!("\r\nauthorization: {SYNTHETIC_AUTHORIZATION}\r\n")));
+            let oversized = body.len() > MAX_MODELS_RESPONSE_BYTES;
+            let written = write_fixture_response(&mut stream, "200 OK", &content_type, &body, true);
+            if let Err(error) = written {
+                assert!(
+                    oversized,
+                    "models probe response failed unexpectedly: {error}"
+                );
+            }
+        });
+
+        let mut tester = ModelsHttpConnectionTester::with_timeout(&vault, HTTP_TIMEOUT);
+        let outcome = tester.test(&profile);
+        server.join().expect("join models probe server");
+        outcome
+    }
+
     #[test]
     fn models_connection_test_uses_the_frozen_profile_without_exposing_credentials() {
         let listener = TcpListener::bind(("127.0.0.1", 0)).expect("connection-test listener");
@@ -2729,6 +2762,7 @@ source = "unknown"
             ProviderConnectionTestStatus::Succeeded {
                 profile: FIXTURE_PROFILE.to_owned(),
                 fingerprint: expected_fingerprint,
+                models: Vec::new(),
             }
         );
         let encoded = serde_json::to_string(&outcome).expect("serialize connection status");
@@ -2736,6 +2770,172 @@ source = "unknown"
         assert!(!encoded.contains(std::str::from_utf8(SYNTHETIC_SECRET).unwrap()));
         assert!(!encoded.contains(&base_url));
         server.join().expect("join models server");
+    }
+
+    #[test]
+    fn models_connection_test_observes_known_and_unknown_models_without_remote_authority() {
+        let outcome = models_probe_outcome(
+            "models-observation",
+            "application/json; charset=utf-8",
+            br#"{
+                "object":"list",
+                "data":[
+                    {
+                        "id":"shadow-model",
+                        "object":"model",
+                        "capabilities":["tool_calling"],
+                        "endpoint":"https://provider-private.example/override"
+                    },
+                    {
+                        "id":"gpt-5.6-luna",
+                        "object":"model",
+                        "owned_by":"opencode"
+                    }
+                ]
+            }"#,
+        );
+        let models = match &outcome {
+            ProviderConnectionTestStatus::Succeeded { models, .. } => models,
+            other => panic!("unexpected models observation: {other:?}"),
+        };
+        assert_eq!(
+            models,
+            &[
+                ObservedProviderModel {
+                    id: "gpt-5.6-luna".to_owned(),
+                    release_catalog_key: Some("opencode-go/gpt-5.6-luna".to_owned()),
+                },
+                ObservedProviderModel {
+                    id: "shadow-model".to_owned(),
+                    release_catalog_key: None,
+                },
+            ]
+        );
+        let encoded = serde_json::to_string(&outcome).expect("serialize model observation");
+        assert!(!encoded.contains("tool_calling"));
+        assert!(!encoded.contains("provider-private.example"));
+        assert!(!encoded.contains("capabilities"));
+        assert!(!encoded.contains("endpoint"));
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("unknown model guard listener");
+        listener
+            .set_nonblocking(true)
+            .expect("make unknown model guard listener nonblocking");
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let profile = opencode_go_responses_fixture_profile(
+            &base_url,
+            "models-observation-unknown-admission",
+            "shadow-model",
+        );
+        let error = match ConfiguredProvider::for_new_turn_with_dialect(
+            profile,
+            "shadow-model",
+            ProviderDialect::Responses,
+            InMemoryCredentialVault::default(),
+        ) {
+            Ok(_) => panic!("observed unknown model must remain unavailable"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error,
+            ProviderError::InvalidConfiguration(
+                "OpenCode Go model and dialect are not verified by the release catalog"
+            )
+        );
+        assert!(
+            matches!(listener.accept(), Err(error) if error.kind() == io::ErrorKind::WouldBlock)
+        );
+    }
+
+    #[test]
+    fn models_connection_test_rejects_invalid_or_unbounded_success_bodies() {
+        let invalid_response = ProviderConnectionTestStatus::Failed {
+            category: ProviderConnectionFailureCategory::InvalidResponse,
+            retryable: false,
+        };
+        for (name, content_type, body) in [
+            (
+                "models-wrong-content-type",
+                "text/plain",
+                br#"{"data":[]}"#.to_vec(),
+            ),
+            (
+                "models-invalid-json",
+                "application/json",
+                br#"{"data":[}"#.to_vec(),
+            ),
+            (
+                "models-overlong-id",
+                "application/json",
+                serde_json::to_vec(&serde_json::json!({
+                    "data": [{"id": "x".repeat(MAX_MODEL_ID_BYTES + 1)}]
+                }))
+                .expect("encode overlong model id"),
+            ),
+            (
+                "models-duplicate-id",
+                "application/json",
+                br#"{"data":[{"id":"same"},{"id":"same"}]}"#.to_vec(),
+            ),
+            (
+                "models-whitespace-id",
+                "application/json",
+                br#"{"data":[{"id":"bad model"}]}"#.to_vec(),
+            ),
+            (
+                "models-oversized-body",
+                "application/json",
+                vec![b' '; MAX_MODELS_RESPONSE_BYTES + 1],
+            ),
+        ] {
+            assert_eq!(
+                models_probe_outcome(name, content_type, &body),
+                invalid_response,
+                "unexpected result for {name}"
+            );
+        }
+
+        let too_many = (0..=MAX_OBSERVED_MODELS)
+            .map(|index| serde_json::json!({"id": format!("model-{index}")}))
+            .collect::<Vec<_>>();
+        let body = serde_json::to_vec(&serde_json::json!({"data": too_many}))
+            .expect("encode oversized model list");
+        assert_eq!(
+            models_probe_outcome("models-too-many", "application/json", &body),
+            invalid_response
+        );
+    }
+
+    #[test]
+    fn models_connection_test_classifies_a_truncated_success_body_as_unavailable() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("truncated models listener");
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let profile = opencode_go_responses_fixture_profile(
+            &base_url,
+            "models-truncated-body",
+            "gpt-5.6-luna",
+        );
+        let vault = bound_chat_vault(&profile);
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept truncated models probe");
+            let _headers = read_request_head(&mut stream);
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 64\r\nConnection: close\r\n\r\n{",
+                )
+                .expect("write truncated models response");
+            stream.flush().expect("flush truncated models response");
+        });
+
+        let mut tester = ModelsHttpConnectionTester::with_timeout(&vault, HTTP_TIMEOUT);
+        assert_eq!(
+            tester.test(&profile),
+            ProviderConnectionTestStatus::Failed {
+                category: ProviderConnectionFailureCategory::Unavailable,
+                retryable: true,
+            }
+        );
+        server.join().expect("join truncated models server");
     }
 
     #[test]

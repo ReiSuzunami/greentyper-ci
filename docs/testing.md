@@ -353,10 +353,17 @@ broader usage normalization.
 The product connection-test adapter has deterministic loopback coverage for one
 explicit GET to the frozen Profile's `models` route. Tests validate the synthetic
 Authorization header server-side, prove a missing origin-bound credential causes
-no request, classify HTTP 503 as retryable without exposing its private body, and
-keep endpoint and credential data out of the serialized result.
-This is a configuration/status probe, not model discovery or live-provider
-validation.
+no request, classify HTTP 503 as retryable without exposing its private body,
+and keep endpoint and credential data out of the serialized result. Success
+tests parse both exact release-catalog and unknown IDs, ignore remote capability
+and endpoint fields, and prove the unknown OpenCode Go model is still rejected
+before credential lookup or network I/O. Rejection tests cover wrong content
+type, malformed JSON, a body over 256 KiB, more than 1,024 models, duplicate IDs,
+whitespace in IDs, and IDs over 256 bytes. A truncated 2xx response body is
+classified as retryable unavailability rather than a provider-format error.
+This is a configuration check plus ephemeral model-list observation, not a
+persistent catalog-discovery merge, selector refresh, or live inference
+conformance test.
 
 The official OpenAI template identity is also exercised with an explicit
 loopback origin override through the Responses adapter and models probe. The
@@ -377,11 +384,11 @@ before admission; this bounded capability resolution is not a network retry or
 general Preset fallback. OpenCode Go Messages remains outside this
 slice; a declared route or dialect is not treated as proof of wire compatibility.
 
-Live provider integration tests are not implemented yet. Planned opt-in,
+Live provider inference tests are not implemented yet. Planned opt-in,
 credential-gated tests will verify OpenAI, DeepSeek, and OpenCode Go without
 running on untrusted pull requests or gating local performance. Future
-model-catalog refresh and discovery work records the source URL and observation
-date; the current release seed already freezes both.
+model-catalog refresh and persistent discovery work records the source URL and
+observation date; the current release seed already freezes both.
 
 ## Performance Testing
 

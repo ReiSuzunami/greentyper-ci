@@ -43,7 +43,7 @@ The shipped product executable. It owns composition and the target TUI, CLI,
 App Server, and concrete production adapters. Its current private modules
 include configured Responses and Chat Completions HTTP/SSE plus the DeepSeek
 Chat Completions and Messages HTTP/SSE request policies, a bounded
-status-only Provider connection test adapter, origin-bound Windows Credential
+Provider connection and model-list observation adapter, origin-bound Windows Credential
 Manager access, the fixed
 `local.echo` process executor, a terminal-neutral presentation projection, Config
 Object lifecycle/Provider-wizard controller, deterministic viewport-row layout, and a

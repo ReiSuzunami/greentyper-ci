@@ -2604,6 +2604,7 @@ credential = "synthetic-deepseek-credential-reference"
             ProviderConnectionTestStatus::Succeeded {
                 profile: profile.profile().to_owned(),
                 fingerprint: profile.fingerprint(),
+                models: Vec::new(),
             }
         }
     }

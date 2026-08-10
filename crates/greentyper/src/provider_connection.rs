@@ -1,15 +1,44 @@
 //! Provider-neutral connection-test status with the current bounded HTTP models probe.
 
+use std::collections::BTreeSet;
+use std::io::Read;
 use std::time::Duration;
 
 use greentyper_core::provider::ProviderProfileSnapshot;
+use greentyper_core::provider_catalog::ProviderCatalog;
 use reqwest::StatusCode;
 use reqwest::blocking::Client;
-use reqwest::header::{ACCEPT, AUTHORIZATION};
-use serde::Serialize;
+use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
+use serde::{Deserialize, Serialize};
 
 use crate::credential_vault::{CredentialVault, CredentialVaultError, ProviderCredentialScope};
 use crate::provider_http_policy::{bearer_header, validate_provider_endpoint};
+
+pub(crate) const MAX_MODELS_RESPONSE_BYTES: usize = 256 * 1024;
+pub(crate) const MAX_OBSERVED_MODELS: usize = 1024;
+pub(crate) const MAX_MODEL_ID_BYTES: usize = 256;
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub(crate) struct ObservedProviderModel {
+    pub(crate) id: String,
+    pub(crate) release_catalog_key: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ModelsResponse {
+    data: Vec<ModelsResponseEntry>,
+}
+
+#[derive(Deserialize)]
+struct ModelsResponseEntry {
+    id: String,
+}
+
+#[derive(Clone, Copy)]
+enum ModelsResponseError {
+    Unavailable,
+    InvalidResponse,
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -31,6 +60,7 @@ pub(crate) enum ProviderConnectionTestStatus {
     Succeeded {
         profile: String,
         fingerprint: u64,
+        models: Vec<ObservedProviderModel>,
     },
     Failed {
         category: ProviderConnectionFailureCategory,
@@ -68,6 +98,74 @@ impl<'a, V: CredentialVault> ModelsHttpConnectionTester<'a, V> {
             category,
             retryable,
         }
+    }
+
+    fn parse_models(
+        profile: &ProviderProfileSnapshot,
+        response: reqwest::blocking::Response,
+    ) -> Result<Vec<ObservedProviderModel>, ModelsResponseError> {
+        let content_type = response
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.split(';').next())
+            .map(str::trim);
+        if !content_type.is_some_and(|value| value.eq_ignore_ascii_case("application/json")) {
+            return Err(ModelsResponseError::InvalidResponse);
+        }
+        let max_response_bytes = u64::try_from(MAX_MODELS_RESPONSE_BYTES)
+            .map_err(|_| ModelsResponseError::InvalidResponse)?;
+        if response
+            .content_length()
+            .is_some_and(|length| length > max_response_bytes)
+        {
+            return Err(ModelsResponseError::InvalidResponse);
+        }
+        let read_limit = max_response_bytes
+            .checked_add(1)
+            .ok_or(ModelsResponseError::InvalidResponse)?;
+        let mut body = Vec::new();
+        response
+            .take(read_limit)
+            .read_to_end(&mut body)
+            .map_err(|_| ModelsResponseError::Unavailable)?;
+        if body.len() > MAX_MODELS_RESPONSE_BYTES {
+            return Err(ModelsResponseError::InvalidResponse);
+        }
+        let decoded: ModelsResponse =
+            serde_json::from_slice(&body).map_err(|_| ModelsResponseError::InvalidResponse)?;
+        if decoded.data.len() > MAX_OBSERVED_MODELS {
+            return Err(ModelsResponseError::InvalidResponse);
+        }
+
+        let mut ids = BTreeSet::new();
+        for entry in decoded.data {
+            if entry.id.is_empty()
+                || entry.id.len() > MAX_MODEL_ID_BYTES
+                || entry.id.chars().any(char::is_whitespace)
+                || entry.id.chars().any(char::is_control)
+                || !ids.insert(entry.id)
+            {
+                return Err(ModelsResponseError::InvalidResponse);
+            }
+        }
+
+        Ok(ids
+            .into_iter()
+            .map(|id| {
+                let key = format!("{}/{id}", profile.template());
+                let release_catalog_key =
+                    ProviderCatalog::release().model(&key).and_then(|record| {
+                        (record.provider_template() == profile.template()
+                            && record.model_id().value() == id)
+                            .then(|| record.key().to_owned())
+                    });
+                ObservedProviderModel {
+                    id,
+                    release_catalog_key,
+                }
+            })
+            .collect())
     }
 }
 
@@ -151,9 +249,18 @@ impl<V: CredentialVault> ProviderConnectionTester for ModelsHttpConnectionTester
         };
         let status = response.status();
         if status.is_success() {
-            ProviderConnectionTestStatus::Succeeded {
-                profile: profile.profile().to_owned(),
-                fingerprint: profile.fingerprint(),
+            match Self::parse_models(profile, response) {
+                Ok(models) => ProviderConnectionTestStatus::Succeeded {
+                    profile: profile.profile().to_owned(),
+                    fingerprint: profile.fingerprint(),
+                    models,
+                },
+                Err(ModelsResponseError::Unavailable) => {
+                    Self::failed(ProviderConnectionFailureCategory::Unavailable, true)
+                }
+                Err(ModelsResponseError::InvalidResponse) => {
+                    Self::failed(ProviderConnectionFailureCategory::InvalidResponse, false)
+                }
             }
         } else if matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) {
             Self::failed(ProviderConnectionFailureCategory::CredentialRejected, false)

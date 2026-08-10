@@ -242,10 +242,14 @@ status degradation. Provider Profile create/edit routes now use a purpose-built
 terminal-neutral wizard over the same revision-bound Draft. It can build the
 validated, frozen candidate Profile and explicitly test its configured `models`
 route with one bounded, no-proxy, no-redirect GET. Results expose only a fixed
-status category, retryability, and the candidate identity; they do not commit the
-Draft, read a response body, or return endpoint or credential data. The CLI
-offers the same status-only check for the currently selected committed Profile
-through `config test-provider`.
+status category, retryability, the candidate identity, and a bounded model-list
+observation. A valid JSON response may contribute at most 1,024 unique model
+IDs of at most 256 bytes each inside a 256 KiB body. Exact release-catalog IDs
+carry their release key; unknown IDs carry no dialect, capability, or execution
+authority. The check does not commit the Draft, merge a live catalog, update a
+Provider Epoch, or return endpoint or credential data. The CLI offers the same
+read-only observation for the currently selected committed Profile through
+`config test-provider`.
 Dirty drafts cannot be discarded implicitly, and failed validation or revision
 conflicts leave the editor live. The public `tui` command is the first real
 product terminal adapter: it enters the alternate screen and raw mode, maps
@@ -254,8 +258,8 @@ Unicode-aware Direct VT cell diff, suppresses identical frames, clears stale
 cells, and restores the terminal on normal and error returns. This tracer is
 read-only and snapshot-based. It is not a mutable terminal editor, approval
 surface, live refresh loop, audited ConPTY integration, object-name dialog,
-rendered template picker, starter-preset workflow, or live catalog discovery.
-Live credential-gated provider validation, configurable proxy policy,
+rendered template picker, starter-preset workflow, or persistent live catalog
+discovery. Live inference conformance, configurable proxy policy,
 reconnect/retry, OpenCode Go Messages execution,
 Messages reasoning blocks, Preset context/fallback execution, richer approval
 presentation, broader Provider and Tool adapters,

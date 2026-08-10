@@ -50,7 +50,7 @@ retains the
 deterministic simulator only when no custom profile is selected. Windows
 Credential Manager is the current platform
 backend; non-Windows product credential access fails closed. Retry, reconnect,
-live-provider validation, and broader Tool presentation remain separate work.
+live inference conformance, and broader Tool presentation remain separate work.
 All three HTTP dialect paths reject serialized request bodies above 128 KiB
 before network I/O. A Tool continuation also rejects any second Tool call at
 the adapter boundary; the Runtime repeats that invariant before projection.
@@ -364,11 +364,17 @@ remains synthetic and does not constitute a live-provider test.
 The product also has an explicit Provider connection-test port for configured
 OpenAI-compatible Profiles. It sends one bounded GET to the
 frozen Profile's configured `models` route, with proxy discovery and redirects
-disabled and the same origin-bound credential policy as inference. It does not
-read the response body, discover models, mutate Config, retry, or expose the
-endpoint or credential in its status. The terminal-neutral Provider Profile
-wizard can test an uncommitted validated candidate; `config test-provider` tests
-the currently selected committed Profile.
+disabled and the same origin-bound credential policy as inference. A successful
+response must use JSON, fit within 256 KiB, and contain at most 1,024 unique
+model IDs of at most 256 bytes each. The port ignores every remote field except
+`id`, sorts accepted IDs, and adds an optional release-catalog key only after an
+exact template/model match. Unknown IDs carry no dialect, capability, adapter,
+endpoint, pricing, or credential authority. The result is an ephemeral
+observation bound to the frozen Profile fingerprint: it does not mutate Config,
+merge the catalog, update a Provider Epoch, retry, or expose the response body,
+endpoint, or credential. The terminal-neutral Provider Profile wizard can test
+an uncommitted validated candidate; `config test-provider` tests the currently
+selected committed Profile.
 
 A two-request test for each dialect verifies its exact function definition,
 initial Tool-call stream, canonical `local.echo` mapping, approved output
@@ -395,7 +401,7 @@ plus the [OpenCode Go endpoint matrix](https://opencode.ai/docs/go/).
 
 ## Still Pending
 
-- Live credential-gated provider validation, live catalog discovery/refresh,
+- Live inference conformance, persistent catalog discovery/refresh,
   starter-preset acceptance, configurable proxy policy, broader TLS platform
   evidence, reconnect classification, and retry policy. Release Provider
   Template defaults and seed catalog facts are bundled, but the current adapters

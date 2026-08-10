@@ -176,8 +176,8 @@ route, `max_output_tokens`, Bearer authorization, the same policy rejection,
 and one Responses Tool continuation through durable approval.
 
 The remaining slices are still policy, protocol, and fault-adapter work:
-live-provider validation, non-Windows credential backends, configurable proxy
-policy, live catalog discovery, OpenCode Go Messages execution, DeepSeek
+live inference conformance, non-Windows credential backends, configurable proxy
+policy, persistent live catalog discovery, OpenCode Go Messages execution, DeepSeek
 Chat/Messages reasoning blocks, general Preset
 context/fallback execution, broader canonical Items, multiple
 Tool calls,
@@ -250,12 +250,17 @@ Provider Profile create/edit routes now enter a terminal-neutral purpose-built
 wizard backed by the same Config Draft. It stages opaque credential references
 only through the credential field, derives a validated frozen candidate Profile
 without writing Config, and can explicitly test the configured `models` route.
-The product adapter performs one bounded no-proxy/no-redirect GET, does not read
-the response body, and returns only fixed redacted status categories. The same
-adapter powers `greentyper config test-provider` for the selected committed
-Profile. Tests cover success, missing credentials before network access, redacted
-upstream 503 classification, candidate non-mutation, result invalidation after a
-Draft change, and observed revision conflicts before a probe.
+The product adapter performs one bounded no-proxy/no-redirect GET and accepts
+only a JSON body up to 256 KiB containing at most 1,024 unique model IDs of at
+most 256 bytes each. It returns fixed redacted status categories plus a sorted,
+ephemeral observation whose entries contain only the ID and an exact optional
+release-catalog key. Unknown IDs gain no dialect, capability, or adapter
+authority. The same adapter powers `greentyper config test-provider` for the
+selected committed Profile. Tests cover bounded parsing, known and unknown IDs,
+unknown-model admission rejection before network I/O, missing credentials,
+redacted upstream 503 classification, candidate non-mutation, result
+invalidation after a Draft change, and observed revision conflicts before a
+probe.
 A release-bundled Provider Catalog now freezes schema-versioned OpenAI,
 DeepSeek, and OpenCode Go template defaults and seed model facts with
 field-level source references and observation time. Config Runtime applies
@@ -338,6 +343,9 @@ DeepSeek Responses, Chat Completions, and Messages pairs, and release-verified
 OpenCode Go Chat Completions pairs plus the exact GPT-5.6 Luna Responses pair
 are implemented; custom gateway routes and
 user-owned Model Presets can be selected explicitly by ID for headless Turns.
+The connection-test port also emits a bounded, one-shot model-list observation;
+it does not persist discovery records, change selector availability, or grant
+unknown models execution authority.
 Their Profile/model/dialect, optional output-token limit, typed reasoning effort,
 and typed service tier resolve through the frozen Config/Provider Epoch boundary.
 OpenAI Responses and Chat map the supported request fields. DeepSeek Responses

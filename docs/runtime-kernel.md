@@ -349,7 +349,7 @@ charges still require a future dedicated authority path.
   pinned Usage Windows, revision-bound summary/page `stats` projections, and
   terminal-neutral width-degradation and Context Pressure projection contracts
   are present. The first read-only Direct VT tracer renders those frozen rows.
-- Live-provider validation, non-Windows credential backends, configurable proxy
+- Live inference conformance, non-Windows credential backends, configurable proxy
   policy, broader TLS platform evidence, reconnect policy, multiple or parallel
   Tool calls, resumable result references, broader canonical Items, and the
   unimplemented Provider event kinds. The bounded SSE, OpenAI Responses and
