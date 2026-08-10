@@ -227,6 +227,7 @@ Required scenarios include:
 - Skill content changed before resume
 - Provider reconnect after partial output or tool call
 - Schema migration interrupted before replacement
+- SQLite WAL VFS write, short-write, and sync errors followed by a no-fault reopen, integrity check, and complete-prefix classification
 
 ### Security and Isolation Tests
 
@@ -375,7 +376,7 @@ Results include main process, TUI, per-Agent increment, child processes, and tot
 
 ## CI Matrix
 
-This is the required end-state matrix for a release candidate. The current bootstrap workflow implements formatting, checks, tests, lints, release packaging, the x86-64-v3 guard, an acceptance-harness smoke, a one-sample benchmark-pipeline smoke, isolated compile/test coverage for seven storage workloads, the terminal render matrix, the HTTP loopback transport matrix, and three process-global allocator runners, plus real same-binary cross-process CAS, migration interruption, and child termination/restart integration tests on macOS ARM and Windows. Broader Runtime/tool-effect crash, security, terminal process/input/resource, transport TLS/proxy-auth/fuzz/resource, allocator P0-P6 resource, and general fuzz jobs are added with the slices that make them executable.
+This is the required end-state matrix for a release candidate. The current bootstrap workflow implements formatting, checks, tests, lints, release packaging, the x86-64-v3 guard, an acceptance-harness smoke, a one-sample benchmark-pipeline smoke, isolated compile/test coverage for eight storage workloads, the terminal render matrix, the HTTP loopback transport matrix, and three process-global allocator runners, plus real same-binary cross-process CAS, migration interruption, child termination/restart integration tests, and synthetic SQLite WAL VFS fault recovery on macOS ARM and Windows. Broader Runtime/tool-effect crash, security, terminal process/input/resource, transport TLS/proxy-auth/fuzz/resource, allocator P0-P6 resource, and general fuzz jobs are added with the slices that make them executable.
 
 | Environment | Required evidence |
 | --- | --- |
@@ -386,7 +387,7 @@ This is the required end-state matrix for a release candidate. The current boots
 
 Sanitizer, loom-style concurrency exploration, or equivalent tools should run on a supported CI host when they add evidence unavailable on Windows. Platform-specific behavior still requires Windows tests.
 
-Windows CI executes the release-built acceptance binary's x86-64-v3 feature guard, a three-sample acceptance smoke, and a one-sample benchmark-pipeline smoke. It separately builds and tests the optional storage-, terminal-, transport-, and allocator-candidate runners. Storage smoke covers `critical-append-replay`, `timer-expiry-streaming-replay`, `cas-one-winner`, `interrupted-migration`, and `cross-process-crash-replay` for SQLite WAL and append log; terminal smoke covers `render-matrix` for direct VT and Ratatui/Crossterm; transport smoke covers HTTP `loopback-sse` for native WinHTTP through Wrest and Reqwest/Rustls; allocator smoke covers `allocation-pressure` in distinct system, Mimalloc, and Snmalloc executables and requires a shared correctness digest. Candidate binaries remain outside the portable product package. FMDev and Target evidence still use at least 30 measured runs for every required named workload; CI smoke samples are never treated as performance evidence.
+Windows CI executes the release-built acceptance binary's x86-64-v3 feature guard, a three-sample acceptance smoke, and a one-sample benchmark-pipeline smoke. It separately builds and tests the optional storage-, terminal-, transport-, and allocator-candidate runners. Storage smoke covers `critical-append-replay`, `timer-expiry-streaming-replay`, `cas-one-winner`, `interrupted-migration`, and `cross-process-crash-replay` for SQLite WAL and append log, plus SQLite-only `sqlite-vfs-fault-recovery`; terminal smoke covers `render-matrix` for direct VT and Ratatui/Crossterm; transport smoke covers HTTP `loopback-sse` for native WinHTTP through Wrest and Reqwest/Rustls; allocator smoke covers `allocation-pressure` in distinct system, Mimalloc, and Snmalloc executables and requires a shared correctness digest. Candidate binaries remain outside the portable product package. FMDev and Target evidence still use at least 30 measured runs for every required named workload; CI smoke samples are never treated as performance evidence.
 
 ## Release Gate
 

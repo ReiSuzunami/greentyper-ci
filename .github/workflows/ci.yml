@@ -270,6 +270,17 @@ jobs:
             --warmup-runs 1 `
             --expect-baseline x86-64-v3 `
             --machine-identifiers redacted
+          target/bench-storage/release/greentyper-acceptance.exe bench `
+            --comparison storage `
+            --implementation sqlite-wal `
+            --workload sqlite-vfs-fault-recovery `
+            --candidate-id "ci-$env:GITHUB_SHA" `
+            --source-revision "$env:GITHUB_SHA" `
+            --output candidate-smoke/storage-sqlite-wal-vfs-fault.json `
+            --runs 1 `
+            --warmup-runs 1 `
+            --expect-baseline x86-64-v3 `
+            --machine-identifiers redacted
       - name: Verify terminal candidate pipeline
         shell: pwsh
         run: |

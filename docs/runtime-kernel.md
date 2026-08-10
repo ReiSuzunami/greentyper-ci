@@ -352,6 +352,6 @@ charges still require a future dedicated authority path.
   resolution remain pending. Core call identity, Approval Grant binding,
   prepared-effect ordering, terminal digests, and reconciliation are present.
 - Byte-offset process termination around every remaining Runtime, Provider,
-  Tool, delivery, and product acknowledgement boundary; fuzzing; and SQLite VFS
-  fault injection.
+  Tool, delivery, and product acknowledgement boundary; fuzzing; real
+  power-loss evidence; and Windows directory-entry durability evidence.
 - Headless idle CPU and memory evidence on FMDev and the Target Machine.

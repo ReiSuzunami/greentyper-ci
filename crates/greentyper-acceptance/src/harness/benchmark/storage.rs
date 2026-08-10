@@ -12,6 +12,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 mod cas;
 mod crash;
 mod migration;
+mod sqlite_fault_vfs;
 
 const STORAGE_FIXTURE_JSON: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -41,6 +42,10 @@ const CRASH_FIXTURE_JSON: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../tests/fixtures/bench/storage/v1/cross-process-crash-replay.json"
 ));
+const SQLITE_VFS_FAULT_FIXTURE_JSON: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../tests/fixtures/bench/storage/v1/sqlite-vfs-fault-recovery.json"
+));
 const LOG_HEADER: &[u8; 8] = b"GTLG\x01\0\0\0";
 const LOG_HEADER_V2: &[u8; 8] = b"GTLG\x02\0\0\0";
 const TRANSACTION_MAGIC: &[u8; 4] = b"GTXN";
@@ -61,7 +66,8 @@ pub(super) fn catalog_entry() -> serde_json::Value {
             {"id": "cas-one-winner", "version": 2},
             {"id": "backup-restore", "version": 1},
             {"id": "interrupted-migration", "version": 2},
-            {"id": "cross-process-crash-replay", "version": 1}
+            {"id": "cross-process-crash-replay", "version": 1},
+            {"id": "sqlite-vfs-fault-recovery", "version": 1}
         ],
         "purpose": "candidate evidence; not a storage selection"
     })
@@ -80,6 +86,11 @@ pub(super) fn target(implementation: &str, workload: &str) -> AppResult<Box<dyn 
             )));
         }
     };
+    if workload == StorageWorkload::SqliteVfsFaultRecovery && engine != StorageEngine::SqliteWal {
+        return Err(cli_error(
+            "benchmark workload storage/sqlite-vfs-fault-recovery requires implementation storage/sqlite-wal",
+        ));
+    }
     let events = generate_events(&fixture)?;
     let (events, timer_batch_stats) = if workload == StorageWorkload::TimerExpiryStreamingReplay {
         let plan = plan_timer_expiry_batches(
@@ -145,6 +156,8 @@ struct StorageFixture {
     migration_interruptions: Option<u32>,
     #[serde(default)]
     crash_cases: Option<u32>,
+    #[serde(default)]
+    sqlite_vfs_fault_cases: Option<u32>,
 }
 
 fn validate_fixture(fixture: &StorageFixture, workload: StorageWorkload) -> AppResult<()> {
@@ -242,6 +255,23 @@ fn validate_fixture(fixture: &StorageFixture, workload: StorageWorkload) -> AppR
                 && fixture.migration_interruptions.is_none()
                 && fixture.crash_cases == Some(6)
         }
+        StorageWorkload::SqliteVfsFaultRecovery => {
+            fixture.workload_id == "sqlite-vfs-fault-recovery"
+                && fixture.transactions == 2
+                && fixture.events_per_transaction == 4
+                && fixture.payload_bytes == 256
+                && fixture.max_batch_events.is_none()
+                && fixture.batch_expiry_ms.is_none()
+                && fixture.inter_event_delays_ms.is_none()
+                && fixture.cas_contenders.is_none()
+                && fixture.backup_restore_cycles.is_none()
+                && fixture.migration_interruptions.is_none()
+                && fixture.crash_cases.is_none()
+        }
+    };
+    let vfs_fault_shape_is_valid = match workload {
+        StorageWorkload::SqliteVfsFaultRecovery => fixture.sqlite_vfs_fault_cases == Some(3),
+        _ => fixture.sqlite_vfs_fault_cases.is_none(),
     };
     let expected_workload_version = match workload {
         StorageWorkload::CasOneWinner | StorageWorkload::InterruptedMigration => 2,
@@ -250,6 +280,7 @@ fn validate_fixture(fixture: &StorageFixture, workload: StorageWorkload) -> AppR
     if fixture.comparison_id != "storage"
         || fixture.workload_version != expected_workload_version
         || !shape_is_valid
+        || !vfs_fault_shape_is_valid
     {
         return Err(cli_error("storage benchmark fixture is invalid"));
     }
@@ -308,6 +339,7 @@ enum StorageWorkload {
     BackupRestore,
     InterruptedMigration,
     CrossProcessCrashReplay,
+    SqliteVfsFaultRecovery,
 }
 
 impl StorageWorkload {
@@ -333,6 +365,10 @@ impl StorageWorkload {
             "cross-process-crash-replay" => {
                 Ok((Self::CrossProcessCrashReplay, CRASH_FIXTURE_JSON.as_bytes()))
             }
+            "sqlite-vfs-fault-recovery" => Ok((
+                Self::SqliteVfsFaultRecovery,
+                SQLITE_VFS_FAULT_FIXTURE_JSON.as_bytes(),
+            )),
             _ => Err(cli_error(format!(
                 "benchmark workload storage/{workload} is not compiled into this runner"
             ))),
@@ -348,6 +384,7 @@ impl StorageWorkload {
             Self::BackupRestore => "backup-restore",
             Self::InterruptedMigration => "interrupted-migration",
             Self::CrossProcessCrashReplay => "cross-process-crash-replay",
+            Self::SqliteVfsFaultRecovery => "sqlite-vfs-fault-recovery",
         }
     }
 
@@ -368,6 +405,9 @@ impl StorageWorkload {
             Self::CrossProcessCrashReplay => {
                 "16-event Ledger with 6 child-process termination and restart cases"
             }
+            Self::SqliteVfsFaultRecovery => {
+                "2 SQLite transactions with 3 deterministic WAL VFS fault cases"
+            }
         }
     }
 
@@ -387,6 +427,9 @@ impl StorageWorkload {
             }
             Self::CrossProcessCrashReplay => {
                 "child crashes recovered as known-not-repeated or ambiguous-blocked"
+            }
+            Self::SqliteVfsFaultRecovery => {
+                "VFS faults recovered as complete SQLite transaction prefixes"
             }
         }
     }
@@ -413,6 +456,9 @@ impl StorageWorkload {
             }
             Self::CrossProcessCrashReplay => {
                 "spawn and terminate one child before write, at four transaction progress points, and after sync before acknowledgement; restart and reconcile"
+            }
+            Self::SqliteVfsFaultRecovery => {
+                "prepare one durable SQLite transaction, inject first-WAL-write, short-write, and first-WAL-sync failures into the next transaction, reopen without faults, integrity-check, and classify recovery"
             }
         }
     }
@@ -450,7 +496,7 @@ impl BenchmarkTarget for StorageTarget {
             comparison_id: "storage",
             comparison_version: 1,
             implementation: self.engine.implementation(),
-            implementation_revision: "6",
+            implementation_revision: "7",
             dependencies: self.engine.dependencies(),
             workload_id: self.workload.id(),
             workload_version: self.fixture.workload_version,
@@ -521,6 +567,15 @@ impl BenchmarkTarget for StorageTarget {
                     self.fixture
                         .crash_cases
                         .ok_or_else(|| cli_error("crash fixture has no case count"))?,
+                );
+            }
+            StorageWorkload::SqliteVfsFaultRecovery => {
+                return sqlite_fault_vfs::run_workload(
+                    run_dir,
+                    &self.events,
+                    self.fixture.sqlite_vfs_fault_cases.ok_or_else(|| {
+                        cli_error("SQLite VFS fault fixture has no fault case count")
+                    })?,
                 );
             }
             StorageWorkload::CriticalAppendReplay
@@ -864,7 +919,10 @@ fn run_sqlite(run_dir: &Path, events: &[EventRecord]) -> AppResult<StorageObserv
 }
 
 fn create_sqlite_store(database_path: &Path) -> AppResult<Connection> {
-    let connection = Connection::open(database_path)?;
+    initialize_sqlite_store(Connection::open(database_path)?)
+}
+
+fn initialize_sqlite_store(connection: Connection) -> AppResult<Connection> {
     let journal_mode: String =
         connection.query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))?;
     if !journal_mode.eq_ignore_ascii_case("wal") {
@@ -1955,8 +2013,8 @@ mod tests {
         let append = target_for(&options("append-log")).expect("append target");
         assert_eq!(sqlite.descriptor().process_mode, "cross-process");
         assert_eq!(append.descriptor().process_mode, "cross-process");
-        assert_eq!(sqlite.descriptor().implementation_revision, "6");
-        assert_eq!(append.descriptor().implementation_revision, "6");
+        assert_eq!(sqlite.descriptor().implementation_revision, "7");
+        assert_eq!(append.descriptor().implementation_revision, "7");
     }
 
     #[test]
@@ -2006,7 +2064,39 @@ mod tests {
         for descriptor in [sqlite.descriptor(), append.descriptor()] {
             assert_eq!(descriptor.workload_version, 2);
             assert_eq!(descriptor.process_mode, "cross-process");
-            assert_eq!(descriptor.implementation_revision, "6");
+            assert_eq!(descriptor.implementation_revision, "7");
         }
+    }
+
+    #[test]
+    fn sqlite_vfs_fault_fixture_is_frozen_and_sqlite_only() {
+        let fixture: StorageFixture = serde_json::from_str(SQLITE_VFS_FAULT_FIXTURE_JSON)
+            .expect("SQLite VFS fault fixture JSON");
+        validate_fixture(&fixture, StorageWorkload::SqliteVfsFaultRecovery)
+            .expect("frozen SQLite VFS fault fixture");
+        let mut changed = fixture.clone();
+        changed.sqlite_vfs_fault_cases = Some(2);
+        assert!(validate_fixture(&changed, StorageWorkload::SqliteVfsFaultRecovery).is_err());
+
+        let options = |implementation: &str| Options {
+            comparison: "storage".into(),
+            implementation: implementation.into(),
+            workload: "sqlite-vfs-fault-recovery".into(),
+            candidate_id: "test".into(),
+            source_revision: "0123456".into(),
+            output: "unused.json".into(),
+            runs: 1,
+            warmup_runs: 1,
+            expect_baseline: None,
+            machine_identifiers: MachineIdentifierPolicy::Redacted,
+        };
+        assert!(target_for(&options("append-log")).is_err());
+        let mut sqlite = target_for(&options("sqlite-wal")).expect("SQLite fault target");
+        assert_eq!(sqlite.descriptor().process_mode, "in-process");
+        let (_, observation) = execute_once(sqlite.as_mut()).expect("SQLite VFS fault run");
+        assert_eq!(observation.operation_units, 3);
+        assert_eq!(observation.gauges["complete_prefix_recoveries"], 3);
+        assert_eq!(observation.gauges["known_not_repeated"], 2);
+        assert_eq!(observation.gauges["ambiguous_blocked"], 1);
     }
 }
