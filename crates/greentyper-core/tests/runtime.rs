@@ -4,6 +4,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use greentyper_core::config::{ConfigDocument, ConfigLayers, ConfigPaths, ConfigRuntime};
+use greentyper_core::context::{
+    ContextPressure, ContextPressureAccuracy, ContextPressureInput, ContextPressurePolicy,
+};
 use greentyper_core::ledger::{EventData, FileLedger, LedgerHead};
 use greentyper_core::provider::{
     DeterministicProvider, ProviderError, ProviderEvent, ProviderProfileSnapshot, ProviderRequest,
@@ -63,6 +66,78 @@ fn prepared_output_is_acknowledged_once_and_replays_ready() {
     assert_eq!(snapshot.items[1].text(), "simulated: hello");
     drop(recovered);
     fs::remove_file(path).expect("cleanup Runtime ledger");
+}
+
+#[test]
+fn hard_context_pressure_stops_admission_before_ledger_or_provider_effects() {
+    let path = temp_path("context-pressure-hard");
+    let mut runtime = RuntimeKernel::open(&path).expect("open Runtime");
+    let initial = runtime.snapshot();
+    let pressure = ContextPressure::project(
+        ContextPressureInput::known(1_000, 800, 100, ContextPressureAccuracy::Exact),
+        ContextPressurePolicy::default(),
+    )
+    .expect("hard Context Pressure");
+    let mut provider = CountingProvider::default();
+
+    assert!(matches!(
+        runtime.execute_with_context_pressure(
+            &ConfigLayers::default(),
+            pressure,
+            "must not be admitted",
+            &mut provider,
+        ),
+        Err(RuntimeError::ContextAdmissionBlocked { pressure: actual }) if actual == pressure
+    ));
+    assert_eq!(provider.calls, 0);
+    assert_eq!(runtime.snapshot(), initial);
+    drop(runtime);
+
+    let recovered = RuntimeKernel::open(&path).expect("reopen unchanged Runtime");
+    assert_eq!(recovered.snapshot(), initial);
+    drop(recovered);
+    fs::remove_file(path).expect("cleanup Runtime ledger");
+}
+
+#[test]
+fn soft_and_unknown_context_pressure_preserve_existing_admission() {
+    let projections = [
+        ContextPressure::project(
+            ContextPressureInput::known(1_000, 550, 100, ContextPressureAccuracy::Exact),
+            ContextPressurePolicy::default(),
+        )
+        .expect("soft Context Pressure"),
+        ContextPressure::project(
+            ContextPressureInput::new(
+                None,
+                Some(550),
+                Some(100),
+                Some(ContextPressureAccuracy::Estimated),
+            ),
+            ContextPressurePolicy::default(),
+        )
+        .expect("unknown Context Pressure"),
+    ];
+
+    for (index, pressure) in projections.into_iter().enumerate() {
+        let path = temp_path(&format!("context-pressure-admit-{index}"));
+        let mut runtime = RuntimeKernel::open(&path).expect("open Runtime");
+        let mut provider = CountingProvider::default();
+        let output = runtime
+            .execute_with_context_pressure(
+                &ConfigLayers::default(),
+                pressure,
+                "admitted",
+                &mut provider,
+            )
+            .expect("soft and unknown pressure preserve admission");
+        assert_eq!(provider.calls, 1);
+        runtime
+            .acknowledge(output.delivery())
+            .expect("acknowledge output");
+        drop(runtime);
+        fs::remove_file(path).expect("cleanup Runtime ledger");
+    }
 }
 
 #[test]

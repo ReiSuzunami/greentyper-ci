@@ -4,6 +4,7 @@
 
 pub mod agent_team;
 pub mod config;
+pub mod context;
 pub mod ledger;
 pub mod model;
 pub mod pricing;

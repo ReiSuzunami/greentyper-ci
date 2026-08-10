@@ -27,6 +27,10 @@ fn presentation_smoke_emits_a_read_only_terminal_neutral_snapshot() {
         snapshot["statusline"]["context_pressure_percent"]["state"],
         "unknown"
     );
+    assert_eq!(
+        snapshot["statusline"]["context_pressure"]["state"],
+        "unknown"
+    );
     assert_eq!(snapshot["statusline"]["one_hour_usage"]["state"], "unknown");
     assert_eq!(snapshot["statusline"]["active_agents"]["state"], "unknown");
     assert_eq!(snapshot["statusline"]["blocker_count"]["state"], "unknown");

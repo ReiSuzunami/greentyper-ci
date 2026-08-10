@@ -241,6 +241,12 @@ create/delete projection. Terminal-neutral golden tests freeze exact 40x12,
 and grapheme-safe CJK/emoji/combining-mark text fitting. The subprocess smoke
 emits the same three layouts without accepting a filesystem path. These tests do
 not constitute an ANSI/VT backend, live terminal input, or ConPTY terminal claim.
+Context Pressure tests freeze exact 65%/90% threshold transitions, estimated and
+missing-fact propagation, invalid policy/limit and arithmetic failure, and the
+no-side-effect hard admission gate. Product presentation tests assert estimated
+occupancy renders with `~` while an unavailable pressure fact remains unknown.
+These tests do not constitute Artifact offload, compaction, checkpoint,
+provider-native context adaptation, or P6 resource evidence.
 Provider-wizard tests derive a normalized Profile from an uncommitted multi-field
 Draft, keep credential references out of serialized screens, leave Config
 untouched during the connection check, invalidate a prior result after any staged

@@ -280,6 +280,18 @@ The cursor checksum detects corruption only. It carries no authority or
 confidentiality; a future remote transport must bind continuation state to its
 authenticated Session if it needs adversarial tamper resistance.
 
+Context Pressure has an initial non-durable admission seam. The core projector
+accepts immutable optional facts for context limit, used tokens, output reserve,
+and exact/estimated accuracy. It uses checked integer arithmetic, preserves a
+specific unknown reason, and applies the default 65% soft / 90% hard thresholds.
+`execute_with_context_pressure` stops only a known hard projection, after normal
+input/readiness checks but before identifier allocation, Config/Provider freeze,
+Ledger append, or Provider execution. Soft and unknown projections continue
+through the existing admission path. Pressure is not a Runtime Event and does
+not change recovery of an already admitted Turn. The Context Engine still needs
+authoritative Context Views, reduction, artifact offload, Safe Barrier
+checkpoints, and stale-result CAS handling.
+
 Prompt/provider text and credential material are not part of the Usage domain.
 Requested or observed metadata not supplied by the current Provider remains
 unknown. Runtime Event schema 5 records `UsageAttemptFinished` before
@@ -312,11 +324,13 @@ future dedicated authority paths.
   dry-run validation, atomic commit path, interaction controller, Provider
   Profile candidate/connection-test flow, and deterministic viewport-row
   projection are present.
-- Terminal-backed TUI/statusline Usage presentation, provider-reported charge
+- Terminal-backed TUI/statusline Usage presentation, automatic Context View
+  construction/compaction, provider-reported charge
   and subscription-quota values, richer observed model/effort/tier
   metadata, and FMDev P6 measurements. The durable attempts, cached rollups,
   pinned Usage Windows, revision-bound summary/page `stats` projections, and
-  terminal-neutral width-degradation contract are present.
+  terminal-neutral width-degradation and Context Pressure projection contracts
+  are present.
 - Live-provider validation, non-Windows credential backends, configurable proxy
   policy, broader TLS platform evidence, reconnect policy, multiple or parallel
   Tool calls, resumable result references, broader canonical Items, and the

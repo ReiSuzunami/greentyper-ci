@@ -293,9 +293,11 @@ A selection applies to the current Agent on its next Turn by default. The user m
 
 ## Statusline
 
-The target statusline is event-driven and adaptive. The current
-terminal-neutral projection exposes recovery, provider/model, usage,
-active-agent count, blocker, Config, and unknown Context Pressure facts. Its compact row now applies
+The target statusline is event-driven and adaptive. The current terminal-neutral
+projection exposes recovery, provider/model, usage, active-agent count, blocker,
+Config, and exact/estimated/unknown Context Pressure facts supplied by the core
+projector. Estimated occupancy renders with `~`; a missing limit, used-token
+fact, reserve, or accuracy marker stays unknown. Its compact row now applies
 a deterministic priority and Unicode-safe truncation at 40, 80, and 160 columns,
 and adds a detail row from 120 columns. This is a terminal-neutral layout
 contract, not an ANSI/VT renderer or live resize/input loop. The target has four
@@ -328,7 +330,12 @@ process-resource segments are opt-in and may use scheduled low-frequency updates
 only under a measured Performance Contract exception. v1 does not execute
 arbitrary shell commands from the statusline.
 
-Context display distinguishes projected next-request occupancy from last provider-reported input and marks estimates with `~`. It includes reserved output tokens and soft/hard Compaction thresholds. Cache display uses read and write ratios where reported; unsupported values display as unknown rather than zero.
+The implemented terminal-neutral Context snapshot carries projected occupancy,
+used tokens, reserved output tokens, exact/estimated provenance, and the 65% / 90%
+soft/hard policy. The compact segment renders only occupancy. Automatic Context
+View construction and the target comparison with last provider-reported input
+remain pending. Cache display uses read and write ratios where reported;
+unsupported values display as unknown rather than zero.
 
 ## Usage and Cost Windows
 

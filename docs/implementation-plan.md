@@ -241,11 +241,20 @@ checksummed cursors to that revision and requested instant, cap pages at 1,000
 attempts, and reject stale or malformed cursors. They still replay the bounded
 Ledger before building the cached projection; this slice is
 output/materialization pagination, not an indexed on-disk query engine.
+A first Context Pressure contract is also implemented. A pure core projector
+combines caller-supplied context limit, used tokens, output reserve, and
+exact/estimated provenance with checked arithmetic and explicit unknown reasons.
+The default policy classifies normal, soft, and hard pressure at 65% and 90%.
+An optional single-Agent Runtime path stops a known hard-pressure Turn before
+Ledger or Provider effects; soft and unknown facts preserve existing admission.
+The terminal-neutral status projection carries the immutable snapshot and marks
+estimated occupancy with `~`. No reduction or compaction is performed.
 
 This does not complete Phase 3. VT/ConPTY rendering and input, the keyboard event
 loop and terminal-backed schema editors, rendered object-name and confirmation
 dialogs, rendered credential binding and template-picker/starter-preset workflow,
-live catalog discovery and Recent evidence, Context Pressure, provider-reported
+live catalog discovery and Recent evidence, automatic Context View/token-source
+projection, provider-reported
 charge and subscription-quota accounting, richer observed Provider metadata,
 and the P0/P1/P2/P6
 performance evidence remain pending.
@@ -289,6 +298,11 @@ Exit criteria:
 ## Phase 6: Context, Memory, and Compaction
 
 Implement Artifact offload, Context Pressure thresholds, deterministic reduction, Runtime Fold, Safe Barrier checkpoints, semantic handoff, provider-native compaction adapters, typed Memory Candidates, evidence promotion, scoped retrieval, supersession, user edit/forget/export, and periodic full rebase.
+
+The pure pressure value object, default threshold classification, optional hard
+admission gate, and terminal-neutral exact/estimated/unknown projection already
+exist. This phase supplies the authoritative Context View inputs and every
+mutation/recovery mechanism around that decision.
 
 Exit criteria:
 

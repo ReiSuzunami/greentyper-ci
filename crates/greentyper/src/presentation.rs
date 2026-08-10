@@ -13,6 +13,7 @@ use greentyper_core::config::{
     ConfigRuntimeStatus, ConfigScope, ConfigSection, ConfigValue, ModelCatalogView,
     ModelPresetView, match_command_paths,
 };
+use greentyper_core::context::{ContextPressureAccuracy, ContextPressureSnapshot};
 use greentyper_core::ledger::LedgerHead;
 use greentyper_core::provider_catalog::CatalogAvailability;
 use greentyper_core::runtime::{KernelTeamSnapshot, RecoveryStatus, RuntimeSnapshot};
@@ -169,6 +170,7 @@ pub(crate) struct StatuslineView {
     provider_profile: Availability<String>,
     model: Availability<String>,
     context_pressure_percent: Availability<u8>,
+    context_pressure: Availability<ContextPressureSnapshot>,
     one_hour_usage: Availability<UsageSummaryView>,
     thread: Option<u64>,
     item_count: usize,
@@ -420,7 +422,7 @@ pub(crate) struct PresentationSources<'a> {
     pub(crate) config: &'a ConfigRuntimeStatus,
     pub(crate) provider_profile: Option<&'a str>,
     pub(crate) model: Option<&'a str>,
-    pub(crate) context_pressure_percent: Option<u8>,
+    pub(crate) context_pressure: Option<&'a ContextPressureSnapshot>,
     pub(crate) model_presets: &'a [ModelPresetView],
     pub(crate) catalog_models: &'a [ModelCatalogView],
 }
@@ -440,12 +442,6 @@ impl TuiViewModel {
         selected: usize,
         sources: PresentationSources<'_>,
     ) -> Result<Self, PresentationError> {
-        if sources
-            .context_pressure_percent
-            .is_some_and(|value| value > 100)
-        {
-            return Err(PresentationError::InvalidContextPressure);
-        }
         let slash = SlashPanelView::build(slash_query, selected)?;
         let models =
             ModelSelectorView::build(sources.model_presets, sources.catalog_models, model_query)?;
@@ -460,7 +456,12 @@ impl TuiViewModel {
             provider_profile: availability(sources.provider_profile),
             model: availability(sources.model),
             context_pressure_percent: sources
-                .context_pressure_percent
+                .context_pressure
+                .and_then(|pressure| pressure.occupancy_percent())
+                .map_or(Availability::Unknown, Availability::Known),
+            context_pressure: sources
+                .context_pressure
+                .copied()
                 .map_or(Availability::Unknown, Availability::Known),
             one_hour_usage: sources.usage.map_or(Availability::Unknown, |usage| {
                 Availability::Known(usage.rolling().one_hour().into())
@@ -1045,8 +1046,18 @@ fn status_segments(status: &StatuslineView) -> Vec<StatusSegment> {
         },
         StatusSegment {
             kind: StatusSegmentKind::Context,
-            text: match status.context_pressure_percent {
-                Availability::Known(percent) => format!("ctx {percent}%"),
+            text: match &status.context_pressure {
+                Availability::Known(pressure) => {
+                    match (pressure.occupancy_percent(), pressure.accuracy()) {
+                        (Some(percent), Some(ContextPressureAccuracy::Estimated)) => {
+                            format!("ctx ~{percent}%")
+                        }
+                        (Some(percent), Some(ContextPressureAccuracy::Exact)) => {
+                            format!("ctx {percent}%")
+                        }
+                        _ => "ctx ?".to_owned(),
+                    }
+                }
                 Availability::Unknown => "ctx ?".to_owned(),
             },
             preferred_width: 10,
@@ -1554,7 +1565,7 @@ pub(crate) fn build_smoke_view(
             config: &status,
             provider_profile: Some("simulator"),
             model: Some("deterministic-v1"),
-            context_pressure_percent: None,
+            context_pressure: None,
             model_presets: &[],
             catalog_models: &[],
         },
@@ -1668,7 +1679,6 @@ fn build_blockers(sources: &PresentationSources<'_>) -> Vec<BlockerView> {
 #[derive(Debug)]
 pub(crate) enum PresentationError {
     Command(CommandQueryError),
-    InvalidContextPressure,
     InvalidModelQuery,
 }
 
@@ -1676,9 +1686,6 @@ impl fmt::Display for PresentationError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Command(source) => write!(formatter, "{source}"),
-            Self::InvalidContextPressure => {
-                formatter.write_str("context pressure must be between 0 and 100")
-            }
             Self::InvalidModelQuery => formatter.write_str("model query is invalid"),
         }
     }
@@ -1688,7 +1695,7 @@ impl Error for PresentationError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Command(source) => Some(source),
-            Self::InvalidContextPressure | Self::InvalidModelQuery => None,
+            Self::InvalidModelQuery => None,
         }
     }
 }
@@ -1763,6 +1770,10 @@ mod tests {
         ConfigRuntime, ConfigRuntimeError, ConfigRuntimeStatus, ConfigScope, ConfigValue,
         ModelPresetView,
     };
+    use greentyper_core::context::{
+        ContextPressure, ContextPressureAccuracy, ContextPressureInput, ContextPressurePolicy,
+        ContextPressureState,
+    };
     use greentyper_core::ledger::LedgerHead;
     use greentyper_core::model::{DeliveryId, ThreadId, TurnId};
     use greentyper_core::provider::ProviderDialect;
@@ -1773,8 +1784,8 @@ mod tests {
     use super::{
         Availability, BlockerView, CostQuantityView, ModelSelectorView, PresentationController,
         PresentationControllerError, PresentationScreenView, PresentationSources, RecoveryBadge,
-        SlashPanelView, TuiViewModel, UsageQuantityView, UsageSummaryView, Viewport, cost_label,
-        display_width, fit_text,
+        SlashPanelView, StatusSegmentKind, TuiViewModel, UsageQuantityView, UsageSummaryView,
+        Viewport, cost_label, display_width, fit_text, status_segments,
     };
 
     static NEXT_TEMP: AtomicU64 = AtomicU64::new(1);
@@ -2160,7 +2171,7 @@ source = "unknown"
                 config: &config,
                 provider_profile: None,
                 model: None,
-                context_pressure_percent: None,
+                context_pressure: None,
                 model_presets: &[],
                 catalog_models: &[],
             },
@@ -2215,7 +2226,7 @@ source = "unknown"
                 config: &config,
                 provider_profile: None,
                 model: None,
-                context_pressure_percent: None,
+                context_pressure: None,
                 model_presets: &[],
                 catalog_models: &[],
             },
@@ -2238,6 +2249,61 @@ source = "unknown"
         assert_eq!(&view.statusline.one_hour_usage, &Availability::Unknown);
         assert_eq!(view.statusline.active_agents, Availability::Unknown);
         assert_eq!(view.statusline.blocker_count, Availability::Unknown);
+    }
+
+    #[test]
+    fn statusline_marks_estimated_context_pressure_without_inventing_exactness() {
+        let runtime = runtime(RecoveryStatus::Ready);
+        let config = ConfigRuntimeStatus {
+            ready: true,
+            issues: Vec::new(),
+        };
+        let pressure = ContextPressure::project(
+            ContextPressureInput::known(
+                200_000,
+                100_000,
+                30_000,
+                ContextPressureAccuracy::Estimated,
+            ),
+            ContextPressurePolicy::default(),
+        )
+        .expect("estimated Context Pressure");
+        let view = TuiViewModel::build(
+            "/",
+            "",
+            0,
+            PresentationSources {
+                runtime: &runtime,
+                usage: None,
+                team: None,
+                tools: None,
+                config: &config,
+                provider_profile: None,
+                model: None,
+                context_pressure: Some(&pressure),
+                model_presets: &[],
+                catalog_models: &[],
+            },
+        )
+        .expect("view model");
+
+        assert_eq!(
+            view.statusline.context_pressure_percent,
+            Availability::Known(65)
+        );
+        assert!(matches!(
+            &view.statusline.context_pressure,
+            Availability::Known(snapshot)
+                if snapshot.accuracy() == Some(ContextPressureAccuracy::Estimated)
+                    && snapshot.state() == ContextPressureState::Soft
+        ));
+        assert_eq!(
+            status_segments(&view.statusline)
+                .into_iter()
+                .find(|segment| segment.kind == StatusSegmentKind::Context)
+                .map(|segment| segment.text),
+            Some("ctx ~65%".to_owned())
+        );
     }
 
     #[test]
@@ -2339,7 +2405,7 @@ source = "unknown"
                 config: &config,
                 provider_profile: None,
                 model: None,
-                context_pressure_percent: None,
+                context_pressure: None,
                 model_presets: &presets,
                 catalog_models: &[],
             },
@@ -2804,7 +2870,7 @@ credential = "synthetic-deepseek-credential-reference"
                 config: &config,
                 provider_profile: Some("fixture-provider"),
                 model: Some("deterministic-v1"),
-                context_pressure_percent: None,
+                context_pressure: None,
                 model_presets: &[],
                 catalog_models: &[],
             },

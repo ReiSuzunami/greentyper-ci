@@ -138,6 +138,15 @@ Explicit `--summary-only` and `--limit 1..1000` modes instead return a
 revision-stamped report; bounded pages carry a checksummed `next_cursor` tied to
 the Ledger head and requested instant, so an append makes an old cursor fail
 stale rather than mixing revisions.
+Core now also has a deterministic Context Pressure projector. It combines an
+explicit context limit, used-token fact, output reserve, and exact/estimated
+marker with checked integer arithmetic and default 65% soft / 90% hard
+thresholds. Missing facts remain explicitly unknown. The optional Runtime
+admission path rejects a known hard-pressure Turn before any Ledger append or
+Provider call; soft and unknown projections preserve the existing path. The
+terminal-neutral status projection serializes the immutable facts and marks an
+estimate as `ctx ~N%`. Automatic Context View construction, reduction,
+compaction, checkpoints, and provider-native adapters remain Phase 6 work.
 Editable Config schedules require manual provenance. Provider-reported charges,
 trusted template rates, and subscription quota values remain separate and are
 not inferred from these estimates.

@@ -16,6 +16,7 @@ use crate::agent_team::{
 use crate::config::{
     ConfigEpoch, ConfigError, ConfigLayer, ConfigLayers, ConfigSource, MAX_CONFIG_STRING_BYTES,
 };
+use crate::context::{ContextAdmissionDecision, ContextPressureSnapshot};
 use crate::ledger::{
     DurabilityReceipt, EventData, FileLedger, LedgerError, LedgerHead, StoredEvent,
 };
@@ -259,6 +260,7 @@ pub struct RuntimeKernel {
 struct TurnAdmission {
     usage_windows: Vec<UsageWindow>,
     price_schedules: PriceScheduleBook,
+    context_pressure: Option<ContextPressureSnapshot>,
     input: String,
     provider_snapshot: Option<ProviderProfileSnapshot>,
     provider_dialect: Option<ProviderDialect>,
@@ -644,6 +646,34 @@ impl RuntimeKernel {
             TurnAdmission {
                 usage_windows,
                 price_schedules,
+                context_pressure: None,
+                input: input.into(),
+                provider_snapshot: provider.profile_snapshot().cloned(),
+                provider_dialect: provider.dialect(),
+                agent: None,
+            },
+        )?;
+        self.drive_pending(provider)
+    }
+
+    /// Executes one Turn with an immutable Context Pressure projection.
+    ///
+    /// A hard projection stops before admission or Provider execution. Soft
+    /// and unknown projections preserve the existing path; reduction and
+    /// compaction are separate Context Engine work.
+    pub fn execute_with_context_pressure(
+        &mut self,
+        layers: &ConfigLayers,
+        pressure: ContextPressureSnapshot,
+        input: impl Into<String>,
+        provider: &mut impl ProviderRuntime,
+    ) -> Result<PreparedOutput, RuntimeError> {
+        self.admit_turn(
+            layers,
+            TurnAdmission {
+                usage_windows: Vec::new(),
+                price_schedules: PriceScheduleBook::default(),
+                context_pressure: Some(pressure),
                 input: input.into(),
                 provider_snapshot: provider.profile_snapshot().cloned(),
                 provider_dialect: provider.dialect(),
@@ -722,6 +752,7 @@ impl RuntimeKernel {
             TurnAdmission {
                 usage_windows,
                 price_schedules,
+                context_pressure: None,
                 input: input.into(),
                 provider_snapshot: provider.profile_snapshot().cloned(),
                 provider_dialect: provider.dialect(),
@@ -937,6 +968,7 @@ impl RuntimeKernel {
         let TurnAdmission {
             usage_windows,
             price_schedules,
+            context_pressure,
             input,
             provider_snapshot,
             provider_dialect,
@@ -945,6 +977,13 @@ impl RuntimeKernel {
         self.require_ready()?;
         self.require_no_tool_reconciliation()?;
         validate_input(&input)?;
+        if context_pressure
+            .is_some_and(|pressure| pressure.admission() == ContextAdmissionDecision::Stop)
+        {
+            return Err(RuntimeError::ContextAdmissionBlocked {
+                pressure: context_pressure.expect("hard pressure is present"),
+            });
+        }
 
         let thread = match self.state.thread {
             Some(thread) => thread,
@@ -3549,6 +3588,9 @@ pub enum RuntimeError {
     Model(ModelError),
     Provider(ProviderError),
     Usage(UsageError),
+    ContextAdmissionBlocked {
+        pressure: ContextPressureSnapshot,
+    },
     Busy(RecoveryStatus),
     UnknownDelivery(DeliveryId),
     InvalidInput(&'static str),
@@ -3583,6 +3625,13 @@ impl fmt::Display for RuntimeError {
             Self::Model(source) => write!(formatter, "{source}"),
             Self::Provider(source) => write!(formatter, "{source}"),
             Self::Usage(source) => write!(formatter, "{source}"),
+            Self::ContextAdmissionBlocked { pressure } => write!(
+                formatter,
+                "Context Pressure stopped Turn admission at {}%",
+                pressure
+                    .occupancy_percent()
+                    .expect("hard Context Pressure has a known occupancy")
+            ),
             Self::Busy(status) => write!(formatter, "Runtime requires reconciliation: {status}"),
             Self::UnknownDelivery(delivery) => {
                 write!(formatter, "unknown output delivery {}", delivery.get())

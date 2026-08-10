@@ -443,7 +443,7 @@ mod tests {
                 config: &config,
                 provider_profile: None,
                 model: None,
-                context_pressure_percent: None,
+                context_pressure: None,
                 model_presets: &[],
                 catalog_models: &[],
             },
