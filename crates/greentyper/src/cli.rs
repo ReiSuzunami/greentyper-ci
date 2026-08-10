@@ -31,6 +31,7 @@ use crate::product_driver::{
     ProductDriver, ProductDriverError, ProductInteraction, ProductToolDecision,
     has_product_driver_state,
 };
+use crate::provider_connection::{ModelsHttpConnectionTester, ProviderConnectionTester};
 use crate::provider_http::{
     ConfiguredProvider, ProviderHttpError, ProviderHttpSmokeOutcome, ProviderHttpSmokeScenario,
 };
@@ -213,6 +214,18 @@ fn run_config(command: ConfigCommand) -> Result<(), CliError> {
             let mut runtime = open_config_runtime(paths)?;
             let commit = runtime.restore_backup(scope)?;
             write_json(&commit)
+        }
+        ConfigCommand::TestProvider { paths } => {
+            let runtime = open_config_runtime(paths)?;
+            let profile =
+                runtime
+                    .selected_provider_profile()?
+                    .ok_or(ProviderError::InvalidConfiguration(
+                        "selected simulator profile has no external connection",
+                    ))?;
+            let vault = PlatformCredentialVault;
+            let mut tester = ModelsHttpConnectionTester::new(&vault);
+            write_json(&tester.test(&profile))
         }
     }
 }
@@ -470,6 +483,9 @@ enum ConfigCommand {
     Repair {
         paths: ConfigPaths,
         scope: ConfigScope,
+    },
+    TestProvider {
+        paths: ConfigPaths,
     },
 }
 
@@ -1008,6 +1024,20 @@ fn parse_config(mut arguments: impl Iterator<Item = String>) -> Result<ConfigCom
             }
             Ok(ConfigCommand::Repair { paths, scope })
         }
+        "test-provider" => {
+            if scope.is_some() {
+                return Err(CliError::Usage(
+                    "--scope is not valid for config test-provider",
+                ));
+            }
+            reject_dry_run(dry_run, "--dry-run is not valid for config test-provider")?;
+            if !positionals.is_empty() {
+                return Err(CliError::Usage(
+                    "config test-provider does not accept a path",
+                ));
+            }
+            Ok(ConfigCommand::TestProvider { paths })
+        }
         _ => Err(CliError::Usage("unknown config action")),
     }
 }
@@ -1202,6 +1232,7 @@ Usage:\n\
   greentyper config set PATH VALUE --scope user|project [--dry-run]\n\
   greentyper config reset PATH --scope user|project [--dry-run]\n\
   greentyper config repair --scope user|project\n\
+  greentyper config test-provider [--user-config PATH] [--project-config PATH]\n\
   greentyper credential bind REFERENCE --profile PROFILE --origin URL\n\
   greentyper credential replace REFERENCE --profile PROFILE --origin URL\n\
   greentyper credential test REFERENCE --profile PROFILE --origin URL\n\
@@ -1484,6 +1515,29 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn parser_supports_an_explicit_selected_provider_connection_test() {
+        let user = temp_path();
+        let project = temp_path();
+        let parsed = parse(
+            [
+                "config".to_owned(),
+                "test-provider".to_owned(),
+                "--user-config".to_owned(),
+                user.display().to_string(),
+                "--project-config".to_owned(),
+                project.display().to_string(),
+            ]
+            .into_iter(),
+        )
+        .expect("parse selected Provider connection test");
+        assert!(matches!(
+            parsed,
+            Command::Config(ConfigCommand::TestProvider { paths })
+                if paths.user() == user && paths.project() == project
+        ));
     }
 
     #[test]

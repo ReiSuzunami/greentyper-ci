@@ -225,6 +225,12 @@ create/delete projection. Terminal-neutral golden tests freeze exact 40x12,
 and grapheme-safe CJK/emoji/combining-mark text fitting. The subprocess smoke
 emits the same three layouts without accepting a filesystem path. These tests do
 not constitute an ANSI/VT backend, live terminal input, or ConPTY terminal claim.
+Provider-wizard tests derive a normalized Profile from an uncommitted multi-field
+Draft, keep credential references out of serialized screens, leave Config
+untouched during the connection check, invalidate a prior result after any staged
+change, and reject an observed stale revision before invoking the tester. CLI
+tests prove `config test-provider` returns only a fixed pre-network failure status
+when the selected Profile's credential is unavailable.
 
 Remaining terminal-backend goldens cover real resize and stale-cell clearing,
 hierarchical input events, rendered Config dialogs, model selector states,
@@ -245,6 +251,14 @@ usage, failed, incomplete, and error terminals. One fixture Provider now passes
 its normalized events through the Kernel and Tool Runtime for a single approved
 call and continuation. The remaining scenarios land with concrete transport,
 reconnect, multiple tools, and broader usage normalization.
+
+The product connection-test adapter has deterministic loopback coverage for one
+explicit GET to the frozen Profile's `models` route. Tests validate the synthetic
+Authorization header server-side, prove a missing origin-bound credential causes
+no request, classify HTTP 503 as retryable without exposing its private body, and
+keep endpoint and credential data out of the serialized result.
+This is a configuration/status probe, not model discovery or live-provider
+validation.
 
 Live provider integration tests are not implemented yet. Planned opt-in,
 credential-gated tests will verify OpenAI, DeepSeek, and OpenCode Go without

@@ -316,6 +316,63 @@ fn config_editor_creates_a_provider_profile_through_one_atomic_draft() {
 }
 
 #[test]
+fn provider_editor_builds_a_redacted_profile_snapshot_from_the_uncommitted_draft() {
+    let temp = TempTree::new("draft-provider-snapshot");
+    let paths = temp.paths();
+    let runtime =
+        ConfigRuntime::open(paths.clone(), ConfigDocument::empty()).expect("open config runtime");
+    let object = ConfigObjectRef::new(ConfigObjectKind::ProviderProfile, "edge");
+    let mut editor =
+        ConfigEditorSession::create_object(&runtime, ConfigScope::Project, object.clone())
+            .expect("begin provider profile creation");
+
+    editor
+        .stage_raw("openai-compatible")
+        .expect("stage provider template");
+    editor
+        .focus_from_query(&runtime, "/config provider credential", 0)
+        .expect("focus credential binding");
+    editor
+        .stage_credential_reference("synthetic-edge-credential-reference")
+        .expect("stage opaque credential reference");
+    for (query, value) in [
+        ("/config provider url", "http://127.0.0.1:43123/v1"),
+        ("/config provider route responses", "responses"),
+        ("/config provider route models", "/models"),
+        ("/config provider dialects", "[\"responses\"]"),
+        ("/config provider pricing", "unknown"),
+        ("/config provider insecure-loopback", "true"),
+    ] {
+        editor
+            .focus_from_query(&runtime, query, 0)
+            .expect("focus provider field");
+        editor.stage_raw(value).expect("stage provider field");
+    }
+
+    let snapshot = editor
+        .provider_profile(&runtime)
+        .expect("build Provider Profile snapshot from draft");
+    assert_eq!(snapshot.profile(), "edge");
+    assert_eq!(snapshot.template(), "openai-compatible");
+    assert_eq!(snapshot.base_url(), Some("http://127.0.0.1:43123/v1"));
+    assert_eq!(snapshot.models_route(), Some("/models"));
+    assert_eq!(
+        snapshot.endpoint(ProviderDialect::Responses).as_deref(),
+        Some("http://127.0.0.1:43123/v1/responses")
+    );
+    assert!(snapshot.allow_insecure_loopback());
+    assert!(
+        !paths.project().exists(),
+        "snapshot preview must not write config"
+    );
+
+    let debug = format!("{snapshot:?}");
+    assert!(!debug.contains("synthetic-edge-credential-reference"));
+    assert!(!debug.contains("127.0.0.1"));
+    assert_eq!(editor.object(), Some(&object));
+}
+
+#[test]
 fn config_editor_create_checks_the_target_layer_instead_of_the_effective_union() {
     let temp = TempTree::new("create-layer-overlay");
     let paths = temp.paths();

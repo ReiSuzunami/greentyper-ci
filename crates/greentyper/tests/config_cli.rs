@@ -240,6 +240,66 @@ fn config_get_reports_only_credential_binding_policy_without_reference_readback(
     );
 }
 
+#[test]
+fn config_test_provider_reports_a_redacted_pre_network_failure() {
+    let temp = TempTree::new();
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time after epoch")
+        .as_nanos();
+    let reference = format!("synthetic-never-bound-{}-{nonce}", std::process::id());
+    fs::create_dir_all(
+        temp.project_config()
+            .parent()
+            .expect("project config parent"),
+    )
+    .expect("create project config parent");
+    fs::write(
+        temp.project_config(),
+        format!(
+            r#"schema_version = 1
+
+[provider]
+profile = "edge"
+model = "fixture-model"
+
+[providers.edge]
+template = "openai-compatible"
+credential = "{reference}"
+base_url = "https://provider.invalid/v1"
+dialects = ["responses"]
+
+[providers.edge.routes]
+responses = "/responses"
+models = "/models"
+
+[providers.edge.pricing]
+source = "unknown"
+"#
+        ),
+    )
+    .expect("write Provider test Config");
+
+    let output = temp
+        .config_command("test-provider")
+        .output()
+        .expect("run selected Provider connection test");
+    assert_success(&output);
+    let status = json(&output.stdout);
+    assert_eq!(status["state"], "failed");
+    assert!(matches!(
+        status["category"].as_str(),
+        Some("credential_missing" | "credential_unavailable")
+    ));
+    assert_eq!(status["retryable"].as_bool(), Some(cfg!(not(windows))));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stdout.contains(&reference));
+    assert!(!stderr.contains(&reference));
+    assert!(!stdout.contains("provider.invalid"));
+    assert!(stderr.is_empty(), "{output:?}");
+}
+
 fn backup_path(path: &Path) -> PathBuf {
     let mut value = path.as_os_str().to_owned();
     value.push(".bak");

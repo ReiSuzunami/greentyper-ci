@@ -79,14 +79,15 @@ cargo run -p greentyper -- status --ledger ./target/dev-runtime.ledger
 cargo run -p greentyper -- stats --ledger ./target/dev-runtime.ledger
 cargo run -p greentyper -- config schema
 cargo run -p greentyper -- config get provider.model
+cargo run -p greentyper -- config test-provider
 ```
 
 The core Agent Team policy, Config Runtime, recoverable single-Agent Runtime,
 and first Tool Runtime policy slice compile and run through interface-level and
 cross-process headless tests. Config currently includes versioned TOML, drafts,
 provenance, atomic replacement, repair, typed Provider Profile snapshots, and a
-terminal-neutral schema-driven editor session, but not rendered TUI/App Server
-editors or catalogs. The product CLI can
+terminal-neutral schema-driven editor session and Provider Profile wizard, but
+not rendered TUI/App Server editors or catalogs. The product CLI can
 bind, replace, test, and forget origin-bound credential references without
 putting secret material in arguments, Config, or Ledgers. Windows stores values
 in the current user's Credential Manager; other platforms currently fail
@@ -137,12 +138,20 @@ Draft can create a Profile, Preset, or Usage Window across multiple focused
 fields; whole-object deletion is target-layer explicit and reference validated.
 The terminal-neutral interaction controller projects these operations alongside
 deterministic 40/80/160 column row layouts with Unicode-safe fitting and adaptive
-status degradation.
+status degradation. Provider Profile create/edit routes now use a purpose-built
+terminal-neutral wizard over the same revision-bound Draft. It can build the
+validated, frozen candidate Profile and explicitly test its configured `models`
+route with one bounded, no-proxy, no-redirect GET. Results expose only a fixed
+status category, retryability, and the candidate identity; they do not commit the
+Draft, read a response body, or return endpoint or credential data. The CLI
+offers the same status-only check for the currently selected committed Profile
+through `config test-provider`.
 Dirty drafts cannot be discarded implicitly, and failed validation or revision
 conflicts leave the editor live. This is not an ANSI/VT backend, live keyboard
-loop, ConPTY integration, rendered Config Center, object-name dialog, or Provider
-wizard.
-Live-provider validation, configurable proxy policy, reconnect/retry, richer
+loop, ConPTY integration, rendered Config Center, object-name dialog, or
+official-template/catalog wizard.
+Live credential-gated provider validation, configurable proxy policy,
+reconnect/retry, richer
 approval presentation, broader Provider and Tool adapters, Workspace, TUI, and
 App Server work remain. The loopback Provider tracer remains an internal
 harness; `local.echo` is intentionally a fixed opt-in command rather than a

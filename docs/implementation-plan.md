@@ -198,12 +198,23 @@ revision-bound create/delete sessions for Provider Profiles, Model Presets, and
 Usage Windows. Creation keeps one schema-driven Draft across focused fields;
 deletion removes only a target-layer object, passes through reference validation,
 and preserves backup and compare-and-swap behavior.
+Provider Profile create/edit routes now enter a terminal-neutral purpose-built
+wizard backed by the same Config Draft. It stages opaque credential references
+only through the credential field, derives a validated frozen candidate Profile
+without writing Config, and can explicitly test the configured `models` route.
+The product adapter performs one bounded no-proxy/no-redirect GET, does not read
+the response body, and returns only fixed redacted status categories. The same
+adapter powers `greentyper config test-provider` for the selected committed
+Profile. Tests cover success, missing credentials before network access, redacted
+upstream 503 classification, candidate non-mutation, result invalidation after a
+Draft change, and observed revision conflicts before a probe.
 
 This does not complete Phase 3. VT/ConPTY rendering and input, the keyboard event
 loop and terminal-backed schema editors, rendered object-name and confirmation
-dialogs, Provider wizard, catalog-backed Recent/Compatible model views, Context
-Pressure, Price Schedules/cost calculation, richer observed Provider metadata,
-and the P0/P1/P2/P6 performance evidence remain pending.
+dialogs, rendered credential binding and official-template-backed Provider wizard,
+catalog-backed Recent/Compatible model views, Context Pressure, Price
+Schedules/cost calculation, richer observed Provider metadata, and the
+P0/P1/P2/P6 performance evidence remain pending.
 Large-history statistics pagination and summary-only rendering also remain
 pending; the current command emits the complete replayed attempt projection.
 

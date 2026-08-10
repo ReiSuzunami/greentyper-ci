@@ -5,10 +5,12 @@ use std::fmt;
 
 use serde::Serialize;
 
+use crate::provider::ProviderProfileSnapshot;
+
 use super::{
     CommandQueryError, CommandTarget, ConfigChange, ConfigCommit, ConfigDraft, ConfigFieldContents,
-    ConfigFieldView, ConfigObjectRef, ConfigRevision, ConfigRuntime, ConfigRuntimeError,
-    ConfigScope, match_command_paths,
+    ConfigFieldView, ConfigObjectKind, ConfigObjectRef, ConfigRevision, ConfigRuntime,
+    ConfigRuntimeError, ConfigScope, match_command_paths,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -153,6 +155,17 @@ impl ConfigEditorSession {
         Ok(())
     }
 
+    pub fn stage_credential_reference(&mut self, reference: &str) -> Result<(), ConfigEditorError> {
+        if self.operation == ConfigEditorOperation::Delete {
+            return Err(ConfigEditorError::ObjectDeletionStaged);
+        }
+        if !self.credential_binding {
+            return Err(ConfigEditorError::CredentialBindingRequired);
+        }
+        self.draft.set_raw(&self.field_path, reference)?;
+        Ok(())
+    }
+
     pub fn focus_from_query(
         &mut self,
         runtime: &ConfigRuntime,
@@ -223,6 +236,23 @@ impl ConfigEditorSession {
             .map_err(Into::into)
     }
 
+    pub fn provider_profile(
+        &self,
+        runtime: &ConfigRuntime,
+    ) -> Result<ProviderProfileSnapshot, ConfigEditorError> {
+        if self.operation == ConfigEditorOperation::Delete {
+            return Err(ConfigEditorError::ObjectDeletionStaged);
+        }
+        let object = self
+            .object
+            .as_ref()
+            .filter(|object| object.kind() == ConfigObjectKind::ProviderProfile)
+            .ok_or(ConfigEditorError::ProviderProfileRequired)?;
+        runtime
+            .provider_profile_for_draft(&self.draft, object.id())
+            .map_err(Into::into)
+    }
+
     pub fn commit(self, runtime: &mut ConfigRuntime) -> Result<ConfigCommit, ConfigEditorError> {
         self.require_commit_allowed()?;
         runtime.commit(self.draft, false).map_err(Into::into)
@@ -270,6 +300,8 @@ pub enum ConfigEditorError {
     ConfigObjectNotInTargetScope,
     ObjectDeletionStaged,
     CredentialOperationRequired,
+    CredentialBindingRequired,
+    ProviderProfileRequired,
 }
 
 impl fmt::Display for ConfigEditorError {
@@ -297,6 +329,12 @@ impl fmt::Display for ConfigEditorError {
             Self::CredentialOperationRequired => {
                 formatter.write_str("credential binding requires a secure credential operation")
             }
+            Self::CredentialBindingRequired => {
+                formatter.write_str("secure credential reference requires a credential field")
+            }
+            Self::ProviderProfileRequired => {
+                formatter.write_str("connection test requires a Provider Profile editor")
+            }
         }
     }
 }
@@ -313,7 +351,9 @@ impl Error for ConfigEditorError {
             | Self::ConfigObjectAlreadyExists
             | Self::ConfigObjectNotInTargetScope
             | Self::ObjectDeletionStaged
-            | Self::CredentialOperationRequired => None,
+            | Self::CredentialOperationRequired
+            | Self::CredentialBindingRequired
+            | Self::ProviderProfileRequired => None,
         }
     }
 }

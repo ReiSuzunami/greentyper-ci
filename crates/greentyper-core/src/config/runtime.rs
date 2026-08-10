@@ -1224,33 +1224,17 @@ impl ConfigRuntime {
         if profile == "simulator" {
             return Ok(None);
         }
-        let definition = resolved.document.providers.get(&profile).ok_or_else(|| {
-            invalid(
-                "provider.profile",
-                "selected provider profile does not exist",
-            )
-        })?;
-        let template = definition.template.clone().ok_or_else(|| {
-            invalid(
-                format!("providers.{profile}.template"),
-                "provider profile requires a template",
-            )
-        })?;
-        ProviderProfileSnapshot::from_parts(
-            profile,
-            template,
-            definition.credential.clone(),
-            definition.base_url.clone(),
-            definition.routes.responses.clone(),
-            definition.routes.chat_completions.clone(),
-            definition.routes.messages.clone(),
-            definition.routes.models.clone(),
-            definition.dialects.clone().unwrap_or_default(),
-            definition.pricing.source,
-            definition.allow_insecure_loopback.unwrap_or(false),
-        )
-        .map(Some)
-        .map_err(|source| invalid("provider.profile", source.to_string()))
+        provider_profile_snapshot(&resolved.document, &profile).map(Some)
+    }
+
+    pub fn provider_profile_for_draft(
+        &self,
+        draft: &ConfigDraft,
+        profile: &str,
+    ) -> Result<ProviderProfileSnapshot, ConfigRuntimeError> {
+        validate_id("provider profile", profile)?;
+        let resolved = self.resolve_draft(draft)?;
+        provider_profile_snapshot(&resolved.document, profile)
     }
 
     pub fn resolved_usage_windows(&self) -> Result<Vec<UsageWindow>, ConfigRuntimeError> {
@@ -1288,6 +1272,16 @@ impl ConfigRuntime {
         &self,
         draft: &ConfigDraft,
     ) -> Result<Vec<ConfigChange>, ConfigRuntimeError> {
+        self.resolve_draft(draft)?;
+        let current = self
+            .state(draft.scope)?
+            .current
+            .as_ref()
+            .ok_or_else(|| ConfigRuntimeError::RepairRequired(self.status().issues))?;
+        Ok(diff_documents(&current.document, &draft.document))
+    }
+
+    fn resolve_draft(&self, draft: &ConfigDraft) -> Result<ResolvedState, ConfigRuntimeError> {
         let current = self
             .state(draft.scope)?
             .current
@@ -1323,8 +1317,7 @@ impl ConfigRuntime {
                 return Err(ConfigRuntimeError::ReadOnlyScope(draft.scope));
             }
         };
-        resolve_documents(&self.built_in, user, project, &self.cli)?;
-        Ok(diff_documents(&current.document, &draft.document))
+        resolve_documents(&self.built_in, user, project, &self.cli)
     }
 
     pub fn commit(
@@ -1470,6 +1463,38 @@ fn resolve_if_valid(
             Ok(None)
         }
     }
+}
+
+fn provider_profile_snapshot(
+    document: &ConfigDocument,
+    profile: &str,
+) -> Result<ProviderProfileSnapshot, ConfigRuntimeError> {
+    let definition = document.providers.get(profile).ok_or_else(|| {
+        invalid(
+            format!("providers.{profile}"),
+            "provider profile does not exist",
+        )
+    })?;
+    let template = definition.template.clone().ok_or_else(|| {
+        invalid(
+            format!("providers.{profile}.template"),
+            "provider profile requires a template",
+        )
+    })?;
+    ProviderProfileSnapshot::from_parts(
+        profile,
+        template,
+        definition.credential.clone(),
+        definition.base_url.clone(),
+        definition.routes.responses.clone(),
+        definition.routes.chat_completions.clone(),
+        definition.routes.messages.clone(),
+        definition.routes.models.clone(),
+        definition.dialects.clone().unwrap_or_default(),
+        definition.pricing.source,
+        definition.allow_insecure_loopback.unwrap_or(false),
+    )
+    .map_err(|source| invalid(format!("providers.{profile}"), source.to_string()))
 }
 
 fn resolve_documents(

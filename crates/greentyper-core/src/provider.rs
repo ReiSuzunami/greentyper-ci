@@ -169,6 +169,11 @@ impl ProviderProfileSnapshot {
     }
 
     #[must_use]
+    pub fn models_endpoint(&self) -> Option<String> {
+        Some(format!("{}{}", self.base_url()?, self.models_route()?))
+    }
+
+    #[must_use]
     pub fn endpoint(&self, dialect: ProviderDialect) -> Option<String> {
         Some(format!("{}{}", self.base_url()?, self.route(dialect)?))
     }

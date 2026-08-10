@@ -59,6 +59,11 @@ Model Presets, and Usage Windows through schema-owned multi-field drafts, and
 deletes whole target-layer objects only after full reference validation. Typed
 `add` and `remove` Command Paths stay nested beneath their Config sections;
 failed validation or revision compare-and-swap leaves the draft live.
+Provider Profile create/edit routes now add a terminal-neutral purpose-built
+wizard over that same Draft. The wizard can derive the candidate's normalized,
+typed Profile snapshot without writing Config and can explicitly run one bounded
+status-only check against its configured `models` route. Any staged change
+invalidates the prior check result.
 Default/constraint/normalization/migration
 metadata, rendered TUI and App Server surfaces, and Provider Templates/catalogs
 remain later work. The
@@ -91,8 +96,10 @@ actions, and a reusable Config Runtime editor session for focused multi-field
 draft validation, atomic create/edit/delete, and commit. Object deletion is
 target-layer explicit and fails when the resulting effective configuration has
 dangling references. It does not yet ship the rendered interactive Config
-Center, terminal editor dialogs, object-name input form, purpose-built Provider
-wizard, or App Server surface described below.
+Center, terminal editor dialogs, object-name input form, official-template-backed
+Provider wizard, or App Server surface described below. The current
+terminal-neutral Provider Profile wizard handles only user-configured Profile
+Drafts and the explicit status-only connection check described below.
 
 The root Slash Panel exposes `/config` as one Command Path. It does not register one flat command for every field.
 
@@ -117,7 +124,8 @@ Prefix and fuzzy matching work token by token. `/con` finds `/config`; `/config 
 
 Slash commands navigate and select scope; mutation occurs in a validated
 dialog. The current headless CLI provides `config schema`, `config get`,
-`config set`, `config reset`, and backup-based `config repair`. `set` and
+`config set`, `config reset`, backup-based `config repair`, and
+`config test-provider` for the currently selected committed Profile. `set` and
 `reset` require an explicit `user` or `project` scope, are single-operation
 Config Drafts, and accept `--dry-run` to return the normalized diff without
 committing. `--user-config` and `--project-config` select explicit absolute
@@ -154,9 +162,10 @@ All surfaces share stable error categories: `unknown_object`, `wrong_type`, `inv
 ## Provider Profiles
 
 The target Provider Template catalog supplies official defaults for OpenAI,
-DeepSeek, and OpenCode Go. That catalog and its wizard are not implemented yet.
-Once present, a normal official profile usually requires only a credential
-binding:
+DeepSeek, and OpenCode Go. That catalog and its template-backed wizard are not
+implemented yet. The current terminal-neutral wizard edits user-defined Profile
+Drafts without supplying official defaults. Once the catalog is present, a
+normal official profile usually requires only a credential binding:
 
 ```toml
 schema_version = 1
@@ -205,9 +214,17 @@ Provider Template defaults are suggestions, not locked endpoints. Provider Origi
 - The profile remains a distinct statistics dimension. A gateway's hidden backend is unknown unless trusted response metadata identifies it.
 - The next request starts a new Provider Epoch and cannot reuse incompatible continuation identity.
 
-The planned provider wizard edits name, template, base URL, routes, credential
-binding, supported dialects, price source, and catalog behavior, then tests the
-connection before presenting the Config Draft.
+The current terminal-neutral Provider Profile wizard edits one schema-driven
+Draft across template, base URL, routes, opaque credential reference, supported
+dialects, price source, catalog behavior, and loopback policy. It derives the
+same immutable normalized Profile snapshot used by Provider Epoch admission and
+can explicitly test the candidate before commit. The test performs exactly one
+bounded GET to the configured `models` route, disables proxy discovery and
+redirects, uses the origin-bound credential, reads no response body, and returns
+only a fixed success/failure category plus retryability. It neither discovers
+models nor commits Config, and a successful test is not yet a commit gate. The
+rendered wizard, secure credential binding dialog, official defaults, and model
+catalog workflow remain pending.
 
 ## Model Catalog and Presets
 

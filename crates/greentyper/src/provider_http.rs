@@ -19,13 +19,14 @@ use greentyper_core::provider::{
 };
 use greentyper_core::runtime::{RuntimeError, RuntimeKernel};
 use reqwest::blocking::{Client, ClientBuilder};
-use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderValue};
+use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
 use reqwest::{StatusCode, Url};
 
 use crate::credential_vault::{
     CredentialVault, CredentialVaultError, InMemoryCredentialVault, ProviderCredentialScope,
     SecretValue,
 };
+use crate::provider_http_policy::{bearer_header, validate_provider_endpoint};
 
 const FIXTURE_PROFILE: &str = "responses-loopback";
 const FIXTURE_MODEL: &str = "fixture-model";
@@ -117,7 +118,7 @@ impl<V: CredentialVault> ResponsesHttpProvider<V> {
         let endpoint = profile.endpoint(ProviderDialect::Responses).ok_or(
             ProviderError::InvalidConfiguration("Responses Provider Profile has no endpoint"),
         )?;
-        let endpoint = validate_responses_endpoint(&endpoint, profile.allow_insecure_loopback())?;
+        let endpoint = validate_provider_endpoint(&endpoint, profile.allow_insecure_loopback())?;
         let credential_scope = ProviderCredentialScope::from_profile(&profile)
             .map_err(map_credential_configuration_error)?;
         drop(
@@ -510,18 +511,6 @@ impl ProviderRuntime for LoopbackResponsesProvider {
     }
 }
 
-fn bearer_header(secret: &SecretValue) -> Result<HeaderValue, ProviderError> {
-    let mut bytes = Vec::with_capacity("Bearer ".len() + secret.expose().len());
-    bytes.extend_from_slice(b"Bearer ");
-    bytes.extend_from_slice(secret.expose());
-    let header = HeaderValue::from_bytes(&bytes)
-        .map_err(|_| ProviderError::InvalidConfiguration("Provider credential is invalid"));
-    bytes.fill(0);
-    let mut header = header?;
-    header.set_sensitive(true);
-    Ok(header)
-}
-
 fn map_credential_configuration_error(_error: CredentialVaultError) -> ProviderError {
     ProviderError::InvalidConfiguration("Provider credential binding is invalid")
 }
@@ -561,45 +550,6 @@ fn classify_http_status(status: StatusCode) -> ProviderError {
         }
         _ => ProviderError::InvalidResponse("Responses HTTP status was invalid"),
     }
-}
-
-fn validate_responses_endpoint(
-    value: &str,
-    allow_insecure_loopback: bool,
-) -> Result<Url, ProviderError> {
-    let endpoint = Url::parse(value).map_err(|_| {
-        ProviderError::InvalidConfiguration("Responses endpoint must be an absolute URL")
-    })?;
-    if !matches!(endpoint.scheme(), "http" | "https")
-        || !endpoint.username().is_empty()
-        || endpoint.password().is_some()
-        || endpoint.query().is_some()
-        || endpoint.fragment().is_some()
-    {
-        return Err(ProviderError::InvalidConfiguration(
-            "Responses endpoint contains unsupported URL components",
-        ));
-    }
-    let host = endpoint
-        .host_str()
-        .ok_or(ProviderError::InvalidConfiguration(
-            "Responses endpoint has no host",
-        ))?;
-    let loopback = host.eq_ignore_ascii_case("localhost")
-        || host
-            .parse::<IpAddr>()
-            .is_ok_and(|address| address.is_loopback());
-    if endpoint.scheme() == "http" && (!loopback || !allow_insecure_loopback) {
-        return Err(ProviderError::InvalidConfiguration(
-            "plain HTTP requires explicit loopback permission",
-        ));
-    }
-    if !loopback && allow_insecure_loopback {
-        return Err(ProviderError::InvalidConfiguration(
-            "loopback permission is invalid for a remote endpoint",
-        ));
-    }
-    Ok(endpoint)
 }
 
 fn validate_loopback_endpoint(value: &str) -> Result<Url, ProviderError> {
@@ -732,6 +682,7 @@ allow_insecure_loopback = {allow_insecure_loopback}
 
 [providers.{FIXTURE_PROFILE}.routes]
 responses = "{FIXTURE_ROUTE}"
+models = "/v1/models"
 
 [providers.{FIXTURE_PROFILE}.pricing]
 source = "unknown"
@@ -1118,6 +1069,10 @@ mod tests {
     use rustls::{ServerConfig, ServerConnection, StreamOwned};
 
     use crate::credential_vault::InMemoryCredentialVault;
+    use crate::provider_connection::{
+        ModelsHttpConnectionTester, ProviderConnectionFailureCategory,
+        ProviderConnectionTestStatus, ProviderConnectionTester,
+    };
 
     static NEXT_CONFIG: AtomicU64 = AtomicU64::new(1);
 
@@ -1155,6 +1110,150 @@ mod tests {
             .expect("Provider Epoch"),
             input: input.to_owned(),
         }
+    }
+
+    fn read_request_head(stream: &mut TcpStream) -> String {
+        configure_fixture_stream(stream).expect("configure connection-test fixture");
+        let mut bytes = Vec::new();
+        let mut chunk = [0_u8; 512];
+        while find_header_end(&bytes).is_none() {
+            let read = stream
+                .read(&mut chunk)
+                .expect("read connection-test request");
+            assert!(read > 0, "connection-test request ended before headers");
+            bytes.extend_from_slice(&chunk[..read]);
+            assert!(bytes.len() <= MAX_REQUEST_BYTES);
+        }
+        let header_end = find_header_end(&bytes).expect("connection-test header end");
+        std::str::from_utf8(&bytes[..header_end])
+            .expect("connection-test headers are UTF-8")
+            .to_owned()
+    }
+
+    #[test]
+    fn models_connection_test_uses_the_frozen_profile_without_exposing_credentials() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("connection-test listener");
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let runtime =
+            fixture_config_runtime(&base_url, test_config_paths("models-connection-success"))
+                .expect("valid fixture Config");
+        let profile = runtime
+            .selected_provider_profile()
+            .expect("resolve fixture Provider Profile")
+            .expect("custom Provider Profile");
+        let expected_fingerprint = profile.fingerprint();
+        let scope = ProviderCredentialScope::from_profile(&profile).expect("credential scope");
+        let mut vault = InMemoryCredentialVault::default();
+        vault
+            .bind(&scope, SecretValue::new(SYNTHETIC_SECRET.to_vec()).unwrap())
+            .expect("bind credential");
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept connection test");
+            let headers = read_request_head(&mut stream);
+            assert!(headers.starts_with("GET /v1/models HTTP/1.1\r\n"));
+            assert!(headers.contains(&format!("\r\nauthorization: {SYNTHETIC_AUTHORIZATION}\r\n")));
+            write_fixture_response(
+                &mut stream,
+                "200 OK",
+                "application/json",
+                br#"{"data":[]}"#,
+                false,
+            )
+            .expect("write models response");
+        });
+
+        let mut tester = ModelsHttpConnectionTester::with_timeout(&vault, HTTP_TIMEOUT);
+        let outcome = tester.test(&profile);
+        assert_eq!(
+            outcome,
+            ProviderConnectionTestStatus::Succeeded {
+                profile: FIXTURE_PROFILE.to_owned(),
+                fingerprint: expected_fingerprint,
+            }
+        );
+        let encoded = serde_json::to_string(&outcome).expect("serialize connection status");
+        assert!(!encoded.contains(FIXTURE_CREDENTIAL_REFERENCE));
+        assert!(!encoded.contains(std::str::from_utf8(SYNTHETIC_SECRET).unwrap()));
+        assert!(!encoded.contains(&base_url));
+        server.join().expect("join models server");
+    }
+
+    #[test]
+    fn models_connection_test_classifies_upstream_failure_without_exposing_its_body() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("connection-test listener");
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let runtime = fixture_config_runtime(
+            &base_url,
+            test_config_paths("models-connection-upstream-failure"),
+        )
+        .expect("valid fixture Config");
+        let profile = runtime
+            .selected_provider_profile()
+            .expect("resolve fixture Provider Profile")
+            .expect("custom Provider Profile");
+        let scope = ProviderCredentialScope::from_profile(&profile).expect("credential scope");
+        let mut vault = InMemoryCredentialVault::default();
+        vault
+            .bind(&scope, SecretValue::new(SYNTHETIC_SECRET.to_vec()).unwrap())
+            .expect("bind credential");
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept connection test");
+            let _headers = read_request_head(&mut stream);
+            write_fixture_response(
+                &mut stream,
+                "503 Service Unavailable",
+                "application/json",
+                PRIVATE_ERROR_BODY,
+                false,
+            )
+            .expect("write failure response");
+        });
+
+        let mut tester = ModelsHttpConnectionTester::with_timeout(&vault, HTTP_TIMEOUT);
+        let outcome = tester.test(&profile);
+        assert_eq!(
+            outcome,
+            ProviderConnectionTestStatus::Failed {
+                category: ProviderConnectionFailureCategory::Unavailable,
+                retryable: true,
+            }
+        );
+        let encoded = serde_json::to_string(&outcome).expect("serialize connection status");
+        assert!(!encoded.contains(std::str::from_utf8(PRIVATE_ERROR_BODY).unwrap()));
+        assert!(!encoded.contains(FIXTURE_CREDENTIAL_REFERENCE));
+        assert!(!encoded.contains(&base_url));
+        server.join().expect("join models server");
+    }
+
+    #[test]
+    fn models_connection_test_fails_before_network_when_the_credential_is_missing() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("connection-test listener");
+        listener
+            .set_nonblocking(true)
+            .expect("nonblocking connection-test listener");
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let runtime = fixture_config_runtime(
+            &base_url,
+            test_config_paths("models-connection-missing-credential"),
+        )
+        .expect("valid fixture Config");
+        let profile = runtime
+            .selected_provider_profile()
+            .expect("resolve fixture Provider Profile")
+            .expect("custom Provider Profile");
+        let vault = InMemoryCredentialVault::default();
+
+        let mut tester = ModelsHttpConnectionTester::with_timeout(&vault, HTTP_TIMEOUT);
+        assert_eq!(
+            tester.test(&profile),
+            ProviderConnectionTestStatus::Failed {
+                category: ProviderConnectionFailureCategory::CredentialMissing,
+                retryable: false,
+            }
+        );
+        assert!(
+            matches!(listener.accept(), Err(error) if error.kind() == io::ErrorKind::WouldBlock)
+        );
     }
 
     #[test]
@@ -1295,10 +1394,8 @@ mod tests {
 
     #[test]
     fn responses_endpoint_and_status_policy_fail_closed() {
-        assert!(
-            validate_responses_endpoint("https://provider.example/v1/responses", false).is_ok()
-        );
-        assert!(validate_responses_endpoint("http://127.0.0.1/v1/responses", true).is_ok());
+        assert!(validate_provider_endpoint("https://provider.example/v1/responses", false).is_ok());
+        assert!(validate_provider_endpoint("http://127.0.0.1/v1/responses", true).is_ok());
         for (endpoint, allow_insecure_loopback) in [
             ("http://127.0.0.1/v1/responses", false),
             ("http://198.51.100.1/v1/responses", false),
@@ -1309,7 +1406,7 @@ mod tests {
             ("https://provider.example/v1/responses#fragment", false),
         ] {
             assert!(
-                validate_responses_endpoint(endpoint, allow_insecure_loopback).is_err(),
+                validate_provider_endpoint(endpoint, allow_insecure_loopback).is_err(),
                 "endpoint must be rejected: {endpoint}"
             );
         }

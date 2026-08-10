@@ -5,7 +5,9 @@ mod credential_vault;
 mod local_process;
 mod presentation;
 mod product_driver;
+mod provider_connection;
 mod provider_http;
+mod provider_http_policy;
 
 use std::process::ExitCode;
 

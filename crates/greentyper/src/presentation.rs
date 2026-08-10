@@ -20,6 +20,8 @@ use serde::Serialize;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
+use crate::provider_connection::{ProviderConnectionTestStatus, ProviderConnectionTester};
+
 const MAX_SLASH_RESULTS: usize = 12;
 const MAX_MODEL_QUERY_BYTES: usize = 256;
 
@@ -382,6 +384,7 @@ enum PresentationState {
     SlashPanel,
     ConfigCenter { section: Option<ConfigSection> },
     ConfigEditor,
+    ProviderWizard,
     ModelSelector,
     Stats,
     AgentCenter,
@@ -393,6 +396,7 @@ struct ActiveConfigEditor {
     view: ConfigEditorView,
     dirty: bool,
     validated: bool,
+    connection: ProviderConnectionTestStatus,
 }
 
 pub(crate) struct PresentationController {
@@ -497,8 +501,13 @@ impl PresentationController {
                     view,
                     dirty: false,
                     validated: false,
+                    connection: ProviderConnectionTestStatus::Untested,
                 });
-                self.state = PresentationState::ConfigEditor;
+                self.state = if kind == ConfigObjectKind::ProviderProfile {
+                    PresentationState::ProviderWizard
+                } else {
+                    PresentationState::ConfigEditor
+                };
             }
             CommandTarget::ConfigObjectDelete { kind } => {
                 let object = object.ok_or(ConfigEditorError::ConfigObjectRequired)?;
@@ -513,6 +522,7 @@ impl PresentationController {
                     view,
                     dirty: true,
                     validated: false,
+                    connection: ProviderConnectionTestStatus::Untested,
                 });
                 self.state = PresentationState::ConfigEditor;
             }
@@ -531,8 +541,15 @@ impl PresentationController {
                     view,
                     dirty: false,
                     validated: true,
+                    connection: ProviderConnectionTestStatus::Untested,
                 });
-                self.state = PresentationState::ConfigEditor;
+                self.state = if object
+                    .is_some_and(|object| object.kind() == ConfigObjectKind::ProviderProfile)
+                {
+                    PresentationState::ProviderWizard
+                } else {
+                    PresentationState::ConfigEditor
+                };
             }
             CommandTarget::ModelSelector => {
                 self.state = PresentationState::ModelSelector;
@@ -555,7 +572,10 @@ impl PresentationController {
     }
 
     pub(crate) fn discard_config(&mut self) -> Result<(), PresentationControllerError> {
-        if self.state != PresentationState::ConfigEditor {
+        if !matches!(
+            self.state,
+            PresentationState::ConfigEditor | PresentationState::ProviderWizard
+        ) {
             return Err(PresentationControllerError::NotConfigEditor);
         }
         self.editor = None;
@@ -574,6 +594,25 @@ impl PresentationController {
         editor.view.changes.clear();
         editor.dirty = true;
         editor.validated = false;
+        editor.connection = ProviderConnectionTestStatus::Untested;
+        Ok(())
+    }
+
+    pub(crate) fn stage_provider_credential_reference(
+        &mut self,
+        runtime: &ConfigRuntime,
+        reference: &str,
+    ) -> Result<(), PresentationControllerError> {
+        if self.state != PresentationState::ProviderWizard {
+            return Err(PresentationControllerError::NotProviderWizard);
+        }
+        let editor = self.active_editor_mut()?;
+        editor.session.stage_credential_reference(reference)?;
+        editor.view.field = editor.session.field(runtime)?;
+        editor.view.changes.clear();
+        editor.dirty = true;
+        editor.validated = false;
+        editor.connection = ProviderConnectionTestStatus::Untested;
         Ok(())
     }
 
@@ -587,6 +626,7 @@ impl PresentationController {
         editor.view.changes.clear();
         editor.dirty = true;
         editor.validated = false;
+        editor.connection = ProviderConnectionTestStatus::Untested;
         Ok(())
     }
 
@@ -612,6 +652,20 @@ impl PresentationController {
         editor.validated = true;
         editor.view = preview.clone();
         Ok(preview)
+    }
+
+    pub(crate) fn test_provider_connection(
+        &mut self,
+        runtime: &ConfigRuntime,
+        tester: &mut impl ProviderConnectionTester,
+    ) -> Result<ProviderConnectionTestStatus, PresentationControllerError> {
+        if self.state != PresentationState::ProviderWizard {
+            return Err(PresentationControllerError::NotProviderWizard);
+        }
+        let profile = self.active_editor()?.session.provider_profile(runtime)?;
+        let status = tester.test(&profile);
+        self.active_editor_mut()?.connection = status.clone();
+        Ok(status)
     }
 
     pub(crate) fn commit_config(
@@ -651,6 +705,20 @@ impl PresentationController {
                     validated: editor.validated,
                 })
             }
+            PresentationState::ProviderWizard => {
+                let editor = self.active_editor()?;
+                Ok(PresentationScreenView::ProviderWizard {
+                    object: editor
+                        .object
+                        .clone()
+                        .ok_or(PresentationControllerError::NotProviderWizard)?,
+                    operation: editor.session.operation(),
+                    editor: editor.view.clone(),
+                    dirty: editor.dirty,
+                    validated: editor.validated,
+                    connection: editor.connection.clone(),
+                })
+            }
             PresentationState::ModelSelector => Ok(PresentationScreenView::ModelSelector {
                 query: self.model_query.clone(),
             }),
@@ -683,7 +751,10 @@ impl PresentationController {
     }
 
     fn active_editor(&self) -> Result<&ActiveConfigEditor, PresentationControllerError> {
-        if self.state != PresentationState::ConfigEditor {
+        if !matches!(
+            self.state,
+            PresentationState::ConfigEditor | PresentationState::ProviderWizard
+        ) {
             return Err(PresentationControllerError::NotConfigEditor);
         }
         self.editor
@@ -694,7 +765,10 @@ impl PresentationController {
     fn active_editor_mut(
         &mut self,
     ) -> Result<&mut ActiveConfigEditor, PresentationControllerError> {
-        if self.state != PresentationState::ConfigEditor {
+        if !matches!(
+            self.state,
+            PresentationState::ConfigEditor | PresentationState::ProviderWizard
+        ) {
             return Err(PresentationControllerError::NotConfigEditor);
         }
         self.editor
@@ -725,6 +799,14 @@ pub(crate) enum PresentationScreenView {
         editor: ConfigEditorView,
         dirty: bool,
         validated: bool,
+    },
+    ProviderWizard {
+        object: ConfigObjectRef,
+        operation: ConfigEditorOperation,
+        editor: ConfigEditorView,
+        dirty: bool,
+        validated: bool,
+        connection: ProviderConnectionTestStatus,
     },
     ModelSelector {
         query: String,
@@ -958,56 +1040,22 @@ fn screen_rows(screen: &PresentationScreenView, view: &TuiViewModel) -> Vec<Layo
             dirty,
             validated,
             ..
-        } => {
-            let mut rows = vec![LayoutRowView::new(
-                format!(
-                    "Config {} / {}",
-                    config_editor_operation_label(*operation),
-                    editor.field.path
-                ),
-                false,
-            )];
-            match &editor.field.contents {
-                ConfigFieldContents::Value {
-                    effective, target, ..
-                } => {
-                    rows.push(LayoutRowView::new(
-                        format!("effective {}", config_value_label(effective.as_ref())),
-                        false,
-                    ));
-                    rows.push(LayoutRowView::new(
-                        format!("target {}", config_value_label(target.as_ref())),
-                        false,
-                    ));
-                }
-                ConfigFieldContents::CredentialBinding {
-                    effective_bound,
-                    target_bound,
-                    ..
-                } => {
-                    rows.push(LayoutRowView::new(
-                        format!(
-                            "credential {}",
-                            if *effective_bound { "bound" } else { "missing" }
-                        ),
-                        false,
-                    ));
-                    rows.push(LayoutRowView::new(
-                        format!("target {}", if *target_bound { "bound" } else { "missing" }),
-                        false,
-                    ));
-                }
-            }
-            rows.push(LayoutRowView::new(
-                match (*dirty, *validated) {
-                    (false, _) => "draft clean",
-                    (true, true) => "draft validated",
-                    (true, false) => "draft pending",
-                },
-                false,
-            ));
-            rows
-        }
+        } => config_editor_rows("Config", *operation, editor, *dirty, *validated, None),
+        PresentationScreenView::ProviderWizard {
+            operation,
+            editor,
+            dirty,
+            validated,
+            connection,
+            ..
+        } => config_editor_rows(
+            "Provider",
+            *operation,
+            editor,
+            *dirty,
+            *validated,
+            Some(connection),
+        ),
         PresentationScreenView::ModelSelector { .. } => {
             let mut rows = vec![LayoutRowView::new("Models", false)];
             rows.extend(view.models.all.iter().enumerate().map(|(index, entry)| {
@@ -1027,6 +1075,79 @@ fn screen_rows(screen: &PresentationScreenView, view: &TuiViewModel) -> Vec<Layo
         PresentationScreenView::Stats => vec![LayoutRowView::new("Stats", false)],
         PresentationScreenView::AgentCenter => vec![LayoutRowView::new("Agents", false)],
     }
+}
+
+fn config_editor_rows(
+    title: &str,
+    operation: ConfigEditorOperation,
+    editor: &ConfigEditorView,
+    dirty: bool,
+    validated: bool,
+    connection: Option<&ProviderConnectionTestStatus>,
+) -> Vec<LayoutRowView> {
+    let mut rows = vec![LayoutRowView::new(
+        format!(
+            "{title} {} / {}",
+            config_editor_operation_label(operation),
+            editor.field.path
+        ),
+        false,
+    )];
+    match &editor.field.contents {
+        ConfigFieldContents::Value {
+            effective, target, ..
+        } => {
+            rows.push(LayoutRowView::new(
+                format!("effective {}", config_value_label(effective.as_ref())),
+                false,
+            ));
+            rows.push(LayoutRowView::new(
+                format!("target {}", config_value_label(target.as_ref())),
+                false,
+            ));
+        }
+        ConfigFieldContents::CredentialBinding {
+            effective_bound,
+            target_bound,
+            ..
+        } => {
+            rows.push(LayoutRowView::new(
+                format!(
+                    "credential {}",
+                    if *effective_bound { "bound" } else { "missing" }
+                ),
+                false,
+            ));
+            rows.push(LayoutRowView::new(
+                format!("target {}", if *target_bound { "bound" } else { "missing" }),
+                false,
+            ));
+        }
+    }
+    rows.push(LayoutRowView::new(
+        match (dirty, validated) {
+            (false, _) => "draft clean",
+            (true, true) => "draft validated",
+            (true, false) => "draft pending",
+        },
+        false,
+    ));
+    if let Some(connection) = connection {
+        rows.push(LayoutRowView::new(
+            match connection {
+                ProviderConnectionTestStatus::Untested => "connection untested",
+                ProviderConnectionTestStatus::Succeeded { .. } => "connection succeeded",
+                ProviderConnectionTestStatus::Failed {
+                    retryable: true, ..
+                } => "connection failed (retryable)",
+                ProviderConnectionTestStatus::Failed {
+                    retryable: false, ..
+                } => "connection failed",
+            },
+            false,
+        ));
+    }
+    rows
 }
 
 fn config_value_label(value: Option<&ConfigValue>) -> String {
@@ -1128,6 +1249,7 @@ pub(crate) enum PresentationControllerError {
     NoCommandSelection,
     NotSlashPanel,
     NotConfigEditor,
+    NotProviderWizard,
     ConfigRuntimeRequired,
     UnsavedConfigDraft,
 }
@@ -1141,6 +1263,9 @@ impl fmt::Display for PresentationControllerError {
             Self::NoCommandSelection => formatter.write_str("no command is selected"),
             Self::NotSlashPanel => formatter.write_str("command requires the Slash Panel"),
             Self::NotConfigEditor => formatter.write_str("command requires a Config editor"),
+            Self::NotProviderWizard => {
+                formatter.write_str("command requires a Provider Profile wizard")
+            }
             Self::ConfigRuntimeRequired => {
                 formatter.write_str("Config Center requires the Config Runtime")
             }
@@ -1160,6 +1285,7 @@ impl Error for PresentationControllerError {
             Self::NoCommandSelection
             | Self::NotSlashPanel
             | Self::NotConfigEditor
+            | Self::NotProviderWizard
             | Self::ConfigRuntimeRequired
             | Self::UnsavedConfigDraft => None,
         }
@@ -1428,6 +1554,8 @@ mod tests {
     use greentyper_core::model::{DeliveryId, ThreadId, TurnId};
     use greentyper_core::provider::ProviderDialect;
     use greentyper_core::runtime::{KernelTeamSnapshot, RecoveryStatus, RuntimeSnapshot};
+
+    use crate::provider_connection::{ProviderConnectionTestStatus, ProviderConnectionTester};
 
     use super::{
         Availability, BlockerView, PresentationController, PresentationControllerError,
@@ -1717,6 +1845,19 @@ source = "unknown"
             .stage_config(&loser_runtime, "https://loser.example.com/v1")
             .expect("stage loser");
         winner.commit(&mut winner_runtime).expect("commit winner");
+        loser_runtime.reload().expect("observe winner revision");
+
+        let mut tester = SuccessfulConnectionTester { calls: Vec::new() };
+        assert!(matches!(
+            loser.test_provider_connection(&loser_runtime, &mut tester),
+            Err(PresentationControllerError::ConfigEditor(
+                ConfigEditorError::Config(ConfigRuntimeError::RevisionConflict { .. })
+            ))
+        ));
+        assert!(
+            tester.calls.is_empty(),
+            "stale draft must not reach network"
+        );
 
         assert!(matches!(
             loser.commit_config(&mut loser_runtime),
@@ -1728,12 +1869,11 @@ source = "unknown"
             loser
                 .screen(Some(&loser_runtime))
                 .expect("stale editor remains visible"),
-            PresentationScreenView::ConfigEditor { dirty: true, .. }
+            PresentationScreenView::ProviderWizard { dirty: true, .. }
         ));
         loser
             .stage_config(&loser_runtime, "https://still-live.example.com/v1")
             .expect("stale editor session remains live after conflict");
-        loser_runtime.reload().expect("reload winner state");
         assert_eq!(
             loser_runtime
                 .inspect_field(ConfigScope::Project, "providers.edge.base_url")
@@ -1959,7 +2099,7 @@ source = "unknown"
             .expect("activate create route");
         assert!(matches!(
             controller.screen(Some(&runtime)).expect("create screen"),
-            PresentationScreenView::ConfigEditor {
+            PresentationScreenView::ProviderWizard {
                 operation: ConfigEditorOperation::Create,
                 dirty: false,
                 validated: false,
@@ -1999,6 +2139,116 @@ source = "unknown"
             .commit_config(&mut runtime)
             .expect("commit deletion");
         assert!(!runtime.addressable_objects().unwrap().contains(&object));
+    }
+
+    struct SuccessfulConnectionTester {
+        calls: Vec<(String, u64)>,
+    }
+
+    impl ProviderConnectionTester for SuccessfulConnectionTester {
+        fn test(
+            &mut self,
+            profile: &greentyper_core::provider::ProviderProfileSnapshot,
+        ) -> ProviderConnectionTestStatus {
+            self.calls
+                .push((profile.profile().to_owned(), profile.fingerprint()));
+            ProviderConnectionTestStatus::Succeeded {
+                profile: profile.profile().to_owned(),
+                fingerprint: profile.fingerprint(),
+            }
+        }
+    }
+
+    #[test]
+    fn provider_wizard_tests_the_current_draft_without_committing_or_exposing_credentials() {
+        let temp = TempTree::new("provider-wizard");
+        let paths = temp.paths();
+        let mut runtime = ConfigRuntime::open(paths.clone(), ConfigDocument::empty())
+            .expect("open Config Runtime");
+        let object = ConfigObjectRef::new(ConfigObjectKind::ProviderProfile, "edge");
+        let mut controller = PresentationController::new();
+        controller
+            .set_slash_query("/config provider add")
+            .expect("set Provider wizard route");
+        controller
+            .activate(&mut runtime, ConfigScope::Project, Some(&object))
+            .expect("activate Provider wizard");
+        assert!(matches!(
+            controller.screen(Some(&runtime)).expect("wizard screen"),
+            PresentationScreenView::ProviderWizard {
+                connection: ProviderConnectionTestStatus::Untested,
+                dirty: false,
+                validated: false,
+                ..
+            }
+        ));
+
+        controller
+            .stage_config(&runtime, "openai-compatible")
+            .expect("stage template");
+        controller
+            .focus_config_field(&runtime, "/config provider credential", 0)
+            .expect("focus credential");
+        controller
+            .stage_provider_credential_reference(&runtime, "synthetic-edge-credential-reference")
+            .expect("stage credential reference");
+        for (query, value) in [
+            ("/config provider url", "https://wizard.example.com/v1"),
+            ("/config provider route responses", "/responses"),
+            ("/config provider route models", "/models"),
+            ("/config provider dialects", "[\"responses\"]"),
+            ("/config provider pricing", "unknown"),
+        ] {
+            controller
+                .focus_config_field(&runtime, query, 0)
+                .expect("focus Provider field");
+            controller
+                .stage_config(&runtime, value)
+                .expect("stage Provider field");
+        }
+        controller
+            .preview_config(&mut runtime)
+            .expect("validate Provider draft");
+        let mut tester = SuccessfulConnectionTester { calls: Vec::new() };
+        let status = controller
+            .test_provider_connection(&runtime, &mut tester)
+            .expect("test Provider connection");
+        assert!(matches!(
+            status,
+            ProviderConnectionTestStatus::Succeeded { .. }
+        ));
+        assert_eq!(tester.calls.len(), 1);
+        assert_eq!(tester.calls[0].0, "edge");
+        assert!(
+            !paths.project().exists(),
+            "connection test must not commit Config"
+        );
+
+        let encoded = serde_json::to_string(
+            &controller
+                .screen(Some(&runtime))
+                .expect("tested wizard screen"),
+        )
+        .expect("serialize Provider wizard");
+        assert!(encoded.contains("\"screen\":\"provider_wizard\""));
+        assert!(encoded.contains("\"state\":\"succeeded\""));
+        assert!(!encoded.contains("synthetic-edge-credential-reference"));
+
+        controller
+            .focus_config_field(&runtime, "/config provider template", 0)
+            .expect("refocus template");
+        controller
+            .stage_config(&runtime, "openai-compatible")
+            .expect("restage template");
+        assert!(matches!(
+            controller
+                .screen(Some(&runtime))
+                .expect("invalidated wizard screen"),
+            PresentationScreenView::ProviderWizard {
+                connection: ProviderConnectionTestStatus::Untested,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -2096,7 +2346,7 @@ source = "unknown"
             controller
                 .screen(Some(&runtime))
                 .expect("staged editor screen"),
-            PresentationScreenView::ConfigEditor {
+            PresentationScreenView::ProviderWizard {
                 dirty: true,
                 validated: false,
                 editor: ConfigEditorView {
@@ -2126,7 +2376,7 @@ source = "unknown"
             controller
                 .screen(Some(&runtime))
                 .expect("editor remains visible"),
-            PresentationScreenView::ConfigEditor { dirty: true, .. }
+            PresentationScreenView::ProviderWizard { dirty: true, .. }
         ));
 
         controller
@@ -2143,7 +2393,7 @@ source = "unknown"
             controller
                 .screen(Some(&runtime))
                 .expect("reset editor screen"),
-            PresentationScreenView::ConfigEditor {
+            PresentationScreenView::ProviderWizard {
                 dirty: true,
                 validated: false,
                 editor: ConfigEditorView {

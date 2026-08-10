@@ -172,6 +172,15 @@ classification, require an origin-bound credential before network access, and
 redact Authorization. The fixture remains synthetic and does not constitute a
 live-provider test.
 
+The product also has an explicit Provider connection-test port and one current
+HTTP adapter for OpenAI-compatible Profiles. It sends one bounded GET to the
+frozen Profile's configured `models` route, with proxy discovery and redirects
+disabled and the same origin-bound credential policy as inference. It does not
+read the response body, discover models, mutate Config, retry, or expose the
+endpoint or credential in its status. The terminal-neutral Provider Profile
+wizard can test an uncommitted validated candidate; `config test-provider` tests
+the currently selected committed Profile.
+
 A two-request HTTP test verifies the exact function definition, initial Tool
 call stream, canonical `local.echo` mapping, approved output correlation,
 previous-response continuation request, final text, and both Usage Records.
@@ -189,7 +198,7 @@ The event shapes are checked against the official
 
 ## Still Pending
 
-- Live-provider validation, Provider Template defaults/catalogs, configurable
+- Live credential-gated provider validation, Provider Template defaults/catalogs, configurable
   proxy policy, broader TLS platform evidence, reconnect classification, and
   retry policy. The current adapter disables proxy discovery and redirects and
   classifies one complete request; it does not reconnect or retry partial
