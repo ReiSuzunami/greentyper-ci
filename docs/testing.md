@@ -91,10 +91,10 @@ reason exclusion from the Tool Ledger and Debug output, and explicit ambiguous-
 effect reconciliation. Fault injection proves that a prepared-effect append
 failure invokes no executor,
 while an outcome append failure after one invocation poisons the writer and
-reopens in a reconciliation-required state. The configured Responses and Chat
-Completions adapters now bind typed, frozen Provider Profile, dialect, and route
-metadata to origin-scoped credential lookup. Live-provider validation,
-non-Windows credential backends,
+reopens in a reconciliation-required state. The configured Responses, Chat
+Completions, and Messages adapters now bind typed, frozen Provider Profile,
+dialect, and route metadata to origin-scoped credential lookup. Live-provider
+validation, non-Windows credential backends,
 configurable proxy policy, broader TLS platform evidence, broader canonical
 Runtime Items, reasoning/refusal/annotation and other unimplemented Responses
 event kinds, reconnect/retry fixtures, MCP adapters, richer TUI/App Server Tool
@@ -137,11 +137,11 @@ separately, and round-trip schema-4 Provider Profile, dialect, Config Usage
 Window, and Usage Attempt data while rejecting fingerprint, outcome, timestamp,
 and transition tampering.
 
-Product integration tests also run the configured Responses and Chat
-Completions adapters against concrete loopback HTTP tracers. They resolve and
+Product integration tests also run the configured Responses, Chat Completions,
+and Messages adapters against concrete loopback HTTP tracers. They resolve and
 freeze the fixture Provider Profile through Config Runtime, then validate the
 selected POST route, model, input or messages, streaming flags, and synthetic
-Authorization header; stream fragmented SSE fixtures through the matching core
+credential header; stream fragmented SSE fixtures through the matching core
 decoder and Runtime; and retain fixed redacted failure categories. Responses
 coverage includes canonical replay, HTTP 503, timeout, upstream private-body
 exclusion, unsafe endpoints, local trusted/untrusted TLS roots, and status
@@ -150,6 +150,13 @@ and usage, missing credential or explicit dialect before network access, HTTP
 503, wrong content type, malformed SSE, and one exact two-request Tool protocol:
 advertised `local_echo`, streamed call, canonical `local.echo` mapping,
 correlated assistant/Tool messages, final text, and two Usage Records.
+Messages coverage binds the exact DeepSeek template and frozen Messages route,
+uses a sensitive `x-api-key` plus pinned compatibility-version header without
+an `Authorization` header, disables unsupported thinking, and sends the fixed
+bounded output-token limit. It covers canonical text/usage, missing credential
+and unsupported-template rejection before network access, HTTP 503, wrong
+content type, provider error SSE redaction, and one exact `tool_use`/
+`tool_result` continuation with two Usage Records.
 Windows-only tests exercise Credential Manager bind, replace, resolve, and
 forget. This does not cover live credentials, proxy authentication,
 reconnect/retry, live Providers, or broader Tool presentation.
@@ -280,11 +287,14 @@ malformed completion and process interruption after admission. The OpenAI
 Responses decoder has redacted fixtures for text, function calls, optional
 usage, failed, incomplete, and error terminals. The separate Chat Completions
 decoder has redacted fixtures for fragmented text, one fragmented function call,
-usage-only completion, incomplete termination, and Tool continuation. Fixture
-Providers pass normalized events through the Kernel and Tool Runtime for one
-approved call and continuation. The remaining scenarios land with reconnect,
-multiple tools, broader delta kinds, Anthropic Messages, and broader usage
-normalization.
+usage-only completion, incomplete termination, and Tool continuation.
+The Anthropic Messages decoder has redacted fixtures for ordered message and
+content-block transitions, fragmented text and one `tool_use`, cumulative
+usage, incomplete/error terminals, bounds, redaction, and Tool continuation.
+Fixture Providers pass normalized events through the Kernel and Tool Runtime
+for one approved call and continuation. The remaining scenarios land with
+reconnect, multiple tools, broader delta kinds, Messages reasoning blocks, and
+broader usage normalization.
 
 The product connection-test adapter has deterministic loopback coverage for one
 explicit GET to the frozen Profile's `models` route. Tests validate the synthetic
@@ -299,8 +309,10 @@ loopback origin override through the Responses adapter and models probe. The
 test proves inherited routes and dialects cross the same endpoint and credential
 gates as an explicit compatible gateway. The Chat Completions adapter currently
 admits only the OpenAI and explicit openai-compatible template identities.
-Template-specific DeepSeek/OpenCode Go execution and all Anthropic Messages
-execution remain outside this slice.
+The Messages adapter admits only the official DeepSeek template identity and
+its explicit Messages route. DeepSeek Responses/Chat Completions and all
+OpenCode Go execution remain outside this slice; a declared route or dialect is
+not treated as proof of wire compatibility.
 
 Live provider integration tests are not implemented yet. Planned opt-in,
 credential-gated tests will verify OpenAI, DeepSeek, and OpenCode Go without

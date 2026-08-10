@@ -95,7 +95,7 @@ external-reason exclusion, pre-effect durability failure with zero executor
 calls, and post-effect outcome failure requiring reopen and explicit
 reconciliation.
 
-The first Provider dialect slice and one additional adapter slice are also
+The first Provider dialect slice and two additional adapter slices are also
 implemented. A reusable bounded SSE
 framer handles LF, CRLF, lone CR, fragmented UTF-8, comments, multiline data,
 and explicit byte limits. The OpenAI Responses decoder validates a documented
@@ -108,6 +108,11 @@ The separate Chat Completions decoder validates one choice, streamed content,
 one fragmented function call, usage-only completion, fixed incomplete states,
 and `[DONE]`; it shares only the bounded SSE framer and provider-neutral output
 contract with Responses.
+The Anthropic Messages decoder validates the ordered message/content-block
+protocol, bounded text and one fragmented `tool_use`, cumulative usage, explicit
+incomplete/error terminals, and `message_stop`. It preserves unknown usage
+instead of inventing zeroes and maps only the supported facts into the same
+provider-neutral contract.
 
 A fixture tracer bullet now normalizes the supported Responses facts into
 provider-neutral text, one canonical function call, and optional Usage Records.
@@ -132,23 +137,28 @@ The product exposes it only through explicit `--tool local.echo` approval; it
 is one narrow local process Tool, not a general process sandbox or
 caller-selected command.
 
-A pair of configured product adapters now exercise the concrete Responses and
-Chat Completions HTTP seams.
+Three configured product adapters now exercise the concrete Responses, Chat
+Completions, and Messages HTTP seams.
 Config Runtime resolves and freezes its typed Provider Profile, origin,
 selected-dialect route, dialect, pricing decision, and opaque credential
 reference. Each adapter resolves a secret from the origin-bound product vault,
 requires HTTPS for remote origins, disables proxy discovery and redirects,
 sends a bounded canonical request, applies a fixed deadline, and streams the
-response through its core decoder into the real single-Agent Runtime. Private
-loopback fixtures retain synthetic authorization. Tests cover fragmented success,
-canonical replay, exact dialect-specific request and one-Tool continuation
-bodies, HTTP failure-body redaction, timeout, endpoint/status policy, trusted
-and untrusted TLS, and missing credential failure before network access.
+response through its core decoder into the real single-Agent Runtime. The
+DeepSeek Messages adapter uses `x-api-key`, pins the compatibility version,
+disables unsupported reasoning blocks, and admits only the exact frozen
+DeepSeek/Messages pair. Private loopback fixtures retain synthetic
+authorization. Tests cover fragmented success, canonical replay, exact
+dialect-specific request and one-Tool continuation bodies, HTTP failure-body
+redaction, timeout, endpoint/status policy, trusted and untrusted TLS, and
+missing credential failure before network access.
 
 The remaining slices are still policy, protocol, and fault-adapter work:
 live-provider validation, non-Windows credential backends, configurable proxy
-policy, live catalog discovery, Anthropic Messages, template-specific DeepSeek
-and OpenCode Go execution, broader canonical Items, multiple Tool calls,
+policy, live catalog discovery, template-specific DeepSeek Responses/Chat
+Completions and all OpenCode Go execution, Messages reasoning
+blocks and preset-driven output-token limits, broader canonical Items, multiple
+Tool calls,
 durable resumable Tool result references, richer TUI/App Server
 approval/delivery, caller-selected process policy, complete Windows Job
 lifetime/resource evidence, reconnect/retry behavior, and the cross-process
@@ -156,8 +166,8 @@ Tool crash matrix remain pending.
 
 Exit criteria:
 
-- A fixture Responses or Chat Completions Turn can call one approved Tool and
-  finish canonically.
+- A fixture Responses, Chat Completions, or Messages Turn can call one approved
+  Tool and finish canonically.
 - Successful and ambiguous effects cannot auto-repeat after injected crashes.
 - Credentials stay outside files and Ledgers.
 - Provider raw events are diagnostic artifacts, not core state.
@@ -234,7 +244,9 @@ the installed product-adapter boundary, and keeps live availability and Recent
 unknown. `greentyper config catalog` emits the static snapshot without Config,
 credential, or network access. The current Responses and Chat Completions
 adapters accept the official OpenAI template through the same frozen capability,
-dialect, and endpoint checks as compatible gateways.
+dialect, and endpoint checks as compatible gateways. The current Messages
+adapter accepts only the official DeepSeek template and its explicit frozen
+Messages route; no OpenCode Go wire compatibility is inferred from catalog data.
 Price Schedules are now a fourth typed Config Object with nested lifecycle and
 schema-generated editor routes. The Config Runtime validates provider/pricing
 provenance, effective intervals, selector overlap, and fixed integer rates before
@@ -278,17 +290,19 @@ Exit criteria:
 
 ## Phase 4: Provider Portability
 
-Continue the release templates and seed catalog with an Anthropic Messages
-adapter, template-specific DeepSeek and OpenCode Go Chat Completions execution,
-lazy discovery, starter-preset acceptance, provider capability probes, explicit
-fallback chains, observed availability, and provider/model epoch switching.
-The OpenAI/openai-compatible Chat Completions adapter is already implemented;
-custom gateway routes and user-owned Model Presets already resolve through the
-frozen Config/Provider Epoch boundary.
+Continue the release templates and seed catalog with template-specific DeepSeek
+Responses/Chat Completions and OpenCode Go adapter execution, lazy discovery,
+starter-preset acceptance, provider capability probes, explicit fallback
+chains, observed availability, and provider/model epoch switching. The
+OpenAI/openai-compatible Responses and Chat Completions adapters and the first
+official DeepSeek Messages adapter are implemented; custom gateway routes and
+user-owned Model Presets already resolve through the frozen Config/Provider
+Epoch boundary.
 
 Exit criteria:
 
-- Golden fixtures pass for all three dialects.
+- Golden fixtures continue to pass for all three dialects and every newly
+  enabled template/adapter pair.
 - Mixed-dialect OpenCode Go models resolve per Model Preset.
 - Unknown discovered models remain unavailable until their dialect is trusted.
 - Origin changes require credential and pricing decisions.

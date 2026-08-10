@@ -22,8 +22,8 @@ greentyper/
 
 The only library package. It contains the canonical model, Config Runtime,
 provisional file Ledger, deterministic Provider seam, bounded generic SSE plus
-OpenAI Responses and Chat Completions dialect decoding, recoverable single-Agent
-Runtime Kernel,
+OpenAI Responses, Chat Completions, and Anthropic Messages dialect decoding,
+recoverable single-Agent Runtime Kernel,
 Agent Team Runtime, durable Tool Runtime policy, and the immutable Usage
 Attempt/window/rollup projection. It also owns the immutable release Provider
 Catalog and its field provenance. Config Runtime owns catalog-template
@@ -41,7 +41,8 @@ The core must build and run pure tests on macOS ARM. Platform-specific I/O enter
 
 The shipped product executable. It owns composition and the target TUI, CLI,
 App Server, and concrete production adapters. Its current private modules
-include configured Responses and Chat Completions HTTP/SSE, a bounded
+include configured Responses and Chat Completions HTTP/SSE plus the DeepSeek
+Messages HTTP/SSE adapter, a bounded
 status-only Provider connection test adapter, origin-bound Windows Credential
 Manager access, the fixed
 `local.echo` process executor, a terminal-neutral presentation projection, Config

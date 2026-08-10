@@ -12,6 +12,7 @@ use greentyper_core::config::{
 use greentyper_core::provider::chat_completions::{
     ChatCompletionsSseDecoder, normalize_chat_completions_events,
 };
+use greentyper_core::provider::messages::{MessagesSseDecoder, normalize_messages_events};
 use greentyper_core::provider::responses::{
     ResponsesEventKind, ResponsesSseDecoder, normalize_responses_events,
 };
@@ -29,18 +30,21 @@ use crate::credential_vault::{
     CredentialVault, CredentialVaultError, InMemoryCredentialVault, ProviderCredentialScope,
     SecretValue,
 };
-use crate::provider_http_policy::{bearer_header, validate_provider_endpoint};
+use crate::provider_http_policy::{bearer_header, credential_header, validate_provider_endpoint};
 
 const FIXTURE_PROFILE: &str = "responses-loopback";
 const FIXTURE_MODEL: &str = "fixture-model";
 const FIXTURE_ROUTE: &str = "/v1/responses";
 const OPENAI_TEMPLATE: &str = "openai";
 const OPENAI_COMPATIBLE_TEMPLATE: &str = "openai-compatible";
+const DEEPSEEK_TEMPLATE: &str = "deepseek";
 const FIXTURE_CREDENTIAL_REFERENCE: &str = "responses-loopback-synthetic";
 const SYNTHETIC_AUTHORIZATION: &str = "Bearer greentyper-synthetic-provider-token-v1";
 const SYNTHETIC_SECRET: &[u8] = b"greentyper-synthetic-provider-token-v1";
 const HTTP_TIMEOUT: Duration = Duration::from_millis(200);
 const PROVIDER_TIMEOUT: Duration = Duration::from_secs(300);
+const MESSAGES_MAX_TOKENS: u32 = 4096;
+const ANTHROPIC_VERSION: &str = "2023-06-01";
 const SERVER_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_REQUEST_BYTES: usize = 128 * 1024;
 const MAX_HEADER_BYTES: usize = 32 * 1024;
@@ -59,6 +63,15 @@ const CHAT_TOOL_CONTINUATION_SSE: &[u8] = include_bytes!(
     "../../../tests/fixtures/provider/chat_completions/v1/http-tool-continuation.sse"
 );
 #[cfg(test)]
+const MESSAGES_TEXT_SSE: &[u8] =
+    include_bytes!("../../../tests/fixtures/provider/messages/v1/http-text.sse");
+#[cfg(test)]
+const MESSAGES_TOOL_CALL_SSE: &[u8] =
+    include_bytes!("../../../tests/fixtures/provider/messages/v1/http-tool-call.sse");
+#[cfg(test)]
+const MESSAGES_TOOL_CONTINUATION_SSE: &[u8] =
+    include_bytes!("../../../tests/fixtures/provider/messages/v1/http-tool-continuation.sse");
+#[cfg(test)]
 const TOOL_CALL_SSE: &[u8] =
     include_bytes!("../../../tests/fixtures/provider/responses/v1/http-tool-call.sse");
 #[cfg(test)]
@@ -71,7 +84,7 @@ pub(crate) fn has_provider_adapter(template: &str, dialect: ProviderDialect) -> 
         (
             OPENAI_TEMPLATE | OPENAI_COMPATIBLE_TEMPLATE,
             ProviderDialect::Responses | ProviderDialect::ChatCompletions
-        )
+        ) | (DEEPSEEK_TEMPLATE, ProviderDialect::Messages)
     )
 }
 
@@ -656,6 +669,308 @@ impl<V: CredentialVault> ProviderRuntime for ChatCompletionsHttpProvider<V> {
     }
 }
 
+pub(crate) struct MessagesHttpProvider<V> {
+    client: Client,
+    endpoint: Url,
+    profile: ProviderProfileSnapshot,
+    credential_scope: ProviderCredentialScope,
+    vault: V,
+    local_echo_enabled: bool,
+    pending_continuation: Option<MessagesPendingContinuation>,
+}
+
+#[derive(Clone)]
+struct MessagesPendingContinuation {
+    call_id: String,
+    input: String,
+    arguments_json: String,
+}
+
+impl<V> fmt::Debug for MessagesHttpProvider<V> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("MessagesHttpProvider")
+            .field("transport", &"blocking-http-sse")
+            .field("authorization", &"redacted")
+            .finish()
+    }
+}
+
+impl<V: CredentialVault> MessagesHttpProvider<V> {
+    fn new(profile: ProviderProfileSnapshot, vault: V) -> Result<Self, ProviderError> {
+        Self::with_timeout(profile, vault, PROVIDER_TIMEOUT)
+    }
+
+    fn with_timeout(
+        profile: ProviderProfileSnapshot,
+        vault: V,
+        timeout: Duration,
+    ) -> Result<Self, ProviderError> {
+        Self::with_client_builder(profile, vault, timeout, Client::builder())
+    }
+
+    fn with_client_builder(
+        profile: ProviderProfileSnapshot,
+        vault: V,
+        timeout: Duration,
+        client: ClientBuilder,
+    ) -> Result<Self, ProviderError> {
+        if !has_provider_adapter(profile.template(), ProviderDialect::Messages) {
+            return Err(ProviderError::InvalidConfiguration(
+                "Provider Profile template has no configured runtime adapter",
+            ));
+        }
+        if !profile.supports(ProviderDialect::Messages) {
+            return Err(ProviderError::InvalidConfiguration(
+                "Messages Provider Profile does not declare Messages support",
+            ));
+        }
+        let endpoint = profile.endpoint(ProviderDialect::Messages).ok_or(
+            ProviderError::InvalidConfiguration("Messages Provider Profile has no endpoint"),
+        )?;
+        let endpoint = validate_provider_endpoint(&endpoint, profile.allow_insecure_loopback())?;
+        let credential_scope = ProviderCredentialScope::from_profile(&profile)
+            .map_err(map_credential_configuration_error)?;
+        drop(
+            vault
+                .resolve(&credential_scope)
+                .map_err(map_credential_resolve_error)?,
+        );
+        let client = client
+            .no_proxy()
+            .https_only(endpoint.scheme() == "https")
+            .timeout(timeout)
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|_| ProviderError::unavailable("Messages HTTP client setup failed"))?;
+        Ok(Self {
+            client,
+            endpoint,
+            profile,
+            credential_scope,
+            vault,
+            local_echo_enabled: false,
+            pending_continuation: None,
+        })
+    }
+
+    fn enable_local_echo(&mut self) {
+        self.local_echo_enabled = true;
+    }
+
+    fn send_request(
+        &self,
+        body: serde_json::Value,
+        max_output_bytes: usize,
+    ) -> Result<Vec<ProviderEvent>, ProviderError> {
+        let secret = self
+            .vault
+            .resolve(&self.credential_scope)
+            .map_err(map_credential_resolve_error)?;
+        let api_key = credential_header(&secret)?;
+        let body = serde_json::to_vec(&body)
+            .map_err(|_| ProviderError::InvalidRequest("Messages request could not be encoded"))?;
+        if body.len() > MAX_REQUEST_BYTES {
+            return Err(ProviderError::InvalidRequest(
+                "Messages request exceeds its byte limit",
+            ));
+        }
+        let mut response = self
+            .client
+            .post(self.endpoint.clone())
+            .header(ACCEPT, "text/event-stream")
+            .header("x-api-key", api_key)
+            .header("anthropic-version", ANTHROPIC_VERSION)
+            .header(CONTENT_TYPE, "application/json")
+            .body(body)
+            .send()
+            .map_err(|_| ProviderError::unavailable("Messages HTTP request failed"))?;
+        if response.status() != StatusCode::OK {
+            return Err(classify_messages_http_status(response.status()));
+        }
+        let content_type = response
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.split(';').next())
+            .map(str::trim);
+        if !content_type.is_some_and(|value| value.eq_ignore_ascii_case("text/event-stream")) {
+            return Err(ProviderError::InvalidResponse(
+                "Messages HTTP response has the wrong content type",
+            ));
+        }
+
+        let mut decoder = MessagesSseDecoder::new(max_output_bytes).map_err(|_| {
+            ProviderError::InvalidConfiguration("Messages decoder limits are invalid")
+        })?;
+        let mut buffer = [0_u8; READ_CHUNK_BYTES];
+        loop {
+            let read = response
+                .read(&mut buffer)
+                .map_err(|_| ProviderError::unavailable("Messages HTTP stream failed"))?;
+            if read == 0 {
+                break;
+            }
+            decoder
+                .push(&buffer[..read])
+                .map_err(|_| ProviderError::InvalidResponse("Messages HTTP stream was rejected"))?;
+        }
+        let events = decoder
+            .finish()
+            .map_err(|_| ProviderError::InvalidResponse("Messages HTTP stream ended invalidly"))?;
+        normalize_messages_events(&events)
+    }
+
+    fn require_request_identity(&self, request: &ProviderRequest) -> Result<(), ProviderError> {
+        if request.provider.profile() != self.profile.profile()
+            || request.provider.profile_snapshot() != Some(&self.profile)
+            || request.provider.dialect() != Some(ProviderDialect::Messages)
+        {
+            return Err(ProviderError::InvalidConfiguration(
+                "Messages provider identity does not match its frozen Profile and dialect",
+            ));
+        }
+        Ok(())
+    }
+
+    fn take_pending_continuation(
+        &mut self,
+        call_id: &str,
+    ) -> Result<MessagesPendingContinuation, ProviderError> {
+        let pending = self
+            .pending_continuation
+            .as_ref()
+            .ok_or(ProviderError::InvalidRequest(
+                "Messages Provider has no pending Tool continuation",
+            ))?;
+        if call_id != pending.call_id {
+            return Err(ProviderError::InvalidRequest(
+                "Messages Tool output does not match the pending call",
+            ));
+        }
+        self.pending_continuation
+            .take()
+            .ok_or(ProviderError::InvalidRequest(
+                "Messages Provider has no pending Tool continuation",
+            ))
+    }
+}
+
+impl<V: CredentialVault> ProviderRuntime for MessagesHttpProvider<V> {
+    fn profile_snapshot(&self) -> Option<&ProviderProfileSnapshot> {
+        Some(&self.profile)
+    }
+
+    fn dialect(&self) -> Option<ProviderDialect> {
+        Some(ProviderDialect::Messages)
+    }
+
+    fn run(&mut self, request: &ProviderRequest) -> Result<Vec<ProviderEvent>, ProviderError> {
+        self.require_request_identity(request)?;
+        let max_output_bytes =
+            usize::try_from(*request.config.resolved().max_output_bytes().value())
+                .map_err(|_| ProviderError::InvalidConfiguration("output byte limit is invalid"))?;
+        self.pending_continuation = None;
+        let body = if self.local_echo_enabled {
+            serde_json::json!({
+                "max_tokens": MESSAGES_MAX_TOKENS,
+                "messages": [{"role": "user", "content": request.input}],
+                "model": request.provider.model(),
+                "stream": true,
+                "thinking": {"type": "disabled"},
+                "tool_choice": {"type": "auto", "disable_parallel_tool_use": true},
+                "tools": [messages_local_echo_tool_definition()],
+            })
+        } else {
+            serde_json::json!({
+                "max_tokens": MESSAGES_MAX_TOKENS,
+                "messages": [{"role": "user", "content": request.input}],
+                "model": request.provider.model(),
+                "stream": true,
+                "thinking": {"type": "disabled"},
+            })
+        };
+        let events = self.send_request(body, max_output_bytes)?;
+        let events = if self.local_echo_enabled {
+            normalize_local_echo_calls(events)?
+        } else {
+            events
+        };
+        let calls = events
+            .iter()
+            .filter_map(|event| match event {
+                ProviderEvent::FunctionCall(call) => Some(call),
+                ProviderEvent::TextDelta(_) | ProviderEvent::Completed(_) => None,
+            })
+            .collect::<Vec<_>>();
+        if let [call] = calls.as_slice() {
+            self.pending_continuation = Some(MessagesPendingContinuation {
+                call_id: call.call_id().to_owned(),
+                input: request.input.clone(),
+                arguments_json: call.arguments_json().to_owned(),
+            });
+        }
+        Ok(events)
+    }
+
+    fn continue_after_tool(
+        &mut self,
+        request: &ProviderRequest,
+        output: &ProviderToolOutput,
+    ) -> Result<Vec<ProviderEvent>, ProviderError> {
+        self.require_request_identity(request)?;
+        if !self.local_echo_enabled {
+            return Err(ProviderError::InvalidRequest(
+                "Messages Provider has no enabled Tool continuation",
+            ));
+        }
+        let pending = self.take_pending_continuation(output.call_id())?;
+        let arguments: serde_json::Value = serde_json::from_str(&pending.arguments_json)
+            .map_err(|_| ProviderError::InvalidResponse("Messages Tool input was invalid"))?;
+        let max_output_bytes =
+            usize::try_from(*request.config.resolved().max_output_bytes().value())
+                .map_err(|_| ProviderError::InvalidConfiguration("output byte limit is invalid"))?;
+        let body = serde_json::json!({
+            "max_tokens": MESSAGES_MAX_TOKENS,
+            "messages": [
+                {"role": "user", "content": pending.input},
+                {
+                    "role": "assistant",
+                    "content": [{
+                        "type": "tool_use",
+                        "id": pending.call_id,
+                        "name": "local_echo",
+                        "input": arguments,
+                    }],
+                },
+                {
+                    "role": "user",
+                    "content": [{
+                        "type": "tool_result",
+                        "tool_use_id": output.call_id(),
+                        "content": output.output(),
+                    }],
+                },
+            ],
+            "model": request.provider.model(),
+            "stream": true,
+            "thinking": {"type": "disabled"},
+            "tool_choice": {"type": "none"},
+            "tools": [messages_local_echo_tool_definition()],
+        });
+        let events = self.send_request(body, max_output_bytes)?;
+        if events
+            .iter()
+            .any(|event| matches!(event, ProviderEvent::FunctionCall(_)))
+        {
+            return Err(ProviderError::InvalidResponse(
+                "Messages continuation returned another Tool call",
+            ));
+        }
+        Ok(events)
+    }
+}
+
 fn local_echo_tool_definition() -> serde_json::Value {
     serde_json::json!({
         "type": "function",
@@ -692,6 +1007,21 @@ fn chat_local_echo_tool_definition() -> serde_json::Value {
     })
 }
 
+fn messages_local_echo_tool_definition() -> serde_json::Value {
+    serde_json::json!({
+        "name": "local_echo",
+        "description": "Return the supplied message unchanged.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "message": {"type": "string"},
+            },
+            "required": ["message"],
+            "additionalProperties": false,
+        },
+    })
+}
+
 fn normalize_local_echo_calls(
     events: Vec<ProviderEvent>,
 ) -> Result<Vec<ProviderEvent>, ProviderError> {
@@ -717,6 +1047,7 @@ pub(crate) enum ConfiguredProvider<V> {
     Simulator(DeterministicProvider),
     Responses(Box<ResponsesHttpProvider<V>>),
     ChatCompletions(Box<ChatCompletionsHttpProvider<V>>),
+    Messages(Box<MessagesHttpProvider<V>>),
 }
 
 impl<V: CredentialVault> ConfiguredProvider<V> {
@@ -724,6 +1055,7 @@ impl<V: CredentialVault> ConfiguredProvider<V> {
         match self {
             Self::Responses(provider) => provider.enable_local_echo(),
             Self::ChatCompletions(provider) => provider.enable_local_echo(),
+            Self::Messages(provider) => provider.enable_local_echo(),
             Self::Simulator(_) => {}
         }
     }
@@ -752,9 +1084,9 @@ impl<V: CredentialVault> ConfiguredProvider<V> {
             ProviderDialect::ChatCompletions => ChatCompletionsHttpProvider::new(profile, vault)
                 .map(Box::new)
                 .map(Self::ChatCompletions),
-            ProviderDialect::Messages => Err(ProviderError::InvalidConfiguration(
-                "Provider Profile dialect has no configured runtime adapter",
-            )),
+            ProviderDialect::Messages => MessagesHttpProvider::new(profile, vault)
+                .map(Box::new)
+                .map(Self::Messages),
         }
     }
 
@@ -773,9 +1105,9 @@ impl<V: CredentialVault> ConfiguredProvider<V> {
                         .map(Box::new)
                         .map(Self::ChatCompletions)
                 }
-                ProviderDialect::Messages => Err(ProviderError::InvalidConfiguration(
-                    "Provider Epoch dialect has no configured runtime adapter",
-                )),
+                ProviderDialect::Messages => MessagesHttpProvider::new(profile.clone(), vault)
+                    .map(Box::new)
+                    .map(Self::Messages),
             },
             (_, None) => Err(ProviderError::InvalidConfiguration(
                 "non-simulator Provider Epoch has no frozen Profile",
@@ -790,6 +1122,7 @@ impl<V: CredentialVault> ProviderRuntime for ConfiguredProvider<V> {
             Self::Simulator(provider) => provider.profile_snapshot(),
             Self::Responses(provider) => provider.profile_snapshot(),
             Self::ChatCompletions(provider) => provider.profile_snapshot(),
+            Self::Messages(provider) => provider.profile_snapshot(),
         }
     }
 
@@ -798,6 +1131,7 @@ impl<V: CredentialVault> ProviderRuntime for ConfiguredProvider<V> {
             Self::Simulator(provider) => provider.dialect(),
             Self::Responses(provider) => provider.dialect(),
             Self::ChatCompletions(provider) => provider.dialect(),
+            Self::Messages(provider) => provider.dialect(),
         }
     }
 
@@ -806,6 +1140,7 @@ impl<V: CredentialVault> ProviderRuntime for ConfiguredProvider<V> {
             Self::Simulator(provider) => provider.run(request),
             Self::Responses(provider) => provider.run(request),
             Self::ChatCompletions(provider) => provider.run(request),
+            Self::Messages(provider) => provider.run(request),
         }
     }
 
@@ -818,6 +1153,7 @@ impl<V: CredentialVault> ProviderRuntime for ConfiguredProvider<V> {
             Self::Simulator(provider) => provider.continue_after_tool(request, output),
             Self::Responses(provider) => provider.continue_after_tool(request, output),
             Self::ChatCompletions(provider) => provider.continue_after_tool(request, output),
+            Self::Messages(provider) => provider.continue_after_tool(request, output),
         }
     }
 }
@@ -950,6 +1286,27 @@ fn classify_chat_http_status(status: StatusCode) -> ProviderError {
             ProviderError::InvalidRequest("Chat Completions HTTP request was rejected")
         }
         _ => ProviderError::InvalidResponse("Chat Completions HTTP status was invalid"),
+    }
+}
+
+fn classify_messages_http_status(status: StatusCode) -> ProviderError {
+    match status {
+        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => {
+            ProviderError::InvalidConfiguration("Provider credential was rejected")
+        }
+        StatusCode::REQUEST_TIMEOUT | StatusCode::TOO_MANY_REQUESTS => {
+            ProviderError::unavailable("Messages HTTP request was temporarily rejected")
+        }
+        status if status.is_server_error() => {
+            ProviderError::unavailable("Messages HTTP service failed")
+        }
+        status if status.is_redirection() => {
+            ProviderError::InvalidResponse("Messages HTTP redirect was rejected")
+        }
+        status if status.is_client_error() => {
+            ProviderError::InvalidRequest("Messages HTTP request was rejected")
+        }
+        _ => ProviderError::InvalidResponse("Messages HTTP status was invalid"),
     }
 }
 
@@ -1591,6 +1948,112 @@ source = "unknown"
         vault
     }
 
+    fn messages_fixture_profile(base_url: &str, name: &str) -> ProviderProfileSnapshot {
+        let encoded_base_url = serde_json::to_string(base_url).expect("encode Messages origin");
+        let document = ConfigDocument::parse(&format!(
+            r#"
+schema_version = 1
+
+[provider]
+profile = "messages-loopback"
+model = "{FIXTURE_MODEL}"
+
+[providers.messages-loopback]
+template = "{DEEPSEEK_TEMPLATE}"
+credential = "messages-loopback-synthetic"
+base_url = {encoded_base_url}
+dialects = ["messages"]
+allow_insecure_loopback = true
+
+[providers.messages-loopback.routes]
+messages = "/anthropic/v1/messages"
+models = "/models"
+
+[providers.messages-loopback.pricing]
+source = "unknown"
+"#,
+        ))
+        .expect("parse Messages fixture Config");
+        ConfigRuntime::open(test_config_paths(name), document)
+            .expect("resolve Messages fixture Config")
+            .selected_provider_profile()
+            .expect("resolve Messages Profile")
+            .expect("external Messages Profile")
+    }
+
+    fn bound_messages_vault(profile: &ProviderProfileSnapshot) -> InMemoryCredentialVault {
+        let scope = ProviderCredentialScope::from_profile(profile).expect("credential scope");
+        let mut vault = InMemoryCredentialVault::default();
+        vault
+            .bind(
+                &scope,
+                SecretValue::new(SYNTHETIC_SECRET.to_vec()).expect("synthetic secret"),
+            )
+            .expect("bind Messages credential");
+        vault
+    }
+
+    fn read_messages_request_body(stream: &mut impl Read) -> serde_json::Value {
+        let mut bytes = Vec::new();
+        let mut chunk = [0_u8; 4096];
+        let (body_start, content_length) = loop {
+            let read = stream.read(&mut chunk).expect("read Messages request");
+            assert_ne!(read, 0, "Messages request ended before headers");
+            bytes.extend_from_slice(&chunk[..read]);
+            let Some(header_end) = find_header_end(&bytes) else {
+                continue;
+            };
+            let headers =
+                std::str::from_utf8(&bytes[..header_end]).expect("Messages request headers UTF-8");
+            let mut lines = headers.split("\r\n");
+            assert_eq!(lines.next(), Some("POST /anthropic/v1/messages HTTP/1.1"));
+            let mut api_key = None;
+            let mut anthropic_version = None;
+            let mut authorization = None;
+            let mut content_length = None;
+            let mut content_type = None;
+            for line in lines {
+                let (name, value) = line.split_once(':').expect("well-formed Messages header");
+                let value = value.trim();
+                if name.eq_ignore_ascii_case("x-api-key") {
+                    assert!(api_key.replace(value).is_none());
+                } else if name.eq_ignore_ascii_case("anthropic-version") {
+                    assert!(anthropic_version.replace(value).is_none());
+                } else if name.eq_ignore_ascii_case("authorization") {
+                    assert!(authorization.replace(value).is_none());
+                } else if name.eq_ignore_ascii_case("content-length") {
+                    assert!(
+                        content_length
+                            .replace(value.parse::<usize>().expect("Messages content length"))
+                            .is_none()
+                    );
+                } else if name.eq_ignore_ascii_case("content-type") {
+                    assert!(content_type.replace(value).is_none());
+                }
+            }
+            assert_eq!(api_key, Some("greentyper-synthetic-provider-token-v1"));
+            assert_eq!(anthropic_version, Some("2023-06-01"));
+            assert_eq!(authorization, None);
+            assert_eq!(content_type, Some("application/json"));
+            break (
+                header_end + 4,
+                content_length.expect("Messages content length header"),
+            );
+        };
+        let expected_len = body_start + content_length;
+        while bytes.len() < expected_len {
+            let read = stream.read(&mut chunk).expect("read Messages request body");
+            assert_ne!(read, 0, "Messages request body ended early");
+            bytes.extend_from_slice(&chunk[..read]);
+        }
+        assert_eq!(
+            bytes.len(),
+            expected_len,
+            "Messages request had trailing bytes"
+        );
+        serde_json::from_slice(&bytes[body_start..]).expect("Messages request body JSON")
+    }
+
     fn read_request_head(stream: &mut TcpStream) -> String {
         configure_fixture_stream(stream).expect("configure connection-test fixture");
         let mut bytes = Vec::new();
@@ -2135,6 +2598,384 @@ source = "unknown"
             Some(ProviderDialect::ChatCompletions)
         );
         server.join().expect("join Chat Tool server");
+
+        drop(kernel);
+        fs::remove_file(runtime_path).expect("cleanup Runtime Ledger");
+        fs::remove_file(team_path).expect("cleanup Team Ledger");
+        fs::remove_file(tool_path).expect("cleanup Tool Ledger");
+    }
+
+    #[test]
+    fn messages_adapter_uses_deepseek_headers_frozen_dialect_and_route() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("Messages listener");
+        let address = listener.local_addr().expect("Messages listener address");
+        let base_url = format!("http://{address}");
+        let profile = messages_fixture_profile(&base_url, "messages-adapter");
+        let vault = bound_messages_vault(&profile);
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept Messages request");
+            configure_fixture_stream(&stream).expect("configure Messages request");
+            let body = read_messages_request_body(&mut stream);
+            assert_eq!(
+                body,
+                serde_json::json!({
+                    "max_tokens": 4096,
+                    "messages": [{"role": "user", "content": "hello Messages"}],
+                    "model": FIXTURE_MODEL,
+                    "stream": true,
+                    "thinking": {"type": "disabled"},
+                })
+            );
+            write_fixture_response(
+                &mut stream,
+                "200 OK",
+                "text/event-stream",
+                MESSAGES_TEXT_SSE,
+                true,
+            )
+            .expect("write Messages response");
+        });
+
+        assert!(has_provider_adapter(
+            DEEPSEEK_TEMPLATE,
+            ProviderDialect::Messages
+        ));
+        assert!(!has_provider_adapter(
+            "opencode-go",
+            ProviderDialect::Messages
+        ));
+        assert!(!has_provider_adapter(
+            OPENAI_TEMPLATE,
+            ProviderDialect::Messages
+        ));
+        let mut provider = ConfiguredProvider::for_new_turn_with_dialect(
+            profile.clone(),
+            ProviderDialect::Messages,
+            vault,
+        )
+        .expect("configured Messages provider");
+        let request =
+            provider_request_with_dialect(profile, "hello Messages", ProviderDialect::Messages);
+        let events = provider.run(&request).expect("Messages response");
+        assert!(matches!(
+            events.as_slice(),
+            [ProviderEvent::TextDelta(first), ProviderEvent::TextDelta(second), ProviderEvent::Completed(usage)]
+                if first == "Hello "
+                    && second == "Messages"
+                    && usage.input_tokens() == Some(4)
+                    && usage.output_tokens() == Some(2)
+        ));
+        assert_eq!(provider.dialect(), Some(ProviderDialect::Messages));
+        server.join().expect("join Messages server");
+    }
+
+    #[test]
+    fn messages_provider_fails_before_network_without_credential_or_exact_template() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("Messages guard listener");
+        listener
+            .set_nonblocking(true)
+            .expect("nonblocking Messages guard listener");
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let profile = messages_fixture_profile(&base_url, "messages-pre-network-guards");
+        assert!(matches!(
+            MessagesHttpProvider::with_timeout(
+                profile.clone(),
+                InMemoryCredentialVault::default(),
+                HTTP_TIMEOUT,
+            ),
+            Err(ProviderError::InvalidConfiguration(
+                "Provider credential binding was not found"
+            ))
+        ));
+
+        let encoded_base_url = serde_json::to_string(&base_url).expect("encode OpenCode origin");
+        let opencode = ConfigDocument::parse(&format!(
+            r#"
+schema_version = 1
+[provider]
+profile = "opencode-messages"
+model = "fixture-model"
+[providers.opencode-messages]
+template = "opencode-go"
+credential = "opencode-messages-synthetic"
+base_url = {encoded_base_url}
+dialects = ["messages"]
+allow_insecure_loopback = true
+[providers.opencode-messages.routes]
+messages = "/messages"
+[providers.opencode-messages.pricing]
+source = "unknown"
+"#,
+        ))
+        .expect("parse OpenCode Messages fixture");
+        let opencode = ConfigRuntime::open(test_config_paths("opencode-messages-guard"), opencode)
+            .expect("resolve OpenCode Messages fixture")
+            .selected_provider_profile()
+            .expect("resolve OpenCode Messages Profile")
+            .expect("external OpenCode Messages Profile");
+        assert!(matches!(
+            MessagesHttpProvider::with_timeout(
+                opencode,
+                InMemoryCredentialVault::default(),
+                HTTP_TIMEOUT,
+            ),
+            Err(ProviderError::InvalidConfiguration(
+                "Provider Profile template has no configured runtime adapter"
+            ))
+        ));
+        assert!(
+            matches!(listener.accept(), Err(error) if error.kind() == io::ErrorKind::WouldBlock)
+        );
+    }
+
+    #[test]
+    fn messages_pending_continuation_is_consumed_once_after_identity_matches() {
+        let profile =
+            messages_fixture_profile("http://127.0.0.1:9", "messages-pending-continuation");
+        let mut provider = MessagesHttpProvider::with_timeout(
+            profile.clone(),
+            bound_messages_vault(&profile),
+            HTTP_TIMEOUT,
+        )
+        .expect("Messages provider");
+        provider.pending_continuation = Some(MessagesPendingContinuation {
+            call_id: "toolu_once".into(),
+            input: "input".into(),
+            arguments_json: "{}".into(),
+        });
+
+        assert!(provider.take_pending_continuation("other").is_err());
+        assert!(provider.pending_continuation.is_some());
+        let pending = provider
+            .take_pending_continuation("toolu_once")
+            .expect("matching continuation");
+        assert_eq!(pending.call_id, "toolu_once");
+        assert!(provider.pending_continuation.is_none());
+        assert!(provider.take_pending_continuation("toolu_once").is_err());
+    }
+
+    #[test]
+    fn messages_http_failures_are_fixed_and_redacted() {
+        for (index, status, content_type, body) in [
+            (
+                0,
+                "503 Service Unavailable",
+                "application/json",
+                PRIVATE_ERROR_BODY,
+            ),
+            (1, "200 OK", "application/json", PRIVATE_ERROR_BODY),
+            (
+                2,
+                "200 OK",
+                "text/event-stream",
+                b"event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"provider-private-error-marker\"}}\n\n".as_slice(),
+            ),
+        ] {
+            let listener = TcpListener::bind(("127.0.0.1", 0)).expect("Messages failure listener");
+            let base_url = format!("http://{}", listener.local_addr().unwrap());
+            let profile = messages_fixture_profile(&base_url, &format!("messages-failure-{index}"));
+            let mut provider = MessagesHttpProvider::with_timeout(
+                profile.clone(),
+                bound_messages_vault(&profile),
+                HTTP_TIMEOUT,
+            )
+            .expect("Messages provider");
+            let server = thread::spawn(move || {
+                let (mut stream, _) = listener.accept().expect("accept Messages failure request");
+                configure_fixture_stream(&stream).expect("configure Messages failure request");
+                let _body = read_messages_request_body(&mut stream);
+                write_fixture_response(&mut stream, status, content_type, body, true)
+                    .expect("write Messages failure response");
+            });
+            let request = provider_request_with_dialect(
+                profile,
+                "private input must not enter the error",
+                ProviderDialect::Messages,
+            );
+            let error = provider
+                .run(&request)
+                .expect_err("Messages failure must not produce output");
+            if index == 0 || index == 2 {
+                assert!(matches!(error, ProviderError::Unavailable { .. }));
+            } else {
+                assert!(matches!(error, ProviderError::InvalidResponse(_)));
+            }
+            let rendered = format!("{error:?} {error}");
+            assert!(!rendered.contains("provider-private-error-marker"));
+            assert!(!rendered.contains("private input"));
+            assert!(!rendered.contains("messages-loopback-synthetic"));
+            assert!(!rendered.contains(std::str::from_utf8(SYNTHETIC_SECRET).unwrap()));
+            server.join().expect("join Messages failure server");
+        }
+    }
+
+    #[test]
+    fn messages_provider_continues_one_approved_tool_use_over_http() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("Messages Tool listener");
+        let address = listener
+            .local_addr()
+            .expect("Messages Tool listener address");
+        let server = thread::spawn(move || {
+            let (mut initial, _) = listener.accept().expect("accept initial Messages request");
+            configure_fixture_stream(&initial).expect("configure initial Messages request");
+            let initial_body = read_messages_request_body(&mut initial);
+            assert_eq!(
+                initial_body,
+                serde_json::json!({
+                    "max_tokens": 4096,
+                    "messages": [{"role": "user", "content": "echo through Messages"}],
+                    "model": FIXTURE_MODEL,
+                    "stream": true,
+                    "thinking": {"type": "disabled"},
+                    "tool_choice": {"type": "auto", "disable_parallel_tool_use": true},
+                    "tools": [{
+                        "name": "local_echo",
+                        "description": "Return the supplied message unchanged.",
+                        "input_schema": {
+                            "type": "object",
+                            "properties": {"message": {"type": "string"}},
+                            "required": ["message"],
+                            "additionalProperties": false,
+                        },
+                    }],
+                })
+            );
+            write_fixture_response(
+                &mut initial,
+                "200 OK",
+                "text/event-stream",
+                MESSAGES_TOOL_CALL_SSE,
+                true,
+            )
+            .expect("write Messages Tool call response");
+
+            let (mut continuation, _) = listener.accept().expect("accept Messages continuation");
+            configure_fixture_stream(&continuation)
+                .expect("configure Messages continuation request");
+            let continuation_body = read_messages_request_body(&mut continuation);
+            assert_eq!(
+                continuation_body,
+                serde_json::json!({
+                    "max_tokens": 4096,
+                    "messages": [
+                        {"role": "user", "content": "echo through Messages"},
+                        {
+                            "role": "assistant",
+                            "content": [{
+                                "type": "tool_use",
+                                "id": "toolu_messages_echo_001",
+                                "name": "local_echo",
+                                "input": {"message": "tool says hi"},
+                            }],
+                        },
+                        {
+                            "role": "user",
+                            "content": [{
+                                "type": "tool_result",
+                                "tool_use_id": "toolu_messages_echo_001",
+                                "content": "tool says hi",
+                            }],
+                        },
+                    ],
+                    "model": FIXTURE_MODEL,
+                    "stream": true,
+                    "thinking": {"type": "disabled"},
+                    "tool_choice": {"type": "none"},
+                    "tools": [{
+                        "name": "local_echo",
+                        "description": "Return the supplied message unchanged.",
+                        "input_schema": {
+                            "type": "object",
+                            "properties": {"message": {"type": "string"}},
+                            "required": ["message"],
+                            "additionalProperties": false,
+                        },
+                    }],
+                })
+            );
+            write_fixture_response(
+                &mut continuation,
+                "200 OK",
+                "text/event-stream",
+                MESSAGES_TOOL_CONTINUATION_SSE,
+                true,
+            )
+            .expect("write Messages Tool continuation response");
+        });
+
+        let base_url = format!("http://{address}");
+        let profile = messages_fixture_profile(&base_url, "messages-tool");
+        let mut provider = MessagesHttpProvider::with_timeout(
+            profile.clone(),
+            bound_messages_vault(&profile),
+            Duration::from_secs(2),
+        )
+        .expect("Messages provider");
+        provider.enable_local_echo();
+        let mut layers = ConfigLayers::default();
+        layers.cli.provider_profile = Some(profile.profile().to_owned());
+        layers.cli.provider_model = Some(FIXTURE_MODEL.to_owned());
+
+        let runtime_path = test_ledger_path("messages-tool-continuation", "runtime");
+        let team_path = test_ledger_path("messages-tool-continuation", "team");
+        let tool_path = test_ledger_path("messages-tool-continuation", "tool");
+        let (mut kernel, recovery) =
+            RuntimeKernel::open_with_team_and_tools(&runtime_path, &team_path, &tool_path, 1)
+                .expect("open Kernel");
+        assert!(recovery.into_sessions().is_empty());
+        let operation = kernel
+            .dispatch_team(TeamCommand::AdmitRoot {
+                task: TaskSpec::new(
+                    "exercise one Messages HTTP Tool continuation",
+                    TaskScope::from_labels(["provider-messages-tool-http"]),
+                ),
+                budget: ResourceBudget::new(1_000, 1),
+                capabilities: CapabilitySnapshot::from_capabilities([
+                    Capability::Tool("local.echo".into()),
+                    Capability::Process,
+                ]),
+            })
+            .expect("admit root");
+        kernel
+            .acknowledge_team_operation(operation.operation)
+            .expect("acknowledge root admission");
+        let root = match operation.commit.outcome {
+            CommandOutcome::RootAdmitted { session, .. } => session,
+            other => panic!("unexpected root outcome: {other:?}"),
+        };
+        let outcome = kernel
+            .execute_provider_turn(
+                root,
+                &layers,
+                "echo through Messages",
+                &mut provider,
+                |_| Ok(ToolResources::default().with_process("greentyper.local.echo.v1")),
+            )
+            .expect("prepare Messages Tool approval");
+        let approval = match outcome {
+            ProviderTurnOutcome::ApprovalRequired(approval) => approval,
+            other => panic!("unexpected Provider outcome: {other:?}"),
+        };
+        let output = kernel
+            .resolve_provider_tool_call(
+                approval,
+                ApprovalDecision::Grant {
+                    expires_at_unix_ms: u64::MAX,
+                },
+                &mut EchoExecutor,
+                &mut provider,
+            )
+            .expect("continue after Messages Tool output");
+        assert_eq!(output.text(), "Echoed: tool says hi");
+        assert_eq!(output.usage_records().len(), 2);
+        assert_eq!(
+            kernel
+                .pending_provider_epoch()
+                .expect("pending Messages Provider Epoch")
+                .dialect(),
+            Some(ProviderDialect::Messages)
+        );
+        server.join().expect("join Messages Tool server");
 
         drop(kernel);
         fs::remove_file(runtime_path).expect("cleanup Runtime Ledger");

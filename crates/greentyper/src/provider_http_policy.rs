@@ -20,6 +20,16 @@ pub(crate) fn bearer_header(secret: &SecretValue) -> Result<HeaderValue, Provide
     Ok(header)
 }
 
+pub(crate) fn credential_header(secret: &SecretValue) -> Result<HeaderValue, ProviderError> {
+    let mut bytes = secret.expose().to_vec();
+    let header = HeaderValue::from_bytes(&bytes)
+        .map_err(|_| ProviderError::InvalidConfiguration("Provider credential is invalid"));
+    bytes.fill(0);
+    let mut header = header?;
+    header.set_sensitive(true);
+    Ok(header)
+}
+
 pub(crate) fn validate_provider_endpoint(
     value: &str,
     allow_insecure_loopback: bool,

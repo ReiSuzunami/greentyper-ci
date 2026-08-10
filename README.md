@@ -6,7 +6,7 @@ GreenTyper is a Windows-first coding-agent runtime written in Rust. It is design
 
 GreenTyper is an independent product with selected Codex-compatible protocol and Agent semantics. It is not a Codex CLI clone, a command-compatible replacement, or a wrapper around another agent process.
 
-> Status: feature implementation is active. The repository now contains deterministic Agent Team policy, a recoverable single-Agent headless spine, bounded OpenAI Responses and Chat Completions SSE decoders, and a core Tool Runtime seam with durable call identity, approval binding, prepared-effect ordering, and explicit reconciliation. It is not yet a complete coding-agent product.
+> Status: feature implementation is active. The repository now contains deterministic Agent Team policy, a recoverable single-Agent headless spine, bounded OpenAI Responses, Chat Completions, and Anthropic Messages SSE decoders, and a core Tool Runtime seam with durable call identity, approval binding, prepared-effect ordering, and explicit reconciliation. It is not yet a complete coding-agent product.
 
 > Repository topology: [`ReiSuzunami/greentyper`](https://github.com/ReiSuzunami/greentyper) is the private canonical repository. [`ReiSuzunami/greentyper-ci`](https://github.com/ReiSuzunami/greentyper-ci) is a temporary public, non-authoritative mirror used only for hosted CI and build artifacts. See the [repository policy](docs/repository-policy.md).
 
@@ -86,8 +86,9 @@ cargo run -p greentyper -- config test-provider
 ```
 
 For a configured OpenAI or openai-compatible Profile, `headless` accepts
-`--dialect responses` or `--dialect chat_completions`. The declared `messages`
-value currently fails closed because no Anthropic Messages adapter is installed.
+`--dialect responses` or `--dialect chat_completions`. A configured DeepSeek
+Profile accepts `--dialect messages`; every other template/dialect pair fails
+closed unless the product has an explicit adapter for that exact identity.
 
 The core Agent Team policy, Config Runtime, recoverable single-Agent Runtime,
 and first Tool Runtime policy slice compile and run through interface-level and
@@ -117,12 +118,16 @@ explicit `approve` or `deny` decision from stdin, and acknowledges final output
 only after stdout is flushed. A restart before approval re-presents the durable
 request; a successful or ambiguous effect is never automatically repeated.
 
-Configured OpenAI-compatible Responses and Chat Completions profiles now run
-through no-proxy, no-redirect HTTPS clients, origin-bound credential lookup,
-bounded streaming decode, and a fixed deadline. Config Runtime freezes the
+Configured OpenAI-compatible Responses and Chat Completions profiles plus the
+official DeepSeek Anthropic-compatible Messages profile now run through
+no-proxy, no-redirect HTTPS clients, origin-bound credential lookup, bounded
+streaming decode, and a fixed deadline. Messages uses `x-api-key`, pins the
+Anthropic API version header, explicitly disables DeepSeek's default thinking
+mode, and currently sends a conservative fixed `max_tokens = 4096`; wiring the
+selected Model Preset output limit is still pending. Config Runtime freezes the
 normalized origin, selected-dialect route, dialect, pricing decision, and opaque
 credential reference in the Provider Epoch; adapter reconstruction uses that
-snapshot and never infers a different dialect. Private loopback fixtures retain
+snapshot without changing an explicit dialect. Private loopback fixtures retain
 synthetic authorization for deterministic transport tests. Each core decoder
 normalizes one function call, crosses durable Tool approval/effect policy,
 continues the Provider once with its dialect-specific wire shape, and prepares
@@ -130,6 +135,9 @@ canonical output without repeating successful or ambiguous effects. Provider
 continuation correlation remains process-local, so restart after a completed
 Tool effect blocks instead of reconstructing or repeating it. Headless execution
 keeps the deterministic simulator when no custom profile is selected.
+Current configured Provider Epochs freeze an explicit dialect. Historical
+pre-dialect Epochs retain their schema-compatible Responses default and still
+must pass the frozen Profile's adapter and capability checks during replay.
 Runtime Event schema 5 now brackets every Provider invocation with a durable
 Usage Attempt, records UTC start/completion and outcome, preserves exact,
 estimated, and unknown token classes, and rebuilds cached Turn, Thread, Agent,
@@ -184,8 +192,9 @@ conflicts leave the editor live. This is not an ANSI/VT backend, live keyboard
 loop, ConPTY integration, rendered Config Center, object-name dialog, or
 rendered template picker, starter-preset workflow, or live catalog discovery.
 Live credential-gated provider validation, configurable proxy policy,
-reconnect/retry, Anthropic Messages, template-specific DeepSeek/OpenCode
-execution, richer approval presentation, broader Provider and Tool adapters,
+reconnect/retry, DeepSeek Responses/Chat Completions, all OpenCode Go execution,
+Messages reasoning blocks and preset-driven output limits, richer approval
+presentation, broader Provider and Tool adapters,
 Workspace, TUI, and App Server work remain. The loopback Provider tracer remains
 an internal harness; `local.echo` is intentionally a fixed opt-in command rather
 than a general process runner. The file Ledger remains

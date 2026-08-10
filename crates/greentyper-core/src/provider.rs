@@ -1,6 +1,7 @@
 //! Provider-neutral Turn requests, canonical stream events, and a deterministic simulator.
 
 pub mod chat_completions;
+pub mod messages;
 pub mod responses;
 pub mod sse;
 
