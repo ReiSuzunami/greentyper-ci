@@ -113,6 +113,11 @@ const ALL_SCOPES: &[ConfigScope] = &[
 ];
 const FILE_SCOPES: &[ConfigScope] = &[ConfigScope::User, ConfigScope::Project];
 const PROVIDER_TEMPLATE_CHOICES: &[&str] = &["deepseek", "openai", "opencode-go"];
+const PROVIDER_DIALECT_CHOICES: &[&str] = &[
+    ProviderDialect::Responses.as_str(),
+    ProviderDialect::ChatCompletions.as_str(),
+    ProviderDialect::Messages.as_str(),
+];
 const STATUSLINE_PRESET_CHOICES: &[&str] = &["minimal", "balanced", "diagnostic", "custom"];
 const STATUSLINE_EXPANSION_CHOICES: &[&str] = &["auto", "compact", "expanded"];
 
@@ -615,6 +620,21 @@ fn config_field_interaction(descriptor: &ConfigSchemaEntry) -> ConfigFieldIntera
         ("providers.<id>.base_url", ConfigValueKind::String, false, "url") => {
             ConfigFieldInteraction::Text {
                 max_bytes: MAX_CONFIG_STRING_BYTES,
+            }
+        }
+        ("model_presets.<id>.provider", ConfigValueKind::String, false, "provider_selector") => {
+            ConfigFieldInteraction::Text {
+                max_bytes: MAX_CONFIG_ID_BYTES,
+            }
+        }
+        ("model_presets.<id>.model", ConfigValueKind::String, false, "model_selector") => {
+            ConfigFieldInteraction::Text {
+                max_bytes: MAX_CONFIG_STRING_BYTES,
+            }
+        }
+        ("model_presets.<id>.dialect", ConfigValueKind::String, false, "dialect") => {
+            ConfigFieldInteraction::Choice {
+                choices: PROVIDER_DIALECT_CHOICES,
             }
         }
         _ => ConfigFieldInteraction::ReadOnly,

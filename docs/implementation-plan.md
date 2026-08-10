@@ -341,10 +341,17 @@ pending command into a section-filtered selector and render an exact object
 confirmation. Enter dry-runs and CAS-commits the target-layer deletion; Escape
 cancels it. Reference-validation and stale-revision failures keep the
 confirmation live, and a real-key test reopens Config to prove persistence.
+`/config model add` now supplies the second rendered object-name workflow. It
+collects a bounded Preset ID, existing Provider Profile ID, bounded model ID,
+and schema-owned dialect choice in one revision-bound Draft. Tab/Shift-Tab move
+between the three required fields; preview, CAS commit, invalid-field recovery,
+stale-revision retention, explicit discard, and reopen persistence use the same
+terminal-neutral editor path. It does not implement optional Preset policy fields,
+interactive `/model` selection, starter acceptance, or live catalog data.
 
 This does not complete Phase 3. Audited Windows ConPTY behavior, remaining
 terminal-backed schema editing and approval interaction, live snapshot refresh,
-remaining object-name dialogs, rendered secret binding,
+Price Schedule and Usage Window object-name dialogs, rendered secret binding,
 custom-template/starter-preset workflow, live catalog discovery and Recent
 evidence, automatic Context View/token-source
 projection, provider-reported

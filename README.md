@@ -293,9 +293,18 @@ target confirmation. Enter dry-runs and CAS-commits the deletion; Escape cancels
 it. Reference validation or revision conflict leaves the confirmation live, and
 a real-key test reopens Config to prove the selected object is absent. The
 delete action does not write a Ledger or grant Runtime or Provider authority.
+`/config model add` now prompts for a bounded Model Preset ID and moves with
+Tab/Shift-Tab across the three required fields: an existing Provider Profile ID,
+a model ID, and one of `responses`, `chat_completions`, or `messages`. Provider
+and model text inputs are bounded at 64 and 512 bytes. Enter previews the complete
+Draft and `c` commits it from the dialect choice; tests reopen the file and prove
+the runnable preset survives. Missing fields and revision conflicts keep the
+Draft live for repair or explicit discard. This is manual preset definition, not
+interactive `/model` selection, starter-preset installation, or optional policy
+field editing.
 Outside these narrow workflows the tracer remains snapshot-based and read-only. It is not a
 general mutable terminal editor, approval surface, live refresh loop, audited
-ConPTY integration, non-Provider object-creation dialog, secret-entry/bind
+ConPTY integration, Price Schedule or Usage Window creation dialog, secret-entry/bind
 surface, starter-preset
 workflow, or persistent live catalog discovery. Live inference conformance,
 reconnect/retry, OpenCode Go Messages execution,

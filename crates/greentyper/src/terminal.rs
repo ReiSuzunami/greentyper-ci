@@ -1233,12 +1233,22 @@ impl TerminalSession {
             return Ok(());
         };
         let current = self.config_choice();
-        let index = current
+        let next = current
             .and_then(|current| choices.iter().position(|choice| *choice == current))
-            .unwrap_or(0);
-        let next = index
-            .saturating_add_signed(offset)
-            .min(choices.len().saturating_sub(1));
+            .map_or_else(
+                || {
+                    if offset.is_negative() {
+                        choices.len().saturating_sub(1)
+                    } else {
+                        0
+                    }
+                },
+                |index| {
+                    index
+                        .saturating_add_signed(offset)
+                        .min(choices.len().saturating_sub(1))
+                },
+            );
         let Some(choice) = choices.get(next) else {
             return Ok(());
         };
@@ -1512,7 +1522,7 @@ mod tests {
         ConfigObjectRef, ConfigPaths, ConfigRuntime, ConfigScope, ConfigValue,
         MAX_CONFIG_STRING_BYTES,
     };
-    use greentyper_core::provider::ProviderProfileSnapshot;
+    use greentyper_core::provider::{ProviderDialect, ProviderProfileSnapshot};
 
     use crate::presentation::{PresentationScreenView, build_smoke_view};
     use crate::provider_connection::{
@@ -2472,6 +2482,7 @@ mod tests {
         events.extend([
             Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
             Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
             Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
         ]);
         events.extend(credential_reference.chars().map(|character| {
@@ -2511,6 +2522,192 @@ mod tests {
         assert_eq!(profile.template(), "openai");
         assert_eq!(profile.credential_reference(), Some(credential_reference));
         assert!(!ledger.exists());
+        std::fs::remove_dir_all(root).expect("remove test config");
+    }
+
+    #[test]
+    fn terminal_loop_creates_model_preset_from_real_key_events() {
+        let root = terminal_test_root("model-preset-create-loop");
+        let ledger = root.join("runtime.ledger");
+        let paths = ConfigPaths::new(root.join("user.toml"), root.join("project.toml"));
+        write_terminal_provider_config(&paths);
+        let mut config =
+            ConfigRuntime::open(paths.clone(), ConfigDocument::empty()).expect("config runtime");
+        let view = build_terminal_view(&ledger, &config, "/").expect("terminal view");
+        let mut events: VecDeque<_> = "config model add"
+            .chars()
+            .map(|character| {
+                Event::Key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
+            })
+            .collect();
+        events.push_back(Event::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )));
+        events.extend("fast".chars().map(|character| {
+            Event::Key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
+        }));
+        events.push_back(Event::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )));
+        events.extend("edge".chars().map(|character| {
+            Event::Key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
+        }));
+        events.push_back(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)));
+        events.extend("fixture-model".chars().map(|character| {
+            Event::Key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
+        }));
+        events.extend([
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL)),
+        ]);
+
+        let output = run_terminal_loop(
+            Vec::new(),
+            FakeTerminalMode::default(),
+            &mut config,
+            &view,
+            80,
+            24,
+            move || Ok(events.pop_front().expect("bounded event sequence")),
+        )
+        .expect("terminal loop");
+
+        let preset = config
+            .model_preset("fast")
+            .expect("resolve created Model Preset");
+        assert_eq!(preset.provider, "edge");
+        assert_eq!(preset.model, "fixture-model");
+        assert_eq!(preset.dialect, ProviderDialect::Responses);
+        assert!(output.starts_with(ENTER_TERMINAL));
+        assert!(output.ends_with(LEAVE_TERMINAL));
+        drop(config);
+
+        let reopened = ConfigRuntime::open(paths, ConfigDocument::empty()).expect("reopen config");
+        let preset = reopened
+            .model_preset("fast")
+            .expect("resolve reopened Model Preset");
+        assert_eq!(preset.provider, "edge");
+        assert_eq!(preset.model, "fixture-model");
+        assert_eq!(preset.dialect, ProviderDialect::Responses);
+        assert!(!ledger.exists());
+        std::fs::remove_dir_all(root).expect("remove test config");
+    }
+
+    #[test]
+    fn terminal_model_preset_recovers_from_missing_field_and_cas_conflict() {
+        let root = terminal_test_root("model-preset-create-recovery");
+        let paths = ConfigPaths::new(root.join("user.toml"), root.join("project.toml"));
+        write_terminal_provider_config(&paths);
+        let mut config =
+            ConfigRuntime::open(paths, ConfigDocument::empty()).expect("config runtime");
+        let mut session =
+            TerminalSession::new("/config model add", 80, 24).expect("terminal session");
+
+        session
+            .handle(TerminalInputEvent::Enter, Some(&mut config))
+            .expect("open Model Preset ID prompt");
+        for character in "fast".chars() {
+            session
+                .handle(TerminalInputEvent::Character(character), Some(&mut config))
+                .expect("stage Model Preset ID");
+        }
+        session
+            .handle(TerminalInputEvent::Enter, Some(&mut config))
+            .expect("open Model Preset provider field");
+        assert_eq!(session.input_context(), TerminalInputContext::ConfigText);
+        for character in "edge".chars() {
+            session
+                .handle(TerminalInputEvent::Character(character), Some(&mut config))
+                .expect("stage provider");
+        }
+        session
+            .handle(TerminalInputEvent::Tab, Some(&mut config))
+            .expect("focus model");
+        assert_eq!(session.input_context(), TerminalInputContext::ConfigText);
+        session
+            .handle(TerminalInputEvent::Tab, Some(&mut config))
+            .expect("focus dialect");
+        assert_eq!(session.input_context(), TerminalInputContext::ConfigChoice);
+        session
+            .handle(TerminalInputEvent::Up, Some(&mut config))
+            .expect("start dialect navigation from the end");
+        assert_eq!(session.config_choice(), Some("messages"));
+        session
+            .handle(TerminalInputEvent::Up, Some(&mut config))
+            .expect("select Chat Completions dialect");
+        session
+            .handle(TerminalInputEvent::Up, Some(&mut config))
+            .expect("select Responses dialect");
+        session
+            .handle(TerminalInputEvent::Enter, Some(&mut config))
+            .expect("missing model remains live");
+        assert_eq!(
+            session.notice.as_deref(),
+            Some("Config validation failed at model_presets.fast.model")
+        );
+
+        session
+            .handle(TerminalInputEvent::BackTab, Some(&mut config))
+            .expect("return to model");
+        for character in "fixture-model".chars() {
+            session
+                .handle(TerminalInputEvent::Character(character), Some(&mut config))
+                .expect("repair model");
+        }
+        session
+            .handle(TerminalInputEvent::Tab, Some(&mut config))
+            .expect("return to dialect");
+        session
+            .handle(TerminalInputEvent::Enter, Some(&mut config))
+            .expect("validate repaired Model Preset");
+        assert_eq!(session.notice.as_deref(), Some("Config draft validated"));
+
+        let mut winner = ConfigEditorSession::open_from_query(
+            &config,
+            ConfigScope::User,
+            "/config statusline preset",
+            0,
+            None,
+        )
+        .expect("winner editor");
+        winner.stage_raw("minimal").expect("stage winning change");
+        winner.commit(&mut config).expect("commit winning change");
+
+        session
+            .handle(TerminalInputEvent::Character('c'), Some(&mut config))
+            .expect("stale Model Preset remains live");
+        assert_eq!(
+            session.notice.as_deref(),
+            Some("Config changed; discard and reopen the editor")
+        );
+        assert!(matches!(
+            session.controller.screen(Some(&config)).expect("editor"),
+            PresentationScreenView::ConfigEditor {
+                dirty: true,
+                validated: true,
+                ..
+            }
+        ));
+        assert_eq!(
+            session
+                .handle(TerminalInputEvent::Quit, Some(&mut config))
+                .expect("dirty quit is blocked"),
+            TerminalLoopOutcome::Redraw
+        );
+        session
+            .handle(TerminalInputEvent::Character('d'), Some(&mut config))
+            .expect("discard stale Model Preset");
+        assert!(session.controller.is_slash_panel());
+        assert!(config.model_preset("fast").is_err());
+        assert_eq!(
+            config_string_target(&config, "ui.statusline.preset").as_deref(),
+            Some("minimal")
+        );
         std::fs::remove_dir_all(root).expect("remove test config");
     }
 

@@ -332,6 +332,14 @@ object, while a competing revision keeps the confirmation live, blocks dirty
 quit, and requires explicit discard. A short-viewport regression keeps the
 selected object visible before destructive activation. Core Config tests
 continue to freeze target-layer and dangling-reference deletion rules.
+A real-key loop now carries `/config model add` through its bounded ID prompt,
+required Provider/model text fields, dialect choice, preview, commit, and Config
+reopen. A recovery test leaves the Draft live when model is missing, repairs it,
+then proves a competing revision cannot be overwritten, dirty quit is blocked,
+and explicit discard preserves the winner. Schema tests pin the 64-byte Provider
+ID input, 512-byte model input, and the three parseable dialect choices. These
+tests do not prove interactive `/model` selection, optional Preset field editors,
+starter acceptance, or live catalog refresh.
 They do not constitute real ConPTY, panic-abort cleanup, secret-store UI,
 remaining mutable editors, approval, live-refresh, or resource evidence.
 Context Pressure tests freeze exact 65%/90% threshold transitions, estimated and

@@ -341,6 +341,9 @@ charges still require a future dedicated authority path.
   bounded connection/model-list tester against that revision-bound candidate
   and render its ephemeral status. It never reads back a credential reference,
   commits through that action, or mutates a secret store.
+  `/config model add` can also commit a manually defined minimal Model Preset
+  through bounded Provider/model inputs and a schema-owned dialect choice. It
+  does not apply that Preset to a running Agent or grant Provider authority.
 - Complete Config Schema default/constraint/normalization/migration metadata,
   remaining mutable rendered TUI/App Server editors, live catalog discovery, and the rendered
   template-picker/starter-preset workflow. Release Provider Template defaults
@@ -358,7 +361,8 @@ charges still require a future dedicated authority path.
   are present. The first Direct VT tracer renders those frozen rows and can
   persist the statusline-preset, statusline-expansion, and existing-Provider
   base-URL/credential-reference fields plus a release-template Provider Profile,
-  and can confirm typed target-layer Config Object deletion, but it does not
+  can create a minimal required-field Model Preset, and can confirm typed
+  target-layer Config Object deletion, but it does not
   rebuild the frozen row projection in-process.
 - Live inference conformance, non-Windows credential backends, configurable proxy
   policy, broader TLS platform evidence, reconnect policy, multiple or parallel

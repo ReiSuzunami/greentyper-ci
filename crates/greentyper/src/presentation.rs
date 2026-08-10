@@ -699,7 +699,10 @@ impl PresentationController {
             }
             CommandTarget::ConfigObjectCreate { kind } => {
                 let Some(object) = object else {
-                    if kind != ConfigObjectKind::ProviderProfile {
+                    if !matches!(
+                        kind,
+                        ConfigObjectKind::ProviderProfile | ConfigObjectKind::ModelPreset
+                    ) {
                         return Err(PresentationControllerError::ConfigObjectRouteUnavailable);
                     }
                     self.object_create = Some(ActiveConfigObjectCreate {
@@ -2979,7 +2982,7 @@ credential = "synthetic-deepseek-credential-reference"
     }
 
     #[test]
-    fn controller_only_prompts_for_rendered_provider_creation() {
+    fn controller_prompts_for_rendered_provider_and_model_creation() {
         let temp = TempTree::new("controller-rendered-create-boundary");
         let mut runtime = ConfigRuntime::open(temp.paths(), ConfigDocument::empty())
             .expect("open Config Runtime");
@@ -3003,11 +3006,16 @@ credential = "synthetic-deepseek-credential-reference"
         controller
             .set_slash_query("/config model add")
             .expect("set Model create route");
+        controller
+            .activate(&mut runtime, ConfigScope::User, None)
+            .expect("open rendered Model Preset ID prompt");
         assert!(matches!(
-            controller.activate(&mut runtime, ConfigScope::User, None),
-            Err(PresentationControllerError::ConfigObjectRouteUnavailable)
+            controller.screen(Some(&runtime)).expect("Model prompt"),
+            PresentationScreenView::ConfigObjectCreate {
+                kind: ConfigObjectKind::ModelPreset,
+                ref id,
+            } if id.is_empty()
         ));
-        assert!(controller.is_slash_panel());
     }
 
     struct SuccessfulConnectionTester {

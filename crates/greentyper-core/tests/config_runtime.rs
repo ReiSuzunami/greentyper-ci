@@ -344,6 +344,42 @@ fn schema_and_parser_are_versioned_typed_and_secret_safe() {
             max_bytes: MAX_CONFIG_STRING_BYTES,
         }
     );
+    let model_provider = schema
+        .iter()
+        .find(|entry| entry.path_pattern == "model_presets.<id>.provider")
+        .expect("Model Preset Provider schema");
+    assert_eq!(
+        model_provider.interaction(),
+        ConfigFieldInteraction::Text {
+            max_bytes: MAX_CONFIG_ID_BYTES,
+        }
+    );
+    let model = schema
+        .iter()
+        .find(|entry| entry.path_pattern == "model_presets.<id>.model")
+        .expect("Model Preset model schema");
+    assert_eq!(
+        model.interaction(),
+        ConfigFieldInteraction::Text {
+            max_bytes: MAX_CONFIG_STRING_BYTES,
+        }
+    );
+    let dialect = schema
+        .iter()
+        .find(|entry| entry.path_pattern == "model_presets.<id>.dialect")
+        .expect("Model Preset dialect schema");
+    assert_eq!(
+        dialect.interaction(),
+        ConfigFieldInteraction::Choice {
+            choices: &["responses", "chat_completions", "messages"],
+        }
+    );
+    for choice in ["responses", "chat_completions", "messages"] {
+        assert!(
+            parse_config_value("model_presets.fast.dialect", choice).is_ok(),
+            "Model Preset dialect interaction offered an invalid choice: {choice}"
+        );
+    }
 
     assert_eq!(
         parse_config_value("runtime.max_output_bytes", "4096").expect("positive integer"),
