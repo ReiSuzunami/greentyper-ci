@@ -1085,7 +1085,12 @@ mod tests {
 
     #[test]
     fn color_output_guard_restores_the_exact_crossterm_state() {
-        let original_enabled = !crossterm::style::Colored::ansi_color_disabled_memoized();
+        let original_enabled = {
+            let _lock = COLOR_OUTPUT_LOCK
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            !crossterm::style::Colored::ansi_color_disabled_memoized()
+        };
         for prior_enabled in [false, true] {
             let lock = COLOR_OUTPUT_LOCK
                 .lock()
@@ -1095,11 +1100,17 @@ mod tests {
                 let _guard = ColorOutputGuard::force_enabled_with_lock(lock);
                 assert!(!crossterm::style::Colored::ansi_color_disabled_memoized());
             }
+            let _lock = COLOR_OUTPUT_LOCK
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             assert_eq!(
                 !crossterm::style::Colored::ansi_color_disabled_memoized(),
                 prior_enabled
             );
         }
+        let _lock = COLOR_OUTPUT_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         crossterm::style::force_color_output(original_enabled);
     }
 
