@@ -137,7 +137,12 @@ the process suspended before assigning a single-process, 128 MiB,
 kill-on-close Job Object. The adapter rejects filesystem and network resources.
 The product exposes it only through explicit `--tool local.echo` approval; it
 is one narrow local process Tool, not a general process sandbox or
-caller-selected command.
+caller-selected command. Public `tool status` performs read-only Tool Ledger
+inspection, while `tool reconcile` records an externally observed failure or
+success digest for the original Agent-bound call. A same-binary integration
+test terminates the product after durable `EffectPrepared` and executor entry,
+then proves blocked restart, explicit reconciliation, no effect replay, and
+later Turn admission.
 
 Three configured dialect adapters now exercise five exact template/dialect
 pairs across the concrete Responses, Chat Completions, and Messages HTTP seams.
@@ -172,7 +177,7 @@ Tool calls,
 durable resumable Tool result references, richer TUI/App Server
 approval/delivery, caller-selected process policy, complete Windows Job
 lifetime/resource evidence, reconnect/retry behavior, and the cross-process
-Tool crash matrix remain pending.
+Tool crash matrix beyond the prepared-effect boundary remain pending.
 
 Exit criteria:
 

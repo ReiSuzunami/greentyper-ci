@@ -244,6 +244,9 @@ greentyper resume [--ledger PATH] [--tool local.echo]
 greentyper status [--ledger PATH]
 greentyper stats [--ledger PATH] [--at UNIX_MS]
 greentyper reconcile [--ledger PATH] --delivery ID
+greentyper tool status [--ledger PATH]
+greentyper tool reconcile [--ledger PATH] --call ID
+  (--failed | --succeeded-digest SHA256)
 greentyper config schema
 greentyper config get PATH
 greentyper config set PATH VALUE --scope user|project [--dry-run]
@@ -266,6 +269,14 @@ interface becomes a public automation protocol. In `local.echo` mode, durable
 Team-operation and Tool-approval events are written as JSON to stderr and
 flushed before acknowledgement; the decision is read from stdin as exactly
 `approve` or `deny`.
+
+`tool status` is a shared, read-only Tool Ledger replay. Missing product state
+is reported as an empty snapshot without creating files; partial sidecars fail
+closed. `tool reconcile` is an explicit mutation over the three product
+Ledgers. It requires the original non-terminal Agent owner and records either
+an observed failure or an observed-success SHA-256 digest. Repeating a decision
+for an already-terminal call returns the durable terminal record and never
+invokes the executor.
 
 `stats` replays the Runtime Ledger into the cached Usage projection. With no
 report option it preserves the original complete JSON snapshot: immutable
@@ -352,6 +363,8 @@ charges still require a future dedicated authority path.
   resolution remain pending. Core call identity, Approval Grant binding,
   prepared-effect ordering, terminal digests, and reconciliation are present.
 - Byte-offset process termination around every remaining Runtime, Provider,
-  Tool, delivery, and product acknowledgement boundary; fuzzing; real
+  Tool, delivery, and product acknowledgement boundary. The prepared-effect to
+  executor-entry Tool boundary now has a same-binary process-death/restart test;
+  fuzzing; real
   power-loss evidence; and Windows directory-entry durability evidence.
 - Headless idle CPU and memory evidence on FMDev and the Target Machine.

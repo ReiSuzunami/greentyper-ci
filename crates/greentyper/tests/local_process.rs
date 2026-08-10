@@ -2,6 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use greentyper_core::runtime::RuntimeKernel;
@@ -9,6 +10,7 @@ use greentyper_core::tool_runtime::ToolCallStatus;
 
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(1);
 const FAST_ABORT_LIMIT: Duration = Duration::from_millis(1_500);
+const CRASH_MARKER_TIMEOUT: Duration = Duration::from_secs(5);
 
 struct TempRun {
     root: PathBuf,
@@ -46,6 +48,211 @@ impl Drop for TempRun {
 
 fn binary() -> Command {
     Command::new(env!("CARGO_BIN_EXE_greentyper"))
+}
+
+fn product_binary(run: &TempRun) -> Command {
+    let mut command = binary();
+    command
+        .env("HOME", run.path())
+        .env("APPDATA", run.path())
+        .env("XDG_CONFIG_HOME", run.path());
+    command
+}
+
+fn sidecar(path: &Path, kind: &str) -> PathBuf {
+    let mut sidecar = path.as_os_str().to_owned();
+    sidecar.push(".");
+    sidecar.push(kind);
+    PathBuf::from(sidecar)
+}
+
+fn crash_after_effect_prepared(run: &TempRun) -> PathBuf {
+    let ledger = run.ledger("runtime");
+    let marker = run.path().join("effect-prepared");
+    let mut child = binary()
+        .arg("__local-process-smoke")
+        .arg("--run-dir")
+        .arg(run.path())
+        .arg("--scenario")
+        .arg("prepared-crash")
+        .arg("--message")
+        .arg("must not complete")
+        .spawn()
+        .expect("start prepared-effect crash child");
+    let deadline = Instant::now() + CRASH_MARKER_TIMEOUT;
+    loop {
+        if marker.exists() {
+            break;
+        }
+        if let Some(status) = child.try_wait().expect("poll crash child") {
+            panic!("crash child exited before EffectPrepared marker: {status}");
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("timed out waiting for EffectPrepared marker");
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    child.kill().expect("kill prepared-effect child");
+    let status = child.wait().expect("reap prepared-effect child");
+    assert!(!status.success(), "forced crash must not report success");
+    ledger
+}
+
+#[test]
+fn tool_status_is_read_only_and_fails_closed_on_incomplete_sidecars() {
+    let run = TempRun::new("tool-status-read-only");
+    let ledger = run.ledger("missing-runtime");
+
+    let empty = product_binary(&run)
+        .args(["tool", "status", "--ledger"])
+        .arg(&ledger)
+        .output()
+        .expect("inspect missing Product Tool state");
+    assert!(empty.status.success(), "{empty:?}");
+    let empty_json: serde_json::Value =
+        serde_json::from_slice(&empty.stdout).expect("empty Tool status JSON");
+    assert_eq!(empty_json["calls"].as_array().map(Vec::len), Some(0));
+    assert!(!ledger.exists());
+    assert!(!sidecar(&ledger, "team").exists());
+    assert!(!sidecar(&ledger, "tool").exists());
+
+    let unavailable = product_binary(&run)
+        .args(["tool", "reconcile", "--ledger"])
+        .arg(&ledger)
+        .args(["--call", "1", "--failed"])
+        .output()
+        .expect("reject missing Product Tool state reconciliation");
+    assert!(!unavailable.status.success(), "{unavailable:?}");
+    assert!(unavailable.stdout.is_empty());
+    assert!(
+        String::from_utf8_lossy(&unavailable.stderr).contains("Product Tool state is unavailable"),
+        "{unavailable:?}"
+    );
+    assert!(!ledger.exists());
+    assert!(!sidecar(&ledger, "team").exists());
+    assert!(!sidecar(&ledger, "tool").exists());
+
+    fs::write(sidecar(&ledger, "team"), b"incomplete").expect("write incomplete Team sidecar");
+    let incomplete = product_binary(&run)
+        .args(["tool", "status", "--ledger"])
+        .arg(&ledger)
+        .output()
+        .expect("reject incomplete Product Tool state");
+    assert!(!incomplete.status.success(), "{incomplete:?}");
+    assert!(incomplete.stdout.is_empty());
+    assert!(
+        String::from_utf8_lossy(&incomplete.stderr)
+            .contains("Product driver sidecar state is incomplete"),
+        "{incomplete:?}"
+    );
+    assert!(!ledger.exists());
+    assert!(!sidecar(&ledger, "tool").exists());
+}
+
+#[test]
+fn prepared_effect_process_death_requires_explicit_product_reconciliation() {
+    let run = TempRun::new("prepared-crash-reconcile");
+    let ledger = crash_after_effect_prepared(&run);
+
+    let status = product_binary(&run)
+        .args(["tool", "status", "--ledger"])
+        .arg(&ledger)
+        .output()
+        .expect("inspect prepared Tool effect");
+    assert!(status.status.success(), "{status:?}");
+    let status_json: serde_json::Value =
+        serde_json::from_slice(&status.stdout).expect("Tool status JSON");
+    assert_eq!(status_json["calls"].as_array().map(Vec::len), Some(1));
+    assert_eq!(status_json["calls"][0]["call"], 1);
+    assert_eq!(status_json["calls"][0]["status"], "reconciliation_required");
+    assert_eq!(
+        status_json["calls"][0]["result_sha256"],
+        serde_json::Value::Null
+    );
+
+    let blocked = product_binary(&run)
+        .args(["headless", "--ledger"])
+        .arg(&ledger)
+        .args(["--input", "must remain blocked"])
+        .output()
+        .expect("run blocked Product Turn");
+    assert!(!blocked.status.success(), "{blocked:?}");
+    assert!(blocked.stdout.is_empty());
+    assert!(
+        String::from_utf8_lossy(&blocked.stderr).contains("Tool call 1 requires reconciliation"),
+        "{blocked:?}"
+    );
+
+    let reconciled = product_binary(&run)
+        .args(["tool", "reconcile", "--ledger"])
+        .arg(&ledger)
+        .args(["--call", "1", "--failed"])
+        .output()
+        .expect("reconcile prepared Tool effect");
+    assert!(reconciled.status.success(), "{reconciled:?}");
+    let reconciled_json: serde_json::Value =
+        serde_json::from_slice(&reconciled.stdout).expect("Tool reconciliation JSON");
+    assert_eq!(reconciled_json["call"], 1);
+    assert_eq!(reconciled_json["status"], "failed");
+
+    let resumed = product_binary(&run)
+        .args(["headless", "--ledger"])
+        .arg(&ledger)
+        .args(["--input", "after reconciliation"])
+        .output()
+        .expect("run Product Turn after reconciliation");
+    assert!(resumed.status.success(), "{resumed:?}");
+    assert_eq!(resumed.stdout, b"simulated: after reconciliation\n");
+    assert!(sidecar(&ledger, "team").exists());
+    assert!(sidecar(&ledger, "tool").exists());
+}
+
+#[test]
+fn prepared_effect_can_be_reconciled_as_observed_success_without_reexecution() {
+    let run = TempRun::new("prepared-crash-succeeded");
+    let ledger = crash_after_effect_prepared(&run);
+    let digest = "ab".repeat(32);
+
+    let reconciled = product_binary(&run)
+        .args(["tool", "reconcile", "--ledger"])
+        .arg(&ledger)
+        .args(["--call", "1", "--succeeded-digest", &digest])
+        .output()
+        .expect("reconcile observed Tool success");
+    assert!(reconciled.status.success(), "{reconciled:?}");
+    let reconciled_json: serde_json::Value =
+        serde_json::from_slice(&reconciled.stdout).expect("Tool reconciliation JSON");
+    assert_eq!(reconciled_json["call"], 1);
+    assert_eq!(reconciled_json["status"], "succeeded");
+    assert_eq!(reconciled_json["result_sha256"], digest);
+
+    let conflicting_repeat = product_binary(&run)
+        .args(["tool", "reconcile", "--ledger"])
+        .arg(&ledger)
+        .args(["--call", "1", "--failed"])
+        .output()
+        .expect("repeat reconciliation after terminal success");
+    assert!(
+        conflicting_repeat.status.success(),
+        "{conflicting_repeat:?}"
+    );
+    let repeat_json: serde_json::Value =
+        serde_json::from_slice(&conflicting_repeat.stdout).expect("repeat reconciliation JSON");
+    assert_eq!(repeat_json["status"], "succeeded");
+    assert_eq!(repeat_json["result_sha256"], digest);
+
+    let status = product_binary(&run)
+        .args(["tool", "status", "--ledger"])
+        .arg(&ledger)
+        .output()
+        .expect("inspect reconciled Tool success");
+    assert!(status.status.success(), "{status:?}");
+    let status_json: serde_json::Value =
+        serde_json::from_slice(&status.stdout).expect("Tool status JSON");
+    assert_eq!(status_json["calls"][0]["status"], "succeeded");
+    assert_eq!(status_json["calls"][0]["result_sha256"], digest);
 }
 
 #[test]

@@ -13,6 +13,7 @@ use greentyper_core::agent_team::{
     TaskSpec, TeamCommand, TeamOperationRecord, TeamOperationStatus,
 };
 use greentyper_core::config::ConfigLayers;
+use greentyper_core::ledger::LedgerHead;
 use greentyper_core::model::DeliveryId;
 use greentyper_core::pricing::PriceScheduleBook;
 use greentyper_core::provider::{ProviderEpoch, ProviderRuntime};
@@ -22,7 +23,10 @@ use greentyper_core::runtime::{
     AcknowledgeOutcome, PreparedOutput, ProviderToolApproval, ProviderTurnOutcome, RuntimeError,
     RuntimeKernel,
 };
-use greentyper_core::tool_runtime::{ApprovalDecision, ToolEffectExecutor};
+use greentyper_core::tool_runtime::{
+    ApprovalDecision, ToolCallRecord, ToolEffectExecutor, ToolReconciliationDecision,
+    ToolRuntimeError, ToolSnapshot, inspect_tool_ledger,
+};
 use greentyper_core::usage::UsageWindow;
 
 use crate::local_process::{LOCAL_ECHO_TOOL, local_echo_resources};
@@ -217,6 +221,53 @@ pub(crate) fn has_product_driver_state(runtime_path: &Path) -> Result<bool, Prod
     }
 }
 
+pub(crate) fn inspect_product_tools(
+    runtime_path: &Path,
+) -> Result<ToolSnapshot, ProductDriverError> {
+    if !has_product_driver_state(runtime_path)? {
+        return Ok(ToolSnapshot {
+            ledger_head: LedgerHead::default(),
+            recovered_tail_bytes: 0,
+            calls: Vec::new(),
+        });
+    }
+    if !runtime_path.exists() {
+        return Err(ProductDriverError::IncompleteState);
+    }
+    inspect_tool_ledger(sidecar_path(runtime_path, "tool")).map_err(ProductDriverError::Tool)
+}
+
+pub(crate) fn reconcile_product_tool(
+    runtime_path: &Path,
+    call: u64,
+    decision: ToolReconciliationDecision,
+) -> Result<ToolCallRecord, ProductDriverError> {
+    if !runtime_path.exists() || !has_product_driver_state(runtime_path)? {
+        return Err(ProductDriverError::ToolStateUnavailable);
+    }
+    let team_path = sidecar_path(runtime_path, "team");
+    let tool_path = sidecar_path(runtime_path, "tool");
+    let (mut kernel, recovery) =
+        RuntimeKernel::open_with_team_and_tools(runtime_path, team_path, tool_path, 1)?;
+    let record = kernel
+        .tool_snapshot()
+        .and_then(|snapshot| {
+            snapshot
+                .calls
+                .into_iter()
+                .find(|record| record.call.get() == call)
+        })
+        .ok_or(ProductDriverError::UnknownToolCall(call))?;
+    let session = recovery
+        .into_sessions()
+        .into_iter()
+        .find(|session| session.agent() == record.agent)
+        .ok_or(ProductDriverError::ToolOwnerUnavailable(call))?;
+    kernel
+        .reconcile_tool_call(session, record.call, decision)
+        .map_err(ProductDriverError::Runtime)
+}
+
 fn admit_root(
     kernel: &mut RuntimeKernel,
     interaction: &mut impl ProductInteraction,
@@ -272,7 +323,11 @@ pub(crate) enum ProductDriverError {
     Io(io::Error),
     Interaction(io::Error),
     Runtime(RuntimeError),
+    Tool(ToolRuntimeError),
     IncompleteState,
+    ToolStateUnavailable,
+    UnknownToolCall(u64),
+    ToolOwnerUnavailable(u64),
     UnexpectedRecovery,
 }
 
@@ -282,8 +337,16 @@ impl fmt::Display for ProductDriverError {
             Self::Io(source) => write!(formatter, "Product driver I/O failed: {source}"),
             Self::Interaction(source) => write!(formatter, "Product interaction failed: {source}"),
             Self::Runtime(source) => write!(formatter, "{source}"),
+            Self::Tool(source) => write!(formatter, "{source}"),
             Self::IncompleteState => {
                 write!(formatter, "Product driver sidecar state is incomplete")
+            }
+            Self::ToolStateUnavailable => {
+                write!(formatter, "Product Tool state is unavailable")
+            }
+            Self::UnknownToolCall(call) => write!(formatter, "unknown Tool call {call}"),
+            Self::ToolOwnerUnavailable(call) => {
+                write!(formatter, "Tool call {call} has no recoverable Agent owner")
             }
             Self::UnexpectedRecovery => {
                 write!(formatter, "Product driver recovery is inconsistent")
@@ -297,7 +360,12 @@ impl Error for ProductDriverError {
         match self {
             Self::Io(source) | Self::Interaction(source) => Some(source),
             Self::Runtime(source) => Some(source),
-            Self::IncompleteState | Self::UnexpectedRecovery => None,
+            Self::Tool(source) => Some(source),
+            Self::IncompleteState
+            | Self::ToolStateUnavailable
+            | Self::UnknownToolCall(_)
+            | Self::ToolOwnerUnavailable(_)
+            | Self::UnexpectedRecovery => None,
         }
     }
 }

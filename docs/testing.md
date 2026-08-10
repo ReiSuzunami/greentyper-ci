@@ -98,9 +98,9 @@ validation, non-Windows credential backends,
 configurable proxy policy, broader TLS platform evidence, broader canonical
 Runtime Items, reasoning/refusal/annotation and other unimplemented Responses
 event kinds, reconnect/retry fixtures, MCP adapters, richer TUI/App Server Tool
-presentation, the cross-process Tool byte-offset matrix, and final
-reconciliation presentation remain pending. The fixed CLI path now flushes the
-Team receipt and exact approval event before acknowledgement.
+presentation, and the remaining cross-process Tool byte-offset matrix remain
+pending. The fixed CLI path now flushes the Team receipt and exact approval
+event before acknowledgement.
 Migration/backup remains in the candidate storage harness rather than these
 provisional product adapters.
 
@@ -123,6 +123,14 @@ A binary test exercises `headless --tool local.echo`, verifies the Team receipt
 and final stdout, then reopens the same three Ledgers for another Turn without
 presenting the already-acknowledged Team receipt again; Runtime returns to
 `ready` after both Turns.
+
+Another same-binary test kills the product after the executor observes a
+durably prepared effect. Restarted `tool status` exposes the call as
+reconciliation-required, headless execution remains blocked, and explicit
+observed-failure reconciliation permits a later Turn. A companion case records
+an observed-success digest, proves conflicting repeat reconciliation remains
+idempotent, and never invokes the effect again. Missing state inspection and
+reconciliation create no Ledgers; incomplete sidecars fail closed.
 
 The first fixture Provider/Tool tracer bullet decodes and normalizes one
 Responses function call, requires a current Session and exact Tool authority,
@@ -376,7 +384,18 @@ Results include main process, TUI, per-Agent increment, child processes, and tot
 
 ## CI Matrix
 
-This is the required end-state matrix for a release candidate. The current bootstrap workflow implements formatting, checks, tests, lints, release packaging, the x86-64-v3 guard, an acceptance-harness smoke, a one-sample benchmark-pipeline smoke, isolated compile/test coverage for eight storage workloads, the terminal render matrix, the HTTP loopback transport matrix, and three process-global allocator runners, plus real same-binary cross-process CAS, migration interruption, child termination/restart integration tests, and synthetic SQLite WAL VFS fault recovery on macOS ARM and Windows. Broader Runtime/tool-effect crash, security, terminal process/input/resource, transport TLS/proxy-auth/fuzz/resource, allocator P0-P6 resource, and general fuzz jobs are added with the slices that make them executable.
+This is the required end-state matrix for a release candidate. The current
+bootstrap workflow implements formatting, checks, tests, lints, release
+packaging, the x86-64-v3 guard, an acceptance-harness smoke, a one-sample
+benchmark-pipeline smoke, isolated compile/test coverage for eight storage
+workloads, the terminal render matrix, the HTTP loopback transport matrix, and
+three process-global allocator runners, plus real same-binary cross-process
+CAS, migration interruption, child termination/restart integration tests, one
+prepared-Tool-effect product process-death/reconciliation test, and synthetic
+SQLite WAL VFS fault recovery on macOS ARM and Windows. Remaining
+Runtime/tool-effect crash, security, terminal process/input/resource, transport
+TLS/proxy-auth/fuzz/resource, allocator P0-P6 resource, and general fuzz jobs
+are added with the slices that make them executable.
 
 | Environment | Required evidence |
 | --- | --- |

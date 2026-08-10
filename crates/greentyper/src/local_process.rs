@@ -2,7 +2,7 @@
 
 use std::error::Error;
 use std::fmt;
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -64,6 +64,7 @@ pub(crate) enum LocalProcessSmokeScenario {
     BlockedStdin,
     SpawnFailure,
     WorkingDirectory,
+    PreparedCrash,
 }
 
 impl LocalProcessSmokeScenario {
@@ -85,6 +86,7 @@ impl LocalProcessSmokeScenario {
             "blocked-stdin" => Some(Self::BlockedStdin),
             "spawn-failure" => Some(Self::SpawnFailure),
             "working-directory" => Some(Self::WorkingDirectory),
+            "prepared-crash" => Some(Self::PreparedCrash),
             _ => None,
         }
     }
@@ -107,6 +109,7 @@ impl LocalProcessSmokeScenario {
             Self::BlockedStdin => "product-local-echo-blocked-stdin-v1",
             Self::SpawnFailure => "product-local-echo-spawn-failure-v1",
             Self::WorkingDirectory => "product-local-echo-working-directory-v1",
+            Self::PreparedCrash => "product-local-echo-prepared-crash-v1",
         }
     }
 
@@ -177,6 +180,7 @@ pub(crate) struct LocalProcessExecutor {
     executable: PathBuf,
     timeout: Duration,
     child_mode: LocalProcessChildMode,
+    prepared_marker: Option<PathBuf>,
 }
 
 impl LocalProcessExecutor {
@@ -190,10 +194,14 @@ impl LocalProcessExecutor {
             executable,
             timeout: DEFAULT_TIMEOUT,
             child_mode: LocalProcessChildMode::Echo,
+            prepared_marker: None,
         })
     }
 
-    fn for_smoke(scenario: LocalProcessSmokeScenario) -> Result<Self, LocalProcessError> {
+    fn for_smoke(
+        scenario: LocalProcessSmokeScenario,
+        run_dir: &Path,
+    ) -> Result<Self, LocalProcessError> {
         let mut executor = Self::current()?;
         if matches!(scenario, LocalProcessSmokeScenario::Timeout) {
             executor.timeout = SMOKE_TIMEOUT;
@@ -221,6 +229,8 @@ impl LocalProcessExecutor {
             ));
         } else if matches!(scenario, LocalProcessSmokeScenario::WorkingDirectory) {
             executor.child_mode = LocalProcessChildMode::WorkingDirectory;
+        } else if matches!(scenario, LocalProcessSmokeScenario::PreparedCrash) {
+            executor.prepared_marker = Some(run_dir.join("effect-prepared"));
         }
         Ok(executor)
     }
@@ -359,6 +369,16 @@ pub(crate) fn local_echo_resources(call: &ProviderToolCall) -> Result<ToolResour
 
 impl ToolEffectExecutor for LocalProcessExecutor {
     fn execute(&mut self, call: &AuthorizedToolCall<'_>) -> ToolExecution {
+        if let Some(marker) = &self.prepared_marker {
+            if write_prepared_marker(marker).is_err() {
+                return ToolExecution::Failed {
+                    reason: EXECUTION_FAILED.into(),
+                };
+            }
+            loop {
+                thread::park();
+            }
+        }
         let Ok(arguments) = validate_echo_call(call) else {
             return ToolExecution::Failed {
                 reason: EXECUTION_FAILED.into(),
@@ -366,6 +386,20 @@ impl ToolEffectExecutor for LocalProcessExecutor {
         };
         self.execute_echo(arguments.message.as_bytes())
     }
+}
+
+fn write_prepared_marker(path: &Path) -> io::Result<()> {
+    let mut options = OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut marker = options.open(path)?;
+    marker.write_all(b"effect-prepared\n")?;
+    marker.flush()?;
+    marker.sync_all()
 }
 
 #[derive(Deserialize)]
@@ -759,8 +793,16 @@ pub(crate) fn run_smoke(
 ) -> Result<LocalProcessSmokeOutcome, LocalProcessError> {
     fs::create_dir_all(run_dir).map_err(LocalProcessError::Io)?;
     let runtime_path = run_dir.join("runtime.ledger");
-    let team_path = run_dir.join("team.ledger");
-    let tool_path = run_dir.join("tool.ledger");
+    let team_path = if matches!(scenario, LocalProcessSmokeScenario::PreparedCrash) {
+        sidecar_path(&runtime_path, "team")
+    } else {
+        run_dir.join("team.ledger")
+    };
+    let tool_path = if matches!(scenario, LocalProcessSmokeScenario::PreparedCrash) {
+        sidecar_path(&runtime_path, "tool")
+    } else {
+        run_dir.join("tool.ledger")
+    };
     let (mut kernel, recovery) =
         RuntimeKernel::open_with_team_and_tools(runtime_path, team_path, tool_path, 1)
             .map_err(LocalProcessError::Runtime)?;
@@ -849,7 +891,7 @@ pub(crate) fn run_smoke(
             return existing_smoke_outcome(record.status);
         }
     };
-    let mut executor = LocalProcessExecutor::for_smoke(scenario)?;
+    let mut executor = LocalProcessExecutor::for_smoke(scenario, run_dir)?;
     let outcome = kernel
         .resolve_tool_call(
             request,
@@ -866,6 +908,13 @@ pub(crate) fn run_smoke(
             LocalProcessSmokeOutcome::ReconciliationRequired
         }
     })
+}
+
+fn sidecar_path(runtime: &Path, kind: &str) -> PathBuf {
+    let mut path = runtime.as_os_str().to_owned();
+    path.push(".");
+    path.push(kind);
+    PathBuf::from(path)
 }
 
 fn existing_smoke_outcome(

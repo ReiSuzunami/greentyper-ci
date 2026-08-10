@@ -17,7 +17,9 @@ use greentyper_core::provider_catalog::ProviderCatalog;
 use greentyper_core::runtime::{
     AcknowledgeOutcome, PreparedOutput, ProviderToolApproval, RecoveryStatus, RuntimeKernel,
 };
-use greentyper_core::tool_runtime::ToolEffectExecutor;
+use greentyper_core::tool_runtime::{
+    ToolCallRecord, ToolCallStatus, ToolEffectExecutor, ToolReconciliationDecision, ToolSnapshot,
+};
 use greentyper_core::usage::{
     RuntimeUsageQuery, RuntimeUsageSnapshot, UsageCursor, UsageError, UsageTimestamp, UsageWindow,
 };
@@ -33,7 +35,7 @@ use crate::local_process::{
 use crate::presentation::PresentationSmokeError;
 use crate::product_driver::{
     ProductDriver, ProductDriverError, ProductInteraction, ProductToolDecision,
-    has_product_driver_state,
+    has_product_driver_state, inspect_product_tools, reconcile_product_tool,
 };
 use crate::provider_connection::{ModelsHttpConnectionTester, ProviderConnectionTester};
 use crate::provider_http::{
@@ -166,6 +168,20 @@ pub fn run(arguments: impl Iterator<Item = String>) -> Result<(), CliError> {
             }
             Ok(())
         }
+        Command::Tool(command) => match command {
+            ToolCommand::Status { ledger } => {
+                let snapshot = inspect_product_tools(&ledger)?;
+                write_tool_snapshot(&snapshot)
+            }
+            ToolCommand::Reconcile {
+                ledger,
+                call,
+                decision,
+            } => {
+                let record = reconcile_product_tool(&ledger, call, decision)?;
+                write_json(&tool_record_json(&record))
+            }
+        },
         Command::Config(command) => run_config(command),
         Command::Credential(command) => {
             let mut vault = PlatformCredentialVault;
@@ -309,6 +325,47 @@ fn write_json(value: &impl serde::Serialize) -> Result<(), CliError> {
     stdout.write_all(b"\n")?;
     stdout.flush()?;
     Ok(())
+}
+
+fn write_tool_snapshot(snapshot: &ToolSnapshot) -> Result<(), CliError> {
+    let calls: Vec<_> = snapshot.calls.iter().map(tool_record_json).collect();
+    write_json(&serde_json::json!({
+        "ledger_head": {
+            "transaction": snapshot.ledger_head.transaction,
+            "sequence": snapshot.ledger_head.sequence,
+        },
+        "recovered_tail_bytes": snapshot.recovered_tail_bytes,
+        "calls": calls,
+    }))
+}
+
+fn tool_record_json(record: &ToolCallRecord) -> serde_json::Value {
+    serde_json::json!({
+        "call": record.call.get(),
+        "identity": record.identity,
+        "agent": record.agent.get(),
+        "tool": record.tool,
+        "status": tool_status_name(record.status),
+        "result_sha256": record.result_digest.map(encode_sha256),
+        "reason": record.reason,
+    })
+}
+
+const fn tool_status_name(status: ToolCallStatus) -> &'static str {
+    match status {
+        ToolCallStatus::AwaitingApproval => "awaiting_approval",
+        ToolCallStatus::Denied => "denied",
+        ToolCallStatus::ReconciliationRequired => "reconciliation_required",
+        ToolCallStatus::Succeeded => "succeeded",
+        ToolCallStatus::Failed => "failed",
+    }
+}
+
+fn encode_sha256(digest: [u8; 32]) -> String {
+    digest
+        .into_iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 fn deliver_and_ack(
@@ -515,6 +572,7 @@ enum Command {
         ledger: PathBuf,
         delivery: DeliveryId,
     },
+    Tool(ToolCommand),
     Config(ConfigCommand),
     Credential(CredentialCommand),
     LocalProcessChild {
@@ -534,6 +592,18 @@ enum Command {
         query: String,
     },
     Help,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum ToolCommand {
+    Status {
+        ledger: PathBuf,
+    },
+    Reconcile {
+        ledger: PathBuf,
+        call: u64,
+        decision: ToolReconciliationDecision,
+    },
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -637,6 +707,9 @@ fn parse(mut arguments: impl Iterator<Item = String>) -> Result<Command, CliErro
     }
     if command == "credential" {
         return parse_credential(arguments).map(Command::Credential);
+    }
+    if command == "tool" {
+        return parse_tool(arguments).map(Command::Tool);
     }
     if command == "__local-process-child" {
         let mode = LocalProcessChildMode::parse(arguments.next().as_deref())
@@ -826,6 +899,138 @@ fn parse_provider_dialect(value: &str) -> Result<ProviderDialect, CliError> {
         "messages" => Ok(ProviderDialect::Messages),
         _ => Err(CliError::Usage(
             "--dialect must be responses, chat_completions, or messages",
+        )),
+    }
+}
+
+fn parse_tool(mut arguments: impl Iterator<Item = String>) -> Result<ToolCommand, CliError> {
+    let action = arguments
+        .next()
+        .ok_or(CliError::Usage("tool requires an action"))?;
+    if !matches!(action.as_str(), "status" | "reconcile") {
+        return Err(CliError::Usage("unknown tool action"));
+    }
+    let mut ledger = None;
+    let mut call = None;
+    let mut failed = false;
+    let mut succeeded_digest = None;
+    while let Some(argument) = arguments.next() {
+        match argument.as_str() {
+            "--ledger" => {
+                if ledger.is_some() {
+                    return Err(CliError::Usage("duplicate --ledger"));
+                }
+                ledger = Some(PathBuf::from(next_tool_option_value(
+                    &mut arguments,
+                    "--ledger",
+                )?));
+            }
+            "--call" => {
+                if call.is_some() {
+                    return Err(CliError::Usage("duplicate --call"));
+                }
+                let value = next_tool_option_value(&mut arguments, "--call")?;
+                let value = value
+                    .parse::<u64>()
+                    .map_err(|_| CliError::Usage("Tool call must be a positive integer"))?;
+                if value == 0 || value == u64::MAX {
+                    return Err(CliError::Usage("Tool call must be a positive integer"));
+                }
+                call = Some(value);
+            }
+            "--failed" => {
+                if failed {
+                    return Err(CliError::Usage("duplicate --failed"));
+                }
+                failed = true;
+            }
+            "--succeeded-digest" => {
+                if succeeded_digest.is_some() {
+                    return Err(CliError::Usage("duplicate --succeeded-digest"));
+                }
+                let value = next_tool_option_value(&mut arguments, "--succeeded-digest")?;
+                succeeded_digest = Some(parse_sha256(&value)?);
+            }
+            _ => return Err(CliError::Usage("unknown tool option")),
+        }
+    }
+    let ledger = match ledger {
+        Some(path) if path.as_os_str().is_empty() => {
+            return Err(CliError::Usage("ledger path cannot be empty"));
+        }
+        Some(path) => path,
+        None => default_ledger_path()?,
+    };
+    match action.as_str() {
+        "status" => {
+            if call.is_some() || failed || succeeded_digest.is_some() {
+                return Err(CliError::Usage("tool status accepts only --ledger"));
+            }
+            Ok(ToolCommand::Status { ledger })
+        }
+        "reconcile" => {
+            let call = call.ok_or(CliError::Usage("tool reconcile requires --call"))?;
+            let decision = match (failed, succeeded_digest) {
+                (true, None) => ToolReconciliationDecision::ObservedFailed {
+                    reason: "user observed Tool effect failure".into(),
+                },
+                (false, Some(result_digest)) => {
+                    ToolReconciliationDecision::ObservedSucceeded { result_digest }
+                }
+                _ => {
+                    return Err(CliError::Usage(
+                        "tool reconcile requires exactly one of --failed or --succeeded-digest",
+                    ));
+                }
+            };
+            Ok(ToolCommand::Reconcile {
+                ledger,
+                call,
+                decision,
+            })
+        }
+        _ => unreachable!("tool action was validated"),
+    }
+}
+
+fn next_tool_option_value(
+    arguments: &mut impl Iterator<Item = String>,
+    option: &'static str,
+) -> Result<String, CliError> {
+    let value = arguments
+        .next()
+        .ok_or(CliError::Usage("tool option is missing its value"))?;
+    if value.starts_with('-') {
+        return Err(CliError::Usage(match option {
+            "--ledger" => "--ledger is missing its value",
+            "--call" => "--call is missing its value",
+            "--succeeded-digest" => "--succeeded-digest is missing its value",
+            _ => "tool option is missing its value",
+        }));
+    }
+    Ok(value)
+}
+
+fn parse_sha256(value: &str) -> Result<[u8; 32], CliError> {
+    let bytes = value.as_bytes();
+    if bytes.len() != 64 {
+        return Err(CliError::Usage(
+            "--succeeded-digest must be 64 lowercase hexadecimal characters",
+        ));
+    }
+    let mut digest = [0_u8; 32];
+    for (index, pair) in bytes.chunks_exact(2).enumerate() {
+        digest[index] = (parse_hex_digit(pair[0])? << 4) | parse_hex_digit(pair[1])?;
+    }
+    Ok(digest)
+}
+
+fn parse_hex_digit(value: u8) -> Result<u8, CliError> {
+    match value {
+        b'0'..=b'9' => Ok(value - b'0'),
+        b'a'..=b'f' => Ok(value - b'a' + 10),
+        _ => Err(CliError::Usage(
+            "--succeeded-digest must be 64 lowercase hexadecimal characters",
         )),
     }
 }
@@ -1389,6 +1594,8 @@ Usage:\n\
   greentyper status [--ledger PATH]\n\
   greentyper stats [--ledger PATH] [--at UNIX_MS] [--summary-only | --limit N [--cursor CURSOR]]\n\
   greentyper reconcile [--ledger PATH] --delivery ID\n\
+  greentyper tool status [--ledger PATH]\n\
+  greentyper tool reconcile [--ledger PATH] --call ID (--failed | --succeeded-digest SHA256)\n\
   greentyper config schema\n\
   greentyper config catalog\n\
   greentyper config get PATH [--user-config PATH] [--project-config PATH]\n\
@@ -1543,14 +1750,16 @@ mod tests {
     use greentyper_core::config::{ConfigLayers, ConfigScope};
     use greentyper_core::provider::DeterministicProvider;
     use greentyper_core::runtime::{ProviderToolApproval, RecoveryStatus, RuntimeKernel};
-    use greentyper_core::tool_runtime::{AuthorizedToolCall, ToolEffectExecutor, ToolExecution};
+    use greentyper_core::tool_runtime::{
+        AuthorizedToolCall, ToolEffectExecutor, ToolExecution, ToolReconciliationDecision,
+    };
 
     use crate::credential_vault::InMemoryCredentialVault;
     use crate::product_driver::{ProductDriver, ProductInteraction, ProductToolDecision};
 
     use super::{
-        Command, ConfigCommand, CredentialCommand, CredentialOutcome, deliver_and_ack_to,
-        deliver_product_and_ack_to, execute_credential_command, parse,
+        Command, ConfigCommand, CredentialCommand, CredentialOutcome, ToolCommand,
+        deliver_and_ack_to, deliver_product_and_ack_to, execute_credential_command, parse,
     };
 
     static NEXT_TEMP: AtomicU64 = AtomicU64::new(1);
@@ -1722,6 +1931,89 @@ mod tests {
         assert!(
             parse(["stats".to_owned(), "--at".to_owned(), "later".to_owned()].into_iter()).is_err()
         );
+    }
+
+    #[test]
+    fn parser_bounds_tool_inspection_and_reconciliation() {
+        assert!(matches!(
+            parse(
+                [
+                    "tool".to_owned(),
+                    "status".to_owned(),
+                    "--ledger".to_owned(),
+                    "runtime.ledger".to_owned(),
+                ]
+                .into_iter()
+            ),
+            Ok(Command::Tool(ToolCommand::Status { ledger }))
+                if ledger == Path::new("runtime.ledger")
+        ));
+        assert!(matches!(
+            parse(
+                [
+                    "tool".to_owned(),
+                    "reconcile".to_owned(),
+                    "--call".to_owned(),
+                    "7".to_owned(),
+                    "--failed".to_owned(),
+                ]
+                .into_iter()
+            ),
+            Ok(Command::Tool(ToolCommand::Reconcile {
+                call: 7,
+                decision: ToolReconciliationDecision::ObservedFailed { .. },
+                ..
+            }))
+        ));
+        let digest = "ab".repeat(32);
+        assert!(matches!(
+            parse(
+                [
+                    "tool".to_owned(),
+                    "reconcile".to_owned(),
+                    "--call".to_owned(),
+                    "9".to_owned(),
+                    "--succeeded-digest".to_owned(),
+                    digest,
+                ]
+                .into_iter()
+            ),
+            Ok(Command::Tool(ToolCommand::Reconcile {
+                call: 9,
+                decision: ToolReconciliationDecision::ObservedSucceeded {
+                    result_digest
+                },
+                ..
+            })) if result_digest == [0xab; 32]
+        ));
+
+        for arguments in [
+            vec!["tool", "status", "--call", "1"],
+            vec!["tool", "reconcile", "--call", "0", "--failed"],
+            vec!["tool", "reconcile", "--call", "1"],
+            vec![
+                "tool",
+                "reconcile",
+                "--call",
+                "1",
+                "--failed",
+                "--succeeded-digest",
+                "abababababababababababababababababababababababababababababababab",
+            ],
+            vec![
+                "tool",
+                "reconcile",
+                "--call",
+                "1",
+                "--succeeded-digest",
+                "ABABABABABABABABABABABABABABABABABABABABABABABABABABABABABAB",
+            ],
+        ] {
+            assert!(
+                parse(arguments.into_iter().map(str::to_owned)).is_err(),
+                "accepted invalid Tool arguments"
+            );
+        }
     }
 
     #[test]

@@ -465,6 +465,17 @@ pub struct ToolSnapshot {
     pub calls: Vec<ToolCallRecord>,
 }
 
+/// Replays Tool state without repairing or creating its Ledger.
+pub fn inspect_tool_ledger(path: impl AsRef<Path>) -> Result<ToolSnapshot, ToolRuntimeError> {
+    let report = FileLedger::inspect(path).map_err(ToolRuntimeError::Ledger)?;
+    let state = replay_state(&report.events)?;
+    Ok(ToolSnapshot {
+        ledger_head: report.head,
+        recovered_tail_bytes: report.truncated_tail_bytes,
+        calls: state.calls.values().cloned().collect(),
+    })
+}
+
 pub struct ToolApprovalRequest {
     call: ToolCallId,
     session: AgentSession,

@@ -145,9 +145,17 @@ failed or ambiguous no-repeat state. A Windows-only test verifies that the Job
 Object's active-process limit denies a descendant; cross-target checks compile
 the audited handle wrapper.
 
+A same-binary process-death test now stops the product immediately after the
+executor observes a durably prepared effect. Read-only `tool status` exposes
+the recovered `ReconciliationRequired` call, ordinary headless admission stays
+blocked, and explicit `tool reconcile` durably records observed failure or an
+observed-success digest without a second executor call. Missing state does not
+create Ledgers, incomplete sidecars fail closed, and repeated reconciliation of
+an already-terminal call is idempotent.
+
 Still pending: richer TUI/App Server approval and result presentation,
 caller-selected process policy, complete Windows Job kill-on-close and memory-
 limit evidence on the Target Machine, filesystem/network/MCP adapters,
 credential-vault integration for Tools, multiple Provider Tool calls,
-cross-process byte-offset termination around every effect boundary, fuzzing,
+cross-process byte-offset termination around every remaining effect boundary, fuzzing,
 and production storage migration.

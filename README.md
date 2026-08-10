@@ -81,6 +81,8 @@ cargo run -p greentyper -- status --ledger ./target/dev-runtime.ledger
 cargo run -p greentyper -- stats --ledger ./target/dev-runtime.ledger
 cargo run -p greentyper -- stats --ledger ./target/dev-runtime.ledger --summary-only
 cargo run -p greentyper -- stats --ledger ./target/dev-runtime.ledger --limit 100
+cargo run -p greentyper -- tool status --ledger ./target/tool-runtime.ledger
+cargo run -p greentyper -- tool reconcile --ledger ./target/tool-runtime.ledger --call 1 --failed
 cargo run -p greentyper -- config schema
 cargo run -p greentyper -- config catalog
 cargo run -p greentyper -- config get provider.model
@@ -129,6 +131,12 @@ operation receipt and exact Tool approval request to stderr, accepts only an
 explicit `approve` or `deny` decision from stdin, and acknowledges final output
 only after stdout is flushed. A restart before approval re-presents the durable
 request; a successful or ambiguous effect is never automatically repeated.
+`tool status` inspects the Tool sidecar without creating or repairing state.
+After external investigation, `tool reconcile` records one observed failure or
+an observed-success SHA-256 digest for the original call; it never reruns the
+effect. A same-binary crash test kills the product after `EffectPrepared` is
+durable and executor entry is observed, then proves restart blocking, explicit
+reconciliation, and later Turn admission.
 
 Configured OpenAI-compatible Responses and Chat Completions profiles plus the
 official DeepSeek Responses, Chat Completions, and Anthropic-compatible Messages profiles now run through
