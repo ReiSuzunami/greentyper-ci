@@ -31,6 +31,7 @@ pub(super) enum Command {
     Run(Options),
     StorageCasChild(StorageCasChildOptions),
     StorageCrashChild(StorageCrashChildOptions),
+    StorageMigrationChild(StorageMigrationChildOptions),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -63,6 +64,13 @@ pub(super) struct StorageCasChildOptions {
     pub(super) supervisor_token: String,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct StorageMigrationChildOptions {
+    pub(super) implementation: String,
+    pub(super) case_name: String,
+    pub(super) run_dir: PathBuf,
+}
+
 pub(super) fn parse(arguments: &[String]) -> AppResult<Command> {
     if arguments == ["list"] {
         return Ok(Command::List);
@@ -72,6 +80,9 @@ pub(super) fn parse(arguments: &[String]) -> AppResult<Command> {
     }
     if arguments.first().map(String::as_str) == Some("__storage-cas-child") {
         return parse_storage_cas_child(&arguments[1..]);
+    }
+    if arguments.first().map(String::as_str) == Some("__storage-migration-child") {
+        return parse_storage_migration_child(&arguments[1..]);
     }
 
     let mut comparison = None;
@@ -208,6 +219,37 @@ fn parse_storage_crash_child(arguments: &[String]) -> AppResult<Command> {
     }))
 }
 
+fn parse_storage_migration_child(arguments: &[String]) -> AppResult<Command> {
+    let mut implementation = None;
+    let mut case_name = None;
+    let mut run_dir = None;
+    parse_options(arguments, |name, value| match name {
+        "--implementation" => set_once(&mut implementation, name, value),
+        "--case" => set_once(&mut case_name, name, value),
+        "--run-dir" => set_once(&mut run_dir, name, value),
+        _ => Err(cli_error(format!(
+            "unknown storage migration child option {name}"
+        ))),
+    })?;
+    let implementation = required(implementation, "--implementation")?;
+    let case_name = required(case_name, "--case")?;
+    let run_dir = PathBuf::from(required(run_dir, "--run-dir")?);
+    validate_benchmark_label("implementation", &implementation)?;
+    validate_benchmark_label("migration case", &case_name)?;
+    if !run_dir.is_absolute() {
+        return Err(cli_error(
+            "storage migration child run directory must be absolute",
+        ));
+    }
+    Ok(Command::StorageMigrationChild(
+        StorageMigrationChildOptions {
+            implementation,
+            case_name,
+            run_dir,
+        },
+    ))
+}
+
 fn validate_storage_supervisor_token(kind: &str, token: &str) -> AppResult<()> {
     if token.len() != 64
         || !token
@@ -244,6 +286,7 @@ pub(super) fn run(command: Command) -> AppResult<()> {
         Command::Run(options) => run_benchmark(options),
         Command::StorageCasChild(options) => run_storage_cas_child(options),
         Command::StorageCrashChild(options) => run_storage_crash_child(options),
+        Command::StorageMigrationChild(options) => run_storage_migration_child(options),
     }
 }
 
@@ -271,6 +314,20 @@ fn run_storage_crash_child(options: StorageCrashChildOptions) -> AppResult<()> {
         let _ = options;
         Err(cli_error(
             "storage crash child is not compiled into this runner",
+        ))
+    }
+}
+
+fn run_storage_migration_child(options: StorageMigrationChildOptions) -> AppResult<()> {
+    #[cfg(feature = "bench-storage")]
+    {
+        storage::run_migration_child(options)
+    }
+    #[cfg(not(feature = "bench-storage"))]
+    {
+        let _ = options;
+        Err(cli_error(
+            "storage migration child is not compiled into this runner",
         ))
     }
 }
@@ -836,6 +893,36 @@ mod tests {
         ));
         let catalog = benchmark_catalog().to_string();
         assert!(!catalog.contains("__storage-cas-child"));
+    }
+
+    #[test]
+    fn storage_migration_child_is_hidden_and_requires_an_absolute_directory() {
+        assert!(
+            parse(&strings(&[
+                "__storage-migration-child",
+                "--implementation",
+                "append-log",
+                "--case",
+                "published-v2",
+                "--run-dir",
+                "relative",
+            ]))
+            .is_err()
+        );
+        let run_dir = std::env::temp_dir().join("greentyper-hidden-migration-child-parse");
+        let command = parse(&[
+            "__storage-migration-child".into(),
+            "--implementation".into(),
+            "sqlite-wal".into(),
+            "--case".into(),
+            "complete-unpublished".into(),
+            "--run-dir".into(),
+            run_dir.to_string_lossy().into_owned(),
+        ])
+        .expect("hidden migration child");
+        assert!(matches!(command, Command::StorageMigrationChild(_)));
+        let catalog = benchmark_catalog().to_string();
+        assert!(!catalog.contains("__storage-migration-child"));
     }
 
     #[test]

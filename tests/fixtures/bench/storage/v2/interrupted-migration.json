@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "comparison_id": "storage",
+  "workload_id": "interrupted-migration",
+  "workload_version": 2,
+  "transactions": 16,
+  "events_per_transaction": 4,
+  "payload_bytes": 256,
+  "migration_interruptions": 3
+}

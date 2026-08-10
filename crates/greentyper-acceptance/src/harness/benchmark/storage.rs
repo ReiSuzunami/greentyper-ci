@@ -11,6 +11,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 mod cas;
 mod crash;
+mod migration;
 
 const STORAGE_FIXTURE_JSON: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -34,7 +35,7 @@ const BACKUP_FIXTURE_JSON: &str = include_str!(concat!(
 ));
 const MIGRATION_FIXTURE_JSON: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../../tests/fixtures/bench/storage/v1/interrupted-migration.json"
+    "/../../tests/fixtures/bench/storage/v2/interrupted-migration.json"
 ));
 const CRASH_FIXTURE_JSON: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -59,7 +60,7 @@ pub(super) fn catalog_entry() -> serde_json::Value {
             {"id": "timer-expiry-streaming-replay", "version": 1},
             {"id": "cas-one-winner", "version": 2},
             {"id": "backup-restore", "version": 1},
-            {"id": "interrupted-migration", "version": 1},
+            {"id": "interrupted-migration", "version": 2},
             {"id": "cross-process-crash-replay", "version": 1}
         ],
         "purpose": "candidate evidence; not a storage selection"
@@ -115,6 +116,10 @@ pub(super) fn run_crash_child(options: StorageCrashChildOptions) -> AppResult<()
 
 pub(super) fn run_cas_child(options: StorageCasChildOptions) -> AppResult<()> {
     cas::run_child(options)
+}
+
+pub(super) fn run_migration_child(options: StorageMigrationChildOptions) -> AppResult<()> {
+    migration::run_child(options)
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -239,7 +244,7 @@ fn validate_fixture(fixture: &StorageFixture, workload: StorageWorkload) -> AppR
         }
     };
     let expected_workload_version = match workload {
-        StorageWorkload::CasOneWinner => 2,
+        StorageWorkload::CasOneWinner | StorageWorkload::InterruptedMigration => 2,
         _ => 1,
     };
     if fixture.comparison_id != "storage"
@@ -445,7 +450,7 @@ impl BenchmarkTarget for StorageTarget {
             comparison_id: "storage",
             comparison_version: 1,
             implementation: self.engine.implementation(),
-            implementation_revision: "5",
+            implementation_revision: "6",
             dependencies: self.engine.dependencies(),
             workload_id: self.workload.id(),
             workload_version: self.fixture.workload_version,
@@ -453,9 +458,9 @@ impl BenchmarkTarget for StorageTarget {
             unit: self.workload.unit(),
             boundary: self.workload.boundary(),
             process_mode: match self.workload {
-                StorageWorkload::CasOneWinner | StorageWorkload::CrossProcessCrashReplay => {
-                    "cross-process"
-                }
+                StorageWorkload::CasOneWinner
+                | StorageWorkload::InterruptedMigration
+                | StorageWorkload::CrossProcessCrashReplay => "cross-process",
                 _ => "in-process",
             },
             fixture_bytes: self.fixture_bytes,
@@ -499,7 +504,7 @@ impl BenchmarkTarget for StorageTarget {
                 return run_backup_restore_workload(self.engine, run_dir, &self.events);
             }
             StorageWorkload::InterruptedMigration => {
-                return run_interrupted_migration_workload(
+                return migration::run_workload(
                     self.engine,
                     run_dir,
                     &self.events,
@@ -600,6 +605,7 @@ impl BenchmarkTarget for StorageTarget {
             .ok_or_else(|| cli_error("storage benchmark run directory was not active"))?;
         cas::require_no_active_children(path)?;
         crash::require_no_active_children(path)?;
+        migration::require_no_active_children(path)?;
         let path = self
             .run_dir
             .take()
@@ -739,94 +745,6 @@ fn run_backup_restore_workload(
     })
 }
 
-fn run_interrupted_migration_workload(
-    engine: StorageEngine,
-    run_dir: &Path,
-    events: &[EventRecord],
-    expected_boundaries: u32,
-) -> AppResult<BenchmarkObservation> {
-    let (replayed, prepare_ns, migration_ns, old_recoveries, new_recoveries, schema_version) =
-        match engine {
-            StorageEngine::SqliteWal => run_sqlite_migration(run_dir, events)?,
-            StorageEngine::AppendLog => run_append_log_migration(run_dir, events)?,
-        };
-    if replayed != events
-        || old_recoveries + new_recoveries != u64::from(expected_boundaries)
-        || old_recoveries != 2
-        || new_recoveries != 1
-        || schema_version != 2
-    {
-        return Err(cli_error(
-            "storage migration did not recover as exactly two v1 states and one v2 state",
-        ));
-    }
-    Ok(BenchmarkObservation {
-        operation_units: old_recoveries + new_recoveries,
-        output_digest: canonical_digest(&replayed)?,
-        timings_ns: BTreeMap::from([
-            ("migration_and_recovery".into(), migration_ns),
-            ("prepare".into(), prepare_ns),
-        ]),
-        gauges: BTreeMap::from([
-            ("final_schema_version".into(), schema_version),
-            ("final_storage_bytes".into(), directory_size(run_dir)?),
-            ("new_generation_recoveries".into(), new_recoveries),
-            ("old_generation_recoveries".into(), old_recoveries),
-        ]),
-    })
-}
-
-fn run_sqlite_migration(
-    run_dir: &Path,
-    events: &[EventRecord],
-) -> AppResult<(Vec<EventRecord>, u64, u64, u64, u64, u64)> {
-    let path = run_dir.join("ledger.sqlite3");
-    let prepare_started = Instant::now();
-    let mut connection = create_sqlite_store(&path)?;
-    append_sqlite_events(&mut connection, events)?;
-    drop(connection);
-    verify_sqlite_schema(&path, 1, false, events)?;
-    let prepare_ns = elapsed_ns(prepare_started)?;
-
-    let migration_started = Instant::now();
-    rollback_sqlite_migration(&path, false)?;
-    verify_sqlite_schema(&path, 1, false, events)?;
-    rollback_sqlite_migration(&path, true)?;
-    verify_sqlite_schema(&path, 1, false, events)?;
-    commit_sqlite_migration(&path)?;
-    let replayed = verify_sqlite_schema(&path, 2, true, events)?;
-    let migration_ns = elapsed_ns(migration_started)?;
-    Ok((replayed, prepare_ns, migration_ns, 2, 1, 2))
-}
-
-fn rollback_sqlite_migration(database_path: &Path, include_backfill: bool) -> AppResult<()> {
-    let mut connection = Connection::open(database_path)?;
-    configure_sqlite_durability(&connection)?;
-    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    transaction.execute_batch("ALTER TABLE events ADD COLUMN payload_size INTEGER;")?;
-    if include_backfill {
-        transaction.execute_batch(
-            "UPDATE events SET payload_size = length(payload);
-             PRAGMA user_version = 2;",
-        )?;
-    }
-    transaction.rollback()?;
-    Ok(())
-}
-
-fn commit_sqlite_migration(database_path: &Path) -> AppResult<()> {
-    let mut connection = Connection::open(database_path)?;
-    configure_sqlite_durability(&connection)?;
-    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    transaction.execute_batch(
-        "ALTER TABLE events ADD COLUMN payload_size INTEGER;
-         UPDATE events SET payload_size = length(payload);
-         PRAGMA user_version = 2;",
-    )?;
-    transaction.commit()?;
-    Ok(())
-}
-
 fn verify_sqlite_schema(
     database_path: &Path,
     expected_version: u64,
@@ -867,74 +785,6 @@ fn sqlite_column_exists(connection: &Connection, table: &str, column: &str) -> A
         }
     }
     Ok(false)
-}
-
-fn run_append_log_migration(
-    run_dir: &Path,
-    events: &[EventRecord],
-) -> AppResult<(Vec<EventRecord>, u64, u64, u64, u64, u64)> {
-    let v1_path = run_dir.join("ledger-v1.gtlog");
-    let v2_partial_path = run_dir.join("ledger-v2.partial");
-    let v2_temporary_path = run_dir.join(".ledger-v2.gtlog.tmp");
-    let v2_path = run_dir.join("ledger-v2.gtlog");
-
-    let prepare_started = Instant::now();
-    let mut v1 = create_append_log(&v1_path)?;
-    append_log_events(&mut v1, events)?;
-    drop(v1);
-    let initial = select_append_log_generation(run_dir)?;
-    if initial.format_version != 1 || initial.events != events {
-        return Err(cli_error("append-log v1 generation is invalid"));
-    }
-    let prepare_ns = elapsed_ns(prepare_started)?;
-
-    let migration_started = Instant::now();
-    let first_transaction = transaction_slices(events)?
-        .into_iter()
-        .next()
-        .ok_or_else(|| cli_error("migration workload has no transaction"))?;
-    let mut partial = create_append_log_with_header(&v2_partial_path, LOG_HEADER_V2)?;
-    write_transaction(&mut partial, first_transaction)?;
-    partial.flush()?;
-    partial.sync_all()?;
-    let partial_length = partial.metadata()?.len();
-    if partial_length <= u64::try_from(LOG_HEADER_V2.len())? {
-        return Err(cli_error("append-log migration partial frame is empty"));
-    }
-    partial.set_len(partial_length - 1)?;
-    partial.sync_all()?;
-    drop(partial);
-    let incomplete = replay_log(&v2_partial_path)?;
-    if incomplete.format_version != 2 || !incomplete.incomplete_tail {
-        return Err(cli_error(
-            "append-log partial v2 generation was not detected",
-        ));
-    }
-    let old_after_partial = select_append_log_generation(run_dir)?;
-    if old_after_partial.format_version != 1 || old_after_partial.events != events {
-        return Err(cli_error("append-log selected an unpublished generation"));
-    }
-
-    let mut temporary = create_append_log_with_header(&v2_temporary_path, LOG_HEADER_V2)?;
-    append_log_events(&mut temporary, events)?;
-    drop(temporary);
-    let candidate = replay_log(&v2_temporary_path)?;
-    if candidate.format_version != 2 || candidate.incomplete_tail || candidate.events != events {
-        return Err(cli_error("append-log complete v2 candidate is invalid"));
-    }
-    let old_before_publish = select_append_log_generation(run_dir)?;
-    if old_before_publish.format_version != 1 || old_before_publish.events != events {
-        return Err(cli_error("append-log selected v2 before publication"));
-    }
-
-    fs::rename(&v2_temporary_path, &v2_path)?;
-    sync_directory(run_dir)?;
-    let published = select_append_log_generation(run_dir)?;
-    if published.format_version != 2 || published.incomplete_tail || published.events != events {
-        return Err(cli_error("append-log published v2 generation is invalid"));
-    }
-    let migration_ns = elapsed_ns(migration_started)?;
-    Ok((published.events, prepare_ns, migration_ns, 2, 1, 2))
 }
 
 fn select_append_log_generation(run_dir: &Path) -> AppResult<ReplayOutcome> {
@@ -2105,8 +1955,8 @@ mod tests {
         let append = target_for(&options("append-log")).expect("append target");
         assert_eq!(sqlite.descriptor().process_mode, "cross-process");
         assert_eq!(append.descriptor().process_mode, "cross-process");
-        assert_eq!(sqlite.descriptor().implementation_revision, "5");
-        assert_eq!(append.descriptor().implementation_revision, "5");
+        assert_eq!(sqlite.descriptor().implementation_revision, "6");
+        assert_eq!(append.descriptor().implementation_revision, "6");
     }
 
     #[test]
@@ -2138,7 +1988,7 @@ mod tests {
     }
 
     #[test]
-    fn interrupted_migration_recovers_only_complete_generations() {
+    fn interrupted_migration_descriptor_is_cross_process_for_both_candidates() {
         let options = |implementation: &str| Options {
             comparison: "storage".into(),
             implementation: implementation.into(),
@@ -2151,19 +2001,12 @@ mod tests {
             expect_baseline: None,
             machine_identifiers: MachineIdentifierPolicy::Redacted,
         };
-        let mut sqlite = target_for(&options("sqlite-wal")).expect("SQLite target");
-        let mut append = target_for(&options("append-log")).expect("append target");
-        let (_, sqlite_observation) = execute_once(sqlite.as_mut()).expect("SQLite migration");
-        let (_, append_observation) = execute_once(append.as_mut()).expect("append migration");
-        for observation in [&sqlite_observation, &append_observation] {
-            assert_eq!(observation.operation_units, 3);
-            assert_eq!(observation.gauges["old_generation_recoveries"], 2);
-            assert_eq!(observation.gauges["new_generation_recoveries"], 1);
-            assert_eq!(observation.gauges["final_schema_version"], 2);
+        let sqlite = target_for(&options("sqlite-wal")).expect("SQLite target");
+        let append = target_for(&options("append-log")).expect("append target");
+        for descriptor in [sqlite.descriptor(), append.descriptor()] {
+            assert_eq!(descriptor.workload_version, 2);
+            assert_eq!(descriptor.process_mode, "cross-process");
+            assert_eq!(descriptor.implementation_revision, "6");
         }
-        assert_eq!(
-            sqlite_observation.output_digest,
-            append_observation.output_digest
-        );
     }
 }
