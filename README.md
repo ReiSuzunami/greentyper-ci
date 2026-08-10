@@ -112,8 +112,8 @@ OpenCode Go template defaults plus seed model facts with field provenance. The
 selector exposes compatible release candidates while keeping unverified live
 availability explicit. A first Direct VT product tracer now renders the Slash
 Panel, controller screens, and adaptive status rows through `greentyper tui` and
-includes narrow mutable user-scope editors for the statusline preset and an
-existing Provider Profile's base URL. Remaining rendered TUI/App Server editors
+includes narrow mutable user-scope editors for the statusline preset, statusline
+expansion policy, and an existing Provider Profile's base URL. Remaining rendered TUI/App Server editors
 remain pending. The product CLI can bind,
 replace, test, and forget origin-bound credential references without
 putting secret material in arguments, Config, or Ledgers. Windows stores values
@@ -261,15 +261,18 @@ cells, and restores the terminal on normal and error returns. The route
 `/config statusline preset` is its first mutable dialog: Up/Down stages one of
 the four schema values, Enter runs the real dry-run preview, `c` commits the
 validated user-scope Draft, and `d` explicitly discards it. The second route,
-`/config provider url`, opens a Provider-filtered Config Center, selects one
+`/config statusline expansion`, uses the same metadata-driven choice interaction
+for `auto`, `compact`, and `expanded`. The third route, `/config provider url`,
+opens a Provider-filtered Config Center, selects one
 existing Profile, and edits its base URL through a 512-byte input. The first
 Enter previews the complete Draft and the second commits it; Delete resets the
 field, while dirty Escape requires explicit discard confirmation. Invalid
 previews and revision conflicts render a bounded notice and keep the Draft live;
 Escape, Ctrl-C, and Ctrl-Q do not implicitly discard a dirty Draft. A no-change
 commit does not create a Config file, and tests reopen committed files. Outside
-those two dialogs the tracer remains snapshot-based and read-only. It is not a general
-mutable terminal editor, approval surface, live refresh loop, audited ConPTY integration, object-name dialog,
+those three dialogs the tracer remains snapshot-based and read-only. It is not
+a general mutable terminal editor, approval surface, live refresh loop, audited
+ConPTY integration, object-name dialog,
 rendered template picker, starter-preset workflow, or persistent live catalog
 discovery. Live inference conformance, configurable proxy policy,
 reconnect/retry, OpenCode Go Messages execution,

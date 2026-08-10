@@ -101,10 +101,12 @@ a terminal-neutral hierarchical Command Path registry generated from Config
 Schema metadata, provenance-aware field views, typed nested object lifecycle
 actions, and a reusable Config Runtime editor session for focused multi-field
 draft validation, atomic create/edit/delete, and commit. The Direct VT product
-TUI now connects two non-secret routes to that real session in the user scope.
+TUI now connects three non-secret routes to that real session in the user scope.
 `/config statusline preset` stages a bounded enum choice with Up/Down, previews
 with Enter, commits the currently previewed choice with `c`, and explicitly
-discards with `d`. `/config provider url` carries the selected command into a
+discards with `d`. `/config statusline expansion` uses the same interaction,
+selected from the schema editor metadata, for `auto`, `compact`, and `expanded`.
+`/config provider url` carries the selected command into a
 Provider-filtered Config Center, opens one existing Profile, and edits its base
 URL through a 512-byte text input. Its first Enter previews and its second Enter
 commits; Delete resets the field, and dirty Escape requires discard
@@ -117,7 +119,7 @@ statusline reconstruction is not claimed by this slice. Object deletion is
 target-layer explicit and fails when the resulting effective configuration has
 dangling references. The snapshot-based `tui` tracer renders controller screens
 reachable from the Slash Panel, including the top-level Config Center; only the
-two dialogs above mutate a Draft. It does not yet ship remaining
+three dialogs above mutate a Draft. It does not yet ship remaining
 schema-driven terminal editor dialogs,
 object-name input form, rendered Provider
 template picker, or App Server surface described below. The current

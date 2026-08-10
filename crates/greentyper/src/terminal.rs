@@ -11,16 +11,15 @@ use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 use greentyper_core::config::{
-    ConfigEditorError, ConfigError, ConfigFieldContents, ConfigRuntime, ConfigRuntimeError,
-    ConfigScope, ConfigValue, MAX_COMMAND_QUERY_BYTES, MAX_CONFIG_STRING_BYTES,
+    ConfigEditorError, ConfigError, ConfigFieldContents, ConfigFieldInteraction, ConfigRuntime,
+    ConfigRuntimeError, ConfigScope, ConfigValue, MAX_COMMAND_QUERY_BYTES,
 };
 use greentyper_core::runtime::{RuntimeError, RuntimeKernel};
 use greentyper_core::usage::{UsageError, UsageTimestamp};
 
 use crate::presentation::{
-    PROVIDER_BASE_URL_PATH_PATTERN, PresentationController, PresentationControllerError,
-    PresentationError, PresentationLayoutView, PresentationSources, STATUSLINE_PRESET_CHOICES,
-    STATUSLINE_PRESET_PATH, TuiViewModel, Viewport, ViewportError,
+    PresentationController, PresentationControllerError, PresentationError, PresentationLayoutView,
+    PresentationSources, TuiViewModel, Viewport, ViewportError,
 };
 
 pub(crate) fn require_interactive() -> Result<(), TerminalError> {
@@ -800,16 +799,12 @@ impl TerminalSession {
             TerminalInputContext::SlashPanel
         } else if self.controller.is_config_object_selector() {
             TerminalInputContext::ConfigObject
-        } else if self.controller.config_editor_field().is_some_and(|field| {
-            field.path == STATUSLINE_PRESET_PATH
-                && matches!(field.contents, ConfigFieldContents::Value { .. })
-        }) {
-            TerminalInputContext::ConfigChoice
-        } else if self.controller.config_editor_field().is_some_and(|field| {
-            field.path_pattern == PROVIDER_BASE_URL_PATH_PATTERN
-                && matches!(field.contents, ConfigFieldContents::Value { .. })
-        }) {
-            TerminalInputContext::ConfigText
+        } else if let Some(field) = self.controller.config_editor_field() {
+            match field.interaction {
+                ConfigFieldInteraction::Choice { .. } => TerminalInputContext::ConfigChoice,
+                ConfigFieldInteraction::Text { .. } => TerminalInputContext::ConfigText,
+                ConfigFieldInteraction::ReadOnly => TerminalInputContext::Other,
+            }
         } else {
             TerminalInputContext::Other
         }
@@ -820,7 +815,7 @@ impl TerminalSession {
             self.clear_config_text();
             return;
         };
-        if field.path_pattern != PROVIDER_BASE_URL_PATH_PATTERN {
+        if !matches!(field.interaction, ConfigFieldInteraction::Text { .. }) {
             self.clear_config_text();
             return;
         }
@@ -861,14 +856,16 @@ impl TerminalSession {
         let Some(current) = self.config_text.as_ref() else {
             return Ok(());
         };
+        let Some(max_bytes) = self.config_text_limit() else {
+            return Ok(());
+        };
         let mut next = if current.replace_on_edit {
             String::new()
         } else {
             current.value.clone()
         };
         if let Some(character) = character {
-            if character.is_control()
-                || next.len().saturating_add(character.len_utf8()) > MAX_CONFIG_STRING_BYTES
+            if character.is_control() || next.len().saturating_add(character.len_utf8()) > max_bytes
             {
                 self.notice = Some("Config value exceeds its input limit".to_owned());
                 return Ok(());
@@ -889,6 +886,14 @@ impl TerminalSession {
         }
         self.stage_config_text(runtime, next);
         Ok(())
+    }
+
+    fn config_text_limit(&self) -> Option<usize> {
+        let field = self.controller.config_editor_field()?;
+        match field.interaction {
+            ConfigFieldInteraction::Text { max_bytes } => Some(max_bytes),
+            ConfigFieldInteraction::ReadOnly | ConfigFieldInteraction::Choice { .. } => None,
+        }
     }
 
     fn stage_config_text(&mut self, runtime: &ConfigRuntime, next: String) {
@@ -949,9 +954,7 @@ impl TerminalSession {
 
     fn config_choice(&self) -> Option<&str> {
         let field = self.controller.config_editor_field()?;
-        if field.path != STATUSLINE_PRESET_PATH {
-            return None;
-        }
+        self.config_choices()?;
         let ConfigFieldContents::Value {
             effective, target, ..
         } = &field.contents
@@ -967,24 +970,33 @@ impl TerminalSession {
             })
     }
 
+    fn config_choices(&self) -> Option<&'static [&'static str]> {
+        let field = self.controller.config_editor_field()?;
+        match field.interaction {
+            ConfigFieldInteraction::Choice { choices } => Some(choices),
+            ConfigFieldInteraction::ReadOnly | ConfigFieldInteraction::Text { .. } => None,
+        }
+    }
+
     fn move_config_choice(
         &mut self,
         runtime: &ConfigRuntime,
         offset: isize,
     ) -> Result<(), PresentationControllerError> {
+        let Some(choices) = self.config_choices() else {
+            return Ok(());
+        };
         let current = self.config_choice();
         let index = current
-            .and_then(|current| {
-                STATUSLINE_PRESET_CHOICES
-                    .iter()
-                    .position(|choice| *choice == current)
-            })
+            .and_then(|current| choices.iter().position(|choice| *choice == current))
             .unwrap_or(0);
         let next = index
             .saturating_add_signed(offset)
-            .min(STATUSLINE_PRESET_CHOICES.len() - 1);
-        self.controller
-            .stage_config(runtime, STATUSLINE_PRESET_CHOICES[next])
+            .min(choices.len().saturating_sub(1));
+        let Some(choice) = choices.get(next) else {
+            return Ok(());
+        };
+        self.controller.stage_config(runtime, choice)
     }
 
     fn layout(
@@ -1579,6 +1591,59 @@ mod tests {
         assert_eq!(
             config_string_target(&reopened, "ui.statusline.preset").as_deref(),
             Some("diagnostic")
+        );
+        std::fs::remove_dir_all(root).expect("remove test config");
+    }
+
+    #[test]
+    fn terminal_statusline_expansion_uses_schema_choice_metadata_and_reopens() {
+        let root = terminal_test_root("config-expansion");
+        let paths = ConfigPaths::new(root.join("user.toml"), root.join("project.toml"));
+        let mut config =
+            ConfigRuntime::open(paths.clone(), ConfigDocument::empty()).expect("config runtime");
+        let mut session =
+            TerminalSession::new("/config statusline expansion", 80, 24).expect("session");
+
+        assert_eq!(
+            session
+                .handle(TerminalInputEvent::Enter, Some(&mut config))
+                .expect("open editor"),
+            TerminalLoopOutcome::Redraw
+        );
+        assert_eq!(session.input_context(), TerminalInputContext::ConfigChoice);
+        assert_eq!(
+            session
+                .handle(TerminalInputEvent::Down, Some(&mut config))
+                .expect("choose compact"),
+            TerminalLoopOutcome::Redraw
+        );
+        let smoke = build_smoke_view("/").expect("view");
+        let layout = session
+            .layout(Some(&config), smoke.view())
+            .expect("choice layout");
+        assert!(
+            layout
+                .body()
+                .iter()
+                .any(|row| { row.is_selected() && row.text() == "> compact" })
+        );
+        session
+            .handle(TerminalInputEvent::Enter, Some(&mut config))
+            .expect("preview");
+        session
+            .handle(TerminalInputEvent::Character('c'), Some(&mut config))
+            .expect("commit");
+        assert!(session.controller.is_slash_panel());
+        assert_eq!(
+            config_string_target(&config, "ui.statusline.expand").as_deref(),
+            Some("compact")
+        );
+
+        drop(config);
+        let reopened = ConfigRuntime::open(paths, ConfigDocument::empty()).expect("reopen config");
+        assert_eq!(
+            config_string_target(&reopened, "ui.statusline.expand").as_deref(),
+            Some("compact")
         );
         std::fs::remove_dir_all(root).expect("remove test config");
     }

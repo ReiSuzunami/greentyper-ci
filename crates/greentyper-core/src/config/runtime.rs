@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use url::{Host, Url};
 
-use super::{ConfigLayer, ConfigLayers, ReasoningEffort, ServiceTier};
+use super::{ConfigLayer, ConfigLayers, MAX_CONFIG_STRING_BYTES, ReasoningEffort, ServiceTier};
 use crate::pricing::{
     PriceSchedule, PriceScheduleBook, PriceScheduleDefinition, PriceScheduleSource, TokenRates,
 };
@@ -77,6 +77,14 @@ pub enum ConfigValueKind {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ConfigFieldInteraction {
+    ReadOnly,
+    Choice { choices: &'static [&'static str] },
+    Text { max_bytes: usize },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub struct ConfigSchemaEntry {
     pub path_pattern: &'static str,
     pub command_path: &'static str,
@@ -87,6 +95,13 @@ pub struct ConfigSchemaEntry {
     pub editor: &'static str,
 }
 
+impl ConfigSchemaEntry {
+    #[must_use]
+    pub fn interaction(&self) -> ConfigFieldInteraction {
+        config_field_interaction(self)
+    }
+}
+
 const ALL_SCOPES: &[ConfigScope] = &[
     ConfigScope::BuiltIn,
     ConfigScope::User,
@@ -94,6 +109,8 @@ const ALL_SCOPES: &[ConfigScope] = &[
     ConfigScope::Cli,
 ];
 const FILE_SCOPES: &[ConfigScope] = &[ConfigScope::User, ConfigScope::Project];
+const STATUSLINE_PRESET_CHOICES: &[&str] = &["minimal", "balanced", "diagnostic", "custom"];
+const STATUSLINE_EXPANSION_CHOICES: &[&str] = &["auto", "compact", "expanded"];
 
 const CONFIG_SCHEMA: &[ConfigSchemaEntry] = &[
     schema_entry(
@@ -564,6 +581,32 @@ pub const fn config_schema() -> &'static [ConfigSchemaEntry] {
     CONFIG_SCHEMA
 }
 
+fn config_field_interaction(descriptor: &ConfigSchemaEntry) -> ConfigFieldInteraction {
+    match (
+        descriptor.path_pattern,
+        descriptor.value_kind,
+        descriptor.credential_reference,
+        descriptor.editor,
+    ) {
+        ("ui.statusline.preset", ConfigValueKind::String, false, "statusline_preset") => {
+            ConfigFieldInteraction::Choice {
+                choices: STATUSLINE_PRESET_CHOICES,
+            }
+        }
+        ("ui.statusline.expand", ConfigValueKind::String, false, "expansion_policy") => {
+            ConfigFieldInteraction::Choice {
+                choices: STATUSLINE_EXPANSION_CHOICES,
+            }
+        }
+        ("providers.<id>.base_url", ConfigValueKind::String, false, "url") => {
+            ConfigFieldInteraction::Text {
+                max_bytes: MAX_CONFIG_STRING_BYTES,
+            }
+        }
+        _ => ConfigFieldInteraction::ReadOnly,
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(tag = "type", content = "value", rename_all = "snake_case")]
 pub enum ConfigValue {
@@ -705,6 +748,7 @@ pub struct ConfigFieldView {
     pub target_scope: ConfigScope,
     pub timing: ConfigApplicationTiming,
     pub editor: &'static str,
+    pub interaction: ConfigFieldInteraction,
     pub contents: ConfigFieldContents,
 }
 
@@ -1461,6 +1505,7 @@ impl ConfigRuntime {
             target_scope,
             timing: descriptor.timing,
             editor: descriptor.editor,
+            interaction: descriptor.interaction(),
             contents,
         })
     }

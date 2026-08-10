@@ -9,9 +9,9 @@ use greentyper_core::agent_team::{TaskStatus, TeamOperationStatus};
 use greentyper_core::config::{
     CommandMatchKind, CommandQueryError, CommandTarget, ConfigCommit, ConfigEditorError,
     ConfigEditorOperation, ConfigEditorSession, ConfigEditorView, ConfigErrorCategory,
-    ConfigFieldContents, ConfigFieldView, ConfigObjectKind, ConfigObjectRef, ConfigRuntime,
-    ConfigRuntimeError, ConfigRuntimeStatus, ConfigScope, ConfigSection, ConfigValue,
-    ModelCatalogView, ModelPresetView, match_command_paths,
+    ConfigFieldContents, ConfigFieldInteraction, ConfigFieldView, ConfigObjectKind,
+    ConfigObjectRef, ConfigRuntime, ConfigRuntimeError, ConfigRuntimeStatus, ConfigScope,
+    ConfigSection, ConfigValue, ModelCatalogView, ModelPresetView, match_command_paths,
 };
 use greentyper_core::context::{ContextPressureAccuracy, ContextPressureSnapshot};
 use greentyper_core::ledger::LedgerHead;
@@ -1452,11 +1452,12 @@ fn config_editor_rows(
         ConfigFieldContents::Value {
             effective, target, ..
         } => {
+            let interaction = editor.field.interaction;
             rows.push(LayoutRowView::new(
                 format!("effective {}", config_value_label(effective.as_ref())),
                 false,
             ));
-            let text_input_selected = editor.field.path_pattern == PROVIDER_BASE_URL_PATH_PATTERN;
+            let text_input_selected = matches!(interaction, ConfigFieldInteraction::Text { .. });
             rows.push(LayoutRowView::new(
                 format!(
                     "{}target {}",
@@ -1465,7 +1466,7 @@ fn config_editor_rows(
                 ),
                 text_input_selected,
             ));
-            if editor.field.path == STATUSLINE_PRESET_PATH {
+            if let ConfigFieldInteraction::Choice { choices } = interaction {
                 let selected = target.as_ref().or(effective.as_ref()).and_then(|value| {
                     if let ConfigValue::String(value) = value {
                         Some(value.as_str())
@@ -1473,7 +1474,7 @@ fn config_editor_rows(
                         None
                     }
                 });
-                rows.extend(STATUSLINE_PRESET_CHOICES.into_iter().map(|choice| {
+                rows.extend(choices.iter().copied().map(|choice| {
                     let is_selected = selected == Some(choice);
                     LayoutRowView::new(
                         format!("{} {choice}", if is_selected { '>' } else { ' ' }),
@@ -1525,11 +1526,6 @@ fn config_editor_rows(
     }
     rows
 }
-
-pub(crate) const STATUSLINE_PRESET_PATH: &str = "ui.statusline.preset";
-pub(crate) const STATUSLINE_PRESET_CHOICES: [&str; 4] =
-    ["minimal", "balanced", "diagnostic", "custom"];
-pub(crate) const PROVIDER_BASE_URL_PATH_PATTERN: &str = "providers.<id>.base_url";
 
 fn config_value_label(value: Option<&ConfigValue>) -> String {
     match value {

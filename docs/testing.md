@@ -301,7 +301,9 @@ creation or stdout output. Provider URL input is separately bounded to 512
 bytes before Draft growth. The first rendered mutation tests drive
 `/config statusline preset` through menu selection, dry-run preview, user-scope
 commit, disk reopen, explicit discard, validation recovery, and a competing
-revision winner. Provider URL tests drive a field command into an existing
+revision winner. A separate `/config statusline expansion` test proves the same
+schema-metadata-driven choice interaction selects `compact`, previews, commits,
+and survives Config Runtime reopen. Provider URL tests drive a field command into an existing
 Profile selection, render the focused target, replace/reset bounded text,
 recover from invalid URL validation, commit and reopen, retain a losing CAS
 Draft, and explicitly discard it without overwriting the winner. Two full-loop

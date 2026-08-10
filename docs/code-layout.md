@@ -50,8 +50,9 @@ Object lifecycle/Provider-wizard controller, deterministic viewport-row layout, 
 ProductDriver that composes the Kernel-owned Team, Tool, Provider, approval, and
 delivery seams. Its first product terminal tracer privately owns a
 Direct VT cell-diff renderer, blocking Crossterm event adapter, alternate-screen
-and raw-mode lifecycle, the public `tui` command, and one user-scope
-statusline-preset choice editor over the existing Config Runtime. Remaining
+and raw-mode lifecycle, the public `tui` command, metadata-driven user-scope
+statusline-preset and statusline-expansion choice editors, and one existing-
+Provider base-URL text editor over the existing Config Runtime. Remaining
 mutable terminal editors, approval interaction, live refresh, the App Server, and an audited Windows
 ConPTY wrapper remain pending. Platform wrappers for process,
 credential, transport, and eventually terminal facilities remain private to

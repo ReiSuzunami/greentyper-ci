@@ -313,9 +313,11 @@ clears stale cells, bounds the viewport and Slash query before allocation, and
 restores raw mode, cursor visibility, and the alternate screen on normal and
 error returns. Windows startup explicitly requires VT output support. Its first
 mutable route is the user-scope `/config statusline preset` choice dialog. A
-second route, `/config provider url`, carries the pending field command into a
-Provider-filtered Config Center, selects an existing Profile, and edits its base
-URL through a 512-byte text input. Both require a successful real dry-run
+second metadata-driven choice route, `/config statusline expansion`, exposes
+`auto`, `compact`, and `expanded`. A third route, `/config provider url`, carries
+the pending field command into a Provider-filtered Config Center, selects an
+existing Profile, and edits its base URL through a 512-byte text input. All
+three require a successful real dry-run
 preview before commit, persist through the Config Runtime CAS/backup path,
 explicitly discard, block dirty escape/quit, preserve the editor on validation
 or revision conflict, and render bounded error notices. Tests prove no-change

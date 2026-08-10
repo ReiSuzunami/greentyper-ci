@@ -5,9 +5,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use greentyper_core::config::{
     ConfigApplicationTiming, ConfigDocument, ConfigEditorError, ConfigEditorOperation,
-    ConfigEditorSession, ConfigErrorCategory, ConfigFieldContents, ConfigObjectKind,
-    ConfigObjectRef, ConfigPaths, ConfigRuntime, ConfigRuntimeError, ConfigScope, ConfigValue,
-    ConfigValueKind, MAX_OUTPUT_TOKENS, config_schema, parse_config_value,
+    ConfigEditorSession, ConfigErrorCategory, ConfigFieldContents, ConfigFieldInteraction,
+    ConfigObjectKind, ConfigObjectRef, ConfigPaths, ConfigRuntime, ConfigRuntimeError, ConfigScope,
+    ConfigValue, ConfigValueKind, MAX_CONFIG_STRING_BYTES, MAX_OUTPUT_TOKENS, config_schema,
+    parse_config_value,
 };
 use greentyper_core::pricing::PriceScheduleSource;
 use greentyper_core::provider::{ProviderDialect, ProviderPricingSource};
@@ -277,6 +278,49 @@ fn schema_and_parser_are_versioned_typed_and_secret_safe() {
     assert_eq!(
         credential.timing,
         ConfigApplicationTiming::NextProviderEpoch
+    );
+    assert_eq!(credential.interaction(), ConfigFieldInteraction::ReadOnly);
+    let preset = schema
+        .iter()
+        .find(|entry| entry.path_pattern == "ui.statusline.preset")
+        .expect("statusline preset schema");
+    assert_eq!(
+        preset.interaction(),
+        ConfigFieldInteraction::Choice {
+            choices: &["minimal", "balanced", "diagnostic", "custom"],
+        }
+    );
+    let expansion = schema
+        .iter()
+        .find(|entry| entry.path_pattern == "ui.statusline.expand")
+        .expect("statusline expansion schema");
+    assert_eq!(
+        expansion.interaction(),
+        ConfigFieldInteraction::Choice {
+            choices: &["auto", "compact", "expanded"],
+        }
+    );
+    for (entry, choices) in [
+        (preset, &["minimal", "balanced", "diagnostic", "custom"][..]),
+        (expansion, &["auto", "compact", "expanded"][..]),
+    ] {
+        for choice in choices {
+            assert!(
+                parse_config_value(entry.path_pattern, choice).is_ok(),
+                "schema interaction offered an invalid choice: {}={choice}",
+                entry.path_pattern
+            );
+        }
+    }
+    let base_url = schema
+        .iter()
+        .find(|entry| entry.path_pattern == "providers.<id>.base_url")
+        .expect("Provider base URL schema");
+    assert_eq!(
+        base_url.interaction(),
+        ConfigFieldInteraction::Text {
+            max_bytes: MAX_CONFIG_STRING_BYTES,
+        }
     );
 
     assert_eq!(

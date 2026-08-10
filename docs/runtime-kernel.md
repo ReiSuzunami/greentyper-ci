@@ -334,8 +334,8 @@ charges still require a future dedicated authority path.
   operation receipt before acknowledgement and consumes only the complete
   Kernel-rebound Session bundle; it exposes no Agent-ID-to-session conversion.
   The Direct VT tracer carries no approval authority; its mutable surface is
-  limited to the user-scope statusline-preset and existing-Provider base-URL
-  Config Drafts described below.
+  limited to the user-scope statusline-preset, statusline-expansion, and
+  existing-Provider base-URL Config Drafts described below.
 - Complete Config Schema default/constraint/normalization/migration metadata,
   remaining mutable rendered TUI/App Server editors, live catalog discovery, and the rendered
   template-picker/starter-preset workflow. Release Provider Template defaults
@@ -351,8 +351,8 @@ charges still require a future dedicated authority path.
   pinned Usage Windows, revision-bound summary/page `stats` projections, and
   terminal-neutral width-degradation and Context Pressure projection contracts
   are present. The first Direct VT tracer renders those frozen rows and can
-  persist the statusline-preset and existing-Provider base-URL fields, but it
-  does not rebuild the frozen row projection in-process.
+  persist the statusline-preset, statusline-expansion, and existing-Provider
+  base-URL fields, but it does not rebuild the frozen row projection in-process.
 - Live inference conformance, non-Windows credential backends, configurable proxy
   policy, broader TLS platform evidence, reconnect policy, multiple or parallel
   Tool calls, resumable result references, broader canonical Items, and the
