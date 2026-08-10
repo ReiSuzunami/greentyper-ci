@@ -101,7 +101,8 @@ a terminal-neutral hierarchical Command Path registry generated from Config
 Schema metadata, provenance-aware field views, typed nested object lifecycle
 actions, and a reusable Config Runtime editor session for focused multi-field
 draft validation, atomic create/edit/delete, and commit. The Direct VT product
-TUI now connects three non-secret routes to that real session in the user scope.
+TUI now connects three focused non-secret editors and one Provider-creation
+workflow to that real session in the user scope.
 `/config statusline preset` stages a bounded enum choice with Up/Down, previews
 with Enter, commits the currently previewed choice with `c`, and explicitly
 discards with `d`. `/config statusline expansion` uses the same interaction,
@@ -111,6 +112,13 @@ Provider-filtered Config Center, opens one existing Profile, and edits its base
 URL through a 512-byte text input. Its first Enter previews and its second Enter
 commits; Delete resets the field, and dirty Escape requires discard
 confirmation.
+`/config provider credential` uses a status-only text interaction for an opaque
+secure-store reference. It starts empty even when a reference is already bound,
+never renders or reads back the reference, and leaves secret bind/replace to the
+separate credential command. `/config provider add` prompts for a bounded
+lowercase Profile ID, opens a release-template choice, and uses Tab/Shift-Tab to
+move among the rendered template, credential-reference, and base-URL fields.
+The same dry-run and CAS rules apply before the Profile is committed.
 Validation and revision-conflict failures stay visible without consuming the
 Draft; Escape and quit keys cannot discard a dirty Draft, and a no-change commit
 does not create a Config file. The committed value is verified by reopening the
@@ -119,10 +127,10 @@ statusline reconstruction is not claimed by this slice. Object deletion is
 target-layer explicit and fails when the resulting effective configuration has
 dangling references. The snapshot-based `tui` tracer renders controller screens
 reachable from the Slash Panel, including the top-level Config Center; only the
-three dialogs above mutate a Draft. It does not yet ship remaining
-schema-driven terminal editor dialogs,
-object-name input form, rendered Provider
-template picker, or App Server surface described below. The current
+workflows above mutate a Draft. It does not yet ship remaining schema-driven
+terminal editor dialogs, non-Provider object-name or deletion-confirmation
+forms, secret-entry/bind UI, connection-test control, or the App Server surface
+described below. The current
 terminal-neutral Provider Profile wizard resolves release template defaults into
 user-configured Profile Drafts and supports the explicit bounded connection and
 model-list observation described below; it does not merge discovered records,
@@ -264,7 +272,9 @@ capability, endpoint, pricing, or execution authority. Provider-supplied fields
 other than `id` are ignored and never enter the result. The check returns a
 fixed failure category for an invalid response, never exposes response bodies,
 does not commit Config or mutate a Provider Epoch, and is not yet a commit gate.
-The rendered wizard, secure credential binding dialog, template picker, and
+The rendered TUI now supplies the narrow release-template and opaque
+credential-reference creation flow described above. Secure credential secret
+binding, a rendered connection-test control, custom template editing, and the
 starter preset workflow remain pending.
 
 ## Model Catalog and Presets

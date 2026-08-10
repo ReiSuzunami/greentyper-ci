@@ -298,7 +298,8 @@ controller input mapping, blocking event delivery, 512x256/131,072-cell viewport
 and 256-byte Slash-query bounds, alternate-screen/raw-mode restoration,
 read-only missing-Ledger inspection, and non-terminal rejection before state
 creation or stdout output. Provider URL input is separately bounded to 512
-bytes before Draft growth. The first rendered mutation tests drive
+bytes before Draft growth; Provider Profile and credential-reference IDs are
+bounded to 64 bytes. The first rendered mutation tests drive
 `/config statusline preset` through menu selection, dry-run preview, user-scope
 commit, disk reopen, explicit discard, validation recovery, and a competing
 revision winner. A separate `/config statusline expansion` test proves the same
@@ -306,13 +307,21 @@ schema-metadata-driven choice interaction selects `compact`, previews, commits,
 and survives Config Runtime reopen. Provider URL tests drive a field command into an existing
 Profile selection, render the focused target, replace/reset bounded text,
 recover from invalid URL validation, commit and reopen, retain a losing CAS
-Draft, and explicitly discard it without overwriting the winner. Two full-loop
-tests map real Crossterm key events through VT rendering and reopen the resulting
-Config files. They assert that dirty
+Draft, and explicitly discard it without overwriting the winner. Two earlier
+full-loop tests map real Crossterm key events through VT rendering and reopen the
+resulting Config files. A third full-loop test drives `/config provider add`
+through the ID prompt, release-template choice, Tab field movement, opaque
+credential reference, preview, commit, and reopen. It asserts the credential
+reference is absent from terminal bytes. A recovery test retains an invalid ID,
+blocks dirty quit, rejects a stale CAS preview, explicitly discards, and
+preserves the winning Config. Controller tests also prove non-Provider `add`
+routes do not enter a partial rendered prompt and that an existing Profile's
+credential reference can be replaced without serialized readback or generic raw
+credential mutation. These tests assert that dirty
 Escape/quit is blocked, a failed preview
 is rendered without ending the loop, and a no-change commit creates no file.
-They do not constitute real ConPTY, panic-abort cleanup, remaining mutable
-editors, approval, live-refresh, or resource evidence.
+They do not constitute real ConPTY, panic-abort cleanup, secret-store UI,
+remaining mutable editors, approval, live-refresh, or resource evidence.
 Context Pressure tests freeze exact 65%/90% threshold transitions, estimated and
 missing-fact propagation, invalid policy/limit and arithmetic failure, and the
 no-side-effect hard admission gate. Product presentation tests assert estimated

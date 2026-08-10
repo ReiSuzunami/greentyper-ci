@@ -9,8 +9,8 @@ use crate::provider::ProviderProfileSnapshot;
 
 use super::{
     CommandQueryError, CommandTarget, ConfigChange, ConfigCommit, ConfigDraft, ConfigFieldContents,
-    ConfigFieldView, ConfigObjectKind, ConfigObjectRef, ConfigRevision, ConfigRuntime,
-    ConfigRuntimeError, ConfigScope, match_command_paths,
+    ConfigFieldInteraction, ConfigFieldView, ConfigObjectKind, ConfigObjectRef, ConfigRevision,
+    ConfigRuntime, ConfigRuntimeError, ConfigScope, match_command_paths,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -97,10 +97,12 @@ impl ConfigEditorSession {
         if draft.contains_object(&object)? {
             return Err(ConfigEditorError::ConfigObjectAlreadyExists);
         }
-        let field = runtime
-            .draft_object_fields(&draft, object.kind(), object.id())?
-            .into_iter()
-            .next()
+        let fields = runtime.draft_object_fields(&draft, object.kind(), object.id())?;
+        let field = fields
+            .iter()
+            .find(|field| field.interaction != ConfigFieldInteraction::ReadOnly)
+            .or_else(|| fields.first())
+            .cloned()
             .ok_or(ConfigEditorError::ConfigObjectMismatch)?;
         let credential_binding = matches!(
             field.contents,
@@ -166,6 +168,17 @@ impl ConfigEditorSession {
         Ok(())
     }
 
+    pub fn reset_credential_reference(&mut self) -> Result<(), ConfigEditorError> {
+        if self.operation == ConfigEditorOperation::Delete {
+            return Err(ConfigEditorError::ObjectDeletionStaged);
+        }
+        if !self.credential_binding {
+            return Err(ConfigEditorError::CredentialBindingRequired);
+        }
+        self.draft.reset(&self.field_path)?;
+        Ok(())
+    }
+
     pub fn focus_from_query(
         &mut self,
         runtime: &ConfigRuntime,
@@ -198,6 +211,42 @@ impl ConfigEditorSession {
             ConfigFieldContents::CredentialBinding { .. }
         );
         self.field_path = field.path;
+        Ok(())
+    }
+
+    pub fn move_field(
+        &mut self,
+        runtime: &ConfigRuntime,
+        offset: isize,
+    ) -> Result<(), ConfigEditorError> {
+        if self.operation == ConfigEditorOperation::Delete {
+            return Err(ConfigEditorError::ObjectDeletionStaged);
+        }
+        let Some(object) = self.object.as_ref() else {
+            return Ok(());
+        };
+        let fields = runtime
+            .draft_object_fields(&self.draft, object.kind(), object.id())?
+            .into_iter()
+            .filter(|field| field.interaction != ConfigFieldInteraction::ReadOnly)
+            .collect::<Vec<_>>();
+        let Some(index) = fields
+            .iter()
+            .position(|field| field.path == self.field_path)
+        else {
+            return Ok(());
+        };
+        let next = index
+            .saturating_add_signed(offset)
+            .min(fields.len().saturating_sub(1));
+        let Some(field) = fields.get(next) else {
+            return Ok(());
+        };
+        self.credential_binding = matches!(
+            field.contents,
+            ConfigFieldContents::CredentialBinding { .. }
+        );
+        self.field_path.clone_from(&field.path);
         Ok(())
     }
 
@@ -264,6 +313,27 @@ impl ConfigEditorSession {
         runtime: &mut ConfigRuntime,
     ) -> Result<ConfigCommit, ConfigEditorError> {
         self.require_commit_allowed()?;
+        runtime
+            .commit(self.draft.clone(), false)
+            .map_err(Into::into)
+    }
+
+    pub fn try_commit_provider_profile(
+        &self,
+        runtime: &mut ConfigRuntime,
+    ) -> Result<ConfigCommit, ConfigEditorError> {
+        if self.operation == ConfigEditorOperation::Delete {
+            return Err(ConfigEditorError::ObjectDeletionStaged);
+        }
+        match self.require_commit_allowed() {
+            Ok(()) => {}
+            Err(ConfigEditorError::CredentialOperationRequired) if self.credential_binding => {}
+            Err(source) => return Err(source),
+        }
+        self.object
+            .as_ref()
+            .filter(|object| object.kind() == ConfigObjectKind::ProviderProfile)
+            .ok_or(ConfigEditorError::ProviderProfileRequired)?;
         runtime
             .commit(self.draft.clone(), false)
             .map_err(Into::into)

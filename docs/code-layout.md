@@ -52,7 +52,10 @@ delivery seams. Its first product terminal tracer privately owns a
 Direct VT cell-diff renderer, blocking Crossterm event adapter, alternate-screen
 and raw-mode lifecycle, the public `tui` command, metadata-driven user-scope
 statusline-preset and statusline-expansion choice editors, and one existing-
-Provider base-URL text editor over the existing Config Runtime. Remaining
+Provider base-URL text editor over the existing Config Runtime. It also owns a
+bounded Provider Profile ID prompt, release-template/opaque-reference creation
+flow, and status-only existing-reference editor; secret storage stays behind the
+credential adapter. Remaining
 mutable terminal editors, approval interaction, live refresh, the App Server, and an audited Windows
 ConPTY wrapper remain pending. Platform wrappers for process,
 credential, transport, and eventually terminal facilities remain private to

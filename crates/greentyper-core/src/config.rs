@@ -20,6 +20,7 @@ pub use runtime::*;
 pub const DEFAULT_MAX_OUTPUT_BYTES: u32 = 64 * 1024;
 pub const MAX_OUTPUT_BYTES: u32 = 512 * 1024;
 pub const MAX_OUTPUT_TOKENS: u32 = 1024 * 1024;
+pub const MAX_CONFIG_ID_BYTES: usize = 64;
 pub const MAX_CONFIG_STRING_BYTES: usize = 512;
 pub const CONFIG_SCHEMA_VERSION: u16 = SchemaKind::ConfigEpoch.current().get();
 

@@ -530,6 +530,7 @@ impl Error for ViewportError {}
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PresentationState {
     SlashPanel,
+    ConfigObjectCreate,
     ConfigCenter {
         section: Option<ConfigSection>,
         selected: usize,
@@ -540,6 +541,11 @@ enum PresentationState {
     ModelSelector,
     Stats,
     AgentCenter,
+}
+
+struct ActiveConfigObjectCreate {
+    kind: ConfigObjectKind,
+    id: String,
 }
 
 struct ActiveConfigEditor {
@@ -556,6 +562,7 @@ pub(crate) struct PresentationController {
     slash_query: String,
     model_query: String,
     selected: usize,
+    object_create: Option<ActiveConfigObjectCreate>,
     editor: Option<ActiveConfigEditor>,
 }
 
@@ -574,6 +581,7 @@ impl PresentationController {
             slash_query: "/".to_owned(),
             model_query: String::new(),
             selected: 0,
+            object_create: None,
             editor: None,
         }
     }
@@ -590,6 +598,14 @@ impl PresentationController {
                 ..
             }
         )
+    }
+
+    pub(crate) const fn is_config_object_create(&self) -> bool {
+        matches!(self.state, PresentationState::ConfigObjectCreate)
+    }
+
+    pub(crate) fn config_object_id(&self) -> Option<&str> {
+        self.object_create.as_ref().map(|create| create.id.as_str())
     }
 
     pub(crate) fn config_editor_field(&self) -> Option<&ConfigFieldView> {
@@ -609,6 +625,7 @@ impl PresentationController {
         self.slash_query = panel.query;
         self.selected = panel.selected.unwrap_or(0);
         self.state = PresentationState::SlashPanel;
+        self.object_create = None;
         self.editor = None;
         Ok(())
     }
@@ -669,7 +686,17 @@ impl PresentationController {
                 };
             }
             CommandTarget::ConfigObjectCreate { kind } => {
-                let object = object.ok_or(ConfigEditorError::ConfigObjectRequired)?;
+                let Some(object) = object else {
+                    if kind != ConfigObjectKind::ProviderProfile {
+                        return Err(PresentationControllerError::ConfigObjectRouteUnavailable);
+                    }
+                    self.object_create = Some(ActiveConfigObjectCreate {
+                        kind,
+                        id: String::new(),
+                    });
+                    self.state = PresentationState::ConfigObjectCreate;
+                    return Ok(());
+                };
                 if object.kind() != kind {
                     return Err(ConfigEditorError::ConfigObjectMismatch.into());
                 }
@@ -688,6 +715,7 @@ impl PresentationController {
                 } else {
                     PresentationState::ConfigEditor
                 };
+                self.object_create = None;
             }
             CommandTarget::ConfigObjectDelete { kind } => {
                 let object = object.ok_or(ConfigEditorError::ConfigObjectRequired)?;
@@ -755,6 +783,50 @@ impl PresentationController {
         Ok(())
     }
 
+    pub(crate) fn set_config_object_id(
+        &mut self,
+        id: &str,
+    ) -> Result<(), PresentationControllerError> {
+        let create = self
+            .object_create
+            .as_mut()
+            .filter(|_| self.state == PresentationState::ConfigObjectCreate)
+            .ok_or(PresentationControllerError::NotConfigObjectCreate)?;
+        create.id.clear();
+        create.id.push_str(id);
+        Ok(())
+    }
+
+    pub(crate) fn submit_config_object_id(
+        &mut self,
+        runtime: &mut ConfigRuntime,
+        scope: ConfigScope,
+    ) -> Result<(), PresentationControllerError> {
+        let create = self
+            .object_create
+            .as_ref()
+            .filter(|_| self.state == PresentationState::ConfigObjectCreate)
+            .ok_or(PresentationControllerError::NotConfigObjectCreate)?;
+        let object = ConfigObjectRef::new(create.kind, create.id.clone());
+        let session = ConfigEditorSession::create_object(runtime, scope, object.clone())?;
+        let view = session.current_view(runtime)?;
+        self.editor = Some(ActiveConfigEditor {
+            object: Some(object),
+            session,
+            view,
+            dirty: false,
+            validated: false,
+            connection: ProviderConnectionTestStatus::Untested,
+        });
+        self.state = if create.kind == ConfigObjectKind::ProviderProfile {
+            PresentationState::ProviderWizard
+        } else {
+            PresentationState::ConfigEditor
+        };
+        self.object_create = None;
+        Ok(())
+    }
+
     pub(crate) fn move_config_object_selection(
         &mut self,
         runtime: &ConfigRuntime,
@@ -802,6 +874,7 @@ impl PresentationController {
 
     pub(crate) fn back(&mut self) -> Result<(), PresentationControllerError> {
         self.require_discardable_editor()?;
+        self.object_create = None;
         self.editor = None;
         self.state = PresentationState::SlashPanel;
         Ok(())
@@ -852,6 +925,23 @@ impl PresentationController {
         Ok(())
     }
 
+    pub(crate) fn reset_provider_credential_reference(
+        &mut self,
+        runtime: &ConfigRuntime,
+    ) -> Result<(), PresentationControllerError> {
+        if self.state != PresentationState::ProviderWizard {
+            return Err(PresentationControllerError::NotProviderWizard);
+        }
+        let editor = self.active_editor_mut()?;
+        editor.session.reset_credential_reference()?;
+        editor.view.field = editor.session.field(runtime)?;
+        editor.view.changes.clear();
+        editor.dirty = true;
+        editor.validated = false;
+        editor.connection = ProviderConnectionTestStatus::Untested;
+        Ok(())
+    }
+
     pub(crate) fn reset_config(
         &mut self,
         runtime: &ConfigRuntime,
@@ -874,6 +964,17 @@ impl PresentationController {
     ) -> Result<(), PresentationControllerError> {
         let editor = self.active_editor_mut()?;
         editor.session.focus_from_query(runtime, query, selected)?;
+        editor.view.field = editor.session.field(runtime)?;
+        Ok(())
+    }
+
+    pub(crate) fn move_config_field(
+        &mut self,
+        runtime: &ConfigRuntime,
+        offset: isize,
+    ) -> Result<(), PresentationControllerError> {
+        let editor = self.active_editor_mut()?;
+        editor.session.move_field(runtime, offset)?;
         editor.view.field = editor.session.field(runtime)?;
         Ok(())
     }
@@ -908,7 +1009,13 @@ impl PresentationController {
         &mut self,
         runtime: &mut ConfigRuntime,
     ) -> Result<ConfigCommit, PresentationControllerError> {
-        let commit = self.active_editor()?.session.try_commit(runtime)?;
+        let commit = if self.state == PresentationState::ProviderWizard {
+            self.active_editor()?
+                .session
+                .try_commit_provider_profile(runtime)?
+        } else {
+            self.active_editor()?.session.try_commit(runtime)?
+        };
         self.editor = None;
         self.state = PresentationState::SlashPanel;
         Ok(commit)
@@ -922,6 +1029,16 @@ impl PresentationController {
             PresentationState::SlashPanel => Ok(PresentationScreenView::SlashPanel(
                 SlashPanelView::build(&self.slash_query, self.selected)?,
             )),
+            PresentationState::ConfigObjectCreate => {
+                let create = self
+                    .object_create
+                    .as_ref()
+                    .ok_or(PresentationControllerError::NotConfigObjectCreate)?;
+                Ok(PresentationScreenView::ConfigObjectCreate {
+                    kind: create.kind,
+                    id: create.id.clone(),
+                })
+            }
             PresentationState::ConfigCenter {
                 section,
                 selected,
@@ -1033,6 +1150,10 @@ impl PresentationController {
 #[serde(tag = "screen", rename_all = "snake_case")]
 pub(crate) enum PresentationScreenView {
     SlashPanel(SlashPanelView),
+    ConfigObjectCreate {
+        kind: ConfigObjectKind,
+        id: String,
+    },
     ConfigCenter {
         section: Option<ConfigSection>,
         objects: Vec<ConfigObjectRef>,
@@ -1365,6 +1486,13 @@ fn screen_rows(screen: &PresentationScreenView, view: &TuiViewModel) -> Vec<Layo
             }));
             rows
         }
+        PresentationScreenView::ConfigObjectCreate { kind, id } => vec![
+            LayoutRowView::new(format!("Create {}", config_object_label(*kind)), false),
+            LayoutRowView::new(
+                format!("> ID {}", if id.is_empty() { "<new>" } else { id }),
+                true,
+            ),
+        ],
         PresentationScreenView::ConfigCenter {
             section,
             objects,
@@ -1495,9 +1623,17 @@ fn config_editor_rows(
                 ),
                 false,
             ));
+            let input_selected = matches!(
+                editor.field.interaction,
+                ConfigFieldInteraction::CredentialReference { .. }
+            );
             rows.push(LayoutRowView::new(
-                format!("target {}", if *target_bound { "bound" } else { "missing" }),
-                false,
+                format!(
+                    "{}target {}",
+                    if input_selected { "> " } else { "" },
+                    if *target_bound { "bound" } else { "missing" }
+                ),
+                input_selected,
             ));
         }
     }
@@ -1655,6 +1791,7 @@ pub(crate) enum PresentationControllerError {
     NoCommandSelection,
     NotSlashPanel,
     NotConfigCenter,
+    NotConfigObjectCreate,
     NotConfigEditor,
     NotProviderWizard,
     ConfigRuntimeRequired,
@@ -1672,6 +1809,9 @@ impl fmt::Display for PresentationControllerError {
             Self::NoCommandSelection => formatter.write_str("no command is selected"),
             Self::NotSlashPanel => formatter.write_str("command requires the Slash Panel"),
             Self::NotConfigCenter => formatter.write_str("command requires the Config Center"),
+            Self::NotConfigObjectCreate => {
+                formatter.write_str("command requires a Config Object name prompt")
+            }
             Self::NotConfigEditor => formatter.write_str("command requires a Config editor"),
             Self::NotProviderWizard => {
                 formatter.write_str("command requires a Provider Profile wizard")
@@ -1699,6 +1839,7 @@ impl Error for PresentationControllerError {
             Self::NoCommandSelection
             | Self::NotSlashPanel
             | Self::NotConfigCenter
+            | Self::NotConfigObjectCreate
             | Self::NotConfigEditor
             | Self::NotProviderWizard
             | Self::ConfigRuntimeRequired
@@ -2751,6 +2892,38 @@ credential = "synthetic-deepseek-credential-reference"
         assert!(!runtime.addressable_objects().unwrap().contains(&object));
     }
 
+    #[test]
+    fn controller_only_prompts_for_rendered_provider_creation() {
+        let temp = TempTree::new("controller-rendered-create-boundary");
+        let mut runtime = ConfigRuntime::open(temp.paths(), ConfigDocument::empty())
+            .expect("open Config Runtime");
+        let mut controller = PresentationController::new();
+
+        controller
+            .set_slash_query("/config provider add")
+            .expect("set Provider create route");
+        controller
+            .activate(&mut runtime, ConfigScope::User, None)
+            .expect("open rendered Provider ID prompt");
+        assert!(matches!(
+            controller.screen(Some(&runtime)).expect("Provider prompt"),
+            PresentationScreenView::ConfigObjectCreate {
+                kind: ConfigObjectKind::ProviderProfile,
+                ref id,
+            } if id.is_empty()
+        ));
+
+        controller.back().expect("close Provider prompt");
+        controller
+            .set_slash_query("/config model add")
+            .expect("set Model create route");
+        assert!(matches!(
+            controller.activate(&mut runtime, ConfigScope::User, None),
+            Err(PresentationControllerError::ConfigObjectRouteUnavailable)
+        ));
+        assert!(controller.is_slash_panel());
+    }
+
     struct SuccessfulConnectionTester {
         calls: Vec<(String, u64)>,
     }
@@ -3059,7 +3232,7 @@ credential = "synthetic-deepseek-credential-reference"
     }
 
     #[test]
-    fn controller_keeps_credential_fields_status_only() {
+    fn controller_edits_credential_references_without_readback() {
         let temp = TempTree::new("controller-credential");
         let mut runtime = temp.open_provider_runtime();
         let object = ConfigObjectRef::new(ConfigObjectKind::ProviderProfile, "edge");
@@ -3085,12 +3258,32 @@ credential = "synthetic-deepseek-credential-reference"
                 ConfigEditorError::CredentialOperationRequired
             ))
         ));
-        assert!(matches!(
-            controller.commit_config(&mut runtime),
-            Err(PresentationControllerError::ConfigEditor(
-                ConfigEditorError::CredentialOperationRequired
-            ))
-        ));
+        controller
+            .stage_provider_credential_reference(&runtime, "synthetic-replacement-reference")
+            .expect("stage opaque credential reference");
+        controller
+            .preview_config(&mut runtime)
+            .expect("preview credential reference");
+        let staged = serde_json::to_string(
+            &controller
+                .screen(Some(&runtime))
+                .expect("staged credential status screen"),
+        )
+        .expect("serialize staged credential status screen");
+        assert!(!staged.contains("synthetic-edge-credential-reference"));
+        assert!(!staged.contains("synthetic-replacement-reference"));
+        assert!(staged.contains("target_bound"));
+        controller
+            .commit_config(&mut runtime)
+            .expect("commit credential reference");
+        assert_eq!(
+            runtime
+                .provider_profile("edge")
+                .expect("resolve Provider")
+                .expect("Provider exists")
+                .credential_reference(),
+            Some("synthetic-replacement-reference")
+        );
     }
 
     #[test]

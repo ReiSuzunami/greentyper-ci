@@ -12,7 +12,7 @@ use unicode_width::UnicodeWidthStr;
 
 use greentyper_core::config::{
     ConfigEditorError, ConfigError, ConfigFieldContents, ConfigFieldInteraction, ConfigRuntime,
-    ConfigRuntimeError, ConfigScope, ConfigValue, MAX_COMMAND_QUERY_BYTES,
+    ConfigRuntimeError, ConfigScope, ConfigValue, MAX_COMMAND_QUERY_BYTES, MAX_CONFIG_ID_BYTES,
 };
 use greentyper_core::runtime::{RuntimeError, RuntimeKernel};
 use greentyper_core::usage::{UsageError, UsageTimestamp};
@@ -407,6 +407,8 @@ enum TerminalInputEvent {
     Character(char),
     Backspace,
     Delete,
+    Tab,
+    BackTab,
     Up,
     Down,
     Enter,
@@ -435,6 +437,11 @@ fn map_crossterm_event(event: Event) -> TerminalInputEvent {
             }
             KeyCode::Backspace => TerminalInputEvent::Backspace,
             KeyCode::Delete => TerminalInputEvent::Delete,
+            KeyCode::Tab if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                TerminalInputEvent::BackTab
+            }
+            KeyCode::Tab => TerminalInputEvent::Tab,
+            KeyCode::BackTab => TerminalInputEvent::BackTab,
             KeyCode::Up => TerminalInputEvent::Up,
             KeyCode::Down => TerminalInputEvent::Down,
             KeyCode::Enter => TerminalInputEvent::Enter,
@@ -450,8 +457,13 @@ enum TerminalIntent {
     SetSlashQuery(String),
     MoveSelection(isize),
     Activate,
+    EditConfigObjectId(char),
+    BackspaceConfigObjectId,
+    ClearConfigObjectId,
+    SubmitConfigObjectId,
     MoveConfigObjectSelection(isize),
     ActivateConfigObject,
+    MoveConfigField(isize),
     MoveConfigChoice(isize),
     PreviewConfig,
     CommitConfig,
@@ -470,9 +482,11 @@ enum TerminalIntent {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum TerminalInputContext {
     SlashPanel,
+    ConfigObjectId,
     ConfigObject,
     ConfigChoice,
     ConfigText,
+    ConfigCredentialReference,
     DiscardConfirmation,
     Other,
 }
@@ -528,6 +542,20 @@ impl TerminalInputState {
             TerminalInputEvent::Enter if context == TerminalInputContext::SlashPanel => {
                 TerminalIntent::Activate
             }
+            TerminalInputEvent::Character(character)
+                if context == TerminalInputContext::ConfigObjectId && !character.is_control() =>
+            {
+                TerminalIntent::EditConfigObjectId(character)
+            }
+            TerminalInputEvent::Backspace if context == TerminalInputContext::ConfigObjectId => {
+                TerminalIntent::BackspaceConfigObjectId
+            }
+            TerminalInputEvent::Delete if context == TerminalInputContext::ConfigObjectId => {
+                TerminalIntent::ClearConfigObjectId
+            }
+            TerminalInputEvent::Enter if context == TerminalInputContext::ConfigObjectId => {
+                TerminalIntent::SubmitConfigObjectId
+            }
             TerminalInputEvent::Up if context == TerminalInputContext::ConfigObject => {
                 TerminalIntent::MoveConfigObjectSelection(-1)
             }
@@ -552,18 +580,60 @@ impl TerminalInputState {
             TerminalInputEvent::Character('d') if context == TerminalInputContext::ConfigChoice => {
                 TerminalIntent::DiscardConfig
             }
+            TerminalInputEvent::Tab
+                if matches!(
+                    context,
+                    TerminalInputContext::ConfigChoice
+                        | TerminalInputContext::ConfigText
+                        | TerminalInputContext::ConfigCredentialReference
+                ) =>
+            {
+                TerminalIntent::MoveConfigField(1)
+            }
+            TerminalInputEvent::BackTab
+                if matches!(
+                    context,
+                    TerminalInputContext::ConfigChoice
+                        | TerminalInputContext::ConfigText
+                        | TerminalInputContext::ConfigCredentialReference
+                ) =>
+            {
+                TerminalIntent::MoveConfigField(-1)
+            }
             TerminalInputEvent::Character(character)
-                if context == TerminalInputContext::ConfigText && !character.is_control() =>
+                if matches!(
+                    context,
+                    TerminalInputContext::ConfigText
+                        | TerminalInputContext::ConfigCredentialReference
+                ) && !character.is_control() =>
             {
                 TerminalIntent::EditConfigText(character)
             }
-            TerminalInputEvent::Backspace if context == TerminalInputContext::ConfigText => {
+            TerminalInputEvent::Backspace
+                if matches!(
+                    context,
+                    TerminalInputContext::ConfigText
+                        | TerminalInputContext::ConfigCredentialReference
+                ) =>
+            {
                 TerminalIntent::BackspaceConfigText
             }
-            TerminalInputEvent::Delete if context == TerminalInputContext::ConfigText => {
+            TerminalInputEvent::Delete
+                if matches!(
+                    context,
+                    TerminalInputContext::ConfigText
+                        | TerminalInputContext::ConfigCredentialReference
+                ) =>
+            {
                 TerminalIntent::ClearConfigText
             }
-            TerminalInputEvent::Enter if context == TerminalInputContext::ConfigText => {
+            TerminalInputEvent::Enter
+                if matches!(
+                    context,
+                    TerminalInputContext::ConfigText
+                        | TerminalInputContext::ConfigCredentialReference
+                ) =>
+            {
                 TerminalIntent::SubmitConfigText
             }
             TerminalInputEvent::Enter if context == TerminalInputContext::DiscardConfirmation => {
@@ -581,6 +651,8 @@ impl TerminalInputState {
             TerminalInputEvent::Character(_)
             | TerminalInputEvent::Backspace
             | TerminalInputEvent::Delete
+            | TerminalInputEvent::Tab
+            | TerminalInputEvent::BackTab
             | TerminalInputEvent::Up
             | TerminalInputEvent::Down
             | TerminalInputEvent::Enter
@@ -658,6 +730,36 @@ impl TerminalSession {
                 }
                 Ok(TerminalLoopOutcome::Redraw)
             }
+            TerminalIntent::EditConfigObjectId(character) => {
+                self.edit_config_object_id(Some(character));
+                Ok(TerminalLoopOutcome::Redraw)
+            }
+            TerminalIntent::BackspaceConfigObjectId => {
+                self.edit_config_object_id(None);
+                Ok(TerminalLoopOutcome::Redraw)
+            }
+            TerminalIntent::ClearConfigObjectId => {
+                match self.controller.set_config_object_id("") {
+                    Ok(()) => self.notice = None,
+                    Err(source) => self.notice = Some(presentation_notice(&source)),
+                }
+                Ok(TerminalLoopOutcome::Redraw)
+            }
+            TerminalIntent::SubmitConfigObjectId => {
+                let runtime = runtime.ok_or(TerminalError::ConfigRuntimeRequired)?;
+                match self
+                    .controller
+                    .submit_config_object_id(runtime, ConfigScope::User)
+                {
+                    Ok(()) => {
+                        self.validated_config_choice = None;
+                        self.sync_config_text();
+                        self.notice = None;
+                    }
+                    Err(source) => self.notice = Some(presentation_notice(&source)),
+                }
+                Ok(TerminalLoopOutcome::Redraw)
+            }
             TerminalIntent::MoveConfigObjectSelection(offset) => {
                 let runtime = runtime.ok_or(TerminalError::ConfigRuntimeRequired)?;
                 match self
@@ -675,6 +777,18 @@ impl TerminalSession {
                     .controller
                     .activate_config_object(runtime, ConfigScope::User)
                 {
+                    Ok(()) => {
+                        self.validated_config_choice = None;
+                        self.sync_config_text();
+                        self.notice = None;
+                    }
+                    Err(source) => self.notice = Some(presentation_notice(&source)),
+                }
+                Ok(TerminalLoopOutcome::Redraw)
+            }
+            TerminalIntent::MoveConfigField(offset) => {
+                let runtime = runtime.ok_or(TerminalError::ConfigRuntimeRequired)?;
+                match self.controller.move_config_field(runtime, offset) {
                     Ok(()) => {
                         self.validated_config_choice = None;
                         self.sync_config_text();
@@ -797,16 +911,46 @@ impl TerminalSession {
             TerminalInputContext::DiscardConfirmation
         } else if self.controller.is_slash_panel() {
             TerminalInputContext::SlashPanel
+        } else if self.controller.is_config_object_create() {
+            TerminalInputContext::ConfigObjectId
         } else if self.controller.is_config_object_selector() {
             TerminalInputContext::ConfigObject
         } else if let Some(field) = self.controller.config_editor_field() {
             match field.interaction {
                 ConfigFieldInteraction::Choice { .. } => TerminalInputContext::ConfigChoice,
                 ConfigFieldInteraction::Text { .. } => TerminalInputContext::ConfigText,
+                ConfigFieldInteraction::CredentialReference { .. } => {
+                    TerminalInputContext::ConfigCredentialReference
+                }
                 ConfigFieldInteraction::ReadOnly => TerminalInputContext::Other,
             }
         } else {
             TerminalInputContext::Other
+        }
+    }
+
+    fn edit_config_object_id(&mut self, character: Option<char>) {
+        let Some(current) = self.controller.config_object_id() else {
+            return;
+        };
+        let mut next = current.to_owned();
+        if let Some(character) = character {
+            if character.is_control()
+                || next.len().saturating_add(character.len_utf8()) > MAX_CONFIG_ID_BYTES
+            {
+                self.notice = Some("Config Object ID exceeds its input limit".to_owned());
+                return;
+            }
+            next.push(character);
+        } else {
+            let last = UnicodeSegmentation::grapheme_indices(next.as_str(), true)
+                .next_back()
+                .map_or(0, |(index, _)| index);
+            next.truncate(last);
+        }
+        match self.controller.set_config_object_id(&next) {
+            Ok(()) => self.notice = None,
+            Err(source) => self.notice = Some(presentation_notice(&source)),
         }
     }
 
@@ -815,8 +959,24 @@ impl TerminalSession {
             self.clear_config_text();
             return;
         };
-        if !matches!(field.interaction, ConfigFieldInteraction::Text { .. }) {
+        if !matches!(
+            field.interaction,
+            ConfigFieldInteraction::Text { .. }
+                | ConfigFieldInteraction::CredentialReference { .. }
+        ) {
             self.clear_config_text();
+            return;
+        }
+        if matches!(
+            field.interaction,
+            ConfigFieldInteraction::CredentialReference { .. }
+        ) {
+            self.config_text = Some(ConfigTextInput {
+                value: String::new(),
+                replace_on_edit: true,
+            });
+            self.validated_config_text = None;
+            self.confirming_discard = false;
             return;
         }
         let ConfigFieldContents::Value {
@@ -891,13 +1051,24 @@ impl TerminalSession {
     fn config_text_limit(&self) -> Option<usize> {
         let field = self.controller.config_editor_field()?;
         match field.interaction {
-            ConfigFieldInteraction::Text { max_bytes } => Some(max_bytes),
+            ConfigFieldInteraction::Text { max_bytes }
+            | ConfigFieldInteraction::CredentialReference { max_bytes } => Some(max_bytes),
             ConfigFieldInteraction::ReadOnly | ConfigFieldInteraction::Choice { .. } => None,
         }
     }
 
     fn stage_config_text(&mut self, runtime: &ConfigRuntime, next: String) {
-        match self.controller.stage_config(runtime, &next) {
+        let result = match self
+            .controller
+            .config_editor_field()
+            .map(|field| field.interaction)
+        {
+            Some(ConfigFieldInteraction::CredentialReference { .. }) => self
+                .controller
+                .stage_provider_credential_reference(runtime, &next),
+            _ => self.controller.stage_config(runtime, &next),
+        };
+        match result {
             Ok(()) => {
                 self.config_text = Some(ConfigTextInput {
                     value: next,
@@ -912,7 +1083,17 @@ impl TerminalSession {
     }
 
     fn reset_config_text(&mut self, runtime: &ConfigRuntime) {
-        match self.controller.reset_config(runtime) {
+        let result = match self
+            .controller
+            .config_editor_field()
+            .map(|field| field.interaction)
+        {
+            Some(ConfigFieldInteraction::CredentialReference { .. }) => {
+                self.controller.reset_provider_credential_reference(runtime)
+            }
+            _ => self.controller.reset_config(runtime),
+        };
+        match result {
             Ok(()) => {
                 self.config_text = Some(ConfigTextInput {
                     value: String::new(),
@@ -974,7 +1155,9 @@ impl TerminalSession {
         let field = self.controller.config_editor_field()?;
         match field.interaction {
             ConfigFieldInteraction::Choice { choices } => Some(choices),
-            ConfigFieldInteraction::ReadOnly | ConfigFieldInteraction::Text { .. } => None,
+            ConfigFieldInteraction::ReadOnly
+            | ConfigFieldInteraction::Text { .. }
+            | ConfigFieldInteraction::CredentialReference { .. } => None,
         }
     }
 
@@ -1029,6 +1212,7 @@ fn presentation_notice(source: &PresentationControllerError) -> String {
         PresentationControllerError::NoCommandSelection => "No command is selected".to_owned(),
         PresentationControllerError::NotSlashPanel
         | PresentationControllerError::NotConfigCenter
+        | PresentationControllerError::NotConfigObjectCreate
         | PresentationControllerError::NotConfigEditor
         | PresentationControllerError::NotProviderWizard
         | PresentationControllerError::ConfigRuntimeRequired => {
@@ -1826,6 +2010,23 @@ mod tests {
             TerminalInputEvent::Delete
         );
         assert_eq!(
+            map_crossterm_event(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE,))),
+            TerminalInputEvent::Tab
+        );
+        assert_eq!(
+            map_crossterm_event(Event::Key(KeyEvent::new(
+                KeyCode::BackTab,
+                KeyModifiers::SHIFT,
+            ))),
+            TerminalInputEvent::BackTab
+        );
+        assert_eq!(
+            map_crossterm_event(Event::Key(
+                KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT,)
+            )),
+            TerminalInputEvent::BackTab
+        );
+        assert_eq!(
             map_crossterm_event(Event::Key(KeyEvent::new_with_kind(
                 KeyCode::Down,
                 KeyModifiers::NONE,
@@ -1945,6 +2146,173 @@ mod tests {
             Some("https://new-gateway.example.com/v2")
         );
         assert!(!ledger.exists());
+        std::fs::remove_dir_all(root).expect("remove test config");
+    }
+
+    #[test]
+    fn terminal_loop_creates_provider_profile_from_real_key_events() {
+        let root = terminal_test_root("provider-create-loop");
+        let ledger = root.join("runtime.ledger");
+        let paths = ConfigPaths::new(root.join("user.toml"), root.join("project.toml"));
+        let mut config =
+            ConfigRuntime::open(paths.clone(), ConfigDocument::empty()).expect("config runtime");
+        let view = build_terminal_view(&ledger, &config, "/").expect("terminal view");
+        let credential_reference = "hidden-binding-ref";
+        let mut events: VecDeque<_> = "config provider add"
+            .chars()
+            .map(|character| {
+                Event::Key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
+            })
+            .collect();
+        events.push_back(Event::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )));
+        events.extend("openai-main".chars().map(|character| {
+            Event::Key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
+        }));
+        events.extend([
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+        ]);
+        events.extend(credential_reference.chars().map(|character| {
+            Event::Key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
+        }));
+        events.extend([
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL)),
+        ]);
+
+        let output = run_terminal_loop(
+            Vec::new(),
+            FakeTerminalMode::default(),
+            &mut config,
+            &view,
+            80,
+            24,
+            move || Ok(events.pop_front().expect("bounded event sequence")),
+        )
+        .expect("terminal loop");
+
+        let profile = config
+            .provider_profile("openai-main")
+            .expect("resolve profile")
+            .expect("created profile");
+        assert_eq!(profile.template(), "openai");
+        assert_eq!(profile.credential_reference(), Some(credential_reference));
+        assert!(!String::from_utf8_lossy(&output).contains(credential_reference));
+        drop(config);
+
+        let reopened = ConfigRuntime::open(paths, ConfigDocument::empty()).expect("reopen config");
+        let profile = reopened
+            .provider_profile("openai-main")
+            .expect("resolve reopened profile")
+            .expect("reopened profile");
+        assert_eq!(profile.template(), "openai");
+        assert_eq!(profile.credential_reference(), Some(credential_reference));
+        assert!(!ledger.exists());
+        std::fs::remove_dir_all(root).expect("remove test config");
+    }
+
+    #[test]
+    fn terminal_provider_create_recovers_from_invalid_id_and_cas_conflict() {
+        let root = terminal_test_root("provider-create-recovery");
+        let paths = ConfigPaths::new(root.join("user.toml"), root.join("project.toml"));
+        let mut config =
+            ConfigRuntime::open(paths, ConfigDocument::empty()).expect("config runtime");
+        let mut session =
+            TerminalSession::new("/config provider add", 80, 24).expect("terminal session");
+
+        session
+            .handle(TerminalInputEvent::Enter, Some(&mut config))
+            .expect("open Provider ID prompt");
+        assert_eq!(
+            session.input_context(),
+            TerminalInputContext::ConfigObjectId
+        );
+        for character in "Bad".chars() {
+            session
+                .handle(TerminalInputEvent::Character(character), Some(&mut config))
+                .expect("stage invalid Provider ID");
+        }
+        session
+            .handle(TerminalInputEvent::Enter, Some(&mut config))
+            .expect("invalid Provider ID remains live");
+        assert_eq!(
+            session.notice.as_deref(),
+            Some("Config validation failed at <id>")
+        );
+        assert!(matches!(
+            session.controller.screen(Some(&config)).expect("ID prompt"),
+            PresentationScreenView::ConfigObjectCreate {
+                kind: ConfigObjectKind::ProviderProfile,
+                ref id,
+            } if id == "Bad"
+        ));
+
+        session
+            .handle(TerminalInputEvent::Delete, Some(&mut config))
+            .expect("clear invalid Provider ID");
+        for character in "edge".chars() {
+            session
+                .handle(TerminalInputEvent::Character(character), Some(&mut config))
+                .expect("stage corrected Provider ID");
+        }
+        session
+            .handle(TerminalInputEvent::Enter, Some(&mut config))
+            .expect("open Provider template picker");
+        assert_eq!(session.input_context(), TerminalInputContext::ConfigChoice);
+        session
+            .handle(TerminalInputEvent::Down, Some(&mut config))
+            .expect("select OpenAI template");
+        assert_eq!(
+            session
+                .handle(TerminalInputEvent::Quit, Some(&mut config))
+                .expect("dirty quit is blocked"),
+            TerminalLoopOutcome::Redraw
+        );
+        assert_eq!(
+            session.notice.as_deref(),
+            Some("Config draft must be committed or discarded")
+        );
+
+        let mut winner = ConfigEditorSession::open_from_query(
+            &config,
+            ConfigScope::User,
+            "/config statusline preset",
+            0,
+            None,
+        )
+        .expect("winner editor");
+        winner.stage_raw("minimal").expect("stage winning change");
+        winner.commit(&mut config).expect("commit winning change");
+
+        session
+            .handle(TerminalInputEvent::Enter, Some(&mut config))
+            .expect("stale preview remains live");
+        assert_eq!(
+            session.notice.as_deref(),
+            Some("Config changed; discard and reopen the editor")
+        );
+        assert!(matches!(
+            session.controller.screen(Some(&config)).expect("wizard"),
+            PresentationScreenView::ProviderWizard {
+                dirty: true,
+                validated: false,
+                ..
+            }
+        ));
+        session
+            .handle(TerminalInputEvent::Character('d'), Some(&mut config))
+            .expect("discard stale Provider draft");
+        assert!(session.controller.is_slash_panel());
+        assert!(config.provider_profile("edge").is_err());
+        assert_eq!(
+            config_string_target(&config, "ui.statusline.preset").as_deref(),
+            Some("minimal")
+        );
         std::fs::remove_dir_all(root).expect("remove test config");
     }
 

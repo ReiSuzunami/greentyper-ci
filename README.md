@@ -113,8 +113,9 @@ selector exposes compatible release candidates while keeping unverified live
 availability explicit. A first Direct VT product tracer now renders the Slash
 Panel, controller screens, and adaptive status rows through `greentyper tui` and
 includes narrow mutable user-scope editors for the statusline preset, statusline
-expansion policy, and an existing Provider Profile's base URL. Remaining rendered TUI/App Server editors
-remain pending. The product CLI can bind,
+expansion policy, an existing Provider Profile's base URL and opaque credential
+reference, plus a bounded Provider Profile creation wizard. Remaining rendered
+TUI/App Server editors remain pending. The product CLI can bind,
 replace, test, and forget origin-bound credential references without
 putting secret material in arguments, Config, or Ledgers. Windows stores values
 in the current user's Credential Manager; other platforms currently fail
@@ -234,7 +235,8 @@ provenanced, credential-safe field views for existing Provider Profiles, Model
 Presets, Price Schedules, and Usage Windows. Config Runtime can now open a selected field route as
 one revision-bound draft, preview the normalized diff through the real validation
 and locking path, reset it, and commit it atomically. Credential routes expose
-binding state and require the separate secure credential operation. The product
+binding state; the TUI may replace only the opaque reference, while secret-store
+mutation remains a separate secure credential operation. The product
 now also has typed nested Config Object add/remove routes. One schema-driven
 Draft can create a Profile, Preset, Price Schedule, or Usage Window across multiple focused
 fields; whole-object deletion is target-layer explicit and reference validated.
@@ -269,12 +271,20 @@ Enter previews the complete Draft and the second commits it; Delete resets the
 field, while dirty Escape requires explicit discard confirmation. Invalid
 previews and revision conflicts render a bounded notice and keep the Draft live;
 Escape, Ctrl-C, and Ctrl-Q do not implicitly discard a dirty Draft. A no-change
-commit does not create a Config file, and tests reopen committed files. Outside
-those three dialogs the tracer remains snapshot-based and read-only. It is not
-a general mutable terminal editor, approval surface, live refresh loop, audited
-ConPTY integration, object-name dialog,
-rendered template picker, starter-preset workflow, or persistent live catalog
-discovery. Live inference conformance, configurable proxy policy,
+commit does not create a Config file, and tests reopen committed files.
+`/config provider add` now opens a bounded lowercase Profile-ID prompt, then a
+release-template choice. Tab and Shift-Tab move among the rendered template,
+opaque credential-reference, and base-URL fields; credential references are
+never rendered or read back. Enter previews a text-field Draft and a second
+Enter commits it, while a template choice uses Enter to preview and `c` to
+commit. The same status-only credential-reference interaction is available for
+an existing Profile. Real-key tests commit and reopen a created Profile, and
+invalid IDs or revision conflicts leave the wizard recoverable. Outside these
+narrow workflows the tracer remains snapshot-based and read-only. It is not a
+general mutable terminal editor, approval surface, live refresh loop, audited
+ConPTY integration, non-Provider object-creation or deletion-confirmation
+dialog, secret-entry/bind surface, connection-test control, starter-preset
+workflow, or persistent live catalog discovery. Live inference conformance,
 reconnect/retry, OpenCode Go Messages execution,
 Messages reasoning blocks, Preset context/fallback execution, richer approval
 presentation, broader Provider and Tool adapters,

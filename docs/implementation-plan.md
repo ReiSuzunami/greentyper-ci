@@ -322,13 +322,21 @@ preview before commit, persist through the Config Runtime CAS/backup path,
 explicitly discard, block dirty escape/quit, preserve the editor on validation
 or revision conflict, and render bounded error notices. Tests prove no-change
 commit creates no file and committed state survives reopen. The rest of the TUI
-is snapshot-based; this slice adds no Runtime, Tool, credential, or approval
-authority and does not rebuild the frozen status projection after commit.
+is snapshot-based. A fourth workflow, `/config provider add`, now prompts for a
+bounded Profile ID, offers the release Provider templates, and moves among the
+rendered template, opaque credential-reference, and base-URL fields with
+Tab/Shift-Tab. It previews and CAS-commits through the same Config Draft,
+reopens the created Profile, never renders a credential reference, and retains
+invalid-ID or stale-revision Drafts for correction or explicit discard. Existing
+Profiles can replace the opaque reference through the same status-only field.
+Secret bind/replace remains outside the TUI. This slice adds no Runtime, Tool,
+secret-store, or approval authority and does not rebuild the frozen status
+projection after commit.
 
 This does not complete Phase 3. Audited Windows ConPTY behavior, remaining
 terminal-backed schema editing and approval interaction, live snapshot refresh,
-rendered object-name and confirmation
-dialogs, rendered credential binding and template-picker/starter-preset workflow,
+remaining object-name and confirmation dialogs, rendered secret binding,
+custom-template/starter-preset workflow, Provider connection-test control,
 live catalog discovery and Recent evidence, automatic Context View/token-source
 projection, provider-reported
 charge and subscription-quota accounting, richer observed Provider metadata,

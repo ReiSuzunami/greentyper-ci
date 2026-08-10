@@ -11,7 +11,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use url::{Host, Url};
 
-use super::{ConfigLayer, ConfigLayers, MAX_CONFIG_STRING_BYTES, ReasoningEffort, ServiceTier};
+use super::{
+    ConfigLayer, ConfigLayers, MAX_CONFIG_ID_BYTES, MAX_CONFIG_STRING_BYTES, ReasoningEffort,
+    ServiceTier,
+};
 use crate::pricing::{
     PriceSchedule, PriceScheduleBook, PriceScheduleDefinition, PriceScheduleSource, TokenRates,
 };
@@ -25,7 +28,6 @@ use crate::usage::{MAX_USAGE_WINDOWS, UsageWeekday, UsageWindow};
 
 pub const CONFIG_FILE_SCHEMA_VERSION: u16 = SchemaKind::ConfigFile.current().get();
 pub const MAX_CONFIG_FILE_BYTES: usize = 1024 * 1024;
-const MAX_CONFIG_ID_BYTES: usize = 64;
 const MAX_CONFIG_LIST_ITEMS: usize = 128;
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
@@ -82,6 +84,7 @@ pub enum ConfigFieldInteraction {
     ReadOnly,
     Choice { choices: &'static [&'static str] },
     Text { max_bytes: usize },
+    CredentialReference { max_bytes: usize },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -109,6 +112,7 @@ const ALL_SCOPES: &[ConfigScope] = &[
     ConfigScope::Cli,
 ];
 const FILE_SCOPES: &[ConfigScope] = &[ConfigScope::User, ConfigScope::Project];
+const PROVIDER_TEMPLATE_CHOICES: &[&str] = &["deepseek", "openai", "opencode-go"];
 const STATUSLINE_PRESET_CHOICES: &[&str] = &["minimal", "balanced", "diagnostic", "custom"];
 const STATUSLINE_EXPANSION_CHOICES: &[&str] = &["auto", "compact", "expanded"];
 
@@ -588,6 +592,16 @@ fn config_field_interaction(descriptor: &ConfigSchemaEntry) -> ConfigFieldIntera
         descriptor.credential_reference,
         descriptor.editor,
     ) {
+        ("providers.<id>.template", ConfigValueKind::String, false, "provider_template") => {
+            ConfigFieldInteraction::Choice {
+                choices: PROVIDER_TEMPLATE_CHOICES,
+            }
+        }
+        ("providers.<id>.credential", ConfigValueKind::String, true, "credential_binding") => {
+            ConfigFieldInteraction::CredentialReference {
+                max_bytes: MAX_CONFIG_ID_BYTES,
+            }
+        }
         ("ui.statusline.preset", ConfigValueKind::String, false, "statusline_preset") => {
             ConfigFieldInteraction::Choice {
                 choices: STATUSLINE_PRESET_CHOICES,

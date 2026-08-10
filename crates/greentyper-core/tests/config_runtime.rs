@@ -7,12 +7,12 @@ use greentyper_core::config::{
     ConfigApplicationTiming, ConfigDocument, ConfigEditorError, ConfigEditorOperation,
     ConfigEditorSession, ConfigErrorCategory, ConfigFieldContents, ConfigFieldInteraction,
     ConfigObjectKind, ConfigObjectRef, ConfigPaths, ConfigRuntime, ConfigRuntimeError, ConfigScope,
-    ConfigValue, ConfigValueKind, MAX_CONFIG_STRING_BYTES, MAX_OUTPUT_TOKENS, config_schema,
-    parse_config_value,
+    ConfigValue, ConfigValueKind, MAX_CONFIG_ID_BYTES, MAX_CONFIG_STRING_BYTES, MAX_OUTPUT_TOKENS,
+    config_schema, parse_config_value,
 };
 use greentyper_core::pricing::PriceScheduleSource;
 use greentyper_core::provider::{ProviderDialect, ProviderPricingSource};
-use greentyper_core::provider_catalog::{CatalogAvailability, CatalogSourceKind};
+use greentyper_core::provider_catalog::{CatalogAvailability, CatalogSourceKind, ProviderCatalog};
 
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(1);
 
@@ -279,7 +279,27 @@ fn schema_and_parser_are_versioned_typed_and_secret_safe() {
         credential.timing,
         ConfigApplicationTiming::NextProviderEpoch
     );
-    assert_eq!(credential.interaction(), ConfigFieldInteraction::ReadOnly);
+    assert_eq!(
+        credential.interaction(),
+        ConfigFieldInteraction::CredentialReference {
+            max_bytes: MAX_CONFIG_ID_BYTES,
+        }
+    );
+    let provider_template = schema
+        .iter()
+        .find(|entry| entry.path_pattern == "providers.<id>.template")
+        .expect("Provider template schema");
+    let ConfigFieldInteraction::Choice { choices } = provider_template.interaction() else {
+        panic!("Provider template must use a schema-owned choice interaction")
+    };
+    assert_eq!(
+        choices,
+        ProviderCatalog::release()
+            .templates()
+            .iter()
+            .map(|template| template.id())
+            .collect::<Vec<_>>()
+    );
     let preset = schema
         .iter()
         .find(|entry| entry.path_pattern == "ui.statusline.preset")
@@ -301,12 +321,14 @@ fn schema_and_parser_are_versioned_typed_and_secret_safe() {
         }
     );
     for (entry, choices) in [
+        (provider_template, choices),
         (preset, &["minimal", "balanced", "diagnostic", "custom"][..]),
         (expansion, &["auto", "compact", "expanded"][..]),
     ] {
         for choice in choices {
+            let path = entry.path_pattern.replace("<id>", "edge");
             assert!(
-                parse_config_value(entry.path_pattern, choice).is_ok(),
+                parse_config_value(&path, choice).is_ok(),
                 "schema interaction offered an invalid choice: {}={choice}",
                 entry.path_pattern
             );
