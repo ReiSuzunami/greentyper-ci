@@ -364,9 +364,25 @@ cycles do not recursively summarize prior checkpoints. `greentyper context
 status` uses shared read-only inspection and treats a missing Ledger as empty.
 `greentyper context reduce` strictly opens existing state, checks paired Product
 sidecars when present, and mutates only the Runtime Ledger. It returns counts and
-token/byte facts, not raw conversation text. Provider-request consumption,
-semantic handoff, provider-native compaction, external Artifact storage, and
-Durable Memory remain pending.
+token/byte facts, not raw conversation text.
+
+When a checkpoint exists, Turn admission validates it against the authoritative
+canonical prefix before allocating identifiers or freezing Config/Provider
+Epochs. The Provider request receives the checkpoint's bounded recent raw tail
+followed by any completed canonical Items appended after its source. Archived
+artifact bodies remain omitted; no Artifact fetch or summary text is invented.
+The pending user Item stays the separate current input. Recovery locates that
+same user Item and rebuilds the same history projection before explicit resume,
+while the frozen Config and Provider Epoch identities remain unchanged. A
+missing checkpoint preserves the prior single-input request behavior.
+
+Responses, Chat Completions, and Messages map the projected roles to ordered
+native messages. Stateful Responses continuations bind the existing response;
+the stateless DeepSeek Responses path, Chat Completions, and Messages retain the
+same projected conversation when appending the supported Tool result. Raw
+Context text is not added to Usage, checkpoint metadata, Debug output, or new
+Ledger Events. Semantic handoff, provider-native compaction, external Artifact
+storage, and Durable Memory remain pending.
 
 Prompt/provider text and credential material are not part of the Usage domain.
 Requested or observed metadata not supplied by the current Provider remains
@@ -481,8 +497,8 @@ charges still require a future dedicated authority path.
   rebound Active Agent Session and never derives authority from numeric IDs.
   Each Ledger is inspected independently rather than under one cross-Ledger
   transaction.
-- Automatic/background terminal Usage refresh, Provider consumption of the
-  durable Context View, semantic/provider-native compaction, provider-reported charge
+- Automatic/background terminal Usage refresh, semantic/provider-native
+  compaction, provider-reported charge
   and subscription-quota values, richer observed model/effort/tier
   metadata, and FMDev P6 measurements. The durable attempts, cached rollups,
   pinned Usage Windows, revision-bound summary/page `stats` projections, and

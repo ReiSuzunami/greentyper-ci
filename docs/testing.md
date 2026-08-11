@@ -606,8 +606,16 @@ before the next Turn, and unknown pressure creates none. CLI tests prove missing
 `context status` is read-only, `context reduce` exposes no Item text, busy or
 incomplete state is retryable without writes, and Product Team/Tool Ledgers stay
 byte-identical. Tool tests also reject an unresolved approval as non-barrier.
-These tests do not constitute provider-native context adaptation, semantic
-compaction, external Artifact persistence, Durable Memory, or P6 resource evidence.
+Request-projection tests prove archived bodies stay omitted while the recent tail
+and post-checkpoint Items remain ordered, malformed authoritative history fails
+closed, and an oversized delta rejects before admission. Runtime tests prove the
+next request and crash/reopen resume reconstruct that projection. Real loopback
+body assertions cover Responses, Chat Completions, and Messages plus one Tool
+continuation for each request family. A cross-process CLI flow proves explicit
+reduce, next-Turn admission interruption, explicit resume, and checkpoint
+inspection without exposing Context text. These tests do not constitute
+provider-native semantic compaction, external Artifact persistence, Durable
+Memory, or P6 resource evidence.
 Provider-wizard tests derive a normalized Profile from an uncommitted multi-field
 Draft, keep credential references out of serialized screens, leave Config
 untouched during the connection check, invalidate a prior result after any staged

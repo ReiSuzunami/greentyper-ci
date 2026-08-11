@@ -292,8 +292,17 @@ summaries.
 `context status` inspects this state without creating or repairing a Ledger.
 `context reduce` explicitly publishes one bounded checkpoint, checks complete
 Product sidecars when present, and does not change Team or Tool Ledger bytes.
-Provider-request consumption, semantic Compactor output, provider-native
-compaction, external Artifact storage, and Durable Memory remain Phase 6 work.
+The next Provider admission validates that checkpoint against canonical history
+before allocating Turn or Epoch identifiers. Its request contains only the
+bounded recent raw tail plus completed Items appended after the checkpoint;
+older artifact references remain durable evidence and are not rehydrated into
+the request. Restart and explicit resume rebuild the same projection from the
+pending Turn and frozen Config/Provider Epochs. Responses, Chat Completions, and
+Messages map the ordered user/assistant Items to their native request shapes and
+preserve them through the supported one-Tool continuation. With no checkpoint,
+the existing single-input request shape remains unchanged. Semantic Compactor
+output, provider-native compaction, external Artifact storage, and Durable
+Memory remain Phase 6 work.
 Editable Config schedules require manual provenance. The bundled DeepSeek rate
 card supplies versioned official schedules. A custom DeepSeek origin with no
 pricing override defaults to an immutable `template_mirror` estimate; explicit

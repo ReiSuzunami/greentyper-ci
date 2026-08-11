@@ -339,8 +339,9 @@ Ledger or Provider effects. Soft pressure publishes a bounded Context checkpoint
 at a Safe Barrier before admission; unknown facts preserve admission without
 inventing a checkpoint.
 The terminal-neutral status projection carries the immutable snapshot and marks
-estimated occupancy with `~`. Provider consumption and semantic compaction are
-not performed by this presentation slice.
+estimated occupancy with `~`. This presentation slice does not perform Provider
+consumption or semantic compaction; Runtime now performs the bounded checkpoint
+projection independently of terminal rendering.
 
 A first product terminal tracer is now implemented. `greentyper tui`
 inspects the selected Ledger without creating it, renders the existing
@@ -631,9 +632,19 @@ does not invent state. Every checkpoint is a full rebase from authoritative
 Items. Tests preserve Runtime bytes on stale/unsafe failure and preserve Team and
 Tool bytes for Product state.
 
-This is not the full phase. Provider requests do not yet consume the checkpoint;
-there is no semantic handoff, provider-native compactor, external Artifact store,
-typed Memory Candidate, retrieval, supersession, or user memory lifecycle.
+A second four-slice batch closes checkpoint consumption. Core materializes a
+bounded request from the recent checkpoint tail plus canonical Items completed
+after that checkpoint; Runtime validates it before admission and reconstructs it
+for explicit resume; Responses, Chat Completions, and Messages map the ordered
+conversation and preserve it through the supported one-Tool continuation; and a
+cross-process CLI test proves `context reduce`, next-Turn admission interruption,
+explicit `resume`, and post-recovery inspection. Archived artifact bodies remain
+excluded, Config/Provider Epochs remain frozen, and a missing checkpoint keeps
+the legacy current-input request.
+
+This is not the full phase. There is no semantic handoff, provider-native
+compactor, external Artifact store, typed Memory Candidate, retrieval,
+supersession, or user memory lifecycle.
 
 Exit criteria:
 

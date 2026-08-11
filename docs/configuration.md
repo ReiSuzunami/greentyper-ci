@@ -778,8 +778,11 @@ publishes a default bounded checkpoint at a Safe Barrier, while unknown pressure
 does not invent one. `context status` is a missing-safe read-only JSON projection.
 `context reduce` accepts bounded `--max-raw-bytes` and `--max-raw-items`, strictly
 opens existing state, and publishes only counts and source-head facts. It does
-not expose Item text or mutate Config, Team, or Tool state. Provider consumption
-of the checkpoint and comparison with last provider-reported input remain pending.
+not expose Item text or mutate Config, Team, or Tool state. Runtime validates the
+checkpoint before the next admission and sends its bounded recent tail plus
+later completed Items; archived artifact bodies remain omitted. Explicit resume
+rebuilds the same projection. Comparison with last provider-reported input
+remains pending.
 Cache display uses read and write ratios where reported;
 unsupported values display as unknown rather than zero.
 

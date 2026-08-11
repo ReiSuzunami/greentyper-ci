@@ -27,8 +27,9 @@ recoverable single-Agent Runtime Kernel,
 Agent Team Runtime, durable Tool Runtime policy, the immutable Usage
 Attempt/window/rollup projection, and the initial Context Engine foundation.
 The latter owns exact-head canonical Context Views, bounded SHA-256 artifact
-references, Safe Barrier checkpoint CAS/replay, and soft-pressure publication;
-it has no Tool, credential, MCP, or Memory authority. Core also owns the immutable release Provider
+references, Safe Barrier checkpoint CAS/replay, soft-pressure publication, and
+the bounded checkpoint-to-Provider request projection used by admission and
+resume; it has no Tool, credential, MCP, or Memory authority. Core also owns the immutable release Provider
 Catalog and its field provenance. The independent Provider Discovery module owns
 the bounded schema-1 observation file, no-follow inspection, writer locking,
 validation, and atomic per-Profile replacement; it stores no Config, Ledger,
@@ -37,8 +38,10 @@ resolution, schema-derived Command Paths, and the terminal-neutral
 revision-bound editor session used by future presentation adapters. Later slices
 add Workspace Coordinator and deepen the Context foundation with semantic
 handoff, provider-native compaction, Artifact storage, and Durable Memory;
-concrete Provider and Tool integration stays
-behind the narrow core interfaces and is owned by the product package.
+concrete Provider and Tool integration stays behind the narrow core interfaces
+and is owned by the product package. The product adapters map projected Context
+Items into Responses, Chat Completions, and Messages request bodies and keep the
+same conversation across the supported one-Tool continuation.
 
 Provider simulators, in-memory stores, and other test adapters live beside the interfaces they exercise. Internal helpers are not promoted into packages merely to make them independently visible.
 

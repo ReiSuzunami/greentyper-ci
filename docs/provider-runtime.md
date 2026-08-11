@@ -55,6 +55,16 @@ remain separate work.
 All three HTTP dialect paths reject serialized request bodies above 128 KiB
 before network I/O. A Tool continuation also rejects any second Tool call at
 the adapter boundary; the Runtime repeats that invariant before projection.
+If Runtime has a durable Context checkpoint, it first validates and materializes
+a bounded conversation containing the checkpoint's recent raw tail plus later
+completed canonical Items. Archived artifact bodies are not fetched. Responses
+uses an ordered message-input array, while Chat Completions and Messages use
+their native message arrays; an absent checkpoint retains the existing scalar
+Responses input and one-user-message shapes. The supported Tool continuation
+keeps the same conversation: stateful Responses binds the response ID, while
+stateless DeepSeek Responses, Chat Completions, and Messages append the Tool
+call/result to the stored in-memory request messages. This adds no credential,
+Tool, Agent, or Config authority and persists no extra raw Provider payload.
 The Kernel durably brackets each request and continuation as a separate Usage
 Attempt before invoking this adapter, so transport failure, interruption,
 successful usage, and replay remain distinguishable without persisting raw

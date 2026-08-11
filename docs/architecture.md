@@ -88,9 +88,13 @@ Checkpoint creation uses a Safe Barrier and event-range compare-and-swap. The Co
 
 The current foundation implements exact-head canonical Views, bounded recent
 raw tails with Item-bound SHA-256 references, schema-12 Safe Barrier checkpoints,
-full-Item rebases, soft-pressure publication, and explicit CLI inspect/reduce.
-Provider consumption, semantic/provider-native compaction, external Artifact
-storage, and Durable Memory remain target behavior.
+full-Item rebases, soft-pressure publication, explicit CLI inspect/reduce, and a
+bounded Provider request projection. Admission and resume validate the persisted
+checkpoint against canonical history, send only its recent tail plus later
+completed Items, and leave archived artifact references as evidence rather than
+rehydrating them. The three supported HTTP dialects preserve that conversation
+through their one-Tool continuation. Semantic/provider-native compaction,
+external Artifact storage, and Durable Memory remain target behavior.
 
 ### Config Runtime
 
