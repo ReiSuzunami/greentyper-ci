@@ -22,7 +22,8 @@ use greentyper_core::provider::{ProviderEpoch, ProviderRuntime};
 use greentyper_core::runtime::RuntimeSnapshot;
 use greentyper_core::runtime::{
     AcknowledgeOutcome, CancelTurnOutcome, KernelTeamSnapshot, ModelSelection, PreparedOutput,
-    ProviderToolApproval, ProviderTurnOutcome, RecoveryStatus, RuntimeError, RuntimeKernel,
+    ProviderFallbackCandidate, ProviderToolApproval, ProviderTurnOutcome, RecoveryStatus,
+    RuntimeError, RuntimeKernel,
 };
 use greentyper_core::tool_runtime::{
     ApprovalDecision, ToolCallRecord, ToolCallStatus, ToolEffectExecutor,
@@ -251,6 +252,39 @@ impl<E: ToolEffectExecutor> ProductDriver<E> {
             provider,
             local_echo_resources,
         )?;
+        self.finish(outcome, provider, interaction)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn execute_with_provider_fallbacks<P: ProviderRuntime>(
+        &mut self,
+        candidates: &[ProviderFallbackCandidate],
+        usage_windows: Vec<UsageWindow>,
+        price_schedules: PriceScheduleBook,
+        input: impl Into<String>,
+        providers: &mut [P],
+        interaction: &mut impl ProductInteraction,
+    ) -> Result<PreparedOutput, ProductDriverError> {
+        let outcome = self.kernel.execute_provider_turn_with_fallbacks(
+            self.session,
+            candidates,
+            usage_windows,
+            price_schedules,
+            input,
+            providers,
+            local_echo_resources,
+        )?;
+        let candidate_index =
+            self.kernel
+                .pending_provider_candidate_index()
+                .ok_or(RuntimeError::CorruptState(
+                    "Provider fallback candidate is missing",
+                ))?;
+        let provider = providers
+            .get_mut(candidate_index)
+            .ok_or(RuntimeError::CorruptState(
+                "Provider fallback adapter is missing",
+            ))?;
         self.finish(outcome, provider, interaction)
     }
 
@@ -1185,6 +1219,58 @@ source = "unknown"
     }
 
     #[test]
+    fn product_driver_falls_back_without_mutating_team_or_tool_state() {
+        let ledger = temp_path("product-fallback");
+        let mut interaction = RecordingInteraction::approve();
+        let mut driver = ProductDriver::open_with_executor(
+            &ledger,
+            CountingEchoExecutor::new(Rc::new(Cell::new(0))),
+            &mut interaction,
+        )
+        .expect("open Product driver");
+        let team_path = sidecar_path(&ledger, "team");
+        let tool_path = sidecar_path(&ledger, "tool");
+        let team_before = fs::read(&team_path).expect("read Team Ledger");
+        let tool_before = fs::read(&tool_path).expect("read Tool Ledger");
+        let candidates = [
+            product_fallback_candidate("primary", "model-primary"),
+            product_fallback_candidate("backup", "model-backup"),
+        ];
+        let mut providers = [
+            ProductFallbackProvider::unavailable("model-primary"),
+            ProductFallbackProvider::complete("model-backup"),
+        ];
+
+        let output = driver
+            .execute_with_provider_fallbacks(
+                &candidates,
+                Vec::new(),
+                PriceScheduleBook::default(),
+                "Product fallback input",
+                &mut providers,
+                &mut interaction,
+            )
+            .expect("fall back inside Product driver");
+        assert_eq!(output.text(), "Product backup response");
+        assert_eq!(providers[0].runs, 1);
+        assert_eq!(providers[1].runs, 1);
+        assert_eq!(
+            fs::read(&team_path).expect("reread Team Ledger"),
+            team_before
+        );
+        assert_eq!(
+            fs::read(&tool_path).expect("reread Tool Ledger"),
+            tool_before
+        );
+        driver
+            .acknowledge(output.delivery())
+            .expect("acknowledge fallback output");
+        assert_eq!(driver.snapshot().status, RecoveryStatus::Ready);
+        drop(driver);
+        cleanup(&ledger);
+    }
+
+    #[test]
     fn approval_interruption_reopens_and_executes_the_effect_once() {
         let ledger = temp_path("approval-recovery");
         let calls = Rc::new(Cell::new(0));
@@ -1703,6 +1789,75 @@ source = "unknown"
     #[derive(Default)]
     struct LocalEchoProvider {
         runs: usize,
+    }
+
+    fn product_fallback_candidate(preset_id: &str, model: &str) -> ProviderFallbackCandidate {
+        let mut layers = ConfigLayers::default();
+        layers.cli.provider_profile = Some("simulator".to_owned());
+        layers.cli.provider_model = Some(model.to_owned());
+        let config = ConfigEpoch::freeze_with_observability(
+            ConfigEpochId::new(1).expect("Config Epoch ID"),
+            &layers,
+            Vec::new(),
+            PriceScheduleBook::default(),
+        )
+        .expect("freeze fallback Config fingerprint");
+        let selection = ModelSelection::new(
+            preset_id,
+            config.fingerprint(),
+            "simulator",
+            model,
+            greentyper_core::provider::ProviderDialect::Responses,
+        )
+        .expect("fallback Model selection");
+        ProviderFallbackCandidate::new(selection, layers, None, None)
+            .expect("fallback Provider candidate")
+    }
+
+    enum ProductFallbackOutcome {
+        Unavailable,
+        Complete,
+    }
+
+    struct ProductFallbackProvider {
+        model: &'static str,
+        outcome: ProductFallbackOutcome,
+        runs: usize,
+    }
+
+    impl ProductFallbackProvider {
+        const fn unavailable(model: &'static str) -> Self {
+            Self {
+                model,
+                outcome: ProductFallbackOutcome::Unavailable,
+                runs: 0,
+            }
+        }
+
+        const fn complete(model: &'static str) -> Self {
+            Self {
+                model,
+                outcome: ProductFallbackOutcome::Complete,
+                runs: 0,
+            }
+        }
+    }
+
+    impl ProviderRuntime for ProductFallbackProvider {
+        fn run(&mut self, request: &ProviderRequest) -> Result<Vec<ProviderEvent>, ProviderError> {
+            self.runs += 1;
+            assert_eq!(request.provider.model(), self.model);
+            match self.outcome {
+                ProductFallbackOutcome::Unavailable => Err(ProviderError::unavailable_during(
+                    greentyper_core::provider::ProviderUnavailableStage::BeforeFirstEvent,
+                    "private Product fallback failure",
+                )),
+                ProductFallbackOutcome::Complete => Ok(vec![
+                    ProviderEvent::TextDelta("Product backup response".to_owned()),
+                    ProviderEvent::Completed(UsageRecord::default()),
+                ]),
+            }
+        }
     }
 
     struct SnapshotTextProvider {

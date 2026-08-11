@@ -877,6 +877,12 @@ impl RuntimeKernel {
         self.state.providers.get(&pending.provider)
     }
 
+    /// Returns the zero-based active candidate in a frozen Provider fallback plan.
+    #[must_use]
+    pub fn pending_provider_candidate_index(&self) -> Option<usize> {
+        usize::try_from(self.state.pending.as_ref()?.fallback_index).ok()
+    }
+
     #[must_use]
     pub fn team_snapshot(&self) -> Option<KernelTeamSnapshot> {
         self.team.as_ref().map(KernelTeam::snapshot)
@@ -1017,38 +1023,13 @@ impl RuntimeKernel {
         input: impl Into<String>,
         providers: &mut [P],
     ) -> Result<PreparedOutput, RuntimeError> {
-        if candidates.len() < 2
-            || candidates.len() > MAX_MODEL_PRESET_FALLBACK_CANDIDATES
-            || candidates.len() != providers.len()
-        {
-            return Err(RuntimeError::InvalidModelSelection(
-                "Provider fallback plan is invalid",
-            ));
-        }
-        for (candidate, provider) in candidates.iter().zip(providers.iter()) {
-            if candidate.provider_snapshot.as_ref() != provider.profile_snapshot()
-                || candidate.provider_dialect != provider.dialect()
-            {
-                return Err(RuntimeError::Provider(ProviderError::InvalidConfiguration(
-                    "Provider Runtime does not match its fallback candidate",
-                )));
-            }
-        }
-
-        let primary = &candidates[0];
-        self.admit_turn(
-            &primary.layers,
-            TurnAdmission {
-                usage_windows,
-                price_schedules,
-                context_pressure: None,
-                input: input.into(),
-                provider_snapshot: primary.provider_snapshot.clone(),
-                provider_dialect: primary.provider_dialect,
-                primary_selection: Some(primary.selection.clone()),
-                fallbacks: candidates[1..].to_vec(),
-                agent: None,
-            },
+        self.admit_provider_fallback_turn(
+            candidates,
+            usage_windows,
+            price_schedules,
+            input.into(),
+            providers,
+            None,
         )?;
 
         let mut candidate_index = 0;
@@ -1065,6 +1046,59 @@ impl RuntimeKernel {
                             "Provider fallback Turn is missing",
                         ))?;
                     if self.advance_provider_fallback(None, turn)?.is_none() {
+                        return Err(RuntimeError::Provider(source));
+                    }
+                    candidate_index += 1;
+                }
+                Err(source) => return Err(source),
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_provider_turn_with_fallbacks<P, ResolveResources>(
+        &mut self,
+        session: AgentSession,
+        candidates: &[ProviderFallbackCandidate],
+        usage_windows: Vec<UsageWindow>,
+        price_schedules: PriceScheduleBook,
+        input: impl Into<String>,
+        providers: &mut [P],
+        mut map_resources: ResolveResources,
+    ) -> Result<ProviderTurnOutcome, RuntimeError>
+    where
+        P: ProviderRuntime,
+        ResolveResources: FnMut(&ProviderToolCall) -> Result<ToolResources, RuntimeError>,
+    {
+        self.require_provider_session(session)?;
+        self.admit_provider_fallback_turn(
+            candidates,
+            usage_windows,
+            price_schedules,
+            input.into(),
+            providers,
+            Some(session.agent()),
+        )?;
+
+        let mut candidate_index = 0;
+        loop {
+            match self.drive_provider_turn(session, &mut providers[candidate_index], |call| {
+                map_resources(call)
+            }) {
+                Ok(outcome) => return Ok(outcome),
+                Err(RuntimeError::Provider(source)) => {
+                    let turn = self
+                        .state
+                        .pending
+                        .as_ref()
+                        .map(|pending| pending.turn)
+                        .ok_or(RuntimeError::CorruptState(
+                            "Provider fallback Turn is missing",
+                        ))?;
+                    if self
+                        .advance_provider_fallback(Some(session.agent()), turn)?
+                        .is_none()
+                    {
                         return Err(RuntimeError::Provider(source));
                     }
                     candidate_index += 1;
@@ -1494,6 +1528,51 @@ impl RuntimeKernel {
             return Err(RuntimeError::TurnRetryNotAllowed(turn));
         }
         self.commit(&[RuntimeEvent::TurnRetryRequested { turn }])
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn admit_provider_fallback_turn<P: ProviderRuntime>(
+        &mut self,
+        candidates: &[ProviderFallbackCandidate],
+        usage_windows: Vec<UsageWindow>,
+        price_schedules: PriceScheduleBook,
+        input: String,
+        providers: &[P],
+        agent: Option<AgentId>,
+    ) -> Result<(), RuntimeError> {
+        if candidates.len() < 2
+            || candidates.len() > MAX_MODEL_PRESET_FALLBACK_CANDIDATES
+            || candidates.len() != providers.len()
+        {
+            return Err(RuntimeError::InvalidModelSelection(
+                "Provider fallback plan is invalid",
+            ));
+        }
+        for (candidate, provider) in candidates.iter().zip(providers) {
+            if candidate.provider_snapshot.as_ref() != provider.profile_snapshot()
+                || candidate.provider_dialect != provider.dialect()
+            {
+                return Err(RuntimeError::Provider(ProviderError::InvalidConfiguration(
+                    "Provider Runtime does not match its fallback candidate",
+                )));
+            }
+        }
+
+        let primary = &candidates[0];
+        self.admit_turn(
+            &primary.layers,
+            TurnAdmission {
+                usage_windows,
+                price_schedules,
+                context_pressure: None,
+                input,
+                provider_snapshot: primary.provider_snapshot.clone(),
+                provider_dialect: primary.provider_dialect,
+                primary_selection: Some(primary.selection.clone()),
+                fallbacks: candidates[1..].to_vec(),
+                agent,
+            },
+        )
     }
 
     fn advance_provider_fallback(

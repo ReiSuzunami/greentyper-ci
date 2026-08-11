@@ -30,18 +30,20 @@ use crate::provider_http::{
 };
 use greentyper_core::agent_team::TeamOperationRecord;
 use greentyper_core::config::{
-    CONFIG_FILE_SCHEMA_VERSION, ConfigDocument, ConfigDraft, ConfigPaths, ConfigRuntime,
-    ConfigRuntimeError, ConfigScope, config_schema,
+    CONFIG_FILE_SCHEMA_VERSION, ConfigDocument, ConfigDraft, ConfigLayers, ConfigPaths,
+    ConfigRuntime, ConfigRuntimeError, ConfigScope, ModelPresetView, config_schema,
 };
 use greentyper_core::context::ContextReductionPolicy;
 use greentyper_core::model::{DeliveryId, TurnId};
 use greentyper_core::pricing::PriceScheduleBook;
-use greentyper_core::provider::{ProviderDialect, ProviderError};
+use greentyper_core::provider::{
+    ProviderDialect, ProviderError, ProviderProfileSnapshot, ProviderRuntime,
+};
 use greentyper_core::provider_catalog::ProviderCatalog;
 use greentyper_core::provider_discovery::{ProviderDiscoveryError, ProviderDiscoveryState};
 use greentyper_core::runtime::{
     AcknowledgeOutcome, CancelTurnOutcome, ContextCheckpoint, ContextInspection, PreparedOutput,
-    ProviderToolApproval, RecoveryStatus, RuntimeKernel,
+    ProviderFallbackCandidate, ProviderToolApproval, RecoveryStatus, RuntimeKernel,
 };
 use greentyper_core::tool_runtime::{
     ToolCallRecord, ToolCallStatus, ToolEffectExecutor, ToolReconciliationDecision, ToolSnapshot,
@@ -49,6 +51,58 @@ use greentyper_core::tool_runtime::{
 use greentyper_core::usage::{
     RuntimeUsageQuery, RuntimeUsageSnapshot, UsageCursor, UsageError, UsageTimestamp, UsageWindow,
 };
+
+struct ConfiguredProviderFallbackPlan<P> {
+    candidates: Vec<ProviderFallbackCandidate>,
+    providers: Vec<P>,
+}
+
+fn build_provider_fallback_plan<P>(
+    config: &ConfigRuntime,
+    base_layers: &ConfigLayers,
+    presets: &[ModelPresetView],
+    usage_windows: &[UsageWindow],
+    price_schedules: &PriceScheduleBook,
+    mut build_provider: impl FnMut(
+        Option<ProviderProfileSnapshot>,
+        &str,
+        ProviderDialect,
+    ) -> Result<P, ProviderError>,
+) -> Result<ConfiguredProviderFallbackPlan<P>, CliError>
+where
+    P: ProviderRuntime,
+{
+    let mut candidates = Vec::with_capacity(presets.len());
+    let mut providers = Vec::with_capacity(presets.len());
+    for preset in presets {
+        let mut layers = base_layers.clone();
+        apply_model_preset_to_next_turn(&mut layers, preset);
+        let model = layers
+            .resolve()
+            .map_err(|_| {
+                ProviderError::InvalidConfiguration(
+                    "selected Provider model configuration is invalid",
+                )
+            })?
+            .provider_model()
+            .value()
+            .clone();
+        let profile = config.provider_profile(&preset.provider)?;
+        let provider = build_provider(profile, &model, preset.dialect)?;
+        let selection = freeze_model_selection(&layers, usage_windows, price_schedules, preset)?;
+        candidates.push(ProviderFallbackCandidate::new(
+            selection,
+            layers,
+            provider.profile_snapshot().cloned(),
+            provider.dialect(),
+        )?);
+        providers.push(provider);
+    }
+    Ok(ConfiguredProviderFallbackPlan {
+        candidates,
+        providers,
+    })
+}
 
 pub fn run(arguments: impl Iterator<Item = String>) -> Result<(), CliError> {
     match parse(arguments)? {
@@ -74,8 +128,8 @@ pub fn run(arguments: impl Iterator<Item = String>) -> Result<(), CliError> {
         } => {
             let pending_selection = RuntimeKernel::inspect(&ledger)?.pending_model_selection;
             let config = open_config_runtime(default_config_paths()?)?;
-            let mut layers = config.config_layers()?.clone();
-            let preset =
+            let base_layers = config.config_layers()?.clone();
+            let preset_id =
                 match (preset, pending_selection.as_ref()) {
                     (Some(id), Some(pending)) if id != pending.selection().preset_id() => {
                         return Err(greentyper_core::runtime::RuntimeError::InvalidModelSelection(
@@ -87,15 +141,15 @@ pub fn run(arguments: impl Iterator<Item = String>) -> Result<(), CliError> {
                     (None, Some(pending)) => Some(pending.selection().preset_id().to_owned()),
                     (None, None) => None,
                 };
-            let (profile, dialect, applied_preset) = match preset {
-                Some(id) => {
-                    let preset = config.model_preset(&id)?;
-                    let profile = config.provider_profile(&preset.provider)?;
-                    let dialect = apply_model_preset_to_next_turn(&mut layers, &preset);
-                    (profile, Some(dialect), Some(preset))
-                }
-                None => (config.selected_provider_profile()?, dialect, None),
-            };
+            let preset_chain = preset_id
+                .as_deref()
+                .map(|id| config.model_preset_chain(id))
+                .transpose()?;
+            let mut layers = base_layers.clone();
+            let applied_preset = preset_chain.as_ref().and_then(|presets| presets.first());
+            if let Some(preset) = applied_preset {
+                apply_model_preset_to_next_turn(&mut layers, preset);
+            }
             let usage_windows = config.resolved_usage_windows()?;
             let price_schedules = config.resolved_price_schedules()?;
             if let Some(pending) = pending_selection.as_ref() {
@@ -103,9 +157,7 @@ pub fn run(arguments: impl Iterator<Item = String>) -> Result<(), CliError> {
                     &layers,
                     &usage_windows,
                     &price_schedules,
-                    applied_preset
-                        .as_ref()
-                        .expect("pending selection chose a Preset"),
+                    applied_preset.expect("pending selection chose a Preset"),
                 )?;
                 if &applied != pending.selection() {
                     return Err(
@@ -116,6 +168,65 @@ pub fn run(arguments: impl Iterator<Item = String>) -> Result<(), CliError> {
                     );
                 }
             }
+            let fallback_plan = preset_chain
+                .as_deref()
+                .filter(|presets| presets.len() > 1)
+                .map(|presets| {
+                    build_provider_fallback_plan(
+                        &config,
+                        &base_layers,
+                        presets,
+                        &usage_windows,
+                        &price_schedules,
+                        |profile, model, preferred_dialect| match profile {
+                            Some(profile) => {
+                                ConfiguredProvider::for_new_turn_with_preferred_dialect(
+                                    profile,
+                                    model,
+                                    preferred_dialect,
+                                    PlatformCredentialVault,
+                                )
+                            }
+                            None => Err(ProviderError::InvalidConfiguration(
+                                "simulator Provider cannot select a wire dialect",
+                            )),
+                        },
+                    )
+                })
+                .transpose()?;
+            let has_product_state = has_product_driver_state(&ledger)?;
+            if let Some(mut plan) = fallback_plan {
+                if local_echo || has_product_state {
+                    for provider in &mut plan.providers {
+                        provider.enable_local_echo();
+                    }
+                    return run_product_fallback_turn(
+                        &ledger,
+                        &plan.candidates,
+                        usage_windows,
+                        price_schedules,
+                        input,
+                        &mut plan.providers,
+                    );
+                }
+                let mut runtime = open_runtime(&ledger)?;
+                let output = runtime.execute_with_provider_fallbacks(
+                    &plan.candidates,
+                    usage_windows,
+                    price_schedules,
+                    input,
+                    &mut plan.providers,
+                )?;
+                return deliver_and_ack(&mut runtime, output);
+            }
+
+            let (profile, dialect) = match applied_preset {
+                Some(preset) => (
+                    config.provider_profile(&preset.provider)?,
+                    Some(preset.dialect),
+                ),
+                None => (config.selected_provider_profile()?, dialect),
+            };
             let selected_model = layers
                 .resolve()
                 .map_err(|_| {
@@ -143,7 +254,6 @@ pub fn run(arguments: impl Iterator<Item = String>) -> Result<(), CliError> {
                 }
                 (None, None) => ConfiguredProvider::for_new_turn(None, PlatformCredentialVault)?,
             };
-            let has_product_state = has_product_driver_state(&ledger)?;
             if local_echo || has_product_state {
                 provider.enable_local_echo();
                 run_product_turn(
@@ -647,6 +757,33 @@ fn run_product_turn(
         price_schedules,
         input,
         provider,
+        &mut interaction,
+    )?;
+    deliver_product_and_ack(&mut driver, output)
+}
+
+fn run_product_fallback_turn(
+    ledger: &Path,
+    candidates: &[ProviderFallbackCandidate],
+    usage_windows: Vec<UsageWindow>,
+    price_schedules: PriceScheduleBook,
+    input: String,
+    providers: &mut [ConfiguredProvider<PlatformCredentialVault>],
+) -> Result<(), CliError> {
+    let stdin = io::stdin();
+    let stderr = io::stderr();
+    let mut interaction = CliProductInteraction {
+        input: stdin.lock(),
+        output: stderr.lock(),
+    };
+    let executor = LocalProcessExecutor::current()?;
+    let mut driver = ProductDriver::open_with_executor(ledger, executor, &mut interaction)?;
+    let output = driver.execute_with_provider_fallbacks(
+        candidates,
+        usage_windows,
+        price_schedules,
+        input,
+        providers,
         &mut interaction,
     )?;
     deliver_product_and_ack(&mut driver, output)
@@ -2410,8 +2547,9 @@ mod tests {
 
     use super::{
         Command, ConfigCommand, CredentialCommand, CredentialOutcome, ToolCommand,
-        begin_discovered_model_preset, deliver_and_ack_to, deliver_product_and_ack_to,
-        execute_credential_command, parse, provider_discovery_catalog, refresh_provider_discovery,
+        begin_discovered_model_preset, build_provider_fallback_plan, deliver_and_ack_to,
+        deliver_product_and_ack_to, execute_credential_command, parse, provider_discovery_catalog,
+        refresh_provider_discovery,
     };
 
     static NEXT_TEMP: AtomicU64 = AtomicU64::new(1);
@@ -2583,6 +2721,58 @@ mod tests {
         assert!(
             parse(["stats".to_owned(), "--at".to_owned(), "later".to_owned()].into_iter()).is_err()
         );
+    }
+
+    #[test]
+    fn headless_fallback_plan_uses_the_configured_depth_first_chain() {
+        let root = temp_path();
+        std::fs::create_dir_all(&root).expect("create fallback Config root");
+        let user = root.join("user.toml");
+        let project = root.join("project.toml");
+        std::fs::write(
+            &user,
+            r#"schema_version = 1
+
+[model_presets.primary]
+provider = "simulator"
+model = "model-primary"
+dialect = "responses"
+fallback = ["backup"]
+
+[model_presets.backup]
+provider = "simulator"
+model = "model-backup"
+dialect = "responses"
+"#,
+        )
+        .expect("write fallback Config");
+        let config = ConfigRuntime::open(ConfigPaths::new(user, project), ConfigDocument::empty())
+            .expect("open fallback Config");
+        let presets = config
+            .model_preset_chain("primary")
+            .expect("resolve fallback chain");
+        let usage_windows = config.resolved_usage_windows().expect("Usage Windows");
+        let price_schedules = config.resolved_price_schedules().expect("Price Schedules");
+        let mut observed_models = Vec::new();
+
+        let plan = build_provider_fallback_plan(
+            &config,
+            config.config_layers().expect("Config layers"),
+            &presets,
+            &usage_windows,
+            &price_schedules,
+            |profile, model, dialect| {
+                assert!(profile.is_none());
+                assert_eq!(dialect, ProviderDialect::Responses);
+                observed_models.push(model.to_owned());
+                Ok(DeterministicProvider::default())
+            },
+        )
+        .expect("build headless fallback plan");
+        assert_eq!(observed_models, ["model-primary", "model-backup"]);
+        assert_eq!(plan.candidates.len(), 2);
+        assert_eq!(plan.providers.len(), 2);
+        std::fs::remove_dir_all(root).expect("cleanup fallback Config root");
     }
 
     #[test]
