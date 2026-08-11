@@ -14,8 +14,8 @@ use crate::agent_team::{
     TeamOperationStatus, TeamSnapshot,
 };
 use crate::config::{
-    ConfigEpoch, ConfigError, ConfigLayer, ConfigLayers, ConfigSource, MAX_CONFIG_STRING_BYTES,
-    ReasoningEffort, ServiceTier,
+    ConfigEpoch, ConfigError, ConfigLayer, ConfigLayers, ConfigSource, MAX_CONFIG_ID_BYTES,
+    MAX_CONFIG_STRING_BYTES, ReasoningEffort, ServiceTier,
 };
 use crate::context::{ContextAdmissionDecision, ContextPressureSnapshot};
 use crate::ledger::{
@@ -86,7 +86,105 @@ pub struct RuntimeSnapshot {
     pub thread: Option<ThreadId>,
     pub items: Vec<CanonicalItem>,
     pub status: RecoveryStatus,
+    pub pending_model_selection: Option<PendingModelSelection>,
     pub recovered_tail_bytes: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ModelSelection {
+    preset_id: String,
+    config_fingerprint: u64,
+    provider_profile: String,
+    provider_model: String,
+    preferred_dialect: ProviderDialect,
+}
+
+impl ModelSelection {
+    pub fn new(
+        preset_id: impl Into<String>,
+        config_fingerprint: u64,
+        provider_profile: impl Into<String>,
+        provider_model: impl Into<String>,
+        preferred_dialect: ProviderDialect,
+    ) -> Result<Self, RuntimeError> {
+        let selection = Self {
+            preset_id: preset_id.into(),
+            config_fingerprint,
+            provider_profile: provider_profile.into(),
+            provider_model: provider_model.into(),
+            preferred_dialect,
+        };
+        selection.validate()?;
+        Ok(selection)
+    }
+
+    #[must_use]
+    pub fn preset_id(&self) -> &str {
+        &self.preset_id
+    }
+
+    #[must_use]
+    pub const fn config_fingerprint(&self) -> u64 {
+        self.config_fingerprint
+    }
+
+    #[must_use]
+    pub fn provider_profile(&self) -> &str {
+        &self.provider_profile
+    }
+
+    #[must_use]
+    pub fn provider_model(&self) -> &str {
+        &self.provider_model
+    }
+
+    #[must_use]
+    pub const fn preferred_dialect(&self) -> ProviderDialect {
+        self.preferred_dialect
+    }
+
+    fn validate(&self) -> Result<(), RuntimeError> {
+        let id = self.preset_id.as_str();
+        if id.is_empty()
+            || id.len() > MAX_CONFIG_ID_BYTES
+            || !id
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+            || !id.as_bytes().first().is_some_and(u8::is_ascii_alphanumeric)
+        {
+            return Err(RuntimeError::InvalidModelSelection("Preset ID is invalid"));
+        }
+        for value in [&self.provider_profile, &self.provider_model] {
+            if value.trim().is_empty()
+                || value.trim() != value
+                || value.len() > MAX_PROVIDER_ID_BYTES
+                || value.chars().any(char::is_control)
+            {
+                return Err(RuntimeError::InvalidModelSelection(
+                    "Provider identity is invalid",
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingModelSelection {
+    agent: AgentId,
+    selection: ModelSelection,
+}
+
+impl PendingModelSelection {
+    #[must_use]
+    pub const fn agent(&self) -> AgentId {
+        self.agent
+    }
+
+    #[must_use]
+    pub const fn selection(&self) -> &ModelSelection {
+        &self.selection
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -425,6 +523,7 @@ impl RuntimeKernel {
                     thread: None,
                     items: Vec::new(),
                     status: RecoveryStatus::Ready,
+                    pending_model_selection: None,
                     recovered_tail_bytes: 0,
                 });
             }
@@ -437,6 +536,7 @@ impl RuntimeKernel {
             thread: state.thread,
             items: state.items,
             status,
+            pending_model_selection: state.pending_model_selection,
             recovered_tail_bytes: report.truncated_tail_bytes,
         })
     }
@@ -489,8 +589,38 @@ impl RuntimeKernel {
             thread: self.state.thread,
             items: self.state.items.clone(),
             status: self.state.status(),
+            pending_model_selection: self.state.pending_model_selection.clone(),
             recovered_tail_bytes: self.recovered_tail_bytes,
         }
+    }
+
+    #[must_use]
+    pub fn pending_model_selection(&self) -> Option<&PendingModelSelection> {
+        self.state.pending_model_selection.as_ref()
+    }
+
+    pub fn stage_model_selection(
+        &mut self,
+        session: AgentSession,
+        selection: ModelSelection,
+    ) -> Result<DurabilityReceipt, RuntimeError> {
+        self.require_provider_session(session)?;
+        self.require_ready()?;
+        selection.validate()?;
+        if self
+            .state
+            .pending_model_selection
+            .as_ref()
+            .is_some_and(|pending| pending.agent != session.agent())
+        {
+            return Err(RuntimeError::InvalidModelSelection(
+                "another Agent already owns the pending selection",
+            ));
+        }
+        self.commit(&[RuntimeEvent::ModelSelectionStaged {
+            agent: session.agent(),
+            selection,
+        }])
     }
 
     #[must_use]
@@ -1007,6 +1137,18 @@ impl RuntimeKernel {
             price_schedules,
         )
         .map_err(RuntimeError::Config)?;
+        if let Some(pending) = &self.state.pending_model_selection {
+            let resolved = config.resolved();
+            if agent != Some(pending.agent)
+                || config.fingerprint() != pending.selection.config_fingerprint()
+                || resolved.provider_profile().value() != pending.selection.provider_profile()
+                || resolved.provider_model().value() != pending.selection.provider_model()
+            {
+                return Err(RuntimeError::InvalidModelSelection(
+                    "pending Preset no longer matches the next Turn",
+                ));
+            }
+        }
         let profile = config.resolved().provider_profile().value().clone();
         let model = config.resolved().provider_model().value().clone();
         let provider_epoch = match provider_snapshot {
@@ -1753,6 +1895,10 @@ impl FrozenCostEvaluation {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum RuntimeEvent {
+    ModelSelectionStaged {
+        agent: AgentId,
+        selection: ModelSelection,
+    },
     ThreadCreated {
         thread: ThreadId,
     },
@@ -1824,6 +1970,15 @@ impl RuntimeEvent {
     fn encode(&self) -> Result<EventData, RuntimeError> {
         let mut payload = Encoder::default();
         let kind = match self {
+            Self::ModelSelectionStaged { agent, selection } => {
+                payload.u64(agent.get());
+                payload.string(selection.preset_id())?;
+                payload.u64(selection.config_fingerprint());
+                payload.string(selection.provider_profile())?;
+                payload.string(selection.provider_model())?;
+                payload.u8(provider_dialect_tag(selection.preferred_dialect()));
+                14
+            }
             Self::ThreadCreated { thread } => {
                 payload.u64(thread.get());
                 1
@@ -1981,6 +2136,19 @@ impl RuntimeEvent {
         }
         let mut payload = Decoder::new(&event.data.payload);
         let decoded = match event.data.kind {
+            14 if event.data.schema >= 9 => Self::ModelSelectionStaged {
+                agent: AgentId::from_stored(payload.u64()?).ok_or(RuntimeError::CorruptEvent(
+                    "invalid Agent ID in Model selection",
+                ))?,
+                selection: ModelSelection::new(
+                    payload.string(MAX_CONFIG_ID_BYTES)?,
+                    payload.u64()?,
+                    payload.string(MAX_PROVIDER_ID_BYTES)?,
+                    payload.string(MAX_PROVIDER_ID_BYTES)?,
+                    decode_provider_dialect(payload.u8()?)?,
+                )
+                .map_err(|_| RuntimeError::CorruptEvent("invalid Model selection"))?,
+            },
             1 => Self::ThreadCreated {
                 thread: ThreadId::new(payload.u64()?).map_err(RuntimeError::Model)?,
             },
@@ -2179,6 +2347,7 @@ struct RuntimeState {
     turns: BTreeMap<TurnId, TurnRecord>,
     items: Vec<CanonicalItem>,
     pending: Option<PendingTurn>,
+    pending_model_selection: Option<PendingModelSelection>,
     acknowledged: BTreeSet<DeliveryId>,
     usage: UsageProjection,
     pending_cost_evaluation: Option<(TurnId, u32)>,
@@ -2199,6 +2368,7 @@ impl Default for RuntimeState {
             turns: BTreeMap::new(),
             items: Vec::new(),
             pending: None,
+            pending_model_selection: None,
             acknowledged: BTreeSet::new(),
             usage: UsageProjection::default(),
             pending_cost_evaluation: None,
@@ -2250,6 +2420,23 @@ impl RuntimeState {
             ));
         }
         match event {
+            RuntimeEvent::ModelSelectionStaged { agent, selection } => {
+                if self.pending.is_some() {
+                    return Err(RuntimeError::CorruptState(
+                        "Model selection was staged during an active Turn",
+                    ));
+                }
+                if self
+                    .pending_model_selection
+                    .as_ref()
+                    .is_some_and(|pending| pending.agent != agent)
+                {
+                    return Err(RuntimeError::CorruptState(
+                        "Model selection changed Agent ownership",
+                    ));
+                }
+                self.pending_model_selection = Some(PendingModelSelection { agent, selection });
+            }
             RuntimeEvent::ThreadCreated { thread } => {
                 if self.thread.replace(thread).is_some() || !self.turns.is_empty() {
                     return Err(RuntimeError::CorruptState(
@@ -2286,6 +2473,24 @@ impl RuntimeState {
                 }
                 if !self.configs.contains_key(&config) || !self.providers.contains_key(&provider) {
                     return Err(RuntimeError::CorruptState("Turn snapshot is missing"));
+                }
+                if let Some(pending) = &self.pending_model_selection {
+                    let config_epoch = self
+                        .configs
+                        .get(&config)
+                        .ok_or(RuntimeError::CorruptState("Turn snapshot is missing"))?;
+                    let resolved = config_epoch.resolved();
+                    if agent != Some(pending.agent)
+                        || config_epoch.fingerprint() != pending.selection.config_fingerprint()
+                        || resolved.provider_profile().value()
+                            != pending.selection.provider_profile()
+                        || resolved.provider_model().value() != pending.selection.provider_model()
+                    {
+                        return Err(RuntimeError::CorruptState(
+                            "Turn does not match pending Model selection",
+                        ));
+                    }
+                    self.pending_model_selection = None;
                 }
                 if self.turns.contains_key(&turn) || self.item_exists(user_item) {
                     return Err(RuntimeError::CorruptState("duplicate Turn or Item id"));
@@ -3696,6 +3901,7 @@ pub enum RuntimeError {
     UnknownDelivery(DeliveryId),
     InvalidInput(&'static str),
     InvalidProviderOutput(&'static str),
+    InvalidModelSelection(&'static str),
     TeamUnavailable,
     ToolUnavailable,
     TeamOperationReconciliationRequired(TeamOperationId),
@@ -3740,6 +3946,9 @@ impl fmt::Display for RuntimeError {
             Self::InvalidInput(reason) => write!(formatter, "invalid input: {reason}"),
             Self::InvalidProviderOutput(reason) => {
                 write!(formatter, "invalid provider output: {reason}")
+            }
+            Self::InvalidModelSelection(reason) => {
+                write!(formatter, "invalid Model selection: {reason}")
             }
             Self::TeamUnavailable => write!(formatter, "Runtime Kernel has no Agent Team"),
             Self::ToolUnavailable => write!(formatter, "Runtime Kernel has no Tool Runtime"),
@@ -3860,7 +4069,7 @@ mod tests {
         }
         .encode()
         .expect("encode Config Epoch");
-        assert_eq!(schema_six.schema, 8);
+        assert_eq!(schema_six.schema, 9);
         assert_eq!(schema_six.payload.pop(), Some(0));
         assert_eq!(schema_six.payload.pop(), Some(0));
         schema_six.schema = 6;
@@ -4032,7 +4241,7 @@ mod tests {
         }
         .encode()
         .expect("encode mirrored Provider Epoch");
-        assert_eq!(encoded.schema, 8);
+        assert_eq!(encoded.schema, 9);
         assert_eq!(
             RuntimeEvent::decode(&stored_runtime_event(encoded.clone()))
                 .expect("decode mirrored Provider Epoch"),

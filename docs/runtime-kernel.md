@@ -157,16 +157,19 @@ descriptors while Tool Runtime remains the authority gate. Approval and
 `EffectPrepared` are durable before the injected executor runs. A successful
 UTF-8 result may then enter one Provider continuation. The final
 `OutputPrepared` transaction stores the combined canonical text and one or two
-bounded Usage Records. Runtime Event schema 8 also durably brackets every
+bounded Usage Records. Runtime Event schema 9 also durably brackets every
 Provider request or continuation with Usage Attempt start/finish Events and
 carries the Agent scope, Provider dialect, frozen Usage Windows, UTC times,
 outcome, exact/estimated marker, optional token/cache classes, service tier, and
 frozen Provider Profile snapshot, then records one frozen Price Schedule cost
 evaluation plus optional selected-Preset output-token, typed reasoning-effort,
 and typed service-tier policy in the Config Epoch. Requested effort/tier are
-kept distinct from observed Provider metadata. Historical schema-1 through
-schema-7 Runtime transactions replay and can be followed by schema-8 transactions;
-schema-1 token counts become explicitly estimated legacy attempts.
+kept distinct from observed Provider metadata. Schema 9 adds a bounded
+`ModelSelectionStaged` Event bound to the authenticated current Agent. The next
+matching `TurnAdmitted` consumes it in the same transaction as Config and
+Provider freeze; pre-admission failure leaves it pending. Historical schema-1
+through schema-8 Runtime transactions replay and can be followed by schema-9
+transactions; schema-1 token counts become explicitly estimated legacy attempts.
 
 This tracer bullet intentionally stores only the Tool result digest. If the
 process dies after durable Tool success and before Provider continuation, the
@@ -309,7 +312,7 @@ checkpoints, and stale-result CAS handling.
 
 Prompt/provider text and credential material are not part of the Usage domain.
 Requested or observed metadata not supplied by the current Provider remains
-unknown. Runtime Event schema 8 records `UsageAttemptFinished` before
+unknown. Runtime Event schema 9 records `UsageAttemptFinished` before
 `UsageAttemptCostEvaluated` in the same transaction. The Config Epoch freezes
 the resolved Price Schedule book; replay recomputes the cost claim from that
 book and the normalized Usage Record, rejecting a changed schedule fingerprint,
@@ -342,8 +345,11 @@ charges still require a future dedicated authority path.
   and render its ephemeral status. It never reads back a credential reference,
   commits through that action, or mutates a secret store.
   `/config model add` can commit all required and optional Model Preset fields,
-  including explicit fallback references. It does not apply that Preset to a
-  running Agent or grant Provider authority.
+  including explicit fallback references. The separate `/model` action can
+  stage one configured Preset for the existing current Agent's next Turn. It
+  authenticates the rebound Session, persists only Preset identity and Config
+  fingerprint facts, and grants no Provider, Tool, credential, or workspace
+  authority. Release-catalog candidates remain non-runnable.
   `/config stats-window add` can commit one named Usage Window from bounded
   start, end, weekday-list, and IANA-time-zone inputs. Structured weekday text
   stays in a visible dirty buffer until it parses; preview, CAS conflict,

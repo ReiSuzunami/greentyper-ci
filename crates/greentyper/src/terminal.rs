@@ -13,17 +13,20 @@ use unicode_width::UnicodeWidthStr;
 use greentyper_core::config::{
     ConfigEditorError, ConfigError, ConfigFieldContents, ConfigFieldInteraction, ConfigRuntime,
     ConfigRuntimeError, ConfigScope, ConfigValue, ConfigValueKind, MAX_COMMAND_QUERY_BYTES,
-    MAX_CONFIG_ID_BYTES,
+    MAX_CONFIG_ID_BYTES, ModelPresetView,
 };
 use greentyper_core::runtime::{KernelTeamSnapshot, RuntimeError, RuntimeKernel, RuntimeSnapshot};
 use greentyper_core::usage::{RuntimeUsageSnapshot, UsageError, UsageTimestamp};
 
 use crate::credential_vault::PlatformCredentialVault;
 use crate::presentation::{
-    PresentationController, PresentationControllerError, PresentationError, PresentationLayoutView,
-    PresentationSources, TuiViewModel, Viewport, ViewportError,
+    ModelEntryAction, PresentationController, PresentationControllerError, PresentationError,
+    PresentationLayoutView, PresentationSources, TuiViewModel, Viewport, ViewportError,
 };
-use crate::product_driver::{ProductDriverError, inspect_product_team};
+use crate::product_driver::{
+    ProductDriverError, apply_model_preset_to_next_turn, freeze_model_selection,
+    inspect_product_team, stage_product_model_selection,
+};
 use crate::provider_connection::{ModelsHttpConnectionTester, ProviderConnectionTester};
 
 pub(crate) fn require_interactive() -> Result<(), TerminalError> {
@@ -77,6 +80,24 @@ fn refresh_terminal_view(
 struct RefreshedTerminalSnapshot {
     config: ConfigRuntime,
     view: TuiViewModel,
+}
+
+fn stage_terminal_model_selection(
+    ledger: &Path,
+    config: &ConfigRuntime,
+    displayed: &ModelPresetView,
+) -> Result<(), TerminalError> {
+    let preset = config.model_preset(&displayed.id)?;
+    if preset != *displayed {
+        return Err(RuntimeError::InvalidModelSelection("displayed Preset is stale").into());
+    }
+    let mut layers = config.config_layers()?.clone();
+    apply_model_preset_to_next_turn(&mut layers, &preset);
+    let usage_windows = config.resolved_usage_windows()?;
+    let price_schedules = config.resolved_price_schedules()?;
+    let selection = freeze_model_selection(&layers, &usage_windows, &price_schedules, &preset)?;
+    stage_product_model_selection(ledger, selection)?;
+    Ok(())
 }
 
 fn build_terminal_view_from_sources(
@@ -798,6 +819,7 @@ enum TerminalLoopOutcome {
     Redraw,
     Resize(u16, u16),
     RefreshSnapshot,
+    ApplyModelSelection,
     Quit,
     Noop,
 }
@@ -810,6 +832,7 @@ struct TerminalSession {
     config_text: Option<ConfigTextInput>,
     validated_config_text: Option<String>,
     confirming_discard: bool,
+    pending_model_selection: Option<ModelPresetView>,
     notice: Option<String>,
 }
 
@@ -831,6 +854,7 @@ impl TerminalSession {
             config_text: None,
             validated_config_text: None,
             confirming_discard: false,
+            pending_model_selection: None,
             notice: None,
         })
     }
@@ -919,9 +943,24 @@ impl TerminalSession {
             }
             TerminalIntent::ToggleModelDetail => {
                 let view = view.ok_or(TerminalError::ViewModelRequired)?;
-                self.controller.toggle_model_detail(&view.models);
-                self.notice = None;
-                Ok(TerminalLoopOutcome::Redraw)
+                match self.controller.activate_model_entry(&view.models) {
+                    ModelEntryAction::DetailChanged => {
+                        self.notice = None;
+                        Ok(TerminalLoopOutcome::Redraw)
+                    }
+                    ModelEntryAction::ApplyConfigured(preset) => {
+                        self.pending_model_selection = Some(preset);
+                        Ok(TerminalLoopOutcome::ApplyModelSelection)
+                    }
+                    ModelEntryAction::ReleaseUnavailable => {
+                        self.notice = Some(
+                            "Release model must be saved as a configured Preset before selection"
+                                .to_owned(),
+                        );
+                        Ok(TerminalLoopOutcome::Redraw)
+                    }
+                    ModelEntryAction::None => Ok(TerminalLoopOutcome::Noop),
+                }
             }
             TerminalIntent::MoveStatsSelection(offset) => {
                 let view = view.ok_or(TerminalError::ViewModelRequired)?;
@@ -1166,6 +1205,10 @@ impl TerminalSession {
             TerminalIntent::Quit => Ok(TerminalLoopOutcome::Quit),
             TerminalIntent::None => Ok(TerminalLoopOutcome::Noop),
         }
+    }
+
+    fn take_model_selection(&mut self) -> Option<ModelPresetView> {
+        self.pending_model_selection.take()
     }
 
     fn input_context(&self) -> TerminalInputContext {
@@ -1744,6 +1787,46 @@ where
                     }
                 } else {
                     session.notice = Some("Snapshot refresh unavailable".to_owned());
+                }
+                let frame = session.frame(Some(config), &view)?;
+                surface.write_frame(&renderer.draw(&frame)?)?;
+            }
+            TerminalLoopOutcome::ApplyModelSelection => {
+                let preset = session
+                    .take_model_selection()
+                    .ok_or(TerminalError::ViewModelRequired)?;
+                if let Some(ledger) = snapshot.refresh_ledger {
+                    match stage_terminal_model_selection(ledger, config, &preset) {
+                        Ok(()) => {
+                            if let Ok(refreshed) = refresh_terminal_view(
+                                ledger,
+                                config,
+                                session.controller.slash_query(),
+                            ) {
+                                session.controller.reconcile_snapshot(&refreshed.view);
+                                *config = refreshed.config;
+                                view = refreshed.view;
+                            }
+                            session.notice = Some(format!(
+                                "Preset '{}' selected for current Agent next Turn",
+                                preset.id
+                            ));
+                        }
+                        Err(TerminalError::ProductDriver(
+                            ProductDriverError::CurrentAgentUnavailable,
+                        )) => {
+                            session.notice = Some(
+                                "Current Agent is unavailable; start a Turn before selecting a Preset"
+                                    .to_owned(),
+                            );
+                        }
+                        Err(_) => {
+                            session.notice =
+                                Some("Model selection failed; refresh and retry".to_owned());
+                        }
+                    }
+                } else {
+                    session.notice = Some("Model selection unavailable".to_owned());
                 }
                 let frame = session.frame(Some(config), &view)?;
                 surface.write_frame(&renderer.draw(&frame)?)?;
@@ -2365,6 +2448,210 @@ dialect = "responses"
         );
         assert!(!ledger.exists());
         std::fs::remove_dir_all(root).expect("remove model browser fixture");
+    }
+
+    #[test]
+    fn terminal_loop_selects_configured_preset_for_current_agent_next_turn() {
+        let root = terminal_test_root("model-selection");
+        let ledger = root.join("runtime.ledger");
+        let team_ledger = terminal_sidecar_path(&ledger, "team");
+        let tool_ledger = terminal_sidecar_path(&ledger, "tool");
+        let paths = ConfigPaths::new(root.join("user.toml"), root.join("project.toml"));
+        std::fs::create_dir_all(&root).expect("create model selection fixture directory");
+        std::fs::write(
+            paths.user(),
+            r#"schema_version = 1
+
+[providers.edge]
+template = "openai"
+credential = "synthetic-model-selection-credential-reference"
+
+[model_presets.fast]
+provider = "edge"
+model = "gpt-5.6-fast"
+dialect = "responses"
+favorite = true
+
+[model_presets.careful]
+provider = "edge"
+model = "gpt-5.6-careful"
+dialect = "responses"
+"#,
+        )
+        .expect("write model selection config");
+        let (mut runtime, _) =
+            RuntimeKernel::open_with_team_and_tools(&ledger, &team_ledger, &tool_ledger, 1)
+                .expect("open Product state");
+        let root_commit = runtime
+            .dispatch_team(TeamCommand::AdmitRoot {
+                task: TaskSpec::new("select a Model Preset", TaskScope::default()),
+                budget: ResourceBudget::new(1_000, 1),
+                capabilities: CapabilitySnapshot::default(),
+            })
+            .expect("admit current Agent");
+        let current_agent = match root_commit.commit.outcome {
+            CommandOutcome::RootAdmitted { session, .. } => session.agent(),
+            other => panic!("unexpected root outcome: {other:?}"),
+        };
+        runtime
+            .acknowledge_team_operation(root_commit.operation)
+            .expect("acknowledge current Agent admission");
+        drop(runtime);
+
+        let mut config =
+            ConfigRuntime::open(paths.clone(), ConfigDocument::empty()).expect("Config Runtime");
+        let config_before = std::fs::read(paths.user()).expect("read Model config");
+        let runtime_before = std::fs::read(&ledger).expect("read Runtime Ledger");
+        let team_before = std::fs::read(&team_ledger).expect("read Team Ledger");
+        let tool_before = std::fs::read(&tool_ledger).expect("read Tool Ledger");
+        let view = build_terminal_view(&ledger, &config, "/").expect("Model selector view");
+        let mut events = "model"
+            .chars()
+            .map(|character| {
+                Event::Key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
+            })
+            .collect::<VecDeque<_>>();
+        events.extend([
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL)),
+        ]);
+
+        let output = run_terminal_loop_with_snapshot_refresh(
+            Vec::new(),
+            FakeTerminalMode::default(),
+            &mut config,
+            &view,
+            &ledger,
+            Viewport::new(120, 24).expect("Model selection viewport"),
+            move || Ok(events.pop_front().expect("bounded Model selection events")),
+        )
+        .expect("Model selection loop");
+        let output = String::from_utf8(output).expect("Model selection VT output");
+
+        assert!(
+            output.contains("Preset 'fast' selected for current Agent next Turn"),
+            "{output}"
+        );
+        assert!(
+            output.contains("Preset 'careful' selected for current Agent next Turn"),
+            "{output}"
+        );
+        assert!(!output.contains("synthetic-model-selection-credential-reference"));
+        let pending = RuntimeKernel::inspect(&ledger)
+            .expect("inspect selected Preset")
+            .pending_model_selection
+            .expect("pending Model selection");
+        assert_eq!(pending.agent(), current_agent);
+        assert_eq!(pending.selection().preset_id(), "careful");
+        assert_eq!(pending.selection().provider_profile(), "edge");
+        assert_eq!(pending.selection().provider_model(), "gpt-5.6-careful");
+        let final_view = build_terminal_view(&ledger, &config, "/").expect("final Model view");
+        let mut display = TerminalSession::new("/model", 120, 24).expect("display session");
+        display
+            .controller
+            .activate(&mut config, ConfigScope::User, None)
+            .expect("open final Model selector");
+        let layout = display
+            .layout(Some(&config), &final_view)
+            .expect("final Model layout");
+        assert!(
+            layout
+                .body()
+                .iter()
+                .any(|row| row.text() == "next turn careful")
+        );
+        assert_ne!(
+            std::fs::read(&ledger).expect("reread Runtime Ledger"),
+            runtime_before
+        );
+        assert_eq!(
+            std::fs::read(&team_ledger).expect("reread Team Ledger"),
+            team_before
+        );
+        assert_eq!(
+            std::fs::read(&tool_ledger).expect("reread Tool Ledger"),
+            tool_before
+        );
+        assert_eq!(
+            std::fs::read(paths.user()).expect("reread Model config"),
+            config_before
+        );
+        std::fs::remove_dir_all(root).expect("remove model selection fixture");
+    }
+
+    #[test]
+    fn terminal_model_selection_without_current_agent_fails_without_creating_state() {
+        let root = terminal_test_root("model-selection-no-agent");
+        let ledger = root.join("runtime.ledger");
+        let paths = ConfigPaths::new(root.join("user.toml"), root.join("project.toml"));
+        std::fs::create_dir_all(&root).expect("create missing Agent fixture directory");
+        std::fs::write(
+            paths.user(),
+            r#"schema_version = 1
+
+[providers.edge]
+template = "openai"
+credential = "synthetic-missing-agent-credential-reference"
+
+[model_presets.fast]
+provider = "edge"
+model = "gpt-5.6-fast"
+dialect = "responses"
+"#,
+        )
+        .expect("write missing Agent config");
+        let mut config =
+            ConfigRuntime::open(paths.clone(), ConfigDocument::empty()).expect("Config Runtime");
+        let before = std::fs::read(paths.user()).expect("read missing Agent config");
+        let view = build_terminal_view(&ledger, &config, "/").expect("Model selector view");
+        let mut events = "model"
+            .chars()
+            .map(|character| {
+                Event::Key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
+            })
+            .collect::<VecDeque<_>>();
+        events.extend([
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL)),
+        ]);
+
+        let output = run_terminal_loop_with_snapshot_refresh(
+            Vec::new(),
+            FakeTerminalMode::default(),
+            &mut config,
+            &view,
+            &ledger,
+            Viewport::new(120, 24).expect("missing Agent viewport"),
+            move || Ok(events.pop_front().expect("bounded missing Agent events")),
+        )
+        .expect("missing Agent selection loop");
+        let output = String::from_utf8(output).expect("missing Agent VT output");
+
+        assert!(
+            output.contains("Current Agent is unavailable; start a Turn before selecting a Preset"),
+            "{output}"
+        );
+        assert!(!output.contains("synthetic-missing-agent-credential-reference"));
+        assert_eq!(
+            std::fs::read(paths.user()).expect("reread missing Agent config"),
+            before
+        );
+        assert!(!ledger.exists());
+        assert!(!terminal_sidecar_path(&ledger, "team").exists());
+        assert!(!terminal_sidecar_path(&ledger, "tool").exists());
+        std::fs::remove_dir_all(root).expect("remove missing Agent fixture");
     }
 
     #[test]

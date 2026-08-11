@@ -245,6 +245,14 @@ pub(crate) struct ModelSelectorEntryView {
     availability: Availability<bool>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum ModelEntryAction {
+    DetailChanged,
+    ApplyConfigured(ModelPresetView),
+    ReleaseUnavailable,
+    None,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ModelSelectorGroup {
@@ -393,6 +401,7 @@ impl ModelSelectorEntryView {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub(crate) struct ModelSelectorView {
+    pending: Option<String>,
     favorites: Vec<ModelSelectorEntryView>,
     recent: Availability<Vec<ModelSelectorEntryView>>,
     compatible: Availability<Vec<ModelSelectorEntryView>>,
@@ -442,6 +451,7 @@ impl ModelSelectorView {
             )
         };
         Ok(Self {
+            pending: None,
             favorites,
             recent: Availability::Unknown,
             compatible,
@@ -479,6 +489,7 @@ impl ModelSelectorView {
             Availability::Unknown => Availability::Unknown,
         };
         Self {
+            pending: self.pending.clone(),
             favorites,
             recent: Availability::Unknown,
             compatible,
@@ -652,8 +663,13 @@ impl TuiViewModel {
         sources: PresentationSources<'_>,
     ) -> Result<Self, PresentationError> {
         let slash = SlashPanelView::build(slash_query, selected)?;
-        let models =
+        let mut models =
             ModelSelectorView::build(sources.model_presets, sources.catalog_models, model_query)?;
+        models.pending = sources
+            .runtime
+            .pending_model_selection
+            .as_ref()
+            .map(|pending| pending.selection().preset_id().to_owned());
         let stats = sources
             .usage
             .cloned()
@@ -977,21 +993,33 @@ impl PresentationController {
         *detail = false;
     }
 
-    pub(crate) fn toggle_model_detail(&mut self, models: &ModelSelectorView) {
+    pub(crate) fn activate_model_entry(&mut self, models: &ModelSelectorView) -> ModelEntryAction {
         let PresentationState::ModelSelector {
             group,
             selected,
             detail,
-        } = &mut self.state
+        } = self.state
         else {
-            return;
+            return ModelEntryAction::None;
         };
         let filtered = models.filtered(&self.model_query);
-        if filtered
-            .group_entries(*group)
-            .is_some_and(|entries| entries.get(*selected).is_some())
-        {
-            *detail = !*detail;
+        let Some(entry) = filtered
+            .group_entries(group)
+            .and_then(|entries| entries.get(selected))
+        else {
+            return ModelEntryAction::None;
+        };
+        if !detail {
+            if let PresentationState::ModelSelector { detail, .. } = &mut self.state {
+                *detail = true;
+            }
+            return ModelEntryAction::DetailChanged;
+        }
+        match &entry.choice {
+            ModelSelectorChoiceView::ConfiguredPreset { preset } => {
+                ModelEntryAction::ApplyConfigured(preset.clone())
+            }
+            ModelSelectorChoiceView::ReleaseCatalog { .. } => ModelEntryAction::ReleaseUnavailable,
         }
     }
 
@@ -2333,6 +2361,13 @@ fn model_selector_rows(
     let mut rows = vec![
         LayoutRowView::new(format!("Models / {}", group.label()), false),
         LayoutRowView::new(format!("query {query}"), false),
+        LayoutRowView::new(
+            format!(
+                "next turn {}",
+                filtered.pending.as_deref().unwrap_or("unchanged")
+            ),
+            false,
+        ),
     ];
     let Some(entries) = filtered.group_entries(group) else {
         rows.push(LayoutRowView::new(
@@ -3303,6 +3338,7 @@ pub(crate) fn build_smoke_view(
         thread: None,
         items: Vec::new(),
         status: RecoveryStatus::Ready,
+        pending_model_selection: None,
         recovered_tail_bytes: 0,
     };
     let status = ConfigRuntimeStatus {
@@ -3538,11 +3574,12 @@ mod tests {
     use crate::provider_connection::{ProviderConnectionTestStatus, ProviderConnectionTester};
 
     use super::{
-        Availability, BlockerView, CostQuantityView, ModelSelectorGroup, ModelSelectorView,
-        PresentationController, PresentationControllerError, PresentationScreenView,
-        PresentationSources, PresentationState, RecoveryBadge, SlashPanelView, StatsGroup,
-        StatusSegmentKind, TuiViewModel, UsageQuantityView, UsageSummaryView, Viewport, cost_label,
-        display_width, fit_text, model_detail_rows, model_selector_rows, status_segments,
+        Availability, BlockerView, CostQuantityView, ModelEntryAction, ModelSelectorGroup,
+        ModelSelectorView, PresentationController, PresentationControllerError,
+        PresentationScreenView, PresentationSources, PresentationState, RecoveryBadge,
+        SlashPanelView, StatsGroup, StatusSegmentKind, TuiViewModel, UsageQuantityView,
+        UsageSummaryView, Viewport, cost_label, display_width, fit_text, model_detail_rows,
+        model_selector_rows, status_segments,
     };
 
     static NEXT_TEMP: AtomicU64 = AtomicU64::new(1);
@@ -3605,6 +3642,7 @@ source = "unknown"
             thread: Some(ThreadId::new(7).expect("thread")),
             items: Vec::new(),
             status,
+            pending_model_selection: None,
             recovered_tail_bytes: 0,
         }
     }
@@ -4183,6 +4221,7 @@ source = "unknown"
             vec![
                 "Models / Recent".to_owned(),
                 "query ".to_owned(),
+                "next turn unchanged".to_owned(),
                 "Recent unknown".to_owned(),
             ]
         );
@@ -4324,6 +4363,21 @@ credential = "synthetic-deepseek-credential-reference"
         assert!(detail.contains("availability ?"));
         assert!(detail.contains("seed 2026-08-10.2"));
         assert!(!detail.contains("synthetic-openai-credential-reference"));
+
+        let mut controller = PresentationController::new();
+        controller.state = PresentationState::ModelSelector {
+            group: ModelSelectorGroup::All,
+            selected: 0,
+            detail: false,
+        };
+        assert_eq!(
+            controller.activate_model_entry(&selector),
+            ModelEntryAction::DetailChanged
+        );
+        assert_eq!(
+            controller.activate_model_entry(&selector),
+            ModelEntryAction::ReleaseUnavailable
+        );
 
         let deepseek = ModelSelectorView::build(&[], &catalog_models, "deepseek-v4-pro")
             .expect("catalog model with DeepSeek Chat adapter");

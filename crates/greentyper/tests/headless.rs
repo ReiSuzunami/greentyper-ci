@@ -1,18 +1,22 @@
+use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use greentyper_core::config::ConfigLayers;
+use greentyper_core::config::{
+    ConfigDocument, ConfigEpoch, ConfigLayers, ConfigPaths, ConfigRuntime,
+};
+use greentyper_core::model::ConfigEpochId;
 use greentyper_core::pricing::{
     PriceSchedule, PriceScheduleBook, PriceScheduleDefinition, PriceScheduleSource, TokenRates,
 };
 use greentyper_core::provider::{
-    DeterministicProvider, ProviderError, ProviderEvent, ProviderRequest, ProviderRuntime,
-    UsageRecord,
+    DeterministicProvider, ProviderDialect, ProviderError, ProviderEvent, ProviderRequest,
+    ProviderRuntime, UsageRecord,
 };
-use greentyper_core::runtime::RuntimeKernel;
+use greentyper_core::runtime::{ModelSelection, RuntimeKernel};
 use greentyper_core::usage::UsageTimestamp;
 
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(1);
@@ -65,6 +69,13 @@ fn user_config_path(config_root: &Path) -> PathBuf {
     {
         config_root.join("greentyper").join("config.toml")
     }
+}
+
+fn sidecar_path(runtime: &Path, kind: &str) -> PathBuf {
+    let mut path = OsString::from(runtime.as_os_str());
+    path.push(".");
+    path.push(kind);
+    PathBuf::from(path)
 }
 
 #[test]
@@ -527,6 +538,154 @@ max_output_tokens = 2048
     assert!(!ledger.exists());
 
     fs::remove_dir_all(config_root).expect("cleanup config root");
+}
+
+#[test]
+fn headless_uses_pending_current_agent_preset_and_preserves_it_on_preflight_failure() {
+    let ledger = temp_path("pending-model-selection");
+    let config_root = temp_path("pending-model-selection-config");
+    let config_path = user_config_path(&config_root);
+    fs::create_dir_all(config_path.parent().unwrap()).expect("create config parent");
+    fs::write(
+        &config_path,
+        r#"schema_version = 1
+
+[providers.edge]
+template = "openai-compatible"
+credential = "edge-credential"
+base_url = "https://provider.invalid/v1"
+dialects = ["responses"]
+
+[providers.edge.routes]
+responses = "/responses"
+
+[providers.edge.pricing]
+source = "unknown"
+
+[model_presets.fast]
+provider = "edge"
+model = "gpt-5.6-fast"
+dialect = "responses"
+max_output_tokens = 2048
+
+[model_presets.careful]
+provider = "edge"
+model = "gpt-5.6-careful"
+dialect = "responses"
+"#,
+    )
+    .expect("write pending Preset config");
+
+    let initial = binary_with_config_root(&config_root)
+        .current_dir(&config_root)
+        .args(["headless", "--tool", "local.echo", "--ledger"])
+        .arg(&ledger)
+        .args(["--input", "create current Agent"])
+        .output()
+        .expect("create Product state");
+    assert!(initial.status.success(), "{initial:?}");
+
+    let paths = ConfigPaths::new(
+        config_path.clone(),
+        config_root.join(".greentyper").join("config.toml"),
+    );
+    let config = ConfigRuntime::open(paths, ConfigDocument::empty()).expect("open Config");
+    let preset = config.model_preset("fast").expect("resolve fast Preset");
+    let mut layers = config.config_layers().expect("Config layers").clone();
+    layers.cli.provider_profile = Some(preset.provider.clone());
+    layers.cli.provider_model = Some(preset.model.clone());
+    layers.cli.max_output_tokens = preset.max_output_tokens;
+    layers.cli.reasoning_effort = preset.reasoning_effort;
+    layers.cli.service_tier = preset.service_tier;
+    let usage_windows = config.resolved_usage_windows().expect("Usage Windows");
+    let price_schedules = config.resolved_price_schedules().expect("Price Schedules");
+    let config_epoch = ConfigEpoch::freeze_with_observability(
+        ConfigEpochId::new(1).expect("Config Epoch ID"),
+        &layers,
+        usage_windows,
+        price_schedules,
+    )
+    .expect("freeze selected Config");
+    let selection = ModelSelection::new(
+        preset.id,
+        config_epoch.fingerprint(),
+        preset.provider,
+        preset.model,
+        ProviderDialect::Responses,
+    )
+    .expect("build pending selection");
+    let team_path = sidecar_path(&ledger, "team");
+    let tool_path = sidecar_path(&ledger, "tool");
+    let (mut kernel, recovery) =
+        RuntimeKernel::open_with_team_and_tools(&ledger, &team_path, &tool_path, 1)
+            .expect("open Product state");
+    let mut sessions = recovery.into_sessions();
+    assert_eq!(sessions.len(), 1);
+    kernel
+        .stage_model_selection(sessions.pop().expect("current Agent"), selection.clone())
+        .expect("stage pending selection");
+    drop(kernel);
+
+    let ledger_paths = [&ledger, &team_path, &tool_path];
+    let before = ledger_paths
+        .iter()
+        .map(|path| fs::read(path).expect("read Product Ledger"))
+        .collect::<Vec<_>>();
+    let automatic = binary_with_config_root(&config_root)
+        .current_dir(&config_root)
+        .args(["headless", "--ledger"])
+        .arg(&ledger)
+        .args(["--input", "use pending Preset"])
+        .output()
+        .expect("run pending Preset");
+    assert!(!automatic.status.success(), "{automatic:?}");
+    let stderr = String::from_utf8_lossy(&automatic.stderr);
+    assert!(
+        stderr.contains("Provider credential binding was not found")
+            || stderr.contains("provider unavailable"),
+        "{automatic:?}"
+    );
+    assert_eq!(
+        ledger_paths
+            .iter()
+            .map(|path| fs::read(path).expect("reread Product Ledger"))
+            .collect::<Vec<_>>(),
+        before
+    );
+    assert_eq!(
+        RuntimeKernel::inspect(&ledger)
+            .expect("inspect preserved selection")
+            .pending_model_selection
+            .expect("selection survives preflight")
+            .selection(),
+        &selection
+    );
+
+    let conflicting = binary_with_config_root(&config_root)
+        .current_dir(&config_root)
+        .args(["headless", "--preset", "careful", "--ledger"])
+        .arg(&ledger)
+        .args(["--input", "reject conflict"])
+        .output()
+        .expect("run conflicting Preset");
+    assert!(!conflicting.status.success(), "{conflicting:?}");
+    assert!(
+        String::from_utf8_lossy(&conflicting.stderr)
+            .contains("explicit Preset conflicts with the pending current-Agent selection"),
+        "{conflicting:?}"
+    );
+    assert_eq!(
+        ledger_paths
+            .iter()
+            .map(|path| fs::read(path).expect("reread Product Ledger after conflict"))
+            .collect::<Vec<_>>(),
+        before
+    );
+
+    fs::remove_file(ledger).expect("cleanup Runtime Ledger");
+    fs::remove_file(team_path).expect("cleanup Team Ledger");
+    fs::remove_file(tool_path).expect("cleanup Tool Ledger");
+    fs::remove_dir_all(config_root).expect("cleanup Config root");
 }
 
 #[test]

@@ -187,7 +187,7 @@ Flash, maps `max_output_tokens` plus `reasoning.effort` values `low`, `high`, an
 continuation reconstructs bounded input items instead of using
 `previous_response_id`. Reasoning text is bounded and transition-validated by
 the dialect decoder but is not projected as visible output or persisted raw.
-Runtime Event schema 8 freezes the selected Preset's optional output-token
+Runtime Event schema 9 freezes the selected Preset's optional output-token
 limit, typed reasoning effort, and typed service tier in the Config Epoch.
 OpenAI Responses sends reasoning as `reasoning.effort`, OpenAI Chat Completions
 sends `reasoning_effort`, and both send `service_tier`; their output-token
@@ -300,8 +300,8 @@ numeric and TOML-list input is buffered until it parses atomically. Existing
 Preset field routes use the same selector and Draft. Tests commit and reopen
 required and optional values. Missing references, fallback cycles, invalid
 limits, and revision conflicts keep the Draft live for repair or explicit
-discard. This is manual preset definition and editing, not interactive `/model`
-application or starter-preset installation.
+discard. This form defines and edits Presets; the separate `/model` flow applies
+a configured Preset. Starter-preset installation remains unavailable.
 `/config stats-window add` now prompts for a bounded Usage Window ID and moves
 across start, end, weekday-list, and IANA-time-zone fields in one user-scope
 Draft. Each input is bounded to 512 bytes. The weekday list accepts a TOML
@@ -323,15 +323,22 @@ previews, a second Enter CAS-commits, and tests reopen the resolved schedule.
 Invalid selector ranges, effective intervals, provenance, and stale revisions
 retain the Draft for repair or explicit discard. This does not rebuild the
 running TUI's frozen Price Schedule book or add rich cost presentation.
-`/model` now opens a read-only browser over the latest successful local snapshot
-of configured Presets and release-catalog candidates. Character input filters
-the snapshot, Tab and
+`/model` now opens a browser over the latest successful local snapshot of
+configured Presets and release-catalog candidates. Character input filters the
+snapshot, Tab and
 Shift-Tab move across Favorites, Recent, Compatible, and All, Up/Down move the
-selection, and Enter opens bounded source and capability detail. Recent and
-live availability stay explicitly unknown when no trusted fact exists. The
-browser never reads credentials, probes a Provider, writes Config or Ledger
-state, or applies a Preset to an Agent; current-Agent next-Turn application
-remains pending.
+selection, and Enter opens bounded source and capability detail. A second Enter
+on a configured Preset durably selects it for the existing current Agent's next
+Turn; the pending ID is visible and another configured Preset replaces it.
+Release-catalog candidates remain detail-only and are never installed or
+executed implicitly. Selection authenticates the recovered Active Agent Session,
+writes no Config, reads no credential, and performs no Provider request. The
+next headless Turn without an explicit Preset resolves the exact pending ID,
+rechecks its Config fingerprint and identity, and consumes the selection in the
+same admission transaction that freezes Config and Provider Epochs. Config
+drift, an explicit conflicting Preset, missing credentials, or unsupported
+Provider policy fails before Provider execution and preserves the pending
+selection. Running child Agents are unchanged.
 `/stats` now browses the latest successful Usage snapshot. It shows 1-hour, 1-day,
 and 7-day summaries. Tab and Shift-Tab move across Attempts, current Thread,
 Agent, Team, Named Window, and Token & Cache groups; Up/Down selects a row and
@@ -363,7 +370,7 @@ workflow, or persistent live catalog discovery. Live inference conformance,
 reconnect/retry, OpenCode Go Messages execution,
 Messages reasoning blocks, Preset context/fallback execution, richer approval
 presentation, broader Provider and Tool adapters,
-Workspace, current-Agent Preset application, dedicated Turn Usage navigation,
+Workspace, project/new-Agent Preset defaults, dedicated Turn Usage navigation,
 richer cache distributions, Agent lifecycle actions, and App
 Server work remain. The loopback Provider tracer remains
 an internal harness; `local.echo` is intentionally a fixed opt-in command rather

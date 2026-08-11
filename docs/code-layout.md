@@ -64,16 +64,19 @@ until it can be parsed atomically.
 The fourth creates manual Price Schedules across all 17 schema fields while
 keeping partial non-negative-integer input local until it can be parsed
 atomically.
-The same private terminal composition now owns read-only `/model`, `/stats`, and
-`/agent` browsers over local Config Catalog, Usage, and strict Team-sidecar
-projections. They provide bounded query/group/row/detail navigation without
-Config, Ledger, Provider, credential, or Agent mutation. Team inspection uses a
+The same private terminal composition now owns `/model`, `/stats`, and `/agent`
+browsers over local Config Catalog, Usage, and strict Team-sidecar projections.
+All provide bounded query/group/row/detail navigation. Stats and Agent browsing
+remain read-only. On configured Model detail, a second Enter may stage one
+bounded Runtime selection for the authenticated current Agent's next Turn; it
+does not mutate Config, contact a Provider, read credentials, or affect child
+Agents. Team inspection uses a
 shared lock, never creates or repairs state, exposes no Agent Session authority,
 and fails closed on corruption or incomplete Product sidecars. F6 or Ctrl-R
 replaces the local snapshot only after all independent reads succeed and
 preserves the prior Config runtime and view on failure; it does not claim a
 cross-Ledger transactional instant, and there is no background polling.
-Current-Agent Preset application,
+Project/new-Agent Preset defaults,
 dedicated Turn Usage aggregates, richer cache
 distributions, and Agent lifecycle actions remain outside that browser boundary.
 Section-filtered typed remove

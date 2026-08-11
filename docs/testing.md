@@ -165,7 +165,8 @@ effort, service tier, and distinct template-mirror pricing provenance while
 rejecting fingerprint, outcome, timestamp, and transition tampering. A schema-5
 Config Epoch without the optional token field, a schema-6 Config Epoch without
 request-policy fields, and a schema-7 Config Epoch without template-mirror tags
-remain replayable under current Runtime Event schema 8.
+remain replayable under current Runtime Event schema 9; schema 8 Ledgers remain
+compatible before the schema-9 Model-selection event is appended.
 
 Product integration tests also run the configured Responses, Chat Completions,
 and Messages adapters against concrete loopback HTTP tracers. They resolve and
@@ -356,15 +357,25 @@ context mode, favorite, and fallback list. It previews, commits, reopens, and
 checks every optional value. A recovery test leaves the Draft live when model is
 missing, repairs it, then proves a competing revision cannot be overwritten,
 dirty quit is blocked, and explicit discard preserves the winner. Schema tests
-pin every Model Preset interaction and parseable choice. These tests do not prove
-interactive `/model` application, starter acceptance, or live catalog refresh.
+pin every Model Preset interaction and parseable choice. These Config-editor
+tests do not prove starter acceptance or live catalog refresh.
 A real-key loop now opens `/model`, filters configured Presets, moves to the
 Favorites group, opens the selected detail, redraws after resize, and proves
 Config bytes and the absent Ledger remain unchanged. Projection tests separately
 freeze explicit unknown Recent and live availability, release compatibility and
-provenance detail, and credential-reference redaction. These tests prove the
-read-only browser, not current-Agent next-Turn application or Provider-backed
-catalog discovery.
+provenance detail, and credential-reference redaction. A second real-key flow
+opens configured detail, stages `fast`, replaces it with `careful`, renders the
+pending next-Turn ID, and proves Config plus Team and Tool Ledgers are unchanged
+while the Runtime Ledger gains the selection Event. Missing current-Agent state
+creates no files; a release-catalog detail returns an unavailable action. Core
+recovery tests prove stale Session rejection, replacement, shared read-only
+inspection, and restart persistence. Product tests prove Config drift makes no
+Provider call or Ledger write, then exact admission consumes one selection and
+freezes the expected Provider Epoch. Headless integration proves automatic
+pending-ID resolution plus credential-preflight and explicit-ID-conflict
+failure preserve all three Ledger byte streams. These tests do not prove
+Provider-backed catalog discovery, starter acceptance, project/new-Agent
+defaults, context-mode execution, or fallback execution.
 A real-key loop now carries `/config stats-window add` through its bounded ID
 prompt and start/end/days/time-zone fields, previews, commits, and reopens the
 resolved window. Focused tests prove all four schema fields expose 512-byte text
@@ -447,7 +458,7 @@ read-only `config catalog` integration test proves the snapshot contains no
 local path or credential reference.
 
 Remaining terminal-backend evidence covers real terminal/ConPTY resize and input,
-current-Agent Preset application, dedicated Turn Usage navigation, richer cache
+project/new-Agent Preset defaults, dedicated Turn Usage navigation, richer cache
 distributions, Agent Center lifecycle actions, background refresh, approval/blocker
 actions, panic-abort cleanup, final host cell
 geometry, and input-ready/idle resource budgets.

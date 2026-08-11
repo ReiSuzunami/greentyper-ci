@@ -127,13 +127,13 @@ existing durable Tool approval/effect state machine, feeds one successful UTF-8
 result into a Provider continuation, and durably prepares combined canonical
 output. Recovery tests prove stale Sessions cannot invoke the Provider,
 ambiguous effects cannot continue, and process death after a durable Tool
-success blocks rather than repeating the effect. Runtime Event schema 8 stores
+success blocks rather than repeating the effect. Runtime Event schema 9 stores
 durable Usage Attempt boundaries, frozen Usage Windows, Provider dialect, the
 expanded optional Usage Records, frozen Provider Profile snapshot, and the
 subsequent frozen Price Schedule cost evaluation plus an optional selected-Preset
-output-token limit, typed reasoning/service-tier policy, and distinct
-template-mirror pricing provenance while replaying historical schema 1 through
-schema 7.
+output-token limit, typed reasoning/service-tier policy, distinct template-mirror
+pricing provenance, and pending current-Agent Model selection while replaying
+historical schema 1 through schema 8.
 
 A product-private `local.echo` tracer now exercises the concrete process seam.
 It launches a fixed same-binary child without a shell, clears inherited
@@ -210,7 +210,7 @@ Exit criteria:
 
 Add VT/ConPTY TUI, hierarchical Command Paths, global command palette, Config Schema-driven editors, Provider wizard, model selector, adaptive statusline, Context Pressure, Usage Records/Rollups, `/stats`, and named Usage Windows.
 
-The first observability slice is implemented. Runtime Event schema 8 durably
+The first observability slice is implemented. Runtime Event schema 9 durably
 brackets each Provider request and continuation with an immutable Usage Attempt,
 including UTC start/completion, outcome, Agent scope when present, frozen
 Provider Profile/model/dialect, exact or estimated Usage Records, and explicit
@@ -356,8 +356,8 @@ Draft. Provider, model, and dialect remain required; reasoning effort, service
 tier, maximum output tokens, context mode, favorite, and fallback list are
 optional. Preview, CAS commit, cross-reference/cycle validation, stale-revision
 retention, explicit discard, and reopen persistence use the same terminal-neutral
-editor path. It does not implement interactive `/model` application, starter
-acceptance, or live catalog data.
+editor path. Application is a separate `/model` action; starter acceptance and
+live catalog data remain outside the form.
 `/config stats-window add` now supplies a third rendered object-name workflow.
 It collects a bounded ID plus start, end, weekday-list, and IANA-time-zone text
 in one schema-driven Draft. Structured weekday input is visibly buffered until
@@ -376,13 +376,18 @@ domain-validation repair, stale-revision retention, dirty-quit blocking, and
 explicit discard without overwriting the winner. This slice does not rebuild
 the frozen pricing book, ingest provider-reported charges, or add rich cost
 presentation.
-The root `/model` route now supplies a read-only Direct VT browser over the
-latest successful configured-Preset and release-catalog projection. It supports
+The root `/model` route now supplies a Direct VT browser over the latest
+successful configured-Preset and release-catalog projection. It supports
 bounded
 fuzzy query input, Favorites/Recent/Compatible/All groups, selected-row
 navigation, and source-tagged detail while preserving explicit unknown Recent
-and availability facts. It performs no Provider request, credential lookup,
-Config or Ledger write, or current-Agent application.
+and availability facts. A second Enter on configured detail stages a bounded,
+Session-authenticated Runtime Event for the current Agent's next Turn; the
+pending ID is visible and replaceable. Release rows remain detail-only. The next
+headless admission rechecks the exact Preset and Config fingerprint, consumes the
+selection atomically with Config/Provider freeze, and leaves it pending on
+preflight failure. Selection performs no Config write, credential lookup,
+Provider request, child-Agent mutation, or authority grant.
 The root `/stats` route now supplies a read-only browser over the latest
 successful Usage projection. It renders rolling 1-hour, 1-day, and 7-day
 summaries and
@@ -417,7 +422,7 @@ discovery and Recent
 evidence, automatic Context View/token-source
 projection, provider-reported
 charge and subscription-quota accounting, richer observed Provider metadata,
-current-Agent Preset application, dedicated Turn Usage navigation, richer cache
+project/new-Agent Preset defaults, dedicated Turn Usage navigation, richer cache
 distributions, Agent lifecycle actions, and the P0/P1/P2/P6
 performance evidence remain pending.
 
@@ -449,9 +454,10 @@ OpenAI Responses and Chat map the supported request fields. DeepSeek Responses
 maps its supported reasoning effort and rejects service tier, while DeepSeek
 Chat/Messages reject both unsupported policy fields before network I/O. Flash
 keeps a preferred Responses dialect and Pro resolves that preference to Chat
-before admission. Current-Agent Preset application, context mode, and general
-fallback execution are still pending; the rendered `/model` surface is
-currently a read-only browser.
+before admission. Configured Presets can now be staged from `/model` for the
+existing current Agent's next Turn and are consumed at durable admission.
+Project/new-Agent defaults, context mode, general fallback execution, starter
+acceptance, and live discovery remain pending.
 
 Exit criteria:
 

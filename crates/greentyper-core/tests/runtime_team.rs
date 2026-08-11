@@ -9,7 +9,8 @@ use greentyper_core::agent_team::{
     TeamError, TeamOperationAcknowledgeOutcome, TeamOperationStatus,
 };
 use greentyper_core::ledger::LedgerError;
-use greentyper_core::runtime::{RuntimeError, RuntimeKernel};
+use greentyper_core::provider::ProviderDialect;
+use greentyper_core::runtime::{ModelSelection, RecoveryStatus, RuntimeError, RuntimeKernel};
 
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(1);
 
@@ -69,6 +70,98 @@ fn session_for_test(sessions: &[AgentSession], agent: AgentSession) -> AgentSess
         .copied()
         .find(|session| session.agent() == agent.agent())
         .expect("Kernel automatically rebound the persisted owner")
+}
+
+#[test]
+fn current_agent_model_selection_is_durable_replaceable_and_session_bound() {
+    let runtime_path = temp_path("model-selection", "runtime");
+    let team_path = temp_path("model-selection", "team");
+    let tool_path = temp_path("model-selection", "tool");
+    let (mut kernel, initial_recovery) =
+        RuntimeKernel::open_with_team_and_tools(&runtime_path, &team_path, &tool_path, 1)
+            .expect("open Product Kernel");
+    assert!(initial_recovery.into_sessions().is_empty());
+    let root = root_session(
+        dispatch_and_acknowledge(
+            &mut kernel,
+            TeamCommand::AdmitRoot {
+                task: root_spec(),
+                budget: root_budget(),
+                capabilities: root_capabilities(),
+            },
+        )
+        .expect("admit current Agent"),
+    );
+    let first = ModelSelection::new(
+        "fast",
+        11,
+        "edge",
+        "gpt-5.6-fast",
+        ProviderDialect::Responses,
+    )
+    .expect("valid Model selection");
+    kernel
+        .stage_model_selection(root, first.clone())
+        .expect("persist Model selection");
+    assert_eq!(kernel.snapshot().status, RecoveryStatus::Ready);
+    assert_eq!(
+        kernel
+            .pending_model_selection()
+            .expect("pending selection")
+            .selection(),
+        &first
+    );
+    drop(kernel);
+
+    let inspected = RuntimeKernel::inspect(&runtime_path).expect("inspect Runtime selection");
+    let pending = inspected
+        .pending_model_selection
+        .expect("inspected pending selection");
+    assert_eq!(pending.agent(), root.agent());
+    assert_eq!(pending.selection(), &first);
+
+    let (mut recovered, recovery) =
+        RuntimeKernel::open_with_team_and_tools(&runtime_path, &team_path, &tool_path, 1)
+            .expect("reopen Product Kernel");
+    let sessions = recovery.into_sessions();
+    let fresh_root = session_for_test(&sessions, root);
+    let before_rejection = fs::read(&runtime_path).expect("read Runtime Ledger");
+    assert!(matches!(
+        recovered.stage_model_selection(root, first),
+        Err(RuntimeError::Team(DurableTeamError::Team(
+            TeamError::InvalidAgentSession { agent }
+        ))) if agent == root.agent()
+    ));
+    assert_eq!(
+        fs::read(&runtime_path).expect("reread Runtime Ledger"),
+        before_rejection
+    );
+
+    let replacement = ModelSelection::new(
+        "careful",
+        22,
+        "edge",
+        "gpt-5.6-careful",
+        ProviderDialect::ChatCompletions,
+    )
+    .expect("valid replacement selection");
+    recovered
+        .stage_model_selection(fresh_root, replacement.clone())
+        .expect("replace Model selection");
+    drop(recovered);
+
+    let final_snapshot = RuntimeKernel::inspect(&runtime_path).expect("inspect replacement");
+    assert_eq!(
+        final_snapshot
+            .pending_model_selection
+            .expect("replacement selection")
+            .selection(),
+        &replacement
+    );
+
+    fs::remove_file(runtime_path).expect("cleanup Runtime Ledger");
+    fs::remove_file(team_path).expect("cleanup Team Ledger");
+    fs::remove_file(tool_path).expect("cleanup Tool Ledger");
 }
 
 #[test]

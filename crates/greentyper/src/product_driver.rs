@@ -13,15 +13,15 @@ use greentyper_core::agent_team::{
     DurableTeamRuntime, ResourceBudget, TaskScope, TaskSpec, TeamCommand, TeamOperationRecord,
     TeamOperationStatus,
 };
-use greentyper_core::config::ConfigLayers;
-use greentyper_core::ledger::LedgerHead;
-use greentyper_core::model::DeliveryId;
+use greentyper_core::config::{ConfigEpoch, ConfigLayers, ModelPresetView};
+use greentyper_core::ledger::{DurabilityReceipt, LedgerHead};
+use greentyper_core::model::{ConfigEpochId, DeliveryId};
 use greentyper_core::pricing::PriceScheduleBook;
 use greentyper_core::provider::{ProviderEpoch, ProviderRuntime};
 #[cfg(test)]
 use greentyper_core::runtime::RuntimeSnapshot;
 use greentyper_core::runtime::{
-    AcknowledgeOutcome, KernelTeamSnapshot, PreparedOutput, ProviderToolApproval,
+    AcknowledgeOutcome, KernelTeamSnapshot, ModelSelection, PreparedOutput, ProviderToolApproval,
     ProviderTurnOutcome, RuntimeError, RuntimeKernel,
 };
 use greentyper_core::tool_runtime::{
@@ -45,6 +45,40 @@ pub(crate) trait ProductInteraction {
 pub(crate) enum ProductToolDecision {
     Approve,
     Deny,
+}
+
+pub(crate) fn apply_model_preset_to_next_turn(
+    layers: &mut ConfigLayers,
+    preset: &ModelPresetView,
+) -> greentyper_core::provider::ProviderDialect {
+    layers.cli.provider_profile = Some(preset.provider.clone());
+    layers.cli.provider_model = Some(preset.model.clone());
+    layers.cli.max_output_tokens = preset.max_output_tokens;
+    layers.cli.reasoning_effort = preset.reasoning_effort;
+    layers.cli.service_tier = preset.service_tier;
+    preset.dialect
+}
+
+pub(crate) fn freeze_model_selection(
+    layers: &ConfigLayers,
+    usage_windows: &[UsageWindow],
+    price_schedules: &PriceScheduleBook,
+    preset: &ModelPresetView,
+) -> Result<ModelSelection, RuntimeError> {
+    let epoch = ConfigEpoch::freeze_with_observability(
+        ConfigEpochId::new(1).expect("one is a valid Config Epoch ID"),
+        layers,
+        usage_windows.to_vec(),
+        price_schedules.clone(),
+    )
+    .map_err(RuntimeError::Config)?;
+    ModelSelection::new(
+        preset.id.clone(),
+        epoch.fingerprint(),
+        preset.provider.clone(),
+        preset.model.clone(),
+        preset.dialect,
+    )
 }
 
 pub(crate) struct ProductDriver<E> {
@@ -222,6 +256,35 @@ pub(crate) fn has_product_driver_state(runtime_path: &Path) -> Result<bool, Prod
     }
 }
 
+pub(crate) fn stage_product_model_selection(
+    runtime_path: &Path,
+    selection: ModelSelection,
+) -> Result<DurabilityReceipt, ProductDriverError> {
+    if !path_entry_exists(runtime_path)? || !has_product_driver_state(runtime_path)? {
+        return Err(ProductDriverError::CurrentAgentUnavailable);
+    }
+    let team =
+        inspect_product_team(runtime_path)?.ok_or(ProductDriverError::CurrentAgentUnavailable)?;
+    if team.projection.active_agent_count() != 1 {
+        return Err(ProductDriverError::CurrentAgentUnavailable);
+    }
+    let team_path = sidecar_path(runtime_path, "team");
+    let tool_path = sidecar_path(runtime_path, "tool");
+    let (mut kernel, recovery) =
+        RuntimeKernel::open_with_team_and_tools(runtime_path, team_path, tool_path, 1)?;
+    let mut sessions = recovery.into_sessions();
+    let session = match sessions.len() {
+        1 => sessions
+            .pop()
+            .ok_or(ProductDriverError::UnexpectedRecovery)?,
+        0 => return Err(ProductDriverError::CurrentAgentUnavailable),
+        _ => return Err(ProductDriverError::UnexpectedRecovery),
+    };
+    kernel
+        .stage_model_selection(session, selection)
+        .map_err(ProductDriverError::Runtime)
+}
+
 fn path_entry_exists(path: &Path) -> Result<bool, ProductDriverError> {
     match fs::symlink_metadata(path) {
         Ok(_) => Ok(true),
@@ -354,6 +417,7 @@ pub(crate) enum ProductDriverError {
     Team(DurableTeamError),
     Tool(ToolRuntimeError),
     IncompleteState,
+    CurrentAgentUnavailable,
     ToolStateUnavailable,
     UnknownToolCall(u64),
     ToolOwnerUnavailable(u64),
@@ -370,6 +434,12 @@ impl fmt::Display for ProductDriverError {
             Self::Tool(source) => write!(formatter, "{source}"),
             Self::IncompleteState => {
                 write!(formatter, "Product driver sidecar state is incomplete")
+            }
+            Self::CurrentAgentUnavailable => {
+                write!(
+                    formatter,
+                    "current Agent is unavailable for Model selection"
+                )
             }
             Self::ToolStateUnavailable => {
                 write!(formatter, "Product Tool state is unavailable")
@@ -393,6 +463,7 @@ impl Error for ProductDriverError {
             Self::Team(source) => Some(source),
             Self::Tool(source) => Some(source),
             Self::IncompleteState
+            | Self::CurrentAgentUnavailable
             | Self::ToolStateUnavailable
             | Self::UnknownToolCall(_)
             | Self::ToolOwnerUnavailable(_)
@@ -418,11 +489,13 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use greentyper_core::agent_team::TeamOperationRecord;
-    use greentyper_core::config::ConfigLayers;
-    use greentyper_core::config::ConfigRuntimeStatus;
+    use greentyper_core::config::{
+        ConfigDocument, ConfigLayers, ConfigPaths, ConfigRuntime, ConfigRuntimeStatus,
+        ModelPresetView, ReasoningEffort, ServiceTier,
+    };
     use greentyper_core::provider::{
-        ProviderError, ProviderEvent, ProviderRequest, ProviderRuntime, ProviderToolCall,
-        ProviderToolOutput, UsageRecord,
+        ProviderError, ProviderEvent, ProviderProfileSnapshot, ProviderRequest, ProviderRuntime,
+        ProviderToolCall, ProviderToolOutput, UsageRecord,
     };
     use greentyper_core::runtime::{ProviderToolApproval, RecoveryStatus};
     use greentyper_core::tool_runtime::{AuthorizedToolCall, ToolEffectExecutor, ToolExecution};
@@ -431,6 +504,238 @@ mod tests {
     use crate::presentation::{BlockerView, PresentationSources, TuiViewModel};
 
     static NEXT_TEMP: AtomicU64 = AtomicU64::new(1);
+
+    #[test]
+    fn model_preset_overlay_is_exact_and_clears_absent_optional_policy() {
+        let mut layers = ConfigLayers::default();
+        layers.cli.provider_profile = Some("old-profile".into());
+        layers.cli.provider_model = Some("old-model".into());
+        layers.cli.max_output_tokens = Some(4096);
+        layers.cli.reasoning_effort = Some(ReasoningEffort::High);
+        layers.cli.service_tier = Some(ServiceTier::Priority);
+        let preset = ModelPresetView {
+            id: "fast".into(),
+            provider: "edge".into(),
+            model: "gpt-5.6-fast".into(),
+            dialect: greentyper_core::provider::ProviderDialect::ChatCompletions,
+            reasoning_effort: None,
+            service_tier: None,
+            max_output_tokens: None,
+            context_mode: Some("compact".into()),
+            favorite: true,
+            fallback: vec!["careful".into()],
+        };
+
+        let dialect = apply_model_preset_to_next_turn(&mut layers, &preset);
+        let resolved = layers.resolve().expect("resolve overlaid Config");
+
+        assert_eq!(dialect, preset.dialect);
+        assert_eq!(resolved.provider_profile().value(), "edge");
+        assert_eq!(resolved.provider_model().value(), "gpt-5.6-fast");
+        assert!(resolved.max_output_tokens().is_none());
+        assert!(resolved.reasoning_effort().is_none());
+        assert!(resolved.service_tier().is_none());
+        assert_eq!(preset.context_mode.as_deref(), Some("compact"));
+        assert_eq!(preset.fallback, ["careful"]);
+    }
+
+    #[test]
+    fn staged_model_preset_is_consumed_by_exactly_one_current_agent_turn() {
+        let missing = temp_path("model-selection-missing");
+        let preset = ModelPresetView {
+            id: "fast".into(),
+            provider: "edge".into(),
+            model: "gpt-5.6-fast".into(),
+            dialect: greentyper_core::provider::ProviderDialect::Responses,
+            reasoning_effort: Some(ReasoningEffort::Low),
+            service_tier: Some(ServiceTier::Fast),
+            max_output_tokens: Some(2048),
+            context_mode: None,
+            favorite: true,
+            fallback: Vec::new(),
+        };
+        let mut missing_layers = ConfigLayers::default();
+        apply_model_preset_to_next_turn(&mut missing_layers, &preset);
+        let missing_selection =
+            freeze_model_selection(&missing_layers, &[], &PriceScheduleBook::default(), &preset)
+                .expect("freeze missing-state selection");
+        assert!(matches!(
+            stage_product_model_selection(&missing, missing_selection),
+            Err(ProductDriverError::CurrentAgentUnavailable)
+        ));
+        assert!(!missing.exists());
+        assert!(!sidecar_path(&missing, "team").exists());
+        assert!(!sidecar_path(&missing, "tool").exists());
+
+        let inactive = temp_path("model-selection-inactive");
+        let inactive_team = sidecar_path(&inactive, "team");
+        let inactive_tool = sidecar_path(&inactive, "tool");
+        drop(
+            RuntimeKernel::open_with_team_and_tools(&inactive, &inactive_team, &inactive_tool, 1)
+                .expect("create inactive Product state"),
+        );
+        let inactive_paths = [&inactive, &inactive_team, &inactive_tool];
+        let inactive_before = inactive_paths
+            .iter()
+            .map(|path| fs::read(path).expect("read inactive Product Ledger"))
+            .collect::<Vec<_>>();
+        assert!(matches!(
+            stage_product_model_selection(
+                &inactive,
+                freeze_model_selection(
+                    &missing_layers,
+                    &[],
+                    &PriceScheduleBook::default(),
+                    &preset,
+                )
+                .expect("freeze inactive selection"),
+            ),
+            Err(ProductDriverError::CurrentAgentUnavailable)
+        ));
+        assert_eq!(
+            inactive_paths
+                .iter()
+                .map(|path| fs::read(path).expect("reread inactive Product Ledger"))
+                .collect::<Vec<_>>(),
+            inactive_before
+        );
+        cleanup(&inactive);
+
+        let ledger = temp_path("model-selection-turn");
+        let config_root = temp_path("model-selection-config");
+        fs::create_dir_all(&config_root).expect("create Config root");
+        let paths = ConfigPaths::new(
+            config_root.join("user.toml"),
+            config_root.join("project.toml"),
+        );
+        fs::write(
+            paths.user(),
+            r#"schema_version = 1
+
+[providers.edge]
+template = "openai-compatible"
+credential = "synthetic-reference"
+base_url = "https://gateway.example.com/v1"
+dialects = ["responses"]
+
+[providers.edge.routes]
+responses = "/responses"
+
+[providers.edge.pricing]
+source = "unknown"
+"#,
+        )
+        .expect("write Provider config");
+        let config = ConfigRuntime::open(paths, ConfigDocument::empty()).expect("open Config");
+        let profile = config
+            .provider_profile("edge")
+            .expect("resolve Provider Profile")
+            .expect("configured Provider Profile");
+        let mut layers = config.config_layers().expect("Config layers").clone();
+        apply_model_preset_to_next_turn(&mut layers, &preset);
+        let selection =
+            freeze_model_selection(&layers, &[], &PriceScheduleBook::default(), &preset)
+                .expect("freeze selection");
+
+        let calls = Rc::new(Cell::new(0));
+        let mut interaction = RecordingInteraction::approve();
+        let driver = ProductDriver::open_with_executor(
+            &ledger,
+            CountingEchoExecutor::new(Rc::clone(&calls)),
+            &mut interaction,
+        )
+        .expect("create current Agent");
+        drop(driver);
+        stage_product_model_selection(&ledger, selection.clone())
+            .expect("stage current-Agent selection");
+        assert_eq!(
+            RuntimeKernel::inspect(&ledger)
+                .expect("inspect staged selection")
+                .pending_model_selection
+                .expect("pending selection")
+                .selection(),
+            &selection
+        );
+
+        let mut interaction = RecordingInteraction::approve();
+        let mut recovered = ProductDriver::open_with_executor(
+            &ledger,
+            CountingEchoExecutor::new(Rc::clone(&calls)),
+            &mut interaction,
+        )
+        .expect("reopen current Agent");
+        let before_mismatch = fs::read(&ledger).expect("read Runtime Ledger before mismatch");
+        let mut changed_layers = layers.clone();
+        changed_layers.cli.provider_model = Some("gpt-5.6-changed".into());
+        let mut rejected_provider = SnapshotTextProvider {
+            profile: profile.clone(),
+            runs: 0,
+        };
+        assert!(matches!(
+            recovered.execute(
+                &changed_layers,
+                "reject changed Preset",
+                &mut rejected_provider,
+                &mut interaction,
+            ),
+            Err(ProductDriverError::Runtime(
+                RuntimeError::InvalidModelSelection(_)
+            ))
+        ));
+        assert_eq!(rejected_provider.runs, 0);
+        assert_eq!(
+            fs::read(&ledger).expect("reread Runtime Ledger after mismatch"),
+            before_mismatch
+        );
+        assert_eq!(
+            recovered
+                .snapshot()
+                .pending_model_selection
+                .expect("selection survives mismatch")
+                .selection(),
+            &selection
+        );
+        drop(recovered);
+
+        let mut recovered = ProductDriver::open_with_executor(
+            &ledger,
+            CountingEchoExecutor::new(Rc::clone(&calls)),
+            &mut interaction,
+        )
+        .expect("reopen after rejected Config drift");
+        let mut provider = SnapshotTextProvider { profile, runs: 0 };
+        let output = recovered
+            .execute(
+                &layers,
+                "use staged Preset",
+                &mut provider,
+                &mut interaction,
+            )
+            .expect("execute selected Turn");
+        assert_eq!(output.text(), "selected response");
+        assert_eq!(provider.runs, 1);
+        assert_eq!(calls.get(), 0);
+        assert!(recovered.snapshot().pending_model_selection.is_none());
+        let epoch = recovered
+            .pending_provider_epoch()
+            .expect("frozen Provider Epoch");
+        assert_eq!(epoch.profile(), "edge");
+        assert_eq!(epoch.model(), "gpt-5.6-fast");
+        assert_eq!(
+            epoch.dialect(),
+            Some(greentyper_core::provider::ProviderDialect::Responses)
+        );
+        recovered
+            .acknowledge(output.delivery())
+            .expect("acknowledge selected Turn");
+        drop(recovered);
+
+        let final_snapshot = RuntimeKernel::inspect(&ledger).expect("inspect completed Turn");
+        assert_eq!(final_snapshot.status, RecoveryStatus::Ready);
+        assert!(final_snapshot.pending_model_selection.is_none());
+        cleanup(&ledger);
+        fs::remove_dir_all(config_root).expect("cleanup Config root");
+    }
 
     #[test]
     fn approved_provider_tool_runs_once_and_finishes_the_turn() {
@@ -903,6 +1208,31 @@ mod tests {
     #[derive(Default)]
     struct LocalEchoProvider {
         runs: usize,
+    }
+
+    struct SnapshotTextProvider {
+        profile: ProviderProfileSnapshot,
+        runs: usize,
+    }
+
+    impl ProviderRuntime for SnapshotTextProvider {
+        fn run(&mut self, request: &ProviderRequest) -> Result<Vec<ProviderEvent>, ProviderError> {
+            self.runs += 1;
+            assert_eq!(request.provider.profile(), "edge");
+            assert_eq!(request.provider.model(), "gpt-5.6-fast");
+            Ok(vec![
+                ProviderEvent::TextDelta("selected response".into()),
+                ProviderEvent::Completed(UsageRecord::default()),
+            ])
+        }
+
+        fn profile_snapshot(&self) -> Option<&ProviderProfileSnapshot> {
+            Some(&self.profile)
+        }
+
+        fn dialect(&self) -> Option<greentyper_core::provider::ProviderDialect> {
+            Some(greentyper_core::provider::ProviderDialect::Responses)
+        }
     }
 
     impl ProviderRuntime for LocalEchoProvider {

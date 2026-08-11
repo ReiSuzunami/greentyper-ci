@@ -35,7 +35,8 @@ use crate::local_process::{
 use crate::presentation::PresentationSmokeError;
 use crate::product_driver::{
     ProductDriver, ProductDriverError, ProductInteraction, ProductToolDecision,
-    has_product_driver_state, inspect_product_tools, reconcile_product_tool,
+    apply_model_preset_to_next_turn, freeze_model_selection, has_product_driver_state,
+    inspect_product_tools, reconcile_product_tool,
 };
 use crate::provider_connection::{ModelsHttpConnectionTester, ProviderConnectionTester};
 use crate::provider_http::{
@@ -57,23 +58,50 @@ pub fn run(arguments: impl Iterator<Item = String>) -> Result<(), CliError> {
             dialect,
             preset,
         } => {
+            let pending_selection = RuntimeKernel::inspect(&ledger)?.pending_model_selection;
             let config = open_config_runtime(default_config_paths()?)?;
             let mut layers = config.config_layers()?.clone();
-            let (profile, dialect) = match preset {
+            let preset =
+                match (preset, pending_selection.as_ref()) {
+                    (Some(id), Some(pending)) if id != pending.selection().preset_id() => {
+                        return Err(greentyper_core::runtime::RuntimeError::InvalidModelSelection(
+                        "explicit Preset conflicts with the pending current-Agent selection",
+                    )
+                    .into());
+                    }
+                    (Some(id), _) => Some(id),
+                    (None, Some(pending)) => Some(pending.selection().preset_id().to_owned()),
+                    (None, None) => None,
+                };
+            let (profile, dialect, applied_preset) = match preset {
                 Some(id) => {
                     let preset = config.model_preset(&id)?;
                     let profile = config.provider_profile(&preset.provider)?;
-                    layers.cli.provider_profile = Some(preset.provider);
-                    layers.cli.provider_model = Some(preset.model);
-                    layers.cli.max_output_tokens = preset.max_output_tokens;
-                    layers.cli.reasoning_effort = preset.reasoning_effort;
-                    layers.cli.service_tier = preset.service_tier;
-                    (profile, Some(preset.dialect))
+                    let dialect = apply_model_preset_to_next_turn(&mut layers, &preset);
+                    (profile, Some(dialect), Some(preset))
                 }
-                None => (config.selected_provider_profile()?, dialect),
+                None => (config.selected_provider_profile()?, dialect, None),
             };
             let usage_windows = config.resolved_usage_windows()?;
             let price_schedules = config.resolved_price_schedules()?;
+            if let Some(pending) = pending_selection.as_ref() {
+                let applied = freeze_model_selection(
+                    &layers,
+                    &usage_windows,
+                    &price_schedules,
+                    applied_preset
+                        .as_ref()
+                        .expect("pending selection chose a Preset"),
+                )?;
+                if &applied != pending.selection() {
+                    return Err(
+                        greentyper_core::runtime::RuntimeError::InvalidModelSelection(
+                            "pending Preset changed before the next Turn",
+                        )
+                        .into(),
+                    );
+                }
+            }
             let selected_model = layers
                 .resolve()
                 .map_err(|_| {

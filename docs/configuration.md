@@ -133,8 +133,9 @@ are required. Reasoning effort, service tier, maximum output tokens, context
 mode, favorite, and fallback list are optional and editable. Choices remain
 schema-owned; numeric and TOML-list values stay in the local dirty buffer until
 they parse. Missing fields, unknown fallback references, cycles, invalid limits,
-and stale revisions stay recoverable. The form manually defines a Preset. It
-does not accept release starters or apply the Preset to the current Agent.
+and stale revisions stay recoverable. The form manually defines a Preset; the
+separate `/model` action applies a configured Preset to the current Agent. The
+form does not accept release starters.
 `/config stats-window add` prompts for a bounded Usage Window ID, then uses
 Tab/Shift-Tab across start, end, days, and time-zone fields. All four raw inputs
 are bounded to 512 bytes. Days uses a TOML array of weekday strings; partial
@@ -215,8 +216,9 @@ Panel.
 `/stats` browses the latest successful Usage report and never mutates
 configuration.
 Likewise, `/model` browses configured Presets and release candidates while
-`/config model` edits preset definitions. Applying a browsed Preset to an Agent
-remains a separate target behavior.
+`/config model` edits preset definitions. A second Enter from a configured
+Preset's detail selects it for the current Agent's next Turn; release candidates
+remain detail-only.
 `/agent` browses the latest successful Team sidecar projection. It is an
 inspection surface,
 not a route for lifecycle commands or Agent Session authority.
@@ -472,8 +474,8 @@ metadata records the same policy. The accepted reasoning values are `none`,
 model-dependent, so a valid configured value may still receive an explicit
 Provider rejection. The client rejects zero or more than 1,048,576 requested
 tokens as a cost and latency guard; a Provider or model may enforce a lower
-limit. Context mode, fallback execution, current-Agent interactive selection,
-and project/default selection remain target behavior.
+limit. Context mode, fallback execution, and project/default selection remain
+target behavior.
 
 The rendered model browser now provides Favorites, Recent, Compatible, and All
 views with fuzzy search and bounded provider, dialect, context, capability,
@@ -482,10 +484,18 @@ remain visible; richer reasons and Provider-backed catalog discovery/freshness
 refresh remain target behavior. Manual TUI snapshot refresh only reloads local
 Config plus the bundled release projection and performs no network request.
 
-Target selection applies to the current Agent on its next Turn by default. The
-user may instead set the default for new Agents or the project. That application
-flow is not implemented by the read-only browser. Running child Agents are not
-silently changed. Any provider/model/dialect change starts a Provider Epoch.
+After detail opens, a second Enter on a configured Preset durably selects it for
+the existing current Agent's next Turn. The pending Preset ID is rendered in the
+browser and can be replaced by another configured Preset. Release-catalog rows
+remain detail-only. Selection is bound to the recovered Active Agent Session;
+it does not mutate Config, read a credential, contact a Provider, or affect a
+running child Agent. The next headless Turn without `--preset` resolves the exact
+pending ID, rechecks its Config fingerprint and provider/model identity, and
+consumes it atomically with Turn admission and Config/Provider Epoch freeze.
+Config drift, explicit-ID conflict, credential failure, and unsupported policy
+preserve the pending selection before Provider execution. A new-Agent or project
+default remains target behavior. Any provider/model/dialect change starts a
+Provider Epoch.
 Automatic price- or latency-based routing is outside v1; fallback is explicit
 and must preserve the required capability contract.
 
@@ -605,7 +615,7 @@ reasoning_output_micros_per_million = 3000000
 ```
 
 The resolved schedule book rejects duplicate or overlapping selectors. Config
-Epoch creation freezes the book and its fingerprints. Runtime Event schema 8
+Epoch creation freezes the book and its fingerprints. Runtime Event schema 9
 appends normalized Usage first and its cost evaluation second in one transaction;
 replay recomputes the result from that frozen evidence. Missing token classes,
 missing selectors, inconsistent accounting, and arithmetic overflow remain
