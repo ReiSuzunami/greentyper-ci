@@ -1222,7 +1222,7 @@ source = "unknown"
     fn product_driver_falls_back_without_mutating_team_or_tool_state() {
         let ledger = temp_path("product-fallback");
         let mut interaction = RecordingInteraction::approve();
-        let mut driver = ProductDriver::open_with_executor(
+        let driver = ProductDriver::open_with_executor(
             &ledger,
             CountingEchoExecutor::new(Rc::new(Cell::new(0))),
             &mut interaction,
@@ -1230,8 +1230,15 @@ source = "unknown"
         .expect("open Product driver");
         let team_path = sidecar_path(&ledger, "team");
         let tool_path = sidecar_path(&ledger, "tool");
+        drop(driver);
         let team_before = fs::read(&team_path).expect("read Team Ledger");
         let tool_before = fs::read(&tool_path).expect("read Tool Ledger");
+        let mut driver = ProductDriver::open_with_executor(
+            &ledger,
+            CountingEchoExecutor::new(Rc::new(Cell::new(0))),
+            &mut interaction,
+        )
+        .expect("reopen Product driver");
         let candidates = [
             product_fallback_candidate("primary", "model-primary"),
             product_fallback_candidate("backup", "model-backup"),
@@ -1254,6 +1261,11 @@ source = "unknown"
         assert_eq!(output.text(), "Product backup response");
         assert_eq!(providers[0].runs, 1);
         assert_eq!(providers[1].runs, 1);
+        driver
+            .acknowledge(output.delivery())
+            .expect("acknowledge fallback output");
+        assert_eq!(driver.snapshot().status, RecoveryStatus::Ready);
+        drop(driver);
         assert_eq!(
             fs::read(&team_path).expect("reread Team Ledger"),
             team_before
@@ -1262,11 +1274,6 @@ source = "unknown"
             fs::read(&tool_path).expect("reread Tool Ledger"),
             tool_before
         );
-        driver
-            .acknowledge(output.delivery())
-            .expect("acknowledge fallback output");
-        assert_eq!(driver.snapshot().status, RecoveryStatus::Ready);
-        drop(driver);
         cleanup(&ledger);
     }
 
