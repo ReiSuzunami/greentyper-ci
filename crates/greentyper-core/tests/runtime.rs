@@ -127,7 +127,7 @@ fn published_checkpoint_is_used_by_the_next_provider_request() {
         .acknowledge(first.delivery())
         .expect("complete first Turn");
     let checkpoint = runtime
-        .prepare_context_checkpoint(ContextReductionPolicy::new(32, 1).expect("policy"))
+        .prepare_context_checkpoint(ContextReductionPolicy::new(64, 2).expect("policy"))
         .expect("prepare checkpoint");
     runtime
         .publish_context_checkpoint(checkpoint)
@@ -144,13 +144,14 @@ fn published_checkpoint_is_used_by_the_next_provider_request() {
         .as_ref()
         .expect("checkpoint request Context");
     assert_eq!(provider.requests[1].input, "second");
-    assert_eq!(context.archived_items(), 1);
-    assert_eq!(context.items().len(), 1);
+    assert_eq!(context.archived_items(), 0);
+    assert_eq!(context.items().len(), 2);
     assert_eq!(
         context.items()[0].role(),
-        greentyper_core::context::ContextViewRole::Assistant
+        greentyper_core::context::ContextViewRole::User
     );
-    assert_eq!(context.items()[0].text(), "simulated: first");
+    assert_eq!(context.items()[0].text(), "first");
+    assert_eq!(context.items()[1].text(), "simulated: first");
 
     runtime
         .acknowledge(second.delivery())
@@ -171,7 +172,7 @@ fn checkpoint_request_context_survives_admission_crash_and_resume() {
         .acknowledge(first.delivery())
         .expect("complete first Turn");
     let checkpoint = runtime
-        .prepare_context_checkpoint(ContextReductionPolicy::new(32, 1).expect("policy"))
+        .prepare_context_checkpoint(ContextReductionPolicy::new(64, 2).expect("policy"))
         .expect("prepare checkpoint");
     runtime
         .publish_context_checkpoint(checkpoint)
@@ -190,9 +191,10 @@ fn checkpoint_request_context_survives_admission_crash_and_resume() {
     let request = provider.requests.first().expect("resumed Provider request");
     let context = request.context.as_ref().expect("replayed request Context");
     assert_eq!(request.input, "second");
-    assert_eq!(context.archived_items(), 1);
-    assert_eq!(context.items().len(), 1);
-    assert_eq!(context.items()[0].text(), "simulated: first");
+    assert_eq!(context.archived_items(), 0);
+    assert_eq!(context.items().len(), 2);
+    assert_eq!(context.items()[0].text(), "first");
+    assert_eq!(context.items()[1].text(), "simulated: first");
     recovered
         .acknowledge(second.delivery())
         .expect("complete resumed Turn");

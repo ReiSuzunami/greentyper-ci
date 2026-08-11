@@ -57,7 +57,8 @@ before network I/O. A Tool continuation also rejects any second Tool call at
 the adapter boundary; the Runtime repeats that invariant before projection.
 If Runtime has a durable Context checkpoint, it first validates and materializes
 a bounded conversation containing the checkpoint's recent raw tail plus later
-completed canonical Items. Archived artifact bodies are not fetched. Responses
+completed canonical Items. A leading Assistant Item from a split retained Turn
+is omitted up to the next User boundary. Archived artifact bodies are not fetched. Responses
 uses an ordered message-input array, while Chat Completions and Messages use
 their native message arrays; an absent checkpoint retains the existing scalar
 Responses input and one-user-message shapes. The supported Tool continuation

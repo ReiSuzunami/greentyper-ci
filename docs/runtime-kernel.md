@@ -369,7 +369,9 @@ token/byte facts, not raw conversation text.
 When a checkpoint exists, Turn admission validates it against the authoritative
 canonical prefix before allocating identifiers or freezing Config/Provider
 Epochs. The Provider request receives the checkpoint's bounded recent raw tail
-followed by any completed canonical Items appended after its source. Archived
+followed by any completed canonical Items appended after its source. If the raw
+tail split a prior Turn, its leading Assistant Item is omitted until the next
+User Item, so every dialect receives a complete conversation boundary. Archived
 artifact bodies remain omitted; no Artifact fetch or summary text is invented.
 The pending user Item stays the separate current input. Recovery locates that
 same user Item and rebuilds the same history projection before explicit resume,

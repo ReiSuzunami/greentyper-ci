@@ -790,6 +790,14 @@ impl ReducedContextView {
             items.push(item);
         }
 
+        let leading_assistant_items = items
+            .iter()
+            .position(|item| item.role == ContextViewRole::User)
+            .unwrap_or(items.len());
+        if leading_assistant_items != 0 {
+            items.drain(..leading_assistant_items);
+        }
+
         let mut raw_bytes = 0_u64;
         let mut estimated_tokens = 0_u64;
         for item in &items {
@@ -809,8 +817,13 @@ impl ReducedContextView {
 
         Ok(ContextRequestView {
             source: self.source,
-            archived_items: u64::try_from(self.artifacts.len())
-                .map_err(|_| ContextViewError::ArithmeticOverflow)?,
+            archived_items: u64::try_from(
+                self.artifacts
+                    .len()
+                    .checked_add(leading_assistant_items)
+                    .ok_or(ContextViewError::ArithmeticOverflow)?,
+            )
+            .map_err(|_| ContextViewError::ArithmeticOverflow)?,
             items,
             raw_bytes,
             estimated_tokens,

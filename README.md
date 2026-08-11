@@ -294,7 +294,8 @@ summaries.
 Product sidecars when present, and does not change Team or Tool Ledger bytes.
 The next Provider admission validates that checkpoint against canonical history
 before allocating Turn or Epoch identifiers. Its request contains only the
-bounded recent raw tail plus completed Items appended after the checkpoint;
+bounded recent raw tail, normalized to a complete user-turn boundary, plus
+completed Items appended after the checkpoint;
 older artifact references remain durable evidence and are not rehydrated into
 the request. Restart and explicit resume rebuild the same projection from the
 pending Turn and frozen Config/Provider Epochs. Responses, Chat Completions, and

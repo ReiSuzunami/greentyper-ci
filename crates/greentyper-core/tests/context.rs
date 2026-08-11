@@ -395,6 +395,48 @@ fn reduced_context_materializes_only_recent_and_post_checkpoint_history_for_a_re
 }
 
 #[test]
+fn reduced_context_request_omits_an_incomplete_leading_assistant_turn() {
+    let item = |id, turn, role, text| {
+        CanonicalItem::new(
+            ItemId::new(id).expect("Item"),
+            TurnId::new(turn).expect("Turn"),
+            role,
+            text,
+        )
+        .expect("canonical Item")
+    };
+    let checkpoint_items = vec![
+        item(1, 1, ItemRole::User, "archived user"),
+        item(2, 1, ItemRole::Assistant, "split assistant"),
+    ];
+    let reduced = ReducedContextView::from_items(
+        LedgerHead {
+            transaction: 2,
+            sequence: 4,
+        },
+        &checkpoint_items,
+        ContextReductionPolicy::new(32, 1).expect("policy"),
+    )
+    .expect("reduced Context View");
+    let mut authoritative = checkpoint_items;
+    authoritative.extend([
+        item(3, 2, ItemRole::User, "complete user"),
+        item(4, 2, ItemRole::Assistant, "complete assistant"),
+    ]);
+
+    let request = reduced
+        .materialize_request(&authoritative)
+        .expect("request Context View");
+
+    assert_eq!(request.archived_items(), 2);
+    assert_eq!(request.items().len(), 2);
+    assert_eq!(request.items()[0].role(), ContextViewRole::User);
+    assert_eq!(request.items()[0].text(), "complete user");
+    assert_eq!(request.items()[1].role(), ContextViewRole::Assistant);
+    assert_eq!(request.items()[1].text(), "complete assistant");
+}
+
+#[test]
 fn reduced_context_request_rejects_missing_or_changed_authoritative_history() {
     let original = CanonicalItem::new(
         ItemId::new(1).expect("Item"),
