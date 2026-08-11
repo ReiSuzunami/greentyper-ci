@@ -64,7 +64,14 @@ Owns Provider Templates, Profiles, Origins, the Model Catalog, Model Presets, di
 
 Its external seam is canonical request and event semantics. OpenAI Responses, OpenAI Chat Completions, and Anthropic Messages are adapters at that seam. SSE, WebSocket, and ordinary HTTP are transports rather than dialects. Context Mode remains independent of both.
 
-A Model Preset is resolved once per Turn. A provider or model change starts a new Provider Epoch, rebuilds context from canonical state, and does not reuse an incompatible continuation identity.
+A Model Preset and its explicit fallback graph are resolved once per Turn. Each
+candidate freezes a distinct Config and Provider Epoch before admission.
+Runtime may switch candidates only after early Provider unavailability, never
+after partial output or Tool effects; every attempt retains candidate-bound
+Usage and cost evidence. Fallbacks preserve the primary capability contract and
+grant no authority. A provider or model change rebuilds context from canonical
+state and does not reuse an incompatible continuation identity. Automatic
+price- or latency-based routing remains outside this contract.
 
 ### Tool Runtime
 
@@ -87,7 +94,8 @@ Owns Context Pressure calculation, artifact offload, deterministic reduction, Ru
 Checkpoint creation uses a Safe Barrier and event-range compare-and-swap. The Compactor has no tools, MCP access, credentials, or Durable Memory write capability. Periodic full rebases from the Event Ledger prevent recursive-summary drift.
 
 The current foundation implements exact-head canonical Views, bounded recent
-raw tails with Item-bound SHA-256 references, schema-12 Safe Barrier checkpoints,
+raw tails with Item-bound SHA-256 references, the schema-12 Safe Barrier
+checkpoint contract under current Runtime Event schema 13,
 full-Item rebases, soft-pressure publication, explicit CLI inspect/reduce, and a
 bounded Provider request projection. Admission and resume validate the persisted
 checkpoint against canonical history, send only its recent tail plus later

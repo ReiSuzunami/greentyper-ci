@@ -103,31 +103,37 @@ Responses, while V4 Pro freezes Chat Completions because its Responses support
 is not yet available. This is capability resolution before network I/O, not a
 retry after partial output or Tool effects. Every other template/dialect pair
 fails closed unless the product has an explicit adapter for that exact identity.
-`headless --preset ID` resolves one configured Model Preset by exact ID and
-freezes its Profile, model, dialect, and optional output-token limit for the
-Turn. It cannot be combined with `--dialect`; missing IDs fail rather than
-falling back to a model-name match.
+`headless --preset ID` resolves the exact configured Model Preset plus its
+explicit fallback graph in depth-first, first-occurrence order, bounded to 16
+Provider candidates. Every candidate is adapter-preflighted before Runtime
+state opens, then its Profile, model, dialect, and request policy are frozen in
+distinct Config and Provider Epochs for the Turn. It cannot be combined with
+`--dialect`; missing IDs, invalid graphs, and capability-lowering fallbacks fail
+before admission rather than falling back to a model-name match.
 
 All three HTTP dialect adapters classify unavailability at one of three stable
 boundaries: before a streaming response, after the response but before the
 first decoded event, or after at least one event. Early EOF and interrupted SSE
 framing retain that boundary; other malformed Provider data remains an invalid
-response. No boundary triggers an automatic retry or reconnect, and the
-requests carry no inference idempotency key, so an absent response is not proof
-that the remote service did no work or incurred no usage. Runtime Event schema
-12 preserves schema 11's rule that only Provider-origin failures before a response or before the first
-event as `retryable`. `retry --turn ID` durably rearms that exact Turn, input,
-Config Epoch, and Provider Epoch before making one new Provider attempt. It may
-repeat remote work, usage, or billing. A preflight failure after rearming leaves
-the Turn `resume-required`; another early failure becomes blocked again and
-requires another explicit retry request. Failures after the first event,
-malformed output, Tool-derived or post-Tool continuation failures, and historical
-stage-untyped blocks reject retry without writing. `cancel --turn ID` remains the
-explicit terminal recovery for a typed Provider-origin block. Cancellation
-preserves Usage/cost facts and frozen Epochs, invokes neither Provider nor Tool,
-and is idempotent. Product retry and cancellation additionally require the one
-recovered Active Agent Session, strictly open complete existing state, and leave
-Team and Tool Ledgers unchanged.
+response. An adapter never reconnects or repeats the same request automatically,
+and requests carry no inference idempotency key, so an absent response is not
+proof that the remote service did no work or incurred no usage. For a Preset
+with an explicit fallback chain, Runtime schema 13 may instead advance to the
+next separately frozen candidate only after `BeforeResponse` or
+`BeforeFirstEvent`; each candidate gets a new Usage Attempt and candidate-bound
+cost evaluation. It never switches after the first event, malformed output,
+Tool-derived state, or a post-Tool continuation failure. If a process exits
+while such an early failure is blocked, `retry --turn ID` durably selects the
+next frozen candidate first; when none remains, it rearms the active candidate
+with `TurnRetryRequested`. Either path may repeat remote work, usage, or billing.
+A preflight failure after recovery leaves the Turn `resume-required`; another
+early failure becomes blocked again. Historical stage-untyped blocks reject
+recovery without writing. `cancel --turn ID` remains the explicit terminal
+recovery for a typed Provider-origin block. Cancellation preserves Usage/cost
+facts and frozen Epochs, invokes neither Provider nor Tool, and is idempotent.
+Product recovery additionally requires the one recovered Active Agent Session,
+strictly opens complete existing state, and leaves Team and Tool Ledgers
+unchanged.
 
 The core Agent Team policy, Config Runtime, recoverable single-Agent Runtime,
 and first Tool Runtime policy slice compile and run through interface-level and
@@ -241,10 +247,11 @@ Flash, maps `max_output_tokens` plus `reasoning.effort` values `low`, `high`, an
 continuation reconstructs bounded input items instead of using
 `previous_response_id`. Reasoning text is bounded and transition-validated by
 the dialect decoder but is not projected as visible output or persisted raw.
-Runtime Event schema 12 preserves schema 11's redacted Provider-unavailability
-stage and durable `TurnRetryRequested` recovery, schema 10's typed block origin
-and `TurnCancelled`, and schema 9's selected Preset policy. It adds an exact-head
-Context checkpoint event.
+Runtime Event schema 13 preserves schema 12's exact-head Context checkpoint,
+schema 11's redacted Provider-unavailability stage and durable
+`TurnRetryRequested` recovery, schema 10's typed block origin and
+`TurnCancelled`, and schema 9's selected Preset policy. It adds frozen fallback
+Config/Provider references and `ProviderFallbackRequested` recovery.
 OpenAI Responses sends reasoning as `reasoning.effort`, OpenAI Chat Completions
 sends `reasoning_effort`, and both send `service_tier`; their output-token
 fields are `max_output_tokens` and `max_completion_tokens`. DeepSeek Chat and
@@ -284,11 +291,11 @@ estimate as `ctx ~N%`.
 The Context View projects ordered canonical Item/Turn/role facts from an exact
 Ledger head. Reduction keeps a configurable recent raw tail and replaces older
 text with Item-bound SHA-256, byte-count, role, and token-estimate references;
-the Event Ledger remains authoritative. Runtime Event schema 12 publishes that
-projection only at a Ready Safe Barrier, verifies the prior Ledger head on
-replay, rejects stale drafts without writing, and validates every persisted
-checkpoint against complete canonical Items instead of recursively reducing
-summaries.
+the Event Ledger remains authoritative. Schema 12 introduced the singleton
+checkpoint contract, and current Runtime Event schema 13 preserves it: publish
+only at a Ready Safe Barrier, verify the prior Ledger head on replay, reject
+stale drafts without writing, and validate every persisted checkpoint against
+complete canonical Items instead of recursively reducing summaries.
 `context status` inspects this state without creating or repairing a Ledger.
 `context reduce` explicitly publishes one bounded checkpoint, checks complete
 Product sidecars when present, and does not change Team or Tool Ledger bytes.
@@ -501,8 +508,8 @@ snapshot. The terminal and App Server approval surfaces are limited to the exact
 pending `local.echo` call; neither is a general Tool policy editor, audited
 ConPTY integration, automatic starter-update workflow, or automatic/on-open
 Provider discovery. Live inference conformance,
-automatic retry policy or partial-stream reconnect, OpenCode Go Messages execution,
-Messages reasoning blocks, Preset context/fallback execution, broader multi-Tool approval
+automatic transport retry or partial-stream reconnect, OpenCode Go Messages execution,
+Messages reasoning blocks, Preset context-mode execution, broader multi-Tool approval
 presentation, broader Provider and Tool adapters,
 Workspace, project/new-Agent Preset defaults,
 Agent lifecycle actions, general App Server Runtime control beyond the exact

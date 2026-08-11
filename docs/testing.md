@@ -165,11 +165,12 @@ effort, service tier, and distinct template-mirror pricing provenance while
 rejecting fingerprint, outcome, timestamp, and transition tampering. A schema-5
 Config Epoch without the optional token field, a schema-6 Config Epoch without
 request-policy fields, and a schema-7 Config Epoch without template-mirror tags
-remain replayable under current Runtime Event schema 12; schema 8 Ledgers remain
+remain replayable under current Runtime Event schema 13; schema 8 Ledgers remain
 compatible before the schema-9 Model-selection event, and schema-9 Ledgers
 replay with legacy untyped block origin before schema-10 cancellation events.
 Schema-10 blocks replay without a retry stage and therefore remain
-non-retryable; schema 12 preserves schema 11's stage and retry-request event.
+non-retryable; schema 13 preserves schema 11's stage and retry-request event,
+schema 12's checkpoint, and adds frozen fallback recovery.
 
 Product integration tests also run the configured Responses, Chat Completions,
 and Messages adapters against concrete loopback HTTP tracers. They resolve and
@@ -234,15 +235,28 @@ Team/Tool byte identity, restart recovery, and a successful next headless Turn.
 Negative tests preserve bytes while rejecting missing state, prepared output,
 Tool denial or reconciliation, and the corresponding delivery/tool recovery
 still succeeds afterward.
-Provider retry tests persist failed Usage/cost evidence, expose retryability only
-for `BeforeResponse` and `BeforeFirstEvent`, append one explicit schema-11+ retry
-request, recover it as `resume-required`, reuse the frozen Provider Epoch, and
-record a new Attempt. Core tests reject partial-stream, malformed, post-Tool
-continuation, duplicate, and stale-session requests without changing the
-relevant Ledger bytes. Product and public CLI tests prove recovered Agent
-authority, successful replay, a second early failure requiring a second request,
+Provider recovery tests persist failed Usage/cost evidence and expose
+retryability only for `BeforeResponse` and `BeforeFirstEvent`. Without another
+candidate they append the schema-11+ `TurnRetryRequested`, recover as
+`resume-required`, reuse the active frozen Provider Epoch, and record a new
+Attempt. Core tests reject partial-stream, malformed, post-Tool continuation,
+duplicate, and stale-session requests without changing the relevant Ledger
+bytes. Product, public CLI, and App Server tests prove recovered Agent authority,
+successful replay, another early failure requiring another explicit request,
 strict missing/incomplete-state handling, and Team/Tool byte identity. These
-tests do not claim that retry is free of remote work, usage, or billing.
+tests do not claim that recovery is free of remote work, usage, or billing.
+
+Preset fallback tests resolve deterministic depth-first chains with shared-node
+deduplication, enforce the 16-candidate limit through repair/reopen, and reject
+cycles, unknown references, and reasoning/service/context/output capability
+downgrades. Runtime tests prove an early primary failure durably closes its
+Usage and cost evidence before selecting the frozen backup, attributes the
+successful Attempt to that backup, and refuses fallback after partial output.
+Product and headless integration prove both plain and Team/Tool execution paths,
+all-candidate preflight before Runtime creation, final delivery once, and
+Team/Tool byte identity. A crash after the primary block followed by explicit
+recovery selects and resumes the backup Provider Epoch without invoking the
+primary again; App Server recovery exposes the same fallback-first transition.
 Windows-only tests exercise Credential Manager bind, replace, resolve, and
 forget. This does not cover live credentials, proxy authentication,
 automatic retry policy or partial-stream reconnect, live Providers, or broader Tool presentation.
@@ -426,8 +440,8 @@ Provider call or Ledger write, then exact admission consumes one selection and
 freezes the expected Provider Epoch. Headless integration proves automatic
 pending-ID resolution plus credential-preflight and explicit-ID-conflict
 failure preserve all three Ledger byte streams. These tests do not prove
-automatic/on-open/background Provider discovery, automatic starter updates, project/new-Agent
-defaults, context-mode execution, or fallback execution.
+automatic/on-open/background Provider discovery, automatic starter updates,
+project/new-Agent defaults, or context-mode execution.
 A real-key loop now carries `/config stats-window add` through its bounded ID
 prompt and start/end/days/time-zone fields, previews, commits, and reopens the
 resolved window. Focused tests prove all four schema fields expose 512-byte text
@@ -599,8 +613,9 @@ no-side-effect hard admission gate. Product presentation tests assert estimated
 occupancy renders with `~` while an unavailable pressure fact remains unknown.
 Context tests now prove exact-head canonical projection, bounded recent raw
 tails, SHA-256 references for old Items, reduction of history larger than the raw
-View boundary, and foreign-reference rejection. Runtime schema-12 tests prove a
-Safe Barrier checkpoint replays, stale publication leaves exact bytes unchanged,
+View boundary, and foreign-reference rejection. Checkpoint tests introduced at
+schema 12 and replayed under current schema 13 prove a Safe Barrier checkpoint
+replays, stale publication leaves exact bytes unchanged,
 wrong prior heads and tampered references fail closed, soft pressure checkpoints
 before the next Turn, and unknown pressure creates none. CLI tests prove missing
 `context status` is read-only, `context reduce` exposes no Item text, busy or
@@ -707,9 +722,10 @@ Chat adapter also admits exact release-catalog OpenCode Go Chat model/dialect
 pairs with the OpenCode-specific request policy. The
 Messages adapter admits only the official DeepSeek template identity and its
 explicit Messages route. V4 Pro resolves a preferred Responses dialect to Chat
-before admission; this bounded capability resolution is not a network retry or
-general Preset fallback. OpenCode Go Messages remains outside this
-slice; a declared route or dialect is not treated as proof of wire compatibility.
+before admission; this bounded single-candidate capability resolution is not a
+network retry or automatic Provider routing. OpenCode Go Messages remains
+outside this slice; a declared route or dialect is not treated as proof of wire
+compatibility.
 
 Live provider inference tests are not implemented yet. Planned opt-in,
 credential-gated tests will verify OpenAI, DeepSeek, and OpenCode Go without

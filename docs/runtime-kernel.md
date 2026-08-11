@@ -111,7 +111,7 @@ as durability-ambiguous; callers must close and recover instead of retrying.
 | No pending Turn | `ready` | Admit a new Turn |
 | Admission durable, Provider not completed | `resume-required` | Explicit `resume`; never automatic |
 | Output prepared, acknowledgement absent | `reconciliation-required` | Explicit `reconcile`; never print or rerun automatically |
-| Initial Provider request failed before its first event | `blocked`, `retryable=true` under schema 11+ | Explicit `retry --turn ID` or `cancel --turn ID`; never automatic |
+| Initial Provider request failed before its first event | `blocked`, `retryable=true` under schema 11+ | An admitted explicit chain advances to its next frozen candidate; after restart, `retry --turn ID` selects that candidate first or rearms the active one; `cancel --turn ID` remains terminal |
 | Provider failed after an event, emitted malformed events, or failed after a Tool | `blocked`, `retryable=false` | Inspect, or `cancel --turn ID` only for a typed Provider-origin block |
 | Output acknowledged and Turn completed | `ready` | Duplicate acknowledgement is a no-op |
 
@@ -125,22 +125,30 @@ Completions, and Messages never retry or reconnect automatically at any of
 those boundaries. Because inference requests have no idempotency key, a missing
 response does not establish that the remote service did no work or incurred no
 usage. Schema 11+ exposes `retryable=true` only for an initial Provider request
-blocked at `BeforeResponse` or `BeforeFirstEvent`. An explicit retry durably
-rearms the same Turn, input, Config Epoch, and Provider Epoch before one new
-Usage Attempt, and may repeat remote work or billing. Failure after the first
-event, malformed output, Tool-derived state, post-Tool continuation failure, and
-historical stage-untyped blocks reject retry without mutation.
+blocked at `BeforeResponse` or `BeforeFirstEvent`. Schema 13 admits an explicit
+Preset fallback plan as separately frozen Config/Provider Epochs. Execution may
+advance to the next candidate only at those early boundaries and only after the
+failed candidate's Usage Attempt and cost evaluation are durable. It never
+switches after the first event, malformed output, Tool-derived state, or a
+post-Tool continuation failure.
 
-Runtime Event schema 12 preserves schema 11's unavailability stage and
-`TurnRetryRequested`, plus schema 10's typed `TurnBlocked` origin and
-`TurnCancelled`, and permits one
-`TurnRetryRequested` only for the exact retryable Provider-origin blocked Turn.
-The retry transaction moves that Turn to `resume-required`; a process exit or
-adapter preflight failure after the transaction is recoverable by the existing
-explicit `resume`. A second early failure blocks again and requires another
-explicit request. The cancellation transaction remains limited to the exact
-Provider-origin blocked Turn and clears pending recovery while retaining the Turn, its completed
-Usage/cost evidence, and immutable Config and Provider Epochs. A repeated exact
+`retry --turn ID` uses the same recovery rule after restart: it appends
+`ProviderFallbackRequested` for the next frozen candidate when one remains,
+otherwise it appends `TurnRetryRequested` for the active candidate. Either
+transaction preserves the Turn, input, immutable Epoch history, and prior
+Usage/cost evidence, moves the Turn to `resume-required`, and may repeat remote
+work or billing. A process exit or adapter preflight failure after the
+transaction is recoverable by explicit `resume`; another early failure blocks
+again. Historical stage-untyped blocks reject recovery without mutation.
+
+Runtime Event schema 13 preserves schema 12's Context checkpoint, schema 11's
+unavailability stage and `TurnRetryRequested`, plus schema 10's typed
+`TurnBlocked` origin and `TurnCancelled`. It adds bounded frozen fallback
+references on admission and the exact-next-candidate
+`ProviderFallbackRequested` transition. The cancellation transaction remains
+limited to the exact Provider-origin blocked Turn and clears pending recovery
+while retaining the Turn, its completed Usage/cost evidence, and immutable
+Config and Provider Epochs. A repeated exact
 cancel is idempotent. Missing state is not created. Prepared output,
 resume-required admission, incomplete streaming state, Tool-derived blocks,
 Tool approval or reconciliation, and historical schema-9-or-earlier blocks
@@ -197,7 +205,7 @@ descriptors while Tool Runtime remains the authority gate. Approval and
 `EffectPrepared` are durable before the injected executor runs. A successful
 UTF-8 result may then enter one Provider continuation. The final
 `OutputPrepared` transaction stores the combined canonical text and one or two
-bounded Usage Records. Runtime Event schema 12 preserves the schema-6 contract
+bounded Usage Records. Runtime Event schema 13 preserves the schema-6 contract
 that durably brackets every Provider request or continuation with Usage Attempt start/finish Events and
 carries the Agent scope, Provider dialect, frozen Usage Windows, UTC times,
 outcome, exact/estimated marker, optional token/cache classes, service tier, and
@@ -208,7 +216,7 @@ kept distinct from observed Provider metadata. Schema 9 added a bounded
 `ModelSelectionStaged` Event bound to the authenticated current Agent. The next
 matching `TurnAdmitted` consumes it in the same transaction as Config and
 Provider freeze; pre-admission failure leaves it pending. Historical schema-1
-through schema-11 Runtime transactions replay and can be followed by schema-12
+through schema-12 Runtime transactions replay and can be followed by schema-13
 transactions; schema-1 token counts become explicitly estimated legacy attempts.
 
 This tracer bullet intentionally stores only the Tool result digest. If the
@@ -354,12 +362,13 @@ a Safe Barrier before admitting the next Turn. Unknown pressure continues
 without inventing a checkpoint. Pressure itself is not a Runtime Event and does
 not change recovery of an already admitted Turn.
 
-Runtime Event schema 12 stores each checkpoint as a singleton transaction bound
+Schema 12 introduced each checkpoint as a singleton transaction bound
 to the exact prior Ledger head. Publication requires Ready Runtime state, no
 unacknowledged Team operation, no unresolved Tool approval, and no Tool
-reconciliation. A stale draft, corrupt reference, wrong source head, or unsafe
-state fails before append; replay revalidates references against authoritative
-canonical Items. Every publication rebuilds from full Items, so checkpoint
+reconciliation. Current Runtime Event schema 13 preserves that contract. A
+stale draft, corrupt reference, wrong source head, or unsafe state fails before
+append; replay revalidates references against authoritative canonical Items.
+Every publication rebuilds from full Items, so checkpoint
 cycles do not recursively summarize prior checkpoints. `greentyper context
 status` uses shared read-only inspection and treats a missing Ledger as empty.
 `greentyper context reduce` strictly opens existing state, checks paired Product
@@ -388,7 +397,7 @@ storage, and Durable Memory remain pending.
 
 Prompt/provider text and credential material are not part of the Usage domain.
 Requested or observed metadata not supplied by the current Provider remains
-unknown. Runtime Event schema 12 preserves the rule that records
+unknown. Runtime Event schema 13 preserves the rule that records
 `UsageAttemptFinished` before `UsageAttemptCostEvaluated` in the same transaction. The Config Epoch freezes
 the resolved Price Schedule book; replay recomputes the cost claim from that
 book and the normalized Usage Record, rejecting a changed schedule fingerprint,
@@ -456,8 +465,11 @@ charges still require a future dedicated authority path.
   platform backend is unavailable.
   `/config model add` can commit all required and optional Model Preset fields,
   including explicit fallback references. The separate `/model` action can
-  stage one configured Preset for the existing current Agent's next Turn. It
-  authenticates the rebound Session, persists only Preset identity and Config
+  stage one configured Preset for the existing current Agent's next Turn.
+  Headless admission resolves its bounded depth-first fallback graph,
+  preflights every adapter, freezes every candidate, and switches only after an
+  eligible early Provider failure. The selection action authenticates the
+  rebound Session, persists only Preset identity and Config
   fingerprint facts, and grants no Provider, Tool, credential, or workspace
   authority. Release-catalog candidates remain non-runnable.
   `/config stats-window add` can commit one named Usage Window from bounded

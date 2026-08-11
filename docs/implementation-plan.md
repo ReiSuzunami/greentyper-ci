@@ -127,14 +127,15 @@ existing durable Tool approval/effect state machine, feeds one successful UTF-8
 result into a Provider continuation, and durably prepares combined canonical
 output. Recovery tests prove stale Sessions cannot invoke the Provider,
 ambiguous effects cannot continue, and process death after a durable Tool
-success blocks rather than repeating the effect. Runtime Event schema 12 preserves
+success blocks rather than repeating the effect. Runtime Event schema 13 preserves
 durable Usage Attempt boundaries, frozen Usage Windows, Provider dialect, the
 expanded optional Usage Records, frozen Provider Profile snapshot, and the
 subsequent frozen Price Schedule cost evaluation plus an optional selected-Preset
 output-token limit, typed reasoning/service-tier policy, distinct template-mirror
 pricing provenance, pending current-Agent Model selection, typed Provider-block
-origin and unavailability stage, durable cancellation, and explicit early
-Provider retry while replaying historical schema 1 through schema 10.
+origin and unavailability stage, durable cancellation, explicit early Provider
+retry, and frozen Preset fallback recovery while replaying historical schema 1
+through schema 12.
 
 A product-private `local.echo` tracer now exercises the concrete process seam.
 It launches a fixed same-binary child without a shell, clears inherited
@@ -191,14 +192,16 @@ The Provider interruption/recovery batch is implemented across all three HTTP
 dialects. Each adapter classifies unavailability before a response, before the
 first decoded event, or after the first event; early EOF uses the same decoder
 progress while semantic format failures remain invalid responses. Loopback
-fixtures assert one connection and therefore no automatic retry. Runtime Event
-schema 12 preserves the typed Provider block and exact idempotent
-`TurnCancelled`, adds the unavailability stage, and records
-`TurnRetryRequested`. The CLI can explicitly retry only an initial request that
-failed before its first event, using the same Turn/input/frozen Epochs and a new
-Usage Attempt; partial streams, malformed output, Tool-derived state,
+fixtures assert one connection and therefore no automatic transport retry.
+Schema 11 added the unavailability stage and `TurnRetryRequested`; schema 12
+added the exact-head Context checkpoint; current Runtime Event schema 13 adds
+bounded frozen Preset fallback candidates and `ProviderFallbackRequested`.
+Execution switches candidates only after an initial request fails before its
+first event. After restart, the CLI explicitly selects the next frozen candidate
+first and otherwise retries the active one. Each attempt retains candidate-bound
+Usage/cost evidence; partial streams, malformed output, Tool-derived state,
 continuation failure, and old stage-untyped blocks reject without mutation. A
-retry may repeat remote work or billing, and another early failure requires
+recovery may repeat remote work or billing, and another early failure requires
 another explicit request. Cancellation keeps
 its immutable Usage/cost and Config/Provider Epoch evidence, invokes neither
 Provider nor Tool, requires recovered Active Agent authority for Product state,
@@ -208,9 +211,9 @@ untyped states fail closed.
 
 The remaining slices are still policy, protocol, and fault-adapter work:
 live inference conformance, non-Windows credential backends, configurable proxy
-policy, automatic/on-open catalog discovery, OpenCode Go Messages execution, DeepSeek
-Chat/Messages reasoning blocks, general Preset
-context/fallback execution, broader canonical Items, multiple
+policy, automatic/on-open catalog discovery, OpenCode Go Messages execution,
+DeepSeek Chat/Messages reasoning blocks, Preset context-mode execution, broader
+canonical Items, multiple
 Tool calls,
 durable resumable Tool result references, richer TUI/App Server
 approval/delivery, caller-selected process policy, complete Windows Job
@@ -230,7 +233,7 @@ Exit criteria:
 
 Add VT/ConPTY TUI, hierarchical Command Paths, global command palette, Config Schema-driven editors, Provider wizard, model selector, adaptive statusline, Context Pressure, Usage Records/Rollups, `/stats`, and named Usage Windows.
 
-The first observability slice is implemented. Runtime Event schema 12 preserves
+The first observability slice is implemented. Runtime Event schema 13 preserves
 the schema-6 contract that durably brackets each Provider request and continuation with an immutable Usage Attempt,
 including UTC start/completion, outcome, Agent scope when present, frozen
 Provider Profile/model/dialect, exact or estimated Usage Records, and explicit
@@ -564,8 +567,8 @@ Exit criteria:
 
 Continue the release templates and seed catalog with OpenCode Go adapter
 execution, automatic/on-open discovery,
-automatic starter updates, provider capability probes, explicit fallback
-chains, observed availability, and provider/model epoch switching. The
+automatic starter updates, provider capability probes, observed availability,
+and broader provider/model epoch switching. The
 OpenAI/openai-compatible Responses and Chat Completions adapters, official
 DeepSeek Responses, Chat Completions, and Messages pairs, and release-verified
 OpenCode Go Chat Completions pairs plus the exact GPT-5.6 Luna Responses pair
@@ -593,7 +596,19 @@ Chat/Messages reject both unsupported policy fields before network I/O. Flash
 keeps a preferred Responses dialect and Pro resolves that preference to Chat
 before admission. Configured Presets can now be staged from `/model` for the
 existing current Agent's next Turn and are consumed at durable admission.
-Project/new-Agent defaults, context mode, general fallback execution, automatic
+
+An explicit five-slice fallback batch now resolves each Preset graph depth-first
+with first-occurrence deduplication, rejects unknown/cyclic/over-16 or
+capability-lowering plans, and preflights every adapter before Runtime state
+opens. Schema 13 freezes one Config/Provider Epoch pair per candidate. Runtime
+switches only after `BeforeResponse` or `BeforeFirstEvent`, records immutable
+Usage and cost evidence for every candidate, and never switches after partial
+output or Tool-derived state. Product and plain headless paths both deliver the
+successful candidate once. Crash recovery selects the next frozen candidate
+before retrying the active one, resumes that exact Provider Epoch, and never
+replays the failed primary. Team and Tool Ledgers remain byte-identical.
+
+Project/new-Agent defaults, context mode, automatic
 starter updates, and automatic/on-open/background discovery remain pending.
 
 Exit criteria:
@@ -624,7 +639,8 @@ Implement Artifact offload, Context Pressure thresholds, deterministic reduction
 The Context foundation is implemented as four vertical slices. The core projects
 ordered canonical Items from an exact Ledger head; reduction replaces old raw
 text with Item-bound SHA-256 references while retaining a bounded recent tail;
-schema 12 publishes a singleton checkpoint only at a Safe Barrier and rejects a
+schema 12 introduced the singleton checkpoint contract, which current schema 13
+preserves at a Safe Barrier while rejecting a
 stale source head; and `context status`/`context reduce` expose missing-safe
 inspection plus explicit recovery. Soft pressure uses the same checkpoint path
 before admission, hard pressure still stops before effects, and unknown pressure

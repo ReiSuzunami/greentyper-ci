@@ -100,21 +100,30 @@ work or incurred no usage. Each attempted request is already closed as one
 durable failed Usage Attempt with its cost evaluation before the Turn becomes
 blocked.
 
-Runtime Event schema 12 preserves schema 11's redacted unavailability stage. Only an
-initial Provider request blocked at `BeforeResponse` or `BeforeFirstEvent` is
-marked retryable. `greentyper retry --ledger PATH --turn ID` appends a validated
-`TurnRetryRequested`, preserving the exact Turn, input, Config Epoch, Provider
-Epoch, and prior Usage/cost evidence, then starts one new durable Usage Attempt.
-The request may repeat remote work, usage, or billing. If adapter construction
-fails after the retry request, the durable state is `resume-required`; if the new
-attempt fails early, the Turn blocks again and needs another explicit request.
-`AfterFirstEvent`, malformed output, Tool-derived blocks, every post-Tool
-continuation failure, and schema-10-or-earlier blocks without the stage reject
-retry without mutation.
+An explicitly configured Model Preset fallback is a separate Runtime policy,
+not transport retry. Config resolves at most 16 candidates; the product
+preflights every adapter before opening Runtime state, and schema 13 freezes a
+distinct Config/Provider Epoch for each candidate. Runtime advances only after
+`BeforeResponse` or `BeforeFirstEvent`, after closing the failed candidate's
+Usage Attempt and cost evaluation. `AfterFirstEvent`, malformed output,
+Tool-derived blocks, and every post-Tool continuation failure never switch
+candidates.
+
+If a process exits while an eligible early failure is blocked,
+`greentyper retry --ledger PATH --turn ID` first appends a validated
+`ProviderFallbackRequested` for the next frozen candidate. When no fallback
+remains, it appends `TurnRetryRequested` for the active candidate. Both preserve
+the exact Turn, input, immutable Epoch history, and prior Usage/cost evidence,
+then expose `resume-required` for one new durable Usage Attempt. The request may
+repeat remote work, usage, or billing. If adapter construction fails after the
+recovery transaction, the durable state remains `resume-required`; another
+early failure blocks again. Schema-10-or-earlier blocks without the stage reject
+recovery without mutation.
 
 `greentyper cancel --ledger PATH --turn ID` remains the explicit terminal
 recovery for a typed Provider-origin block. Schema 10 introduced the block origin
-and validated `TurnCancelled`; schema 12 preserves that contract. The event
+and validated `TurnCancelled`; current schema 13 preserves that contract. The
+event
 clears only the pending Turn; it retains its user item, immutable Usage/cost
 history, and frozen Config and Provider Epochs. Repeating the exact cancellation
 is a no-op. Product retry and cancellation strictly open existing Runtime, Team,
@@ -480,7 +489,7 @@ plus the [OpenCode Go endpoint matrix](https://opencode.ai/docs/go/).
 - Reasoning, refusal, annotation, hosted-tool, and other Responses event kinds
   not listed above.
 - OpenCode Go Messages execution, DeepSeek Chat/Messages
-  thinking/signature/server-tool blocks, general Preset context/fallback execution, Chat
+  thinking/signature/server-tool blocks, Preset context-mode execution, Chat
   Completions refusal/reasoning and other delta kinds, and non-streaming
   Provider responses.
 - Multiple Tool calls, parallel calls, persisted resumable Provider

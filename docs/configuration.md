@@ -666,16 +666,23 @@ preference keeps V4 Flash on Responses and resolves V4 Pro to Chat Completions
 before admission. OpenCode Go admission separately requires the exact model and
 dialect pair from the release catalog; it does not infer another dialect. The
 effective dialect is frozen in the Provider Epoch. This is not transport retry
-or general fallback-chain execution. Presets may also define reasoning effort,
+or automatic provider routing. Presets may also define reasoning effort,
 reasoning mode where supported, service tier, output limit, context policy, and
-an explicit fallback chain. They never grant tools, approvals, credentials, or
-workspace authority.
+an explicit fallback graph. Config resolves that graph depth-first in
+first-occurrence order, rejects cycles and unknown references, and caps the
+result at 16 Provider candidates. Each direct fallback must retain any required
+reasoning effort, service tier, and context mode and provide at least the
+required output-token limit; provider, model, and dialect changes remain
+explicit. Presets never grant tools, approvals, credentials, or workspace
+authority.
 
 The current headless execution surface accepts `--preset ID`. It resolves the
-exact configured ID, applies its Profile/model/dialect, and freezes optional
-`max_output_tokens`, typed reasoning effort, and typed service tier in the next
-Turn's Config Epoch. `--preset` and `--dialect` are mutually exclusive, and an
-unknown ID fails rather than triggering model-name inference. Responses maps
+exact configured ID and its explicit fallback candidates, adapter-preflights
+the complete plan before opening Runtime state, and freezes every candidate's
+Profile/model/dialect and optional `max_output_tokens`, typed reasoning effort,
+and typed service tier in distinct Config/Provider Epochs for the next Turn.
+`--preset` and `--dialect` are mutually exclusive, and an unknown ID fails
+rather than triggering model-name inference. Responses maps
 reasoning to `reasoning.effort`; OpenAI Chat Completions uses
 `reasoning_effort`; both OpenAI adapters send `service_tier`. DeepSeek Responses
 maps `max_output_tokens` and supported `reasoning.effort`, but rejects service
@@ -694,8 +701,12 @@ metadata records the same policy. The accepted reasoning values are `none`,
 model-dependent, so a valid configured value may still receive an explicit
 Provider rejection. The client rejects zero or more than 1,048,576 requested
 tokens as a cost and latency guard; a Provider or model may enforce a lower
-limit. Context mode, fallback execution, and project/default selection remain
-target behavior.
+limit. Runtime advances to the next frozen fallback only after Provider
+unavailability before a response or before the first decoded event. It records
+the failed candidate's Usage/cost evidence first and never switches after a
+partial stream, malformed output, Tool-derived state, or post-Tool continuation
+failure. This candidate switch is not an adapter retry or reconnect. Context
+mode execution and project/default selection remain target behavior.
 
 The rendered model browser now provides Favorites, Recent, Compatible, and All
 views with fuzzy search and bounded provider, dialect, context, capability,
@@ -724,8 +735,9 @@ Config drift, explicit-ID conflict, credential failure, and unsupported policy
 preserve the pending selection before Provider execution. A new-Agent or project
 default remains target behavior. Any provider/model/dialect change starts a
 Provider Epoch.
-Automatic price- or latency-based routing is outside v1; fallback is explicit
-and must preserve the required capability contract.
+Automatic price- or latency-based routing is outside v1; fallback is explicit,
+bounded, frozen before admission, and must preserve the required capability
+contract.
 
 ## Statusline
 
@@ -854,7 +866,7 @@ reasoning_output_micros_per_million = 3000000
 ```
 
 The resolved schedule book rejects duplicate or overlapping selectors. Config
-Epoch creation freezes the book and its fingerprints. Runtime Event schema 12
+Epoch creation freezes the book and its fingerprints. Runtime Event schema 13
 appends normalized Usage first and its cost evaluation second in one transaction;
 replay recomputes the result from that frozen evidence. Missing token classes,
 missing selectors, inconsistent accounting, and arithmetic overflow remain
