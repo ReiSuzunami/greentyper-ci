@@ -47,7 +47,7 @@ impl SchemaKind {
             | Self::ProviderCatalog
             | Self::ProviderDiscovery
             | Self::ToolEvent => SchemaVersion(1),
-            Self::RuntimeEvent => SchemaVersion(11),
+            Self::RuntimeEvent => SchemaVersion(12),
             Self::TeamEvent => SchemaVersion(2),
             Self::BenchmarkEvidence => SchemaVersion(2),
         }

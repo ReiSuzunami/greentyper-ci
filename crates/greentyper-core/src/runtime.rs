@@ -17,7 +17,11 @@ use crate::config::{
     ConfigEpoch, ConfigError, ConfigLayer, ConfigLayers, ConfigSource, MAX_CONFIG_ID_BYTES,
     MAX_CONFIG_STRING_BYTES, ReasoningEffort, ServiceTier,
 };
-use crate::context::{ContextAdmissionDecision, ContextPressureSnapshot};
+use crate::context::{
+    ContextAdmissionDecision, ContextArtifactRef, ContextEventRange, ContextPressureSnapshot,
+    ContextReductionPolicy, ContextViewError, ContextViewItem, ContextViewRole,
+    MAX_CONTEXT_VIEW_ITEMS, ReducedContextView,
+};
 use crate::ledger::{
     DurabilityReceipt, EventData, FileLedger, LedgerError, LedgerHead, StoredEvent,
 };
@@ -106,6 +110,40 @@ pub struct RuntimeSnapshot {
     pub status: RecoveryStatus,
     pub pending_model_selection: Option<PendingModelSelection>,
     pub recovered_tail_bytes: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContextCheckpointDraft {
+    view: ReducedContextView,
+}
+
+impl ContextCheckpointDraft {
+    #[must_use]
+    pub const fn source(&self) -> ContextEventRange {
+        self.view.source()
+    }
+
+    #[must_use]
+    pub const fn view(&self) -> &ReducedContextView {
+        &self.view
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContextCheckpoint {
+    view: ReducedContextView,
+}
+
+impl ContextCheckpoint {
+    #[must_use]
+    pub const fn source(&self) -> ContextEventRange {
+        self.view.source()
+    }
+
+    #[must_use]
+    pub const fn view(&self) -> &ReducedContextView {
+        &self.view
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -686,6 +724,36 @@ impl RuntimeKernel {
         self.state.pending_model_selection.as_ref()
     }
 
+    #[must_use]
+    pub const fn context_checkpoint(&self) -> Option<&ContextCheckpoint> {
+        self.state.context_checkpoint.as_ref()
+    }
+
+    pub fn prepare_context_checkpoint(
+        &self,
+        policy: ContextReductionPolicy,
+    ) -> Result<ContextCheckpointDraft, RuntimeError> {
+        self.require_context_safe_barrier()?;
+        let view = ReducedContextView::from_items(self.ledger.head(), &self.state.items, policy)
+            .map_err(RuntimeError::Context)?;
+        Ok(ContextCheckpointDraft { view })
+    }
+
+    pub fn publish_context_checkpoint(
+        &mut self,
+        draft: ContextCheckpointDraft,
+    ) -> Result<DurabilityReceipt, RuntimeError> {
+        self.require_context_safe_barrier()?;
+        let expected = draft.source().head();
+        let actual = self.ledger.head();
+        if expected != actual {
+            return Err(RuntimeError::StaleContextCheckpoint { expected, actual });
+        }
+        self.commit(&[RuntimeEvent::ContextCheckpointPublished {
+            checkpoint: ContextCheckpoint { view: draft.view },
+        }])
+    }
+
     pub fn stage_model_selection(
         &mut self,
         session: AgentSession,
@@ -1175,6 +1243,15 @@ impl RuntimeKernel {
             RecoveryStatus::Ready => Ok(()),
             status => Err(RuntimeError::Busy(status)),
         }
+    }
+
+    fn require_context_safe_barrier(&self) -> Result<(), RuntimeError> {
+        self.require_ready()?;
+        self.require_no_tool_reconciliation()?;
+        if let Some(team) = &self.team {
+            team.require_ready()?;
+        }
+        Ok(())
     }
 
     fn dispatch_team_command(
@@ -2102,6 +2179,9 @@ impl FrozenCostEvaluation {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum RuntimeEvent {
+    ContextCheckpointPublished {
+        checkpoint: ContextCheckpoint,
+    },
     ModelSelectionStaged {
         agent: AgentId,
         selection: ModelSelection,
@@ -2185,6 +2265,10 @@ impl RuntimeEvent {
     fn encode(&self) -> Result<EventData, RuntimeError> {
         let mut payload = Encoder::default();
         let kind = match self {
+            Self::ContextCheckpointPublished { checkpoint } => {
+                encode_context_checkpoint(&mut payload, checkpoint)?;
+                17
+            }
             Self::ModelSelectionStaged { agent, selection } => {
                 payload.u64(agent.get());
                 payload.string(selection.preset_id())?;
@@ -2369,6 +2453,9 @@ impl RuntimeEvent {
         }
         let mut payload = Decoder::new(&event.data.payload);
         let decoded = match event.data.kind {
+            17 if event.data.schema >= 12 => Self::ContextCheckpointPublished {
+                checkpoint: decode_context_checkpoint(&mut payload)?,
+            },
             14 if event.data.schema >= 9 => Self::ModelSelectionStaged {
                 agent: AgentId::from_stored(payload.u64()?).ok_or(RuntimeError::CorruptEvent(
                     "invalid Agent ID in Model selection",
@@ -2607,6 +2694,7 @@ struct RuntimeState {
     items: Vec<CanonicalItem>,
     pending: Option<PendingTurn>,
     pending_model_selection: Option<PendingModelSelection>,
+    context_checkpoint: Option<ContextCheckpoint>,
     acknowledged: BTreeSet<DeliveryId>,
     usage: UsageProjection,
     pending_cost_evaluation: Option<(TurnId, u32)>,
@@ -2628,6 +2716,7 @@ impl Default for RuntimeState {
             items: Vec::new(),
             pending: None,
             pending_model_selection: None,
+            context_checkpoint: None,
             acknowledged: BTreeSet::new(),
             usage: UsageProjection::default(),
             pending_cost_evaluation: None,
@@ -2681,6 +2770,18 @@ impl RuntimeState {
             ));
         }
         match event {
+            RuntimeEvent::ContextCheckpointPublished { checkpoint } => {
+                if self.pending.is_some() {
+                    return Err(RuntimeError::CorruptState(
+                        "Context checkpoint was published outside a Safe Barrier",
+                    ));
+                }
+                checkpoint
+                    .view
+                    .validate_against_items(&self.items)
+                    .map_err(RuntimeError::Context)?;
+                self.context_checkpoint = Some(checkpoint);
+            }
             RuntimeEvent::ModelSelectionStaged { agent, selection } => {
                 if self.pending.is_some() {
                     return Err(RuntimeError::CorruptState(
@@ -3313,10 +3414,25 @@ fn replay_runtime(events: &[StoredEvent]) -> Result<RuntimeState, RuntimeError> 
     let mut state = RuntimeState::default();
     let mut index = 0;
     while index < events.len() {
+        let prior_head = index
+            .checked_sub(1)
+            .map_or_else(LedgerHead::default, |prior| LedgerHead {
+                transaction: events[prior].transaction,
+                sequence: events[prior].sequence,
+            });
         let transaction = events[index].transaction;
         let mut candidate = state.clone();
         while index < events.len() && events[index].transaction == transaction {
-            candidate.apply(RuntimeEvent::decode(&events[index])?)?;
+            let event = RuntimeEvent::decode(&events[index])?;
+            if let RuntimeEvent::ContextCheckpointPublished { checkpoint } = &event
+                && (events[index].events_in_transaction != 1
+                    || checkpoint.source().head() != prior_head)
+            {
+                return Err(RuntimeError::CorruptEvent(
+                    "Context checkpoint is not bound to the prior Ledger head",
+                ));
+            }
+            candidate.apply(event)?;
             index += 1;
         }
         candidate.validate_quiescent()?;
@@ -3350,6 +3466,115 @@ fn provider_block_reason(error: &ProviderError) -> &'static str {
             stage: ProviderUnavailableStage::AfterFirstEvent,
             ..
         } => "Provider stream was interrupted after a partial response",
+    }
+}
+
+fn encode_context_checkpoint(
+    encoder: &mut Encoder,
+    checkpoint: &ContextCheckpoint,
+) -> Result<(), RuntimeError> {
+    let head = checkpoint.source().head();
+    encoder.u64(head.transaction);
+    encoder.u64(head.sequence);
+    encoder.u32(
+        u32::try_from(checkpoint.view.artifacts().len())
+            .map_err(|_| RuntimeError::IntegerOverflow)?,
+    );
+    for artifact in checkpoint.view.artifacts() {
+        encoder.u64(artifact.item());
+        encoder.u64(artifact.turn());
+        encoder.u8(context_view_role_tag(artifact.role()));
+        encoder.u64(artifact.byte_len());
+        encoder.u64(artifact.estimated_tokens());
+        encoder.raw(artifact.digest());
+    }
+    encoder.u32(
+        u32::try_from(checkpoint.view.recent_items().len())
+            .map_err(|_| RuntimeError::IntegerOverflow)?,
+    );
+    for item in checkpoint.view.recent_items() {
+        encoder.u64(item.item());
+        encoder.u64(item.turn());
+        encoder.u8(context_view_role_tag(item.role()));
+        encoder.string(item.text())?;
+    }
+    Ok(())
+}
+
+fn decode_context_checkpoint(decoder: &mut Decoder<'_>) -> Result<ContextCheckpoint, RuntimeError> {
+    let transaction = decoder.u64()?;
+    let sequence = decoder.u64()?;
+    if (transaction == 0) != (sequence == 0) {
+        return Err(RuntimeError::CorruptEvent(
+            "Context checkpoint source head is invalid",
+        ));
+    }
+    let source = ContextEventRange::from_head(LedgerHead {
+        transaction,
+        sequence,
+    });
+    let artifact_count = decoder.u32()? as usize;
+    if artifact_count > MAX_CONTEXT_VIEW_ITEMS {
+        return Err(RuntimeError::CorruptEvent(
+            "Context checkpoint artifact count is invalid",
+        ));
+    }
+    let mut artifacts = Vec::with_capacity(artifact_count);
+    for _ in 0..artifact_count {
+        let item = decoder.u64()?;
+        let turn = decoder.u64()?;
+        let role = decode_context_view_role(decoder.u8()?)?;
+        let byte_len = decoder.u64()?;
+        let estimated_tokens = decoder.u64()?;
+        let digest = decoder
+            .bytes(32)?
+            .try_into()
+            .expect("fixed Context artifact digest");
+        artifacts.push(
+            ContextArtifactRef::from_stored(item, turn, role, byte_len, estimated_tokens, digest)
+                .map_err(RuntimeError::Context)?,
+        );
+    }
+    let recent_count = decoder.u32()? as usize;
+    if artifact_count
+        .checked_add(recent_count)
+        .is_none_or(|count| count > MAX_CONTEXT_VIEW_ITEMS)
+    {
+        return Err(RuntimeError::CorruptEvent(
+            "Context checkpoint Item count is invalid",
+        ));
+    }
+    let mut recent_items = Vec::with_capacity(recent_count);
+    for _ in 0..recent_count {
+        recent_items.push(
+            ContextViewItem::from_stored(
+                decoder.u64()?,
+                decoder.u64()?,
+                decode_context_view_role(decoder.u8()?)?,
+                decoder.string(crate::context::MAX_CONTEXT_VIEW_BYTES)?,
+            )
+            .map_err(RuntimeError::Context)?,
+        );
+    }
+    let view = ReducedContextView::from_stored(source, artifacts, recent_items)
+        .map_err(RuntimeError::Context)?;
+    Ok(ContextCheckpoint { view })
+}
+
+const fn context_view_role_tag(role: ContextViewRole) -> u8 {
+    match role {
+        ContextViewRole::User => 1,
+        ContextViewRole::Assistant => 2,
+    }
+}
+
+fn decode_context_view_role(tag: u8) -> Result<ContextViewRole, RuntimeError> {
+    match tag {
+        1 => Ok(ContextViewRole::User),
+        2 => Ok(ContextViewRole::Assistant),
+        _ => Err(RuntimeError::CorruptEvent(
+            "Context checkpoint role is invalid",
+        )),
     }
 }
 
@@ -4204,6 +4429,10 @@ impl Encoder {
         Ok(())
     }
 
+    fn raw(&mut self, value: &[u8]) {
+        self.bytes.extend_from_slice(value);
+    }
+
     fn finish(self) -> Vec<u8> {
         self.bytes
     }
@@ -4287,6 +4516,7 @@ pub enum RuntimeError {
     Model(ModelError),
     Provider(ProviderError),
     Usage(UsageError),
+    Context(ContextViewError),
     ContextAdmissionBlocked {
         pressure: ContextPressureSnapshot,
     },
@@ -4294,6 +4524,10 @@ pub enum RuntimeError {
     UnknownTurn(TurnId),
     TurnCancellationNotAllowed(TurnId),
     TurnRetryNotAllowed(TurnId),
+    StaleContextCheckpoint {
+        expected: LedgerHead,
+        actual: LedgerHead,
+    },
     UnknownDelivery(DeliveryId),
     InvalidInput(&'static str),
     InvalidProviderOutput(&'static str),
@@ -4328,6 +4562,7 @@ impl fmt::Display for RuntimeError {
             Self::Model(source) => write!(formatter, "{source}"),
             Self::Provider(source) => write!(formatter, "{source}"),
             Self::Usage(source) => write!(formatter, "{source}"),
+            Self::Context(source) => write!(formatter, "{source}"),
             Self::ContextAdmissionBlocked { pressure } => write!(
                 formatter,
                 "Context Pressure stopped Turn admission at {}%",
@@ -4343,6 +4578,11 @@ impl fmt::Display for RuntimeError {
             Self::TurnRetryNotAllowed(turn) => {
                 write!(formatter, "Turn {} cannot be retried", turn.get())
             }
+            Self::StaleContextCheckpoint { expected, actual } => write!(
+                formatter,
+                "stale Context checkpoint: expected Ledger head {}/{}, found {}/{}",
+                expected.transaction, expected.sequence, actual.transaction, actual.sequence
+            ),
             Self::UnknownDelivery(delivery) => {
                 write!(formatter, "unknown output delivery {}", delivery.get())
             }
@@ -4404,6 +4644,7 @@ impl Error for RuntimeError {
             Self::Model(source) => Some(source),
             Self::Provider(source) => Some(source),
             Self::Usage(source) => Some(source),
+            Self::Context(source) => Some(source),
             _ => None,
         }
     }
@@ -4438,6 +4679,53 @@ mod tests {
             false,
         )
         .expect("valid Provider Profile snapshot")
+    }
+
+    #[test]
+    fn context_checkpoint_event_rejects_a_non_prior_source_head() {
+        let view = ReducedContextView::from_items(
+            LedgerHead {
+                transaction: 1,
+                sequence: 1,
+            },
+            &[],
+            ContextReductionPolicy::new(64, 1).expect("policy"),
+        )
+        .expect("empty reduced View");
+        let event = RuntimeEvent::ContextCheckpointPublished {
+            checkpoint: ContextCheckpoint { view },
+        }
+        .encode()
+        .expect("encode checkpoint");
+
+        assert!(matches!(
+            replay_runtime(&[stored_runtime_event(event)]),
+            Err(RuntimeError::CorruptEvent(
+                "Context checkpoint is not bound to the prior Ledger head"
+            ))
+        ));
+    }
+
+    #[test]
+    fn context_checkpoint_event_rejects_tampered_artifact_evidence() {
+        let artifact = ContextArtifactRef::from_stored(1, 1, ContextViewRole::User, 4, 1, [0; 32])
+            .expect("bounded artifact");
+        let view = ReducedContextView::from_stored(
+            ContextEventRange::from_head(LedgerHead::default()),
+            vec![artifact],
+            Vec::new(),
+        )
+        .expect("structurally valid reduced View");
+        let event = RuntimeEvent::ContextCheckpointPublished {
+            checkpoint: ContextCheckpoint { view },
+        }
+        .encode()
+        .expect("encode checkpoint");
+
+        assert!(matches!(
+            replay_runtime(&[stored_runtime_event(event)]),
+            Err(RuntimeError::Context(ContextViewError::ArtifactMismatch))
+        ));
     }
 
     #[test]

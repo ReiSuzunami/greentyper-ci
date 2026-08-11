@@ -6,6 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use greentyper_core::config::{ConfigDocument, ConfigLayers, ConfigPaths, ConfigRuntime};
 use greentyper_core::context::{
     ContextPressure, ContextPressureAccuracy, ContextPressureInput, ContextPressurePolicy,
+    ContextReductionPolicy,
 };
 use greentyper_core::ledger::{EventData, FileLedger, LedgerHead};
 use greentyper_core::provider::{
@@ -67,6 +68,113 @@ fn prepared_output_is_acknowledged_once_and_replays_ready() {
     assert_eq!(snapshot.items[0].text(), "hello");
     assert_eq!(snapshot.items[1].text(), "simulated: hello");
     drop(recovered);
+    fs::remove_file(path).expect("cleanup Runtime ledger");
+}
+
+#[test]
+fn context_checkpoint_publishes_at_a_safe_barrier_and_replays() {
+    let path = temp_path("context-checkpoint-replay");
+    let mut runtime = RuntimeKernel::open(&path).expect("open Runtime");
+    let mut provider = DeterministicProvider::default();
+    let output = runtime
+        .execute(&ConfigLayers::default(), "checkpoint me", &mut provider)
+        .expect("prepare output");
+    runtime
+        .acknowledge(output.delivery())
+        .expect("complete Turn");
+
+    let source_head = runtime.snapshot().head;
+    let draft = runtime
+        .prepare_context_checkpoint(ContextReductionPolicy::new(64, 1).expect("policy"))
+        .expect("prepare checkpoint");
+    assert_eq!(draft.source().head(), source_head);
+    assert_eq!(draft.view().artifacts().len(), 1);
+    assert_eq!(draft.view().recent_items().len(), 1);
+
+    let receipt = runtime
+        .publish_context_checkpoint(draft)
+        .expect("publish checkpoint");
+    assert_eq!(receipt.event_count, 1);
+    let published = runtime
+        .context_checkpoint()
+        .cloned()
+        .expect("published checkpoint");
+    assert_eq!(published.source().head(), source_head);
+    assert_eq!(published.view().artifacts().len(), 1);
+    assert_eq!(published.view().recent_items().len(), 1);
+    drop(runtime);
+
+    let recovered = RuntimeKernel::open(&path).expect("reopen Runtime");
+    let replayed = recovered
+        .context_checkpoint()
+        .cloned()
+        .expect("replayed checkpoint");
+    assert_eq!(replayed, published);
+    assert_eq!(replayed.source().head(), source_head);
+    drop(recovered);
+    fs::remove_file(path).expect("cleanup Runtime ledger");
+}
+
+#[test]
+fn context_checkpoint_rejects_stale_source_without_mutating_the_ledger() {
+    let path = temp_path("context-checkpoint-stale");
+    let mut runtime = RuntimeKernel::open(&path).expect("open Runtime");
+    let mut provider = DeterministicProvider::default();
+    let first = runtime
+        .execute(&ConfigLayers::default(), "first", &mut provider)
+        .expect("prepare first output");
+    runtime
+        .acknowledge(first.delivery())
+        .expect("complete first Turn");
+    let stale = runtime
+        .prepare_context_checkpoint(ContextReductionPolicy::new(64, 1).expect("policy"))
+        .expect("prepare stale checkpoint");
+
+    let second = runtime
+        .execute(&ConfigLayers::default(), "second", &mut provider)
+        .expect("prepare second output");
+    runtime
+        .acknowledge(second.delivery())
+        .expect("complete second Turn");
+    let before = runtime.snapshot();
+    let bytes_before = fs::read(&path).expect("read Runtime ledger");
+
+    assert!(matches!(
+        runtime.publish_context_checkpoint(stale),
+        Err(RuntimeError::StaleContextCheckpoint { expected, actual })
+            if expected != actual && actual == before.head
+    ));
+    assert_eq!(runtime.snapshot(), before);
+    assert_eq!(
+        fs::read(&path).expect("read unchanged Runtime ledger"),
+        bytes_before
+    );
+    drop(runtime);
+    fs::remove_file(path).expect("cleanup Runtime ledger");
+}
+
+#[test]
+fn context_checkpoint_requires_a_safe_barrier_without_mutating_state() {
+    let path = temp_path("context-checkpoint-barrier");
+    let mut runtime = RuntimeKernel::open(&path).expect("open Runtime");
+    let mut provider = DeterministicProvider::default();
+    let _output = runtime
+        .execute(
+            &ConfigLayers::default(),
+            "awaiting acknowledgement",
+            &mut provider,
+        )
+        .expect("prepare output");
+    let before = runtime.snapshot();
+
+    assert!(matches!(
+        runtime.prepare_context_checkpoint(ContextReductionPolicy::new(64, 1).expect("policy")),
+        Err(RuntimeError::Busy(
+            RecoveryStatus::ReconciliationRequired { .. }
+        ))
+    ));
+    assert_eq!(runtime.snapshot(), before);
+    drop(runtime);
     fs::remove_file(path).expect("cleanup Runtime ledger");
 }
 
@@ -660,7 +768,7 @@ fn unsupported_runtime_event_schema_fails_closed() {
         .append(
             LedgerHead::default(),
             &[EventData {
-                schema: 12,
+                schema: 13,
                 kind: 1,
                 payload: 1_u64.to_le_bytes().to_vec(),
             }],
@@ -670,8 +778,8 @@ fn unsupported_runtime_event_schema_fails_closed() {
     assert!(matches!(
         RuntimeKernel::open(&path),
         Err(RuntimeError::UnsupportedRuntimeEventSchema {
-            supported: 11,
-            actual: 12
+            supported: 12,
+            actual: 13
         })
     ));
     fs::remove_file(path).expect("cleanup Runtime ledger");
