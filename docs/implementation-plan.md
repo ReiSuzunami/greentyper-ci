@@ -93,7 +93,13 @@ until explicit reconciliation. Tests prove restart deduplication, identity
 conflict rejection, stale-session rejection, expiry denial, raw-argument and
 external-reason exclusion, pre-effect durability failure with zero executor
 calls, and post-effect outcome failure requiring reopen and explicit
-reconciliation.
+reconciliation. A private same-binary child-process matrix now terminates all
+three executor results (success, failure, and ambiguous) at six representative
+points from executor return through the terminal outcome append. Across all 18
+cases, restart either recognizes the complete terminal outcome or exposes the
+call as reconciliation-required; the external effect marker remains exactly
+once, repeat identity never returns to approval, and raw arguments, outputs,
+and executor reasons remain outside the Tool Ledger.
 
 The first Provider dialect slice and two additional adapter slices are also
 implemented. A reusable bounded SSE
@@ -142,7 +148,12 @@ inspection, while `tool reconcile` records an externally observed failure or
 success digest for the original Agent-bound call. A same-binary integration
 test terminates the product after durable `EffectPrepared` and executor entry,
 then proves blocked restart, explicit reconciliation, no effect replay, and
-later Turn admission.
+later Turn admission. A separate core same-binary matrix terminates after the
+executor returns and around the terminal outcome frame header, body, commit,
+flush, and sync points for success, failure, and ambiguous results. It proves
+complete-frame replay or explicit reconciliation without re-executing the
+effect; it is representative process-termination evidence, not real power-loss
+or exhaustive byte-offset evidence.
 
 Three configured dialect adapters now exercise seven exact template/dialect
 pairs across the concrete Responses, Chat Completions, and Messages HTTP seams.
@@ -183,8 +194,9 @@ context/fallback execution, broader canonical Items, multiple
 Tool calls,
 durable resumable Tool result references, richer TUI/App Server
 approval/delivery, caller-selected process policy, complete Windows Job
-lifetime/resource evidence, reconnect/retry behavior, and the cross-process
-Tool crash matrix beyond the prepared-effect boundary remain pending.
+lifetime/resource evidence, reconnect/retry behavior, and cross-process crash
+matrices for the remaining Runtime, Provider, Tool, delivery, and product
+acknowledgement boundaries remain pending.
 
 Exit criteria:
 

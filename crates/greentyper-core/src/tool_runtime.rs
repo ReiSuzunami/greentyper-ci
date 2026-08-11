@@ -699,6 +699,12 @@ pub(crate) struct DurableToolRuntime {
     recovered_tail_bytes: u64,
 }
 
+struct ToolResolveHooks<PrepareAppend, AfterExecute, OutcomeAppend> {
+    prepare_append: PrepareAppend,
+    after_execute: AfterExecute,
+    outcome_append: OutcomeAppend,
+}
+
 impl DurableToolRuntime {
     pub(crate) fn open(path: impl AsRef<Path>) -> Result<Self, ToolRuntimeError> {
         let (ledger, report) = FileLedger::open(path).map_err(ToolRuntimeError::Ledger)?;
@@ -815,6 +821,45 @@ impl DurableToolRuntime {
             &[EventData],
         ) -> Result<DurabilityReceipt, LedgerError>,
     {
+        self.resolve_with_boundary(
+            principal,
+            request,
+            decision,
+            executor,
+            ToolResolveHooks {
+                prepare_append,
+                after_execute: || {},
+                outcome_append,
+            },
+        )
+    }
+
+    fn resolve_with_boundary<PrepareAppend, AfterExecute, OutcomeAppend>(
+        &mut self,
+        principal: ToolPrincipal,
+        request: ToolApprovalRequest,
+        decision: ApprovalDecision,
+        executor: &mut impl ToolEffectExecutor,
+        hooks: ToolResolveHooks<PrepareAppend, AfterExecute, OutcomeAppend>,
+    ) -> Result<ToolCallOutcome, ToolRuntimeError>
+    where
+        PrepareAppend: FnOnce(
+            &mut FileLedger,
+            LedgerHead,
+            &[EventData],
+        ) -> Result<DurabilityReceipt, LedgerError>,
+        AfterExecute: FnOnce(),
+        OutcomeAppend: FnOnce(
+            &mut FileLedger,
+            LedgerHead,
+            &[EventData],
+        ) -> Result<DurabilityReceipt, LedgerError>,
+    {
+        let ToolResolveHooks {
+            prepare_append,
+            after_execute,
+            outcome_append,
+        } = hooks;
         self.validate_request(&principal, &request)?;
         match decision {
             ApprovalDecision::Deny { reason } => {
@@ -857,6 +902,7 @@ impl DurableToolRuntime {
                     resources: &request.intent.resources,
                 };
                 let execution = executor.execute(&authorized);
+                after_execute();
                 match execution {
                     ToolExecution::Succeeded { output } if output.len() <= MAX_OUTPUT_BYTES => {
                         let digest: [u8; 32] = Sha256::digest(&output).into();
@@ -1781,15 +1827,132 @@ impl Error for ToolRuntimeError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
+    use std::env;
+    use std::ffi::OsString;
+    use std::fs::{self, File, OpenOptions};
+    use std::io::{Seek, SeekFrom, Write};
+    use std::path::{Path, PathBuf};
+    use std::process::{Child, Command, ExitStatus, Stdio};
     use std::sync::atomic::{AtomicU64, Ordering};
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::thread;
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     use crate::agent_team::{
         CommandOutcome, ResourceBudget, TaskScope, TaskSpec, TeamCommand, TeamRuntime,
     };
 
     static NEXT_TEMP: AtomicU64 = AtomicU64::new(1);
+
+    const OUTCOME_CRASH_CHILD_ENV: &str = "GREENTYPER_TOOL_OUTCOME_CRASH_CHILD_DIR";
+    const OUTCOME_CRASH_CASE_ENV: &str = "GREENTYPER_TOOL_OUTCOME_CRASH_CASE";
+    const OUTCOME_CRASH_EXECUTION_ENV: &str = "GREENTYPER_TOOL_OUTCOME_CRASH_EXECUTION";
+    const OUTCOME_CRASH_CHILD_TEST: &str =
+        "tool_runtime::tests::tool_outcome_crash_child_entrypoint";
+    const OUTCOME_CRASH_PREFIX: &str = "greentyper-tool-outcome-crash-";
+    const SUPERVISOR_FILE: &str = "supervisor";
+    const READY_FILE: &str = "crash-ready";
+    const READY_PENDING_FILE: &str = "crash-ready.pending";
+    const TOOL_LEDGER_FILE: &str = "tool.ledger";
+    const EFFECT_COUNT_FILE: &str = "effect-count";
+    const PRIVATE_ARGUMENT_MARKER: &str = "tool-crash-private-argument";
+    const PRIVATE_OUTPUT_MARKER: &[u8] = b"tool-crash-private-output";
+    const PRIVATE_FAILURE_MARKER: &str = "tool-crash-private-failure";
+    const PRIVATE_AMBIGUOUS_MARKER: &str = "tool-crash-private-ambiguous";
+    const READY_TIMEOUT: Duration = Duration::from_secs(10);
+    const CHILD_TIMEOUT: Duration = Duration::from_secs(30);
+    const POLL_INTERVAL: Duration = Duration::from_millis(5);
+    const MAX_READY_BYTES: u64 = 256;
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum ToolCrashExecution {
+        Succeeded,
+        Failed,
+        Ambiguous,
+    }
+
+    impl ToolCrashExecution {
+        const ALL: [Self; 3] = [Self::Succeeded, Self::Failed, Self::Ambiguous];
+
+        const fn as_str(self) -> &'static str {
+            match self {
+                Self::Succeeded => "succeeded",
+                Self::Failed => "failed",
+                Self::Ambiguous => "ambiguous",
+            }
+        }
+
+        fn parse(value: &str) -> Result<Self, &'static str> {
+            match value {
+                "succeeded" => Ok(Self::Succeeded),
+                "failed" => Ok(Self::Failed),
+                "ambiguous" => Ok(Self::Ambiguous),
+                _ => Err("unknown Tool crash execution"),
+            }
+        }
+
+        const fn terminal_status(self) -> ToolCallStatus {
+            match self {
+                Self::Succeeded => ToolCallStatus::Succeeded,
+                Self::Failed => ToolCallStatus::Failed,
+                Self::Ambiguous => ToolCallStatus::ReconciliationRequired,
+            }
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum ToolOutcomeCrashPoint {
+        AfterExecutorReturn,
+        AfterLengthHeader,
+        MiddleFrame,
+        BeforeCommit,
+        AfterFlush,
+        AfterSync,
+    }
+
+    impl ToolOutcomeCrashPoint {
+        const ALL: [Self; 6] = [
+            Self::AfterExecutorReturn,
+            Self::AfterLengthHeader,
+            Self::MiddleFrame,
+            Self::BeforeCommit,
+            Self::AfterFlush,
+            Self::AfterSync,
+        ];
+
+        const fn as_str(self) -> &'static str {
+            match self {
+                Self::AfterExecutorReturn => "after-executor-return",
+                Self::AfterLengthHeader => "after-length-header",
+                Self::MiddleFrame => "middle-frame",
+                Self::BeforeCommit => "before-commit",
+                Self::AfterFlush => "after-flush",
+                Self::AfterSync => "after-sync",
+            }
+        }
+
+        fn parse(value: &str) -> Result<Self, &'static str> {
+            match value {
+                "after-executor-return" => Ok(Self::AfterExecutorReturn),
+                "after-length-header" => Ok(Self::AfterLengthHeader),
+                "middle-frame" => Ok(Self::MiddleFrame),
+                "before-commit" => Ok(Self::BeforeCommit),
+                "after-flush" => Ok(Self::AfterFlush),
+                "after-sync" => Ok(Self::AfterSync),
+                _ => Err("unknown Tool outcome crash point"),
+            }
+        }
+
+        const fn writes_complete_frame(self) -> bool {
+            matches!(self, Self::AfterFlush | Self::AfterSync)
+        }
+
+        const fn writes_partial_frame(self) -> bool {
+            matches!(
+                self,
+                Self::AfterLengthHeader | Self::MiddleFrame | Self::BeforeCommit
+            )
+        }
+    }
 
     fn temp_path(name: &str) -> std::path::PathBuf {
         let nonce = SystemTime::now()
@@ -1801,6 +1964,370 @@ mod tests {
             std::process::id(),
             NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
         ))
+    }
+
+    fn create_private_file(path: &Path) -> io::Result<File> {
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+
+            options.mode(0o600);
+        }
+        options.open(path)
+    }
+
+    struct CrashRunDirectory {
+        path: Option<PathBuf>,
+    }
+
+    impl CrashRunDirectory {
+        fn create(execution: ToolCrashExecution, point: ToolOutcomeCrashPoint) -> io::Result<Self> {
+            let nonce = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_err(io::Error::other)?
+                .as_nanos();
+            let path = env::temp_dir().join(format!(
+                "{OUTCOME_CRASH_PREFIX}{}-{}-{}-{nonce}-{}",
+                execution.as_str(),
+                point.as_str(),
+                std::process::id(),
+                NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
+            ));
+            fs::create_dir(&path)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+
+                fs::set_permissions(&path, fs::Permissions::from_mode(0o700))?;
+            }
+            Ok(Self {
+                path: Some(path.canonicalize()?),
+            })
+        }
+
+        fn path(&self) -> &Path {
+            self.path.as_deref().expect("crash run directory exists")
+        }
+
+        fn cleanup(mut self) -> io::Result<()> {
+            let path = self.path.take().expect("crash run directory exists");
+            fs::remove_dir_all(path)
+        }
+    }
+
+    impl Drop for CrashRunDirectory {
+        fn drop(&mut self) {
+            if let Some(path) = self.path.take() {
+                let _ = fs::remove_dir_all(path);
+            }
+        }
+    }
+
+    fn supervisor_token(
+        run_dir: &Path,
+        execution: ToolCrashExecution,
+        point: ToolOutcomeCrashPoint,
+    ) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(b"greentyper-tool-outcome-crash-v2");
+        hasher.update(std::process::id().to_le_bytes());
+        hasher.update(NEXT_TEMP.fetch_add(1, Ordering::Relaxed).to_le_bytes());
+        hasher.update(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("time after epoch")
+                .as_nanos()
+                .to_le_bytes(),
+        );
+        hasher.update(run_dir.as_os_str().to_string_lossy().as_bytes());
+        hasher.update(execution.as_str().as_bytes());
+        hasher.update(point.as_str().as_bytes());
+        let mut token = String::with_capacity(64);
+        for byte in hasher.finalize() {
+            std::fmt::Write::write_fmt(&mut token, format_args!("{byte:02x}"))
+                .expect("writing to a String cannot fail");
+        }
+        token
+    }
+
+    fn valid_token(token: &str) -> bool {
+        token.len() == 64
+            && token
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    }
+
+    fn write_supervisor(run_dir: &Path, token: &str) -> io::Result<()> {
+        let mut file = create_private_file(&run_dir.join(SUPERVISOR_FILE))?;
+        file.write_all(token.as_bytes())?;
+        file.flush()?;
+        file.sync_all()
+    }
+
+    fn validate_child_directory(run_dir: &Path) -> io::Result<String> {
+        let metadata = fs::symlink_metadata(run_dir)?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(io::Error::other("Tool crash run directory is not real"));
+        }
+        if run_dir.canonicalize()? != run_dir {
+            return Err(io::Error::other(
+                "Tool crash run directory is not canonical",
+            ));
+        }
+        let temp_root = env::temp_dir().canonicalize()?;
+        if run_dir.parent() != Some(temp_root.as_path()) {
+            return Err(io::Error::other(
+                "Tool crash run directory is outside the temp namespace",
+            ));
+        }
+        let name = run_dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| io::Error::other("Tool crash run directory name is invalid"))?;
+        if !name.starts_with(OUTCOME_CRASH_PREFIX) {
+            return Err(io::Error::other(
+                "Tool crash run directory has an invalid name",
+            ));
+        }
+        let mut entries = fs::read_dir(run_dir)?
+            .map(|entry| entry.map(|entry| entry.file_name()))
+            .collect::<Result<Vec<OsString>, _>>()?;
+        entries.sort();
+        if entries != [OsString::from(SUPERVISOR_FILE)] {
+            return Err(io::Error::other("Tool crash run directory is not fresh"));
+        }
+        let supervisor_path = run_dir.join(SUPERVISOR_FILE);
+        let supervisor_metadata = fs::symlink_metadata(&supervisor_path)?;
+        if supervisor_metadata.file_type().is_symlink() || !supervisor_metadata.is_file() {
+            return Err(io::Error::other("Tool crash supervisor is not a file"));
+        }
+        let token = fs::read_to_string(supervisor_path)?;
+        if !valid_token(&token) {
+            return Err(io::Error::other("Tool crash supervisor token is invalid"));
+        }
+        Ok(token)
+    }
+
+    #[cfg(unix)]
+    fn sync_directory(path: &Path) -> io::Result<()> {
+        File::open(path)?.sync_all()
+    }
+
+    #[cfg(not(unix))]
+    fn sync_directory(_path: &Path) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn ready_contents(
+        token: &str,
+        pid: u32,
+        call: ToolCallId,
+        execution: ToolCrashExecution,
+        point: ToolOutcomeCrashPoint,
+    ) -> String {
+        format!(
+            "greentyper-tool-outcome-crash-v2\n{token}\n{pid}\n{}\n{}\n{}\n",
+            call.get(),
+            execution.as_str(),
+            point.as_str()
+        )
+    }
+
+    fn signal_ready_and_wait(
+        run_dir: &Path,
+        token: &str,
+        call: ToolCallId,
+        execution: ToolCrashExecution,
+        point: ToolOutcomeCrashPoint,
+    ) -> io::Result<()> {
+        let pending_path = run_dir.join(READY_PENDING_FILE);
+        let ready_path = run_dir.join(READY_FILE);
+        let mut marker = create_private_file(&pending_path)?;
+        marker.write_all(
+            ready_contents(token, std::process::id(), call, execution, point).as_bytes(),
+        )?;
+        marker.flush()?;
+        marker.sync_all()?;
+        drop(marker);
+        fs::rename(&pending_path, &ready_path)?;
+        sync_directory(run_dir)?;
+
+        let deadline = Instant::now() + CHILD_TIMEOUT;
+        while Instant::now() < deadline {
+            thread::sleep(POLL_INTERVAL);
+        }
+        Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "Tool crash child was not terminated by its supervisor",
+        ))
+    }
+
+    fn crash_outcome_write_and_wait(
+        run_dir: &Path,
+        token: &str,
+        call: ToolCallId,
+        execution: ToolCrashExecution,
+        point: ToolOutcomeCrashPoint,
+        file: &mut File,
+        frame: &[u8],
+    ) -> io::Result<()> {
+        file.seek(SeekFrom::End(0))?;
+        match point {
+            ToolOutcomeCrashPoint::AfterExecutorReturn => {
+                return Err(io::Error::other(
+                    "executor-return crash point cannot write an outcome frame",
+                ));
+            }
+            ToolOutcomeCrashPoint::AfterLengthHeader => {
+                file.write_all(&frame[..12])?;
+                file.flush()?;
+            }
+            ToolOutcomeCrashPoint::MiddleFrame => {
+                file.write_all(&frame[..frame.len() / 2])?;
+                file.flush()?;
+            }
+            ToolOutcomeCrashPoint::BeforeCommit => {
+                file.write_all(&frame[..frame.len().saturating_sub(1)])?;
+                file.flush()?;
+            }
+            ToolOutcomeCrashPoint::AfterFlush => {
+                file.write_all(frame)?;
+                file.flush()?;
+            }
+            ToolOutcomeCrashPoint::AfterSync => {
+                file.write_all(frame)?;
+                file.flush()?;
+                file.sync_data()?;
+            }
+        }
+        signal_ready_and_wait(run_dir, token, call, execution, point)
+    }
+
+    fn validate_ready_marker(
+        run_dir: &Path,
+        token: &str,
+        pid: u32,
+        call: ToolCallId,
+        execution: ToolCrashExecution,
+        point: ToolOutcomeCrashPoint,
+    ) -> io::Result<()> {
+        let path = run_dir.join(READY_FILE);
+        let metadata = fs::symlink_metadata(&path)?;
+        if metadata.file_type().is_symlink()
+            || !metadata.is_file()
+            || metadata.len() > MAX_READY_BYTES
+        {
+            return Err(io::Error::other("Tool crash ready marker is invalid"));
+        }
+        if fs::read_to_string(path)? != ready_contents(token, pid, call, execution, point) {
+            return Err(io::Error::other(
+                "Tool crash ready marker did not authenticate",
+            ));
+        }
+        Ok(())
+    }
+
+    struct CrashChildGuard {
+        child: Option<Child>,
+    }
+
+    impl CrashChildGuard {
+        fn new(child: Child) -> Self {
+            Self { child: Some(child) }
+        }
+
+        fn id(&self) -> u32 {
+            self.child.as_ref().expect("child is present").id()
+        }
+
+        fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
+            self.child.as_mut().expect("child is present").try_wait()
+        }
+
+        fn terminate_and_wait(&mut self) -> io::Result<ExitStatus> {
+            let mut child = self.child.take().expect("child is present");
+            if let Some(status) = child.try_wait()? {
+                return Ok(status);
+            }
+            if let Err(kill_error) = child.kill() {
+                if let Some(status) = child.try_wait()? {
+                    return Ok(status);
+                }
+                return Err(kill_error);
+            }
+            child.wait()
+        }
+    }
+
+    impl Drop for CrashChildGuard {
+        fn drop(&mut self) {
+            if let Some(mut child) = self.child.take() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+    }
+
+    fn spawn_and_kill_outcome_child(
+        run_dir: &Path,
+        token: &str,
+        call: ToolCallId,
+        execution: ToolCrashExecution,
+        point: ToolOutcomeCrashPoint,
+    ) -> io::Result<()> {
+        let temp_root = run_dir
+            .parent()
+            .ok_or_else(|| io::Error::other("Tool crash run directory has no temp root"))?;
+        let mut command = Command::new(env::current_exe()?);
+        command
+            .arg("--exact")
+            .arg(OUTCOME_CRASH_CHILD_TEST)
+            .arg("--test-threads=1")
+            .env_clear()
+            .env("TMPDIR", temp_root)
+            .env("TMP", temp_root)
+            .env("TEMP", temp_root)
+            .env(OUTCOME_CRASH_CHILD_ENV, run_dir)
+            .env(OUTCOME_CRASH_CASE_ENV, point.as_str())
+            .env(OUTCOME_CRASH_EXECUTION_ENV, execution.as_str())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit());
+        let child = command.spawn()?;
+        let mut child = CrashChildGuard::new(child);
+        let pid = child.id();
+        let deadline = Instant::now() + READY_TIMEOUT;
+        loop {
+            match fs::symlink_metadata(run_dir.join(READY_FILE)) {
+                Ok(_) => {
+                    validate_ready_marker(run_dir, token, pid, call, execution, point)?;
+                    let status = child.terminate_and_wait()?;
+                    if status.success() {
+                        return Err(io::Error::other(
+                            "Tool crash child exited successfully before termination",
+                        ));
+                    }
+                    return Ok(());
+                }
+                Err(source) if source.kind() == io::ErrorKind::NotFound => {}
+                Err(source) => return Err(source),
+            }
+            if let Some(status) = child.try_wait()? {
+                return Err(io::Error::other(format!(
+                    "Tool crash child exited before readiness: {status}"
+                )));
+            }
+            if Instant::now() >= deadline {
+                let _ = child.terminate_and_wait();
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "Tool crash child readiness timed out",
+                ));
+            }
+            thread::sleep(POLL_INTERVAL);
+        }
     }
 
     fn principal() -> ToolPrincipal {
@@ -1897,6 +2424,11 @@ mod tests {
         calls: usize,
     }
 
+    struct CrashSideEffectExecutor {
+        effect_path: PathBuf,
+        execution: ToolCrashExecution,
+    }
+
     struct AmbiguousExecutor;
 
     impl ToolEffectExecutor for AmbiguousExecutor {
@@ -1912,6 +2444,27 @@ mod tests {
             self.calls += 1;
             ToolExecution::Succeeded {
                 output: b"test output".to_vec(),
+            }
+        }
+    }
+
+    impl ToolEffectExecutor for CrashSideEffectExecutor {
+        fn execute(&mut self, _call: &AuthorizedToolCall<'_>) -> ToolExecution {
+            let mut effect = create_private_file(&self.effect_path)
+                .expect("Tool crash side effect executes only once");
+            effect.write_all(b"1\n").expect("write Tool side effect");
+            effect.flush().expect("flush Tool side effect");
+            effect.sync_all().expect("sync Tool side effect");
+            match self.execution {
+                ToolCrashExecution::Succeeded => ToolExecution::Succeeded {
+                    output: PRIVATE_OUTPUT_MARKER.to_vec(),
+                },
+                ToolCrashExecution::Failed => ToolExecution::Failed {
+                    reason: PRIVATE_FAILURE_MARKER.into(),
+                },
+                ToolCrashExecution::Ambiguous => ToolExecution::Ambiguous {
+                    reason: PRIVATE_AMBIGUOUS_MARKER.into(),
+                },
             }
         }
     }
@@ -2140,6 +2693,232 @@ mod tests {
         assert_eq!(replayed.snapshot().calls[0], record);
         drop(replayed);
         fs::remove_file(path).expect("cleanup Tool Ledger");
+    }
+
+    #[test]
+    fn tool_outcome_crash_child_entrypoint() {
+        let Some(run_dir) = env::var_os(OUTCOME_CRASH_CHILD_ENV) else {
+            return;
+        };
+        let run_dir = PathBuf::from(run_dir);
+        let point = ToolOutcomeCrashPoint::parse(
+            &env::var(OUTCOME_CRASH_CASE_ENV).expect("Tool outcome crash case is present"),
+        )
+        .expect("Tool outcome crash case is supported");
+        let execution = ToolCrashExecution::parse(
+            &env::var(OUTCOME_CRASH_EXECUTION_ENV)
+                .expect("Tool outcome crash execution is present"),
+        )
+        .expect("Tool outcome crash execution is supported");
+        let token = validate_child_directory(&run_dir).expect("validate Tool crash directory");
+        let ledger_path = run_dir.join(TOOL_LEDGER_FILE);
+        let mut runtime = DurableToolRuntime::open(&ledger_path).expect("open child Tool Runtime");
+        let principal = principal();
+        let request = approval_request(
+            &mut runtime,
+            principal.clone(),
+            intent("outcome-crash", PRIVATE_ARGUMENT_MARKER),
+        );
+        let call = request.call();
+        let mut executor = CrashSideEffectExecutor {
+            effect_path: run_dir.join(EFFECT_COUNT_FILE),
+            execution,
+        };
+        let after_execute_dir = run_dir.clone();
+        let after_execute_token = token.clone();
+        let outcome_dir = run_dir.clone();
+        let outcome_token = token.clone();
+        let result = runtime.resolve_with_boundary(
+            principal,
+            request,
+            ApprovalDecision::Grant {
+                expires_at_unix_ms: u64::MAX,
+            },
+            &mut executor,
+            ToolResolveHooks {
+                prepare_append: FileLedger::append,
+                after_execute: move || {
+                    if point == ToolOutcomeCrashPoint::AfterExecutorReturn {
+                        signal_ready_and_wait(
+                            &after_execute_dir,
+                            &after_execute_token,
+                            call,
+                            execution,
+                            point,
+                        )
+                        .expect("supervisor terminates Tool crash child after executor return");
+                    }
+                },
+                outcome_append: move |ledger: &mut FileLedger,
+                                      head: LedgerHead,
+                                      events: &[EventData]| {
+                    if point == ToolOutcomeCrashPoint::AfterExecutorReturn {
+                        return FileLedger::append(ledger, head, events);
+                    }
+                    ledger.append_with_test_io(head, events, move |file, frame| {
+                        crash_outcome_write_and_wait(
+                            &outcome_dir,
+                            &outcome_token,
+                            call,
+                            execution,
+                            point,
+                            file,
+                            frame,
+                        )
+                    })
+                },
+            },
+        );
+        panic!("Tool crash child escaped supervisor termination: {result:?}");
+    }
+
+    #[test]
+    fn process_termination_around_outcome_append_never_reexecutes_the_tool_effect() {
+        let call = ToolCallId::new(1).expect("Tool call id");
+        let digest: [u8; 32] = Sha256::digest(PRIVATE_OUTPUT_MARKER).into();
+
+        for execution in ToolCrashExecution::ALL {
+            for point in ToolOutcomeCrashPoint::ALL {
+                let run = CrashRunDirectory::create(execution, point)
+                    .expect("create Tool crash run directory");
+                let run_dir = run.path();
+                let token = supervisor_token(run_dir, execution, point);
+                assert!(valid_token(&token));
+                write_supervisor(run_dir, &token).expect("write Tool crash supervisor");
+
+                spawn_and_kill_outcome_child(run_dir, &token, call, execution, point)
+                    .expect("terminate Tool child around outcome append");
+                fs::remove_file(run_dir.join(SUPERVISOR_FILE))
+                    .expect("remove Tool crash supervisor");
+                fs::remove_file(run_dir.join(READY_FILE)).expect("remove Tool crash marker");
+                sync_directory(run_dir).expect("sync Tool crash marker cleanup");
+
+                let effect_path = run_dir.join(EFFECT_COUNT_FILE);
+                assert_eq!(
+                    fs::read(&effect_path).expect("read Tool side effect count"),
+                    b"1\n",
+                    "Tool effect must execute once for {execution:?} at {point:?}"
+                );
+                let ledger_path = run_dir.join(TOOL_LEDGER_FILE);
+                let principal = principal();
+                let mut recovered = DurableToolRuntime::open(&ledger_path)
+                    .expect("reopen Tool Runtime after child termination");
+                let snapshot = recovered.snapshot();
+                assert_eq!(snapshot.calls.len(), 1);
+                assert_eq!(snapshot.calls[0].call, call);
+                let expected_status = if point.writes_complete_frame() {
+                    execution.terminal_status()
+                } else {
+                    ToolCallStatus::ReconciliationRequired
+                };
+                let expected_digest = if point.writes_complete_frame()
+                    && execution == ToolCrashExecution::Succeeded
+                {
+                    Some(digest)
+                } else {
+                    None
+                };
+                assert_eq!(snapshot.calls[0].status, expected_status);
+                assert_eq!(snapshot.calls[0].result_digest, expected_digest);
+                if point.writes_complete_frame() {
+                    assert_eq!(snapshot.ledger_head.transaction, 3);
+                    assert_eq!(snapshot.recovered_tail_bytes, 0);
+                } else {
+                    assert_eq!(snapshot.ledger_head.transaction, 2);
+                    if point.writes_partial_frame() {
+                        assert!(snapshot.recovered_tail_bytes > 0);
+                    } else {
+                        assert_eq!(snapshot.recovered_tail_bytes, 0);
+                    }
+                }
+
+                match recovered
+                    .request(
+                        principal.clone(),
+                        intent("outcome-crash", PRIVATE_ARGUMENT_MARKER),
+                    )
+                    .expect("same Tool identity must never reexecute")
+                {
+                    ToolRequestOutcome::Existing(record) => {
+                        assert_eq!(record, snapshot.calls[0]);
+                    }
+                    ToolRequestOutcome::ApprovalRequired(_) => {
+                        panic!(
+                            "crashed {execution:?} Tool effect must not return to approval at {point:?}"
+                        )
+                    }
+                }
+                if expected_status == ToolCallStatus::ReconciliationRequired {
+                    assert!(matches!(
+                        recovered.request(
+                            principal.clone(),
+                            intent("another-effect", "must remain blocked")
+                        ),
+                        Err(ToolRuntimeError::ReconciliationRequired(blocked)) if blocked == call
+                    ));
+                }
+                assert_eq!(
+                    fs::read(&effect_path).expect("re-read Tool side effect count"),
+                    b"1\n"
+                );
+
+                let record = recovered
+                    .reconcile(
+                        principal.clone(),
+                        call,
+                        ToolReconciliationDecision::ObservedSucceeded {
+                            result_digest: digest,
+                        },
+                    )
+                    .expect("explicitly reconcile child-terminated Tool effect");
+                if expected_status == ToolCallStatus::Failed {
+                    assert_eq!(record.status, ToolCallStatus::Failed);
+                    assert_eq!(record.result_digest, None);
+                } else {
+                    assert_eq!(record.status, ToolCallStatus::Succeeded);
+                    assert_eq!(record.result_digest, Some(digest));
+                }
+                assert_eq!(
+                    recovered
+                        .reconcile(
+                            principal,
+                            call,
+                            ToolReconciliationDecision::ObservedFailed {
+                                reason: "conflicting repeat must be ignored".into(),
+                            },
+                        )
+                        .expect("terminal reconciliation is idempotent"),
+                    record
+                );
+                drop(recovered);
+
+                let replayed = DurableToolRuntime::open(&ledger_path)
+                    .expect("replay reconciled Tool Runtime after child termination");
+                assert_eq!(replayed.snapshot().calls[0], record);
+                assert_eq!(replayed.snapshot().recovered_tail_bytes, 0);
+                drop(replayed);
+                assert_eq!(
+                    fs::read(&effect_path).expect("read final Tool side effect count"),
+                    b"1\n"
+                );
+                let ledger_bytes = fs::read(&ledger_path).expect("read Tool crash Ledger");
+                for marker in [
+                    PRIVATE_ARGUMENT_MARKER.as_bytes(),
+                    PRIVATE_OUTPUT_MARKER,
+                    PRIVATE_FAILURE_MARKER.as_bytes(),
+                    PRIVATE_AMBIGUOUS_MARKER.as_bytes(),
+                ] {
+                    assert!(
+                        !ledger_bytes
+                            .windows(marker.len())
+                            .any(|window| window == marker),
+                        "Tool crash Ledger must not contain private input or output"
+                    );
+                }
+
+                run.cleanup().expect("cleanup Tool crash run directory");
+            }
+        }
     }
 
     #[test]

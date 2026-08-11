@@ -379,7 +379,10 @@ charges still require a future dedicated authority path.
   prepared-effect ordering, terminal digests, and reconciliation are present.
 - Byte-offset process termination around every remaining Runtime, Provider,
   Tool, delivery, and product acknowledgement boundary. The prepared-effect to
-  executor-entry Tool boundary now has a same-binary process-death/restart test;
-  fuzzing; real
-  power-loss evidence; and Windows directory-entry durability evidence.
+  executor-entry Tool boundary has a product same-binary process-death/restart
+  test. The executor-return to terminal-outcome-append Tool boundary now has an
+  18-case core same-binary matrix across success, failure, ambiguous results,
+  and six representative frame-write points. Remaining boundary cuts, fuzzing,
+  real power-loss evidence, and Windows directory-entry durability evidence are
+  still pending.
 - Headless idle CPU and memory evidence on FMDev and the Target Machine.

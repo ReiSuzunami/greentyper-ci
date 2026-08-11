@@ -140,7 +140,12 @@ After external investigation, `tool reconcile` records one observed failure or
 an observed-success SHA-256 digest for the original call; it never reruns the
 effect. A same-binary crash test kills the product after `EffectPrepared` is
 durable and executor entry is observed, then proves restart blocking, explicit
-reconciliation, and later Turn admission.
+reconciliation, and later Turn admission. A separate 18-case core matrix kills
+same-binary children after executor return and around terminal outcome-frame
+writes for success, failure, and ambiguous results. Restart either recognizes a
+complete outcome or requires reconciliation, while the external effect remains
+exactly once; this does not claim real power-loss or exhaustive byte-offset
+coverage.
 
 Configured OpenAI-compatible Responses and Chat Completions profiles, the
 official DeepSeek Responses, Chat Completions, and Anthropic-compatible Messages

@@ -91,15 +91,21 @@ reason exclusion from the Tool Ledger and Debug output, and explicit ambiguous-
 effect reconciliation. Fault injection proves that a prepared-effect append
 failure invokes no executor,
 while an outcome append failure after one invocation poisons the writer and
-reopens in a reconciliation-required state. The configured Responses, Chat
+reopens in a reconciliation-required state. A same-binary child-process matrix
+also terminates success, failure, and ambiguous executions at six
+representative points from executor return through outcome-frame sync. Reopen
+must expose either the complete terminal outcome or reconciliation-required,
+must never return the same identity to approval, and must retain one external
+effect marker across all 18 cases. The configured Responses, Chat
 Completions, and Messages adapters now bind typed, frozen Provider Profile,
 dialect, and route metadata to origin-scoped credential lookup. Live-provider
 validation, non-Windows credential backends,
 configurable proxy policy, broader TLS platform evidence, broader canonical
 Runtime Items, reasoning/refusal/annotation and other unimplemented Responses
 event kinds, reconnect/retry fixtures, MCP adapters, richer TUI/App Server Tool
-presentation, and the remaining cross-process Tool byte-offset matrix remain
-pending. The fixed CLI path now flushes the Team receipt and exact approval
+presentation, and cross-process cuts for the remaining Tool, Runtime, Provider,
+delivery, and product acknowledgement boundaries remain pending. The fixed CLI
+path now flushes the Team receipt and exact approval
 event before acknowledgement.
 Migration/backup remains in the candidate storage harness rather than these
 provisional product adapters.
@@ -131,6 +137,18 @@ observed-failure reconciliation permits a later Turn. A companion case records
 an observed-success digest, proves conflicting repeat reconciliation remains
 idempotent, and never invokes the effect again. Missing state inspection and
 reconciliation create no Ledgers; incomplete sidecars fail closed.
+
+The core Tool Runtime additionally launches an authenticated copy of its own
+test binary for each success, failure, and ambiguous executor result. The
+supervisor terminates it after executor return, after the frame length header,
+mid-frame, immediately before the commit byte, after flush, or after sync.
+Complete frames replay terminally; absent or truncated frames recover as
+reconciliation-required and block new effects until explicit reconciliation.
+Every case verifies one external effect, stable repeat identity, idempotent
+reconciliation, clean second reopen, and exclusion of raw arguments, outputs,
+and executor reasons from the Tool Ledger. This is deterministic process-death
+coverage, not exhaustive byte-offset, real power-loss, or Windows
+directory-entry durability evidence.
 
 The first fixture Provider/Tool tracer bullet decodes and normalizes one
 Responses function call, requires a current Session and exact Tool authority,
@@ -456,8 +474,9 @@ benchmark-pipeline smoke, isolated compile/test coverage for eight storage
 workloads, the terminal render matrix, the HTTP loopback transport matrix, and
 three process-global allocator runners, plus real same-binary cross-process
 CAS, migration interruption, child termination/restart integration tests, one
-prepared-Tool-effect product process-death/reconciliation test, and synthetic
-SQLite WAL VFS fault recovery on macOS ARM and Windows. Remaining
+prepared-Tool-effect product process-death/reconciliation test, the 18-case
+executor-return/outcome-append core process-death matrix, and synthetic SQLite
+WAL VFS fault recovery on macOS ARM and Windows. Remaining
 Runtime/tool-effect crash, security, terminal process/input/resource, transport
 TLS/proxy-auth/fuzz/resource, allocator P0-P6 resource, and general fuzz jobs
 are added with the slices that make them executable.
