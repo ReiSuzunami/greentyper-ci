@@ -2335,7 +2335,7 @@ mod tests {
         CanonicalItem, ConfigEpochId, ItemId, ItemRole, ProviderEpochId, ThreadId, TurnId,
     };
     use greentyper_core::provider::ProviderEpoch;
-    use greentyper_core::runtime::ProviderTurnOutcome;
+    use greentyper_core::runtime::{ProviderTurnOutcome, RecoveryStatus};
     use greentyper_core::tool_runtime::{
         ApprovalDecision, AuthorizedToolCall, ToolEffectExecutor, ToolExecution, ToolResources,
     };
@@ -5165,6 +5165,207 @@ source = "unknown"
     }
 
     #[test]
+    fn opencode_go_messages_tool_turn_recovers_output_without_repeating_effect() {
+        let listener =
+            TcpListener::bind(("127.0.0.1", 0)).expect("OpenCode Go Messages Tool listener");
+        let address = listener
+            .local_addr()
+            .expect("OpenCode Go Messages Tool listener address");
+        let server = thread::spawn(move || {
+            let (mut initial, _) = listener
+                .accept()
+                .expect("accept initial OpenCode Go Messages request");
+            configure_fixture_stream(&initial)
+                .expect("configure initial OpenCode Go Messages request");
+            let initial_body = read_messages_request_body_at(&mut initial, "/messages");
+            assert_eq!(
+                initial_body,
+                serde_json::json!({
+                    "max_tokens": 6001,
+                    "messages": [
+                        {"role": "user", "content": "prior question"},
+                        {"role": "assistant", "content": "simulated: prior question"},
+                        {"role": "user", "content": "echo through OpenCode Go Messages"},
+                    ],
+                    "model": "minimax-m2.7",
+                    "stream": true,
+                    "tool_choice": {"type": "auto", "disable_parallel_tool_use": true},
+                    "tools": [messages_local_echo_tool_definition()],
+                })
+            );
+            write_fixture_response(
+                &mut initial,
+                "200 OK",
+                "text/event-stream",
+                MESSAGES_TOOL_CALL_SSE,
+                true,
+            )
+            .expect("write OpenCode Go Messages Tool call");
+
+            let (mut continuation, _) = listener
+                .accept()
+                .expect("accept OpenCode Go Messages continuation");
+            configure_fixture_stream(&continuation)
+                .expect("configure OpenCode Go Messages continuation");
+            let continuation_body = read_messages_request_body_at(&mut continuation, "/messages");
+            assert_eq!(
+                continuation_body,
+                serde_json::json!({
+                    "max_tokens": 6001,
+                    "messages": [
+                        {"role": "user", "content": "prior question"},
+                        {"role": "assistant", "content": "simulated: prior question"},
+                        {"role": "user", "content": "echo through OpenCode Go Messages"},
+                        {
+                            "role": "assistant",
+                            "content": [{
+                                "type": "tool_use",
+                                "id": "toolu_messages_echo_001",
+                                "name": "local_echo",
+                                "input": {"message": "tool says hi"},
+                            }],
+                        },
+                        {
+                            "role": "user",
+                            "content": [{
+                                "type": "tool_result",
+                                "tool_use_id": "toolu_messages_echo_001",
+                                "content": "tool says hi",
+                            }],
+                        },
+                    ],
+                    "model": "minimax-m2.7",
+                    "stream": true,
+                    "tool_choice": {"type": "none"},
+                    "tools": [messages_local_echo_tool_definition()],
+                })
+            );
+            write_fixture_response(
+                &mut continuation,
+                "200 OK",
+                "text/event-stream",
+                MESSAGES_TOOL_CONTINUATION_SSE,
+                true,
+            )
+            .expect("write OpenCode Go Messages Tool continuation");
+        });
+
+        let base_url = format!("http://{address}");
+        let profile = opencode_go_messages_fixture_profile(
+            &base_url,
+            "opencode-go-messages-tool",
+            "minimax-m2.7",
+        );
+        let mut provider = ConfiguredProvider::for_new_turn_with_dialect(
+            profile.clone(),
+            "minimax-m2.7",
+            ProviderDialect::Messages,
+            bound_messages_vault(&profile),
+        )
+        .expect("configured OpenCode Go Messages Tool provider");
+        provider.enable_local_echo();
+        let mut layers = ConfigLayers::default();
+        layers.cli.provider_profile = Some(profile.profile().to_owned());
+        layers.cli.provider_model = Some("minimax-m2.7".to_owned());
+        layers.cli.max_output_tokens = Some(6_001);
+
+        let runtime_path = test_ledger_path("opencode-go-messages-tool", "runtime");
+        let team_path = test_ledger_path("opencode-go-messages-tool", "team");
+        let tool_path = test_ledger_path("opencode-go-messages-tool", "tool");
+        let (mut kernel, recovery) =
+            RuntimeKernel::open_with_team_and_tools(&runtime_path, &team_path, &tool_path, 1)
+                .expect("open OpenCode Go Messages Kernel");
+        assert!(recovery.into_sessions().is_empty());
+        let operation = kernel
+            .dispatch_team(TeamCommand::AdmitRoot {
+                task: TaskSpec::new(
+                    "exercise OpenCode Go Messages Tool continuation",
+                    TaskScope::from_labels(["provider-opencode-go-messages-tool"]),
+                ),
+                budget: ResourceBudget::new(1_000, 1),
+                capabilities: CapabilitySnapshot::from_capabilities([
+                    Capability::Tool("local.echo".into()),
+                    Capability::Process,
+                ]),
+            })
+            .expect("admit OpenCode Go Messages root");
+        kernel
+            .acknowledge_team_operation(operation.operation)
+            .expect("acknowledge OpenCode Go Messages root admission");
+        let root = match operation.commit.outcome {
+            CommandOutcome::RootAdmitted { session, .. } => session,
+            other => panic!("unexpected OpenCode Go Messages root outcome: {other:?}"),
+        };
+        publish_request_context(&mut kernel, root);
+
+        let approval = match kernel
+            .execute_provider_turn(
+                root,
+                &layers,
+                "echo through OpenCode Go Messages",
+                &mut provider,
+                |_| Ok(ToolResources::default().with_process("greentyper.local.echo.v1")),
+            )
+            .expect("prepare OpenCode Go Messages Tool approval")
+        {
+            ProviderTurnOutcome::ApprovalRequired(approval) => approval,
+            other => panic!("unexpected OpenCode Go Messages outcome: {other:?}"),
+        };
+        let calls = AtomicU64::new(0);
+        let output = kernel
+            .resolve_provider_tool_call(
+                approval,
+                ApprovalDecision::Grant {
+                    expires_at_unix_ms: u64::MAX,
+                },
+                &mut CountingEchoExecutor(&calls),
+                &mut provider,
+            )
+            .expect("continue OpenCode Go Messages after Tool output");
+        assert_eq!(output.text(), "Echoed: tool says hi");
+        assert_eq!(output.usage_records().len(), 2);
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        let delivery = output.delivery();
+        assert!(matches!(
+            kernel.snapshot().status,
+            RecoveryStatus::ReconciliationRequired {
+                delivery: pending,
+                ..
+            } if pending == delivery
+        ));
+        server
+            .join()
+            .expect("join OpenCode Go Messages Tool server");
+
+        drop(provider);
+        drop(kernel);
+        let team_before_ack = fs::read(&team_path).expect("read Team Ledger before output ack");
+        let tool_before_ack = fs::read(&tool_path).expect("read Tool Ledger before output ack");
+        let (mut recovered, recovery) =
+            RuntimeKernel::open_with_team_and_tools(&runtime_path, &team_path, &tool_path, 1)
+                .expect("reopen OpenCode Go Messages Kernel");
+        assert_eq!(recovery.into_sessions().len(), 1);
+        recovered
+            .acknowledge(delivery)
+            .expect("acknowledge recovered OpenCode Go Messages output");
+        assert_eq!(recovered.snapshot().status, RecoveryStatus::Ready);
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        drop(recovered);
+        assert_eq!(
+            fs::read(&team_path).expect("read Team Ledger after output ack"),
+            team_before_ack
+        );
+        assert_eq!(
+            fs::read(&tool_path).expect("read Tool Ledger after output ack"),
+            tool_before_ack
+        );
+
+        fs::remove_file(runtime_path).expect("cleanup OpenCode Go Messages Runtime Ledger");
+        fs::remove_file(team_path).expect("cleanup OpenCode Go Messages Team Ledger");
+        fs::remove_file(tool_path).expect("cleanup OpenCode Go Messages Tool Ledger");
+    }
+
+    #[test]
     fn messages_provider_rejects_unsupported_request_policy_before_network() {
         let listener = TcpListener::bind(("127.0.0.1", 0)).expect("Messages policy listener");
         listener
@@ -6188,6 +6389,15 @@ source = "unknown"
             ToolExecution::Succeeded {
                 output: b"tool says hi".to_vec(),
             }
+        }
+    }
+
+    struct CountingEchoExecutor<'a>(&'a AtomicU64);
+
+    impl ToolEffectExecutor for CountingEchoExecutor<'_> {
+        fn execute(&mut self, call: &AuthorizedToolCall<'_>) -> ToolExecution {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            EchoExecutor.execute(call)
         }
     }
 
