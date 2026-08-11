@@ -460,10 +460,12 @@ Profile-supported dialect and creates an ordinary Config Preset. None of these
 paths updates a Provider Epoch, retries, exposes response bodies, endpoints, or
 credentials, or grants remote metadata execution authority.
 
-The Direct VT `/model` browser consumes the same shared projection. It reads
-the saved observation without network I/O, merges release/discovery provenance,
-derives Recent from durable Usage, and uses F5 as the only foreground discovery
-probe. A current unknown model still needs an explicit Profile-supported
+The Direct VT `/model` browser consumes the same shared projection. It starts
+from the saved observation, merges release/discovery provenance, derives Recent
+from durable Usage, and runs one bounded foreground probe when an eligible
+selected Profile is opened; F5 explicitly retries it. Ineligible Profiles and
+ordinary browsing perform no network I/O, and there is no background polling.
+A current unknown model still needs an explicit Profile-supported
 dialect. The exact Profile fingerprint, observation timestamp, and model are
 revalidated immediately before an ordinary Config Draft is created; drift
 returns to the browser without a Config or Ledger write.
@@ -493,7 +495,7 @@ plus the [OpenCode Go endpoint matrix](https://opencode.ai/docs/go/).
 
 ## Still Pending
 
-- Live inference conformance, automatic/on-open/background catalog discovery,
+- Live inference conformance, background/periodic catalog discovery,
   automatic Provider Profile starter offers and updates, configurable proxy policy,
   broader TLS platform evidence, automatic retry policy, and partial-stream
   reconnect. Release Provider

@@ -490,7 +490,7 @@ charges still require a future dedicated authority path.
   Product sidecars fail closed before terminal entry. Manual read-only snapshot
   refresh is available; all Agent lifecycle actions remain pending.
 - Complete Config Schema default/constraint/normalization/migration metadata,
-  automatic/on-open Provider discovery, and automatic Provider Profile starter
+  background/periodic Provider discovery, and automatic Provider Profile starter
   offers and update suggestions. Release Provider Template defaults, seed
   catalog facts, explicit CLI and Direct VT discovery refresh/merge, durable
   Usage-derived Recent choices, and exact discovered-model or

@@ -442,11 +442,15 @@ current discovered-model detail, a second Enter requests the ID and then an
 explicit trusted dialect from the current Profile before entering that same
 ordinary Draft/CAS flow. The Profile fingerprint, observation timestamp, and
 exact model are revalidated immediately before Draft creation; drift returns to
-the browser without writing Config. F5 is the only Provider-discovery action:
-it synchronously probes the selected Profile, atomically replaces its separate
-discovery observation only after success, and preserves the previous file and
-browser on failure. F6 or Ctrl-R remains a local-only snapshot reload and never
-contacts a Provider. The accepted result is an ordinary user-owned Preset;
+the browser without writing Config. Entering `/model` runs one bounded,
+foreground model-list probe when the selected external Profile enables
+discovery and has a `models` route. F5 explicitly retries that same probe.
+Successful observations replace only the separate discovery state and rebuild
+the browser; a failed probe preserves the previous file and browser. Profiles
+that disable discovery or lack a model-list route stay entirely local. Typing,
+navigation, resize, and idle time do not probe. F6 or Ctrl-R remains a
+local-only snapshot reload and never contacts a Provider. The accepted result
+is an ordinary user-owned Preset;
 duplicate IDs, incompatible Profiles, validation failures, and stale revisions
 never overwrite Config. The effective `agent.default_model_preset` is marked as
 `configured default` in the list and `default true` in detail; project scope
@@ -517,8 +521,8 @@ is no background polling or automatic refresh. Runtime, Team, and Tool Ledgers
 are inspected independently, so one refresh is not a cross-Ledger transactional
 snapshot. The terminal and App Server approval surfaces are limited to the exact
 pending `local.echo` call; neither is a general Tool policy editor, audited
-ConPTY integration, automatic starter-update workflow, or automatic/on-open
-Provider discovery. Live inference conformance,
+ConPTY integration, automatic starter-update workflow, background/periodic
+Provider discovery, or automatic Provider execution. Live inference conformance,
 automatic transport retry or partial-stream reconnect, Messages reasoning
 blocks, Preset context-mode execution, broader multi-Tool approval
 presentation, broader Provider and Tool adapters,

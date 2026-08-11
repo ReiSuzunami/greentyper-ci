@@ -72,9 +72,10 @@ user overrides a field. A custom origin under a template with a bundled,
 versioned release rate card defaults to `template_mirror`; other custom origins
 still require an explicit pricing decision.
 Default/constraint/normalization/migration metadata in Config Schema,
-automatic/on-open discovery, and automatic starter-update workflows remain
-later work. The CLI and Direct VT model browser now own explicit bounded
-Provider-discovery flows; the App
+background/periodic discovery and automatic starter-update workflows remain
+later work. The CLI owns explicit bounded Provider-discovery commands, while
+entering the Direct VT model browser runs one bounded foreground probe for an
+eligible selected Profile and F5 retries it; the App
 Server Config surface is implemented. The product now provides origin-bound
 credential bind, replace, test, and forget operations backed by Windows
 Credential Manager; non-Windows
@@ -565,14 +566,18 @@ current observation contained the ID; it is not a live health claim. Recent is
 derived from durable Usage Attempts, deduplicated by Profile/model, and never
 persisted separately. Pricing still resolves
 through a Price Schedule rather than becoming an unversioned catalog number.
-The Direct VT `/model` browser uses the latest successful local projection.
+The Direct VT `/model` browser starts from the latest successful local projection.
 Character input
 filters it, Tab and Shift-Tab move across Favorites, Recent, Compatible, and
 All, Up/Down move the selected row, and Enter opens source-tagged detail for a
 configured Preset, release candidate, or discovered model. Missing or stale
 availability, context, capability, and pricing facts remain visibly unknown;
-Recent is known from the frozen Usage projection. Browsing performs no
-network request, credential lookup, Config or Ledger write, or Agent mutation.
+Recent is known from the frozen Usage projection. Entering `/model` performs at
+most one foreground model-list probe when the selected external Profile enables
+discovery and exposes a `models` route; F5 is the explicit retry. Ineligible
+Profiles, ordinary browsing, typing, navigation, resize, idle time, and
+F6/Ctrl-R perform no Provider request or credential lookup. Discovery never
+writes Config or a Ledger and never mutates an Agent.
 The installed execution matrix is deliberately closed: adapters accept
 `openai` and explicit `openai-compatible` Profiles for Responses and Chat
 Completions, and official `deepseek` Profiles for Responses, Chat Completions,
@@ -624,12 +629,15 @@ Draft/CAS path. Stale observations, absent models, duplicate Preset IDs, and
 unsupported dialects fail before Config write. The separate `test-provider`
 command remains ephemeral and never updates discovery state.
 
-The Direct VT model selector reads the independent discovery file without
-network I/O and merges it with release and configured choices. F5 explicitly
-runs one synchronous bounded probe for the selected Profile; success atomically
-replaces only that Profile's observation and refreshes the selector, while any
-failure preserves the prior file and view. No on-open, idle, or background
-probe exists. Automatic starter offers and update suggestions remain pending.
+The Direct VT model selector starts from the independent discovery file and
+merges it with release and configured choices. Entering `/model` runs one
+synchronous bounded probe when the selected external Profile enables discovery
+and has a `models` route; F5 explicitly retries it. Success atomically replaces
+only that Profile's observation and then refreshes the selector. Probe or state
+write failure preserves the prior file and view; if the post-write projection
+cannot rebuild, the prior in-memory view remains and the saved observation is
+available to the next local refresh. No idle or background probe exists.
+Automatic starter offers and update suggestions remain pending.
 Remote discovery can never add credentials, arbitrary endpoints, instructions,
 or capabilities.
 
@@ -724,7 +732,8 @@ views with fuzzy search and bounded provider, dialect, context, capability,
 price-reference, provenance, freshness, and availability detail. Incompatible,
 stale, and discovery-only entries remain visible. F6/Ctrl-R only reloads local
 Config, Usage, release, and discovery projections; it performs no network
-request. F5 is the separate explicit Provider-discovery action described above.
+request. One eligible `/model` entry triggers the bounded foreground discovery
+action described above; F5 explicitly retries it. No background polling runs.
 
 After detail opens, a second Enter on a compatible release candidate starts the
 explicit user-owned starter Draft described above; an incompatible release

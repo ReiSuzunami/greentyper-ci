@@ -74,9 +74,11 @@ core discovery store, release catalog, and Config Draft/CAS into explicit
 `discovery status`, `refresh`, `catalog`, and `accept` flows. Failed probes do
 not enter the writer path; merge is read-only; acceptance requires a current
 Profile fingerprint and explicit supported dialect. The Direct VT model browser
-uses the same shared release/discovery projection, derives Recent from durable
-Usage, and exposes only an explicit F5 discovery probe. Success swaps the local
-observation/view; failure preserves both. Discovery acceptance revalidates the
+uses the same shared release/discovery projection and derives Recent from
+durable Usage. Entering `/model` runs one bounded foreground discovery probe
+only for an eligible selected Profile; F5 explicitly retries it. Probe failure
+preserves the prior observation/view, and ordinary input, resize, idle time, and
+F6/Ctrl-R do not probe. Discovery acceptance revalidates the
 exact observation before it opens an ordinary Config Draft. It also owns a
 bounded `context status`/`context reduce` CLI surface. Status delegates to
 read-only Runtime inspection; reduce strictly reopens existing Runtime state,

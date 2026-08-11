@@ -216,7 +216,7 @@ untyped states fail closed.
 
 The remaining slices are still policy, protocol, and fault-adapter work:
 live inference conformance, non-Windows credential backends, configurable proxy
-policy, automatic/on-open catalog discovery, DeepSeek Chat/Messages reasoning
+policy, background/periodic catalog discovery, DeepSeek Chat/Messages reasoning
 blocks, Preset context-mode execution, broader
 canonical Items, multiple
 Tool calls,
@@ -554,7 +554,7 @@ multi-Tool/App Server policy, general App Server Runtime control beyond the
 exact cancel/retry/resume recovery flow, remote App Server transport,
 automatic/background snapshot refresh,
 custom-template and automatic starter-offer/update workflow,
-automatic/on-open catalog discovery, automatic Context View/token-source
+background/periodic catalog discovery, automatic Context View/token-source
 projection, provider-reported
 charge and subscription-quota accounting, richer observed Provider metadata,
 new-Agent Preset-default inheritance, Agent lifecycle
@@ -572,7 +572,7 @@ Exit criteria:
 ## Phase 4: Provider Portability
 
 Continue the release templates and seed catalog with OpenCode Go adapter
-execution, automatic/on-open discovery,
+execution, background/periodic discovery,
 automatic starter updates, provider capability probes, observed availability,
 and broader provider/model epoch switching. The
 OpenAI/openai-compatible Responses and Chat Completions adapters, official
@@ -588,9 +588,12 @@ acceptance into an ordinary Config Preset. Failed probes preserve prior state;
 stale or absent models and unsupported dialects fail before Config write.
 Unknown remote fields never gain capability, endpoint, pricing, credential,
 instruction, or execution authority. The Direct VT selector now consumes the
-same shared release/discovery projection, derives Recent from durable Usage,
-and exposes one explicit F5 probe for the selected Profile. Failed probes keep
-the prior observation/view. A current unknown model requires a bounded Preset
+same shared release/discovery projection and derives Recent from durable Usage.
+A three-slice foreground-discovery flow probes an eligible selected Profile
+once when `/model` opens, skips disabled or route-less Profiles without network
+I/O, and retries on re-entry or explicit F5. Failed probes keep the prior
+observation/view; typing, navigation, resize, idle time, and F6/Ctrl-R never
+probe. A current unknown model requires a bounded Preset
 ID plus an explicit trusted Profile dialect; the exact observation is checked
 again before an ordinary Config Draft is created, and CAS conflict remains
 recoverable through discard/reopen.
@@ -627,7 +630,7 @@ before retrying the active one, resumes that exact Provider Epoch, and never
 replays the failed primary. Team and Tool Ledgers remain byte-identical.
 
 New-Agent default inheritance, context mode, automatic
-starter updates, and automatic/on-open/background discovery remain pending.
+starter updates, and background/periodic discovery remain pending.
 
 Exit criteria:
 

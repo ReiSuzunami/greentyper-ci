@@ -429,8 +429,11 @@ a compatible release detail, enters a bounded Preset ID, previews and commits
 the prefilled user-scope Draft, manually refreshes, reopens the configured
 Preset, and stages it for the current Agent. Further real-key flows merge a
 current local discovery observation without writes, keep release choices usable
-when that state is corrupt, and drive three explicit F5 attempts through
-success, failure with byte-identical prior state, and successful retry. Another
+when that state is corrupt, and drive the foreground discovery flow through one
+eligible `/model`-entry success, zero probes for disabled discovery or a missing
+`models` route, byte-identical prior state after failure, and successful retry
+after leaving and reopening the browser. Typing, navigation, resize, and idle
+events do not probe. Another
 opens a current discovery-only model, enters a bounded Preset ID, chooses one
 trusted Profile dialect, commits the ordinary Draft, and proves discovery state
 plus Runtime Ledger remain unchanged. A stale-window regression replaces the
@@ -448,7 +451,7 @@ Provider call or Ledger write, then exact admission consumes one selection and
 freezes the expected Provider Epoch. Headless integration proves automatic
 pending-ID resolution plus credential-preflight and explicit-ID-conflict
 failure preserve all three Ledger byte streams. These tests do not prove
-automatic/on-open/background Provider discovery, automatic starter updates,
+background/periodic Provider discovery, automatic starter updates,
 new-Agent default inheritance, or context-mode execution. Separate headless and
 Config CLI integration tests now prove project `agent.default_model_preset`
 overrides the user value, an explicit Preset is used when no conflicting
@@ -717,10 +720,11 @@ failed credential/network probe preserves the prior bytes. Product tests merge
 current and stale observations with release records, preserve Config/state bytes
 on read, reject stale or absent models before Config write, and reopen one
 explicitly accepted unknown model as an ordinary Preset. Direct VT tests add the
-shared selector merge, durable Recent, explicit F5 refresh/retry, corrupt-state
-fallback, explicit trusted-dialect acceptance, final stale revalidation, and
+shared selector merge, durable Recent, foreground on-open discovery with retry
+by re-entry, ineligible-profile no-network behavior, corrupt-state fallback, explicit
+trusted-dialect acceptance, final stale revalidation, and
 Config/discovery/Ledger no-write assertions described above. They do not prove
-automatic discovery or live inference conformance.
+background/periodic discovery or live inference conformance.
 
 The official OpenAI template identity is also exercised with an explicit
 loopback origin override through the Responses adapter and models probe. The
@@ -744,9 +748,11 @@ network retry or automatic Provider routing.
 Live provider inference tests are not implemented yet. Planned opt-in,
 credential-gated tests will verify OpenAI, DeepSeek, and OpenCode Go without
 running on untrusted pull requests or gating local performance. Direct VT now
-consumes the bounded local discovery projection only through read-only startup
-inspection or explicit F5 refresh; automatic/on-open discovery remains future
-work. The current release seed already freezes its source URL and observation date.
+consumes the bounded local discovery projection, runs one eligible foreground
+probe on `/model` entry, and supports explicit F5 retry. Tests prove ineligible
+Profiles and ordinary browsing do not probe; background/periodic discovery
+remains future work. The current release seed already freezes its source URL
+and observation date.
 
 ## Performance Testing
 

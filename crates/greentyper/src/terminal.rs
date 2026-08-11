@@ -325,6 +325,16 @@ fn inspect_terminal_discovery(ledger: &Path) -> Option<ProviderDiscoveryState> {
     ProviderDiscoveryState::inspect(&terminal_discovery_path(ledger)).ok()
 }
 
+fn can_refresh_terminal_discovery_on_open(config: &ConfigRuntime) -> bool {
+    let Ok(Some(profile)) = config.selected_provider_profile() else {
+        return false;
+    };
+    matches!(
+        config.provider_catalog_mode(profile.profile()),
+        Ok(mode) if mode.includes_discovery()
+    ) && profile.models_endpoint().is_some()
+}
+
 fn refresh_terminal_discovery<T: ProviderConnectionTester + ?Sized>(
     ledger: &Path,
     config: &ConfigRuntime,
@@ -1208,6 +1218,7 @@ enum TerminalLoopOutcome {
     Resize(u16, u16),
     RefreshSnapshot,
     RefreshProviderDiscovery,
+    RefreshProviderDiscoveryOnOpen,
     BeginDiscoveryAcceptance,
     ConfirmDiscoveryAcceptance,
     ApplyModelSelection,
@@ -1426,12 +1437,19 @@ impl TerminalSession {
                 Ok(TerminalLoopOutcome::Redraw)
             }
             TerminalIntent::Activate => {
+                let was_model_selector = self.controller.is_model_selector();
                 let runtime = runtime.ok_or(TerminalError::ConfigRuntimeRequired)?;
                 match self.controller.activate(runtime, ConfigScope::User, None) {
                     Ok(()) => {
                         self.validated_config_choice = None;
                         self.sync_config_text();
                         self.notice = None;
+                        if !was_model_selector
+                            && self.controller.is_model_selector()
+                            && can_refresh_terminal_discovery_on_open(runtime)
+                        {
+                            return Ok(TerminalLoopOutcome::RefreshProviderDiscoveryOnOpen);
+                        }
                     }
                     Err(source) => self.notice = Some(presentation_notice(&source)),
                 }
@@ -2876,7 +2894,10 @@ where
                 let frame = session.frame(Some(config), &view)?;
                 surface.write_frame(&renderer.draw(&frame)?)?;
             }
-            TerminalLoopOutcome::RefreshProviderDiscovery => {
+            outcome @ (TerminalLoopOutcome::RefreshProviderDiscovery
+            | TerminalLoopOutcome::RefreshProviderDiscoveryOnOpen) => {
+                let on_open =
+                    matches!(outcome, TerminalLoopOutcome::RefreshProviderDiscoveryOnOpen);
                 if let Some(ledger) = snapshot.refresh_ledger {
                     match refresh_terminal_discovery(ledger, config, tester) {
                         Ok(
@@ -2914,7 +2935,7 @@ where
                             );
                         }
                     }
-                } else {
+                } else if !on_open {
                     session.notice = Some("Provider discovery refresh unavailable".to_owned());
                 }
                 let frame = session.frame(Some(config), &view)?;
@@ -4440,6 +4461,223 @@ mode = "template_and_discovery"
     }
 
     #[test]
+    fn terminal_model_browser_discovers_once_on_open_without_background_polling() {
+        let root = terminal_test_root("model-discovery-on-open");
+        let ledger = root.join("runtime.ledger");
+        let discovery = ledger.with_file_name("provider-discovery.json");
+        let paths = ConfigPaths::new(root.join("user.toml"), root.join("project.toml"));
+        std::fs::create_dir_all(&root).expect("create on-open discovery fixture directory");
+        std::fs::write(
+            paths.user(),
+            r#"schema_version = 1
+
+[provider]
+profile = "edge"
+model = "gpt-5.6-sol"
+
+[providers.edge]
+template = "openai"
+credential = "synthetic-on-open-discovery-reference"
+
+[providers.edge.catalog]
+mode = "template_and_discovery"
+"#,
+        )
+        .expect("write on-open discovery config");
+        let config_before = std::fs::read(paths.user()).expect("read on-open discovery config");
+        let mut config =
+            ConfigRuntime::open(paths.clone(), ConfigDocument::empty()).expect("Config Runtime");
+        let view = build_terminal_view(&ledger, &config, "/").expect("on-open discovery view");
+        let mut tester = ScriptedDiscoveryTester {
+            results: [DiscoveryTestResult::Success("gpt-5.6-live-on-open")].into(),
+            calls: Vec::new(),
+        };
+        let mut events = "model"
+            .chars()
+            .map(|character| {
+                Event::Key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
+            })
+            .collect::<VecDeque<_>>();
+        events.push_back(Event::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )));
+        events.extend("live".chars().map(|character| {
+            Event::Key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
+        }));
+        events.extend([
+            Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Resize(80, 24),
+            Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL)),
+        ]);
+        let mut credential_vault = InMemoryCredentialVault::default();
+
+        let output = super::run_terminal_loop_core(
+            Vec::new(),
+            FakeTerminalMode::default(),
+            &mut config,
+            TerminalSnapshotSource {
+                initial: &view,
+                refresh_ledger: Some(&ledger),
+                viewport: Viewport::new(100, 24).expect("on-open discovery viewport"),
+            },
+            super::TerminalLoopServices {
+                tester: &mut tester,
+                credential_vault: &mut credential_vault,
+                product: None,
+            },
+            move || {
+                Ok(events
+                    .pop_front()
+                    .expect("bounded on-open discovery events"))
+            },
+        )
+        .expect("on-open discovery loop");
+        let output = String::from_utf8(output).expect("on-open discovery VT output");
+
+        assert_eq!(tester.calls.len(), 1);
+        assert_eq!(tester.calls[0].0, "edge");
+        assert!(output.contains("Provider discovery refreshed"), "{output}");
+        assert!(output.contains("gpt-5.6-live-on-open"), "{output}");
+        assert!(!output.contains("synthetic-on-open-discovery-reference"));
+        let final_state =
+            ProviderDiscoveryState::inspect(&discovery).expect("inspect on-open discovery state");
+        assert_eq!(final_state.profiles().len(), 1);
+        assert_eq!(
+            final_state.profiles()[0].models()[0].id(),
+            "gpt-5.6-live-on-open"
+        );
+        assert_eq!(
+            std::fs::read(paths.user()).expect("reread on-open discovery config"),
+            config_before
+        );
+        assert!(!ledger.exists());
+        std::fs::remove_dir_all(root).expect("remove on-open discovery fixture");
+    }
+
+    #[test]
+    fn terminal_model_browser_skips_on_open_discovery_without_an_eligible_profile() {
+        let cases = [
+            (
+                "catalog-disabled",
+                r#"schema_version = 1
+
+[provider]
+profile = "edge"
+model = "gpt-5.6-sol"
+
+[providers.edge]
+template = "openai"
+credential = "synthetic-disabled-discovery-reference"
+
+[providers.edge.catalog]
+mode = "template"
+"#,
+                "gpt-5.6-sol",
+                "synthetic-disabled-discovery-reference",
+            ),
+            (
+                "models-route-missing",
+                r#"schema_version = 1
+
+[provider]
+profile = "edge"
+model = "local-model"
+
+[providers.edge]
+template = "openai-compatible"
+credential = "synthetic-missing-route-reference"
+base_url = "https://gateway.example.com/v1"
+dialects = ["responses"]
+
+[providers.edge.routes]
+responses = "/responses"
+
+[providers.edge.catalog]
+mode = "template_and_discovery"
+
+[providers.edge.pricing]
+source = "unknown"
+
+[model_presets.local]
+provider = "edge"
+model = "local-model"
+dialect = "responses"
+"#,
+                "local-model",
+                "synthetic-missing-route-reference",
+            ),
+        ];
+
+        for (case, config_text, expected_model, credential_reference) in cases {
+            let root = terminal_test_root(&format!("model-discovery-on-open-{case}"));
+            let ledger = root.join("runtime.ledger");
+            let discovery = ledger.with_file_name("provider-discovery.json");
+            let paths = ConfigPaths::new(root.join("user.toml"), root.join("project.toml"));
+            std::fs::create_dir_all(&root).expect("create ineligible discovery fixture directory");
+            std::fs::write(paths.user(), config_text).expect("write ineligible discovery config");
+            let config_before =
+                std::fs::read(paths.user()).expect("read ineligible discovery config");
+            let mut config = ConfigRuntime::open(paths.clone(), ConfigDocument::empty())
+                .expect("Config Runtime");
+            let view =
+                build_terminal_view(&ledger, &config, "/").expect("ineligible discovery view");
+            let mut tester = ScriptedDiscoveryTester {
+                results: VecDeque::new(),
+                calls: Vec::new(),
+            };
+            let mut events = "model"
+                .chars()
+                .map(|character| {
+                    Event::Key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
+                })
+                .collect::<VecDeque<_>>();
+            events.extend([
+                Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+                Event::Resize(80, 24),
+                Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL)),
+            ]);
+            let mut credential_vault = InMemoryCredentialVault::default();
+
+            let output = super::run_terminal_loop_core(
+                Vec::new(),
+                FakeTerminalMode::default(),
+                &mut config,
+                TerminalSnapshotSource {
+                    initial: &view,
+                    refresh_ledger: Some(&ledger),
+                    viewport: Viewport::new(100, 24).expect("ineligible discovery viewport"),
+                },
+                super::TerminalLoopServices {
+                    tester: &mut tester,
+                    credential_vault: &mut credential_vault,
+                    product: None,
+                },
+                move || {
+                    Ok(events
+                        .pop_front()
+                        .expect("bounded ineligible discovery events"))
+                },
+            )
+            .expect("ineligible discovery loop");
+            let output = String::from_utf8(output).expect("ineligible discovery VT output");
+
+            assert!(tester.calls.is_empty(), "{case}: {output}");
+            assert!(output.contains(expected_model), "{case}: {output}");
+            assert!(!output.contains(credential_reference), "{case}: {output}");
+            assert!(!discovery.exists(), "{case}: discovery state created");
+            assert_eq!(
+                std::fs::read(paths.user()).expect("reread ineligible discovery config"),
+                config_before,
+                "{case}"
+            );
+            assert!(!ledger.exists(), "{case}");
+            std::fs::remove_dir_all(root).expect("remove ineligible discovery fixture");
+        }
+    }
+
+    #[test]
     fn terminal_model_discovery_refresh_preserves_failure_and_retries() {
         let root = terminal_test_root("model-discovery-refresh");
         let ledger = root.join("runtime.ledger");
@@ -4466,10 +4704,30 @@ mode = "template_and_discovery"
         let config_before = std::fs::read(paths.user()).expect("read discovery refresh config");
         let mut config =
             ConfigRuntime::open(paths.clone(), ConfigDocument::empty()).expect("Config Runtime");
+        let profile = config
+            .provider_profile("edge")
+            .expect("resolve discovery refresh Profile")
+            .expect("external discovery refresh Profile");
+        ProviderDiscoveryState::replace_profile(
+            &discovery,
+            ProviderDiscoveryProfile::new(
+                profile.profile(),
+                profile.template(),
+                profile.fingerprint(),
+                1_786_451_200_000,
+                vec![
+                    DiscoveredProviderModel::new("gpt-5.6-live-one", None)
+                        .expect("initial discovery refresh model"),
+                ],
+            )
+            .expect("initial discovery refresh observation"),
+        )
+        .expect("persist initial discovery refresh observation");
+        let discovery_before =
+            std::fs::read(&discovery).expect("read initial discovery refresh observation");
         let view = build_terminal_view(&ledger, &config, "/").expect("discovery refresh view");
         let mut tester = ScriptedDiscoveryTester {
             results: [
-                DiscoveryTestResult::Success("gpt-5.6-live-one"),
                 DiscoveryTestResult::Failure,
                 DiscoveryTestResult::Success("gpt-5.6-live-two"),
             ]
@@ -4484,15 +4742,13 @@ mode = "template_and_discovery"
             .collect::<VecDeque<_>>();
         events.extend([
             Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
-            Event::Key(KeyEvent::new(KeyCode::F(5), KeyModifiers::NONE)),
-            Event::Key(KeyEvent::new(KeyCode::F(5), KeyModifiers::NONE)),
-            Event::Key(KeyEvent::new(KeyCode::F(5), KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Resize(80, 24),
             Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL)),
         ]);
-        let first_success = Rc::new(RefCell::new(None::<Vec<u8>>));
-        let first_success_for_events = Rc::clone(&first_success);
         let discovery_for_events = discovery.clone();
-        let mut f5_count = 0;
+        let discovery_before_failure = discovery_before.clone();
         let mut credential_vault = InMemoryCredentialVault::default();
         let output = super::run_terminal_loop_core(
             Vec::new(),
@@ -4512,23 +4768,12 @@ mode = "template_and_discovery"
                 let event = events
                     .pop_front()
                     .expect("bounded discovery refresh events");
-                if matches!(&event, Event::Key(key) if key.code == KeyCode::F(5)) {
-                    f5_count += 1;
-                    if f5_count == 2 {
-                        *first_success_for_events.borrow_mut() = Some(
-                            std::fs::read(&discovery_for_events)
-                                .expect("first successful discovery observation"),
-                        );
-                    } else if f5_count == 3 {
-                        assert_eq!(
-                            std::fs::read(&discovery_for_events)
-                                .expect("discovery observation after failed refresh"),
-                            *first_success_for_events
-                                .borrow()
-                                .as_ref()
-                                .expect("captured successful discovery observation")
-                        );
-                    }
+                if matches!(&event, Event::Key(key) if key.code == KeyCode::Esc) {
+                    assert_eq!(
+                        std::fs::read(&discovery_for_events)
+                            .expect("discovery observation after failed on-open refresh"),
+                        discovery_before_failure
+                    );
                 }
                 Ok(event)
             },
@@ -4536,7 +4781,7 @@ mode = "template_and_discovery"
         .expect("discovery refresh loop");
         let output = String::from_utf8(output).expect("discovery refresh VT output");
 
-        assert_eq!(tester.calls.len(), 3);
+        assert_eq!(tester.calls.len(), 2);
         assert!(tester.calls.iter().all(|(profile, _)| profile == "edge"));
         assert!(output.contains("Provider discovery refreshed"), "{output}");
         assert!(
@@ -4544,7 +4789,7 @@ mode = "template_and_discovery"
             "{output}"
         );
         assert!(output.contains("gpt-5.6-live-one"), "{output}");
-        assert_eq!(output.matches("two").count(), 2, "{output}");
+        assert!(output.contains("gpt-5.6-live-two"), "{output}");
         assert!(!output.contains("synthetic-discovery-refresh-reference"));
         let final_state =
             ProviderDiscoveryState::inspect(&discovery).expect("inspect final discovery state");
