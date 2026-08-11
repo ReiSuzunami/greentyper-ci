@@ -417,9 +417,12 @@ successful Usage projection. It renders rolling 1-hour, 1-day, and 7-day
 summaries and
 groups for durable Attempts, cached Turns, per-Turn Provider/Model/Dialect/Policy
 distributions, current Thread, Agents, Team, Named Windows, and rolling Token &
-Cache quantities. Up/Down selects rows and Enter opens bounded detail. Real-key
-tests prove Runtime, Team, and Tool Ledger bytes remain unchanged. Richer cache
-distributions remain outside this slice.
+Cache quantities. Token & Cache and every scoped rollup detail show
+token-weighted cache-read/input and cache-write/input ratios while keeping exact,
+estimated, missing, internally inconsistent, and overflowed states distinct.
+The adaptive statusline exposes compact 1-hour ratios when width permits.
+Up/Down selects rows and Enter opens bounded detail. Real-key tests prove
+Runtime, Team, and Tool Ledger bytes remain unchanged.
 The root `/agent` route now supplies a read-only browser over a shared-lock Team
 sidecar inspection. It navigates canonical Agent rows and bounded detail without
 exposing message bodies, capability/scope labels, Completion Capsules, or Agent
@@ -537,7 +540,7 @@ custom-template and automatic starter-offer/update workflow, live catalog
 discovery and Recent evidence, automatic Context View/token-source
 projection, provider-reported
 charge and subscription-quota accounting, richer observed Provider metadata,
-project/new-Agent Preset defaults, richer cache distributions, Agent lifecycle
+project/new-Agent Preset defaults, Agent lifecycle
 actions, and the P0/P1/P2/P6
 performance evidence remain pending.
 

@@ -123,11 +123,11 @@ auto-admitted. Review and decision may each use credentials, append Usage/cost
 records, and affect quota or billing. Prepared output remains separately
 retrievable and unacknowledged. The
 three Ledgers are inspected independently, not as a transactional snapshot.
-Project/new-Agent Preset defaults,
-richer cache distributions, and Agent lifecycle actions remain outside that
+Project/new-Agent Preset defaults and Agent lifecycle actions remain outside that
 browser boundary. The Stats browser already exposes cached Turn aggregates and
-per-Turn Provider/Model/Dialect/Policy distributions without adding a write or
-Provider authority path.
+per-Turn Provider/Model/Dialect/Policy distributions plus token-weighted
+cache-read/input and cache-write/input ratios without adding a write or Provider
+authority path.
 Section-filtered typed remove
 routes render exact Config Object deletion confirmations; secret storage stays
 behind the credential adapter. Broader multi-Tool policy, general App Server

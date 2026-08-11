@@ -9,7 +9,7 @@ use greentyper_core::pricing::{
 };
 use greentyper_core::provider::{
     DeterministicProvider, ProviderDialect, ProviderError, ProviderEvent, ProviderProfileSnapshot,
-    ProviderRequest, ProviderRuntime, UsageRecord,
+    ProviderRequest, ProviderRuntime, UsageAccuracy, UsageRecord,
 };
 use greentyper_core::runtime::{RUNTIME_EVENT_SCHEMA, RuntimeError, RuntimeKernel};
 use greentyper_core::usage::{
@@ -99,6 +99,20 @@ impl ProviderRuntime for CompleteUsageProvider {
 
 struct ProfiledCompleteUsageProvider {
     profile: ProviderProfileSnapshot,
+}
+
+struct SequenceUsageProvider {
+    records: std::collections::VecDeque<UsageRecord>,
+}
+
+impl ProviderRuntime for SequenceUsageProvider {
+    fn run(&mut self, _request: &ProviderRequest) -> Result<Vec<ProviderEvent>, ProviderError> {
+        let usage = self.records.pop_front().expect("fixture Usage Record");
+        Ok(vec![
+            ProviderEvent::TextDelta("cache accounting".to_owned()),
+            ProviderEvent::Completed(usage),
+        ])
+    }
 }
 
 impl ProviderRuntime for ProfiledCompleteUsageProvider {
@@ -358,6 +372,108 @@ fn runtime_persists_attempts_and_rebuilds_cached_rollups() {
     assert_eq!(total.attempts(), 1);
     assert_eq!(total.input_tokens().exact(), Some(0));
     assert!(total.input_tokens().estimated().unwrap() > 0);
+}
+
+#[test]
+fn runtime_rebuilds_exact_estimated_unknown_and_inconsistent_cache_ratios() {
+    let temp = TempConfig::new();
+    let ledger = temp.root.join("cache-ratio-runtime.ledger");
+    let mut runtime = RuntimeKernel::open(&ledger).unwrap();
+    let mut provider = SequenceUsageProvider {
+        records: [
+            UsageRecord::new(
+                Some(100),
+                Some(10),
+                Some(5),
+                Some(1),
+                Some(0),
+                Some(101),
+                None,
+            )
+            .unwrap(),
+            UsageRecord::new(
+                Some(200),
+                Some(50),
+                Some(20),
+                Some(1),
+                Some(0),
+                Some(201),
+                None,
+            )
+            .unwrap()
+            .with_accuracy(UsageAccuracy::Estimated),
+            UsageRecord::new(Some(50), None, None, Some(1), Some(0), Some(51), None).unwrap(),
+            UsageRecord::new(Some(10), Some(8), Some(5), Some(1), Some(0), Some(11), None).unwrap(),
+        ]
+        .into(),
+    };
+    for input in ["exact", "estimated", "unknown", "inconsistent"] {
+        let output = runtime
+            .execute_with_usage_windows(&ConfigLayers::default(), Vec::new(), input, &mut provider)
+            .unwrap();
+        runtime.acknowledge(output.delivery()).unwrap();
+    }
+    drop(runtime);
+
+    let snapshot = RuntimeKernel::inspect_usage(&ledger, UsageTimestamp::now().unwrap()).unwrap();
+    let usage = snapshot.thread().unwrap().usage();
+    let reads = usage.cache_read_ratio();
+    assert_eq!(reads.exact_basis_points(), Some(1_000));
+    assert_eq!(reads.estimated_basis_points(), Some(2_500));
+    assert_eq!(reads.unknown_records(), 1);
+    assert_eq!(reads.inconsistent_records(), 1);
+    assert!(!reads.overflowed());
+    let writes = usage.cache_write_ratio();
+    assert_eq!(writes.exact_basis_points(), Some(500));
+    assert_eq!(writes.estimated_basis_points(), Some(1_000));
+    assert_eq!(writes.unknown_records(), 1);
+    assert_eq!(writes.inconsistent_records(), 1);
+    assert!(!writes.overflowed());
+    let rolling = snapshot.rolling().one_hour();
+    assert_eq!(rolling.cache_read_ratio(), reads);
+    assert_eq!(rolling.cache_write_ratio(), writes);
+}
+
+#[test]
+fn cache_ratio_overflow_remains_unknown_after_replay() {
+    let temp = TempConfig::new();
+    let ledger = temp.root.join("cache-ratio-overflow.ledger");
+    let mut runtime = RuntimeKernel::open(&ledger).unwrap();
+    let mut provider = SequenceUsageProvider {
+        records: [
+            UsageRecord::new(
+                Some(u64::MAX),
+                Some(u64::MAX),
+                Some(0),
+                Some(1),
+                Some(0),
+                None,
+                None,
+            )
+            .unwrap(),
+            UsageRecord::new(Some(1), Some(1), Some(0), Some(1), Some(0), Some(2), None).unwrap(),
+        ]
+        .into(),
+    };
+    for input in ["maximum", "overflow"] {
+        let output = runtime
+            .execute_with_usage_windows(&ConfigLayers::default(), Vec::new(), input, &mut provider)
+            .unwrap();
+        runtime.acknowledge(output.delivery()).unwrap();
+    }
+    drop(runtime);
+
+    let report = RuntimeKernel::inspect_usage_report(
+        &ledger,
+        UsageTimestamp::now().unwrap(),
+        RuntimeUsageQuery::summary_only(),
+    )
+    .unwrap();
+    let usage = report.summary().total();
+    assert!(usage.cache_read_ratio().overflowed());
+    assert_eq!(usage.cache_read_ratio().exact_basis_points(), None);
+    assert!(usage.cache_write_ratio().overflowed());
+    assert_eq!(usage.cache_write_ratio().exact_basis_points(), None);
 }
 
 #[test]

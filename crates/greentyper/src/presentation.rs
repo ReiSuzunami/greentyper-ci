@@ -21,7 +21,7 @@ use greentyper_core::runtime::{KernelTeamSnapshot, RecoveryStatus, RuntimeSnapsh
 use greentyper_core::tool_runtime::{ToolCallStatus, ToolSnapshot};
 use greentyper_core::usage::{
     CostQuantity, RuntimeUsageSnapshot, UsageAttempt, UsageAttemptOutcome, UsageDistribution,
-    UsageQuantity, UsageRollup,
+    UsageQuantity, UsageRatio, UsageRollup,
 };
 use serde::Serialize;
 use unicode_segmentation::UnicodeSegmentation;
@@ -125,6 +125,27 @@ impl From<&UsageQuantity> for UsageQuantityView {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub(crate) struct UsageRatioView {
+    exact_basis_points: Option<u16>,
+    estimated_basis_points: Option<u16>,
+    unknown_records: u64,
+    inconsistent_records: u64,
+    overflowed: bool,
+}
+
+impl From<&UsageRatio> for UsageRatioView {
+    fn from(ratio: &UsageRatio) -> Self {
+        Self {
+            exact_basis_points: ratio.exact_basis_points(),
+            estimated_basis_points: ratio.estimated_basis_points(),
+            unknown_records: ratio.unknown_records(),
+            inconsistent_records: ratio.inconsistent_records(),
+            overflowed: ratio.overflowed(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub(crate) struct CostQuantityView {
     scale_decimal_places: u8,
     exact_pico_units: Option<u64>,
@@ -151,6 +172,8 @@ pub(crate) struct UsageSummaryView {
     total_tokens: UsageQuantityView,
     payg_cost_estimates: BTreeMap<String, CostQuantityView>,
     cost_unknown_attempts: u64,
+    cache_read_ratio: UsageRatioView,
+    cache_write_ratio: UsageRatioView,
 }
 
 impl From<&UsageRollup> for UsageSummaryView {
@@ -164,6 +187,8 @@ impl From<&UsageRollup> for UsageSummaryView {
                 .map(|(currency, quantity)| (currency.clone(), quantity.into()))
                 .collect(),
             cost_unknown_attempts: rollup.cost_unknown_attempts(),
+            cache_read_ratio: rollup.cache_read_ratio().into(),
+            cache_write_ratio: rollup.cache_write_ratio().into(),
         }
     }
 }
@@ -2168,6 +2193,7 @@ pub(crate) enum StatusSegmentKind {
     Model,
     Context,
     Usage,
+    Cache,
     Cost,
     Agents,
     Provider,
@@ -2376,6 +2402,11 @@ fn status_segments(status: &StatuslineView) -> Vec<StatusSegment> {
             preferred_width: 18,
         },
         StatusSegment {
+            kind: StatusSegmentKind::Cache,
+            text: cache_label(&status.one_hour_usage),
+            preferred_width: 26,
+        },
+        StatusSegment {
             kind: StatusSegmentKind::Cost,
             text: cost_label(&status.one_hour_usage),
             preferred_width: 24,
@@ -2469,6 +2500,42 @@ fn usage_label(usage: &Availability<UsageSummaryView>) -> String {
         (None, None, 0) => "1h 0t".to_owned(),
         (None, None, _) => "1h ?".to_owned(),
     }
+}
+
+fn cache_label(usage: &Availability<UsageSummaryView>) -> String {
+    let Availability::Known(usage) = usage else {
+        return "cache ?".to_owned();
+    };
+    let read = compact_usage_ratio_label(&usage.cache_read_ratio);
+    let write = compact_usage_ratio_label(&usage.cache_write_ratio);
+    if read == "?" && write == "?" {
+        "cache ?".to_owned()
+    } else {
+        format!("cache r {read} w {write}")
+    }
+}
+
+fn compact_usage_ratio_label(ratio: &UsageRatioView) -> String {
+    if ratio.overflowed {
+        return "overflow".to_owned();
+    }
+    if ratio.inconsistent_records > 0 {
+        return "?".to_owned();
+    }
+    let mut label = match (ratio.exact_basis_points, ratio.estimated_basis_points) {
+        (Some(exact), Some(estimated)) if estimated > 0 => format!(
+            "{}+~{}",
+            ratio_percent_label(exact),
+            ratio_percent_label(estimated)
+        ),
+        (Some(exact), _) => ratio_percent_label(exact),
+        (None, Some(estimated)) => format!("~{}", ratio_percent_label(estimated)),
+        (None, None) => "?".to_owned(),
+    };
+    if ratio.unknown_records > 0 && label != "?" {
+        label.push_str("+?");
+    }
+    label
 }
 
 fn cost_label(usage: &Availability<UsageSummaryView>) -> String {
@@ -3570,6 +3637,20 @@ fn stats_token_cache_rows(
             ),
             LayoutRowView::new(
                 format!(
+                    "cache read ratio {}",
+                    usage_ratio_label(&rollup.cache_read_ratio().into())
+                ),
+                false,
+            ),
+            LayoutRowView::new(
+                format!(
+                    "cache write ratio {}",
+                    usage_ratio_label(&rollup.cache_write_ratio().into())
+                ),
+                false,
+            ),
+            LayoutRowView::new(
+                format!(
                     "output {}",
                     usage_quantity_label(&rollup.output_tokens().into())
                 ),
@@ -3769,6 +3850,20 @@ fn stats_rollup_detail_rows(
             ),
             false,
         ),
+        LayoutRowView::new(
+            format!(
+                "cache read ratio {}",
+                usage_ratio_label(&rollup.cache_read_ratio().into())
+            ),
+            false,
+        ),
+        LayoutRowView::new(
+            format!(
+                "cache write ratio {}",
+                usage_ratio_label(&rollup.cache_write_ratio().into())
+            ),
+            false,
+        ),
         LayoutRowView::new(cost_label(&Availability::Known(summary)), false),
     ]
 }
@@ -3799,6 +3894,41 @@ fn usage_quantity_label(quantity: &UsageQuantityView) -> String {
         amount
     } else {
         format!("{amount}+?")
+    }
+}
+
+fn usage_ratio_label(ratio: &UsageRatioView) -> String {
+    if ratio.overflowed {
+        return "overflow".to_owned();
+    }
+    let mut label = match (ratio.exact_basis_points, ratio.estimated_basis_points) {
+        (Some(exact), Some(estimated)) => format!(
+            "{} exact | ~{} estimated",
+            ratio_percent_label(exact),
+            ratio_percent_label(estimated)
+        ),
+        (Some(exact), None) => ratio_percent_label(exact),
+        (None, Some(estimated)) => format!("~{}", ratio_percent_label(estimated)),
+        (None, None) => "?".to_owned(),
+    };
+    if ratio.unknown_records > 0 && label != "?" {
+        label.push_str(&format!(" | {} unknown", ratio.unknown_records));
+    }
+    if ratio.inconsistent_records > 0 {
+        label.push_str(&format!(" | {} inconsistent", ratio.inconsistent_records));
+    }
+    label
+}
+
+fn ratio_percent_label(basis_points: u16) -> String {
+    let whole = basis_points / 100;
+    let fraction = basis_points % 100;
+    if fraction == 0 {
+        format!("{whole}%")
+    } else if fraction.is_multiple_of(10) {
+        format!("{whole}.{}%", fraction / 10)
+    } else {
+        format!("{whole}.{fraction:02}%")
     }
 }
 
@@ -4536,10 +4666,10 @@ mod tests {
         ModelSelectorView, PresentationController, PresentationControllerError,
         PresentationScreenView, PresentationSources, PresentationState, ProductToolApprovalView,
         RecoveryBadge, SlashPanelView, StatsGroup, StatusSegmentKind, ToolApprovalAction,
-        ToolApprovalEntryAction, TuiViewModel, UsageQuantityView, UsageSummaryView, Viewport,
-        blocker_center_rows, cost_label, display_width, fit_text, model_detail_rows,
-        model_selector_rows, stats_attempt_quantity_label, stats_rows, status_segments,
-        tool_approval_detail_lines, usage_accuracy_label,
+        ToolApprovalEntryAction, TuiViewModel, UsageQuantityView, UsageRatioView, UsageSummaryView,
+        Viewport, blocker_center_rows, cache_label, cost_label, display_width, fit_text,
+        model_detail_rows, model_selector_rows, stats_attempt_quantity_label, stats_rows,
+        status_segments, tool_approval_detail_lines, usage_accuracy_label,
     };
 
     static NEXT_TEMP: AtomicU64 = AtomicU64::new(1);
@@ -5187,6 +5317,20 @@ source = "unknown"
                 },
             )]),
             cost_unknown_attempts: 1,
+            cache_read_ratio: UsageRatioView {
+                exact_basis_points: Some(1_000),
+                estimated_basis_points: None,
+                unknown_records: 0,
+                inconsistent_records: 0,
+                overflowed: false,
+            },
+            cache_write_ratio: UsageRatioView {
+                exact_basis_points: Some(500),
+                estimated_basis_points: None,
+                unknown_records: 0,
+                inconsistent_records: 0,
+                overflowed: false,
+            },
         };
         assert_eq!(
             cost_label(&Availability::Known(summary.clone())),
@@ -5218,6 +5362,37 @@ source = "unknown"
             .expect("USD estimate")
             .overflowed = true;
         assert_eq!(cost_label(&Availability::Known(overflowed)), "USD overflow");
+    }
+
+    #[test]
+    fn statusline_formats_cache_ratios_without_inventing_missing_facts() {
+        let known = UsageSummaryView {
+            attempts: 1,
+            total_tokens: UsageQuantityView {
+                exact: Some(100),
+                estimated: Some(0),
+                unknown_records: 0,
+                overflowed: false,
+            },
+            payg_cost_estimates: BTreeMap::new(),
+            cost_unknown_attempts: 1,
+            cache_read_ratio: UsageRatioView {
+                exact_basis_points: Some(1_000),
+                estimated_basis_points: None,
+                unknown_records: 0,
+                inconsistent_records: 0,
+                overflowed: false,
+            },
+            cache_write_ratio: UsageRatioView {
+                exact_basis_points: Some(500),
+                estimated_basis_points: None,
+                unknown_records: 0,
+                inconsistent_records: 0,
+                overflowed: false,
+            },
+        };
+        assert_eq!(cache_label(&Availability::Known(known)), "cache r 10% w 5%");
+        assert_eq!(cache_label(&Availability::Unknown), "cache ?");
     }
 
     #[test]
@@ -6168,6 +6343,7 @@ dialects = ["chat_completions"]
             vec![
                 super::StatusSegmentKind::Context,
                 super::StatusSegmentKind::Usage,
+                super::StatusSegmentKind::Cache,
                 super::StatusSegmentKind::Cost,
                 super::StatusSegmentKind::Agents,
                 super::StatusSegmentKind::Provider,
@@ -6176,11 +6352,12 @@ dialects = ["chat_completions"]
         );
         assert_eq!(
             layouts[1].statusline.rows[0].text,
-            "ready | blockers ? | model deterministic-v1 | ctx ? | 1h ? | cost ? | agents ?"
+            "ready | blockers ? | model deterministic-v1 | ctx ? | 1h ? | cache ? | cost ?"
         );
         assert_eq!(
             layouts[1].statusline.hidden,
             vec![
+                super::StatusSegmentKind::Agents,
                 super::StatusSegmentKind::Provider,
                 super::StatusSegmentKind::Config,
             ]
@@ -6188,7 +6365,7 @@ dialects = ["chat_completions"]
         assert_eq!(layouts[2].statusline.rows.len(), 2);
         assert_eq!(
             layouts[2].statusline.rows[0].text,
-            "ready | blockers ? | model deterministic-v1 | ctx ? | 1h ? | cost ? | agents ? | provider fixture-provider | config ok"
+            "ready | blockers ? | model deterministic-v1 | ctx ? | 1h ? | cache ? | cost ? | agents ? | provider fixture-provider | config ok"
         );
         assert_eq!(
             layouts[2].statusline.rows[1].text,

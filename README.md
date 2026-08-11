@@ -410,6 +410,10 @@ dialect, reasoning, and requested/observed service-tier distributions remain
 scoped to their Turn and keep unknown values explicit. Attempt detail includes
 provider, model, policy, token, cost, outcome, and timing facts. Aggregate
 detail preserves exact, estimated, unknown, and overflow token/cost states.
+Token & Cache and every scoped rollup detail also show token-weighted
+cache-read/input and cache-write/input ratios. Exact and estimated records stay
+separate; missing, internally inconsistent, and overflowed facts stay explicit.
+The adaptive statusline shows compact 1-hour read/write ratios when width permits.
 `/agent` now browses the latest successful read-only Team sidecar projection.
 Up/Down selects
 canonical Agents and Enter shows status, Task identity and state, budgets,
@@ -453,7 +457,7 @@ workflow, or persistent live catalog discovery. Live inference conformance,
 automatic retry policy or partial-stream reconnect, OpenCode Go Messages execution,
 Messages reasoning blocks, Preset context/fallback execution, broader multi-Tool approval
 presentation, broader Provider and Tool adapters,
-Workspace, project/new-Agent Preset defaults, richer cache distributions,
+Workspace, project/new-Agent Preset defaults,
 Agent lifecycle actions, general App Server Runtime control beyond the exact
 cancel/retry/resume recovery flow, and
 remote App Server transport remain. The loopback Provider tracer remains

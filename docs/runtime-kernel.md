@@ -460,8 +460,8 @@ charges still require a future dedicated authority path.
   rebound Active Agent Session and never derives authority from numeric IDs.
   Each Ledger is inspected independently rather than under one cross-Ledger
   transaction.
-- Automatic/background terminal Usage refresh and richer cache distributions,
-  automatic Context View construction/compaction, provider-reported charge
+- Automatic/background terminal Usage refresh, automatic Context View
+  construction/compaction, provider-reported charge
   and subscription-quota values, richer observed model/effort/tier
   metadata, and FMDev P6 measurements. The durable attempts, cached rollups,
   pinned Usage Windows, revision-bound summary/page `stats` projections, and
@@ -469,11 +469,13 @@ charges still require a future dedicated authority path.
   are present. The Direct VT tracer now browses the latest successful rolling
   Usage summaries, durable attempt details, cached Turn aggregates, per-Turn
   Provider/Model/Dialect/Policy distributions, current Thread, Agent-usage,
-  Team-usage, named-window, and rolling token/cache aggregate screens. F6 or
-  Ctrl-R performs
+  Team-usage, named-window, and rolling token/cache aggregate screens. Token &
+  Cache and every scoped rollup detail include token-weighted cache-read/input
+  and cache-write/input ratios, with exact, estimated, missing, internally
+  inconsistent, and overflowed states kept distinct. F6 or Ctrl-R performs
   one all-or-old TUI replacement after independent local Ledger and Config
   reads; it is not a cross-Ledger transactional snapshot. No background polling
-  exists, and richer cache-distribution browsing remains pending.
+  exists.
   The separate `/agent` browser exposes read-only Team orchestration state, not a
   Usage aggregate or mutation surface. It can also
   persist every user-scope Config Schema field, can create a complete Provider

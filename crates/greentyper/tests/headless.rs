@@ -281,6 +281,7 @@ fn stats_reports_the_frozen_payg_estimate_without_user_text() {
         .acknowledge(prepared.delivery())
         .expect("acknowledge priced output");
     drop(runtime);
+    let ledger_before_stats = fs::read(&path).expect("read priced Runtime ledger before stats");
 
     let at = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -316,6 +317,26 @@ fn stats_reports_the_frozen_payg_estimate_without_user_text() {
         202
     );
     assert_eq!(document["thread"]["usage"]["cost_unknown_attempts"], 0);
+    assert_eq!(
+        document["thread"]["usage"]["cache_read_ratio"]["exact_numerator"],
+        10
+    );
+    assert_eq!(
+        document["thread"]["usage"]["cache_read_ratio"]["exact_denominator"],
+        100
+    );
+    assert_eq!(
+        document["thread"]["usage"]["cache_write_ratio"]["exact_numerator"],
+        5
+    );
+    assert_eq!(
+        document["thread"]["usage"]["cache_write_ratio"]["exact_denominator"],
+        100
+    );
+    assert_eq!(
+        fs::read(&path).expect("reread priced Runtime ledger after stats"),
+        ledger_before_stats
+    );
     fs::remove_file(path).expect("cleanup priced Runtime ledger");
 }
 

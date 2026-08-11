@@ -550,6 +550,158 @@ impl UsageQuantity {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct UsageRatio {
+    exact_numerator: Option<u64>,
+    exact_denominator: Option<u64>,
+    estimated_numerator: Option<u64>,
+    estimated_denominator: Option<u64>,
+    unknown_records: u64,
+    inconsistent_records: u64,
+    overflowed: bool,
+}
+
+impl Default for UsageRatio {
+    fn default() -> Self {
+        Self {
+            exact_numerator: Some(0),
+            exact_denominator: Some(0),
+            estimated_numerator: Some(0),
+            estimated_denominator: Some(0),
+            unknown_records: 0,
+            inconsistent_records: 0,
+            overflowed: false,
+        }
+    }
+}
+
+impl UsageRatio {
+    #[must_use]
+    pub fn exact_basis_points(&self) -> Option<u16> {
+        ratio_basis_points(self.exact_numerator?, self.exact_denominator?)
+    }
+
+    #[must_use]
+    pub fn estimated_basis_points(&self) -> Option<u16> {
+        ratio_basis_points(self.estimated_numerator?, self.estimated_denominator?)
+    }
+
+    #[must_use]
+    pub const fn unknown_records(&self) -> u64 {
+        self.unknown_records
+    }
+
+    #[must_use]
+    pub const fn inconsistent_records(&self) -> u64 {
+        self.inconsistent_records
+    }
+
+    #[must_use]
+    pub const fn overflowed(&self) -> bool {
+        self.overflowed
+    }
+
+    fn observe(
+        &mut self,
+        numerator: Option<u64>,
+        denominator: Option<u64>,
+        accuracy: UsageAccuracy,
+    ) {
+        let (Some(numerator), Some(denominator)) = (numerator, denominator) else {
+            self.unknown_records = self.unknown_records.saturating_add(1);
+            return;
+        };
+        if denominator == 0 {
+            if numerator == 0 {
+                self.unknown_records = self.unknown_records.saturating_add(1);
+            } else {
+                self.inconsistent_records = self.inconsistent_records.saturating_add(1);
+            }
+            return;
+        }
+        if numerator > denominator {
+            self.inconsistent_records = self.inconsistent_records.saturating_add(1);
+            return;
+        }
+        let (target_numerator, target_denominator) = match accuracy {
+            UsageAccuracy::Exact => (&mut self.exact_numerator, &mut self.exact_denominator),
+            UsageAccuracy::Estimated => (
+                &mut self.estimated_numerator,
+                &mut self.estimated_denominator,
+            ),
+        };
+        let next_numerator = target_numerator.and_then(|value| value.checked_add(numerator));
+        let next_denominator = target_denominator.and_then(|value| value.checked_add(denominator));
+        if next_numerator.is_none() || next_denominator.is_none() {
+            *target_numerator = None;
+            *target_denominator = None;
+            self.overflowed = true;
+        } else {
+            *target_numerator = next_numerator;
+            *target_denominator = next_denominator;
+        }
+    }
+
+    fn observe_inconsistent(&mut self) {
+        self.inconsistent_records = self.inconsistent_records.saturating_add(1);
+    }
+
+    fn merge(&mut self, other: &Self) {
+        let (exact_numerator, exact_denominator, exact_overflow) = merge_ratio_pair(
+            self.exact_numerator,
+            self.exact_denominator,
+            other.exact_numerator,
+            other.exact_denominator,
+        );
+        let (estimated_numerator, estimated_denominator, estimated_overflow) = merge_ratio_pair(
+            self.estimated_numerator,
+            self.estimated_denominator,
+            other.estimated_numerator,
+            other.estimated_denominator,
+        );
+        self.exact_numerator = exact_numerator;
+        self.exact_denominator = exact_denominator;
+        self.estimated_numerator = estimated_numerator;
+        self.estimated_denominator = estimated_denominator;
+        self.unknown_records = self.unknown_records.saturating_add(other.unknown_records);
+        self.inconsistent_records = self
+            .inconsistent_records
+            .saturating_add(other.inconsistent_records);
+        self.overflowed =
+            self.overflowed || other.overflowed || exact_overflow || estimated_overflow;
+    }
+}
+
+fn merge_ratio_pair(
+    left_numerator: Option<u64>,
+    left_denominator: Option<u64>,
+    right_numerator: Option<u64>,
+    right_denominator: Option<u64>,
+) -> (Option<u64>, Option<u64>, bool) {
+    let numerator = left_numerator
+        .zip(right_numerator)
+        .and_then(|(left, right)| left.checked_add(right));
+    let denominator = left_denominator
+        .zip(right_denominator)
+        .and_then(|(left, right)| left.checked_add(right));
+    let overflowed = numerator.is_none() || denominator.is_none();
+    if overflowed {
+        (None, None, true)
+    } else {
+        (numerator, denominator, false)
+    }
+}
+
+fn ratio_basis_points(numerator: u64, denominator: u64) -> Option<u16> {
+    if denominator == 0 || numerator > denominator {
+        return None;
+    }
+    let basis_points = u128::from(numerator)
+        .checked_mul(10_000)?
+        .checked_div(u128::from(denominator))?;
+    u16::try_from(basis_points).ok()
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct CostQuantity {
     scale_decimal_places: u8,
     exact_pico_units: Option<u64>,
@@ -672,6 +824,8 @@ pub struct UsageRollup {
     input_tokens: UsageQuantity,
     cached_input_tokens: UsageQuantity,
     cache_write_input_tokens: UsageQuantity,
+    cache_read_ratio: UsageRatio,
+    cache_write_ratio: UsageRatio,
     output_tokens: UsageQuantity,
     reasoning_output_tokens: UsageQuantity,
     total_tokens: UsageQuantity,
@@ -726,6 +880,16 @@ impl UsageRollup {
     #[must_use]
     pub const fn cache_write_input_tokens(&self) -> &UsageQuantity {
         &self.cache_write_input_tokens
+    }
+
+    #[must_use]
+    pub const fn cache_read_ratio(&self) -> &UsageRatio {
+        &self.cache_read_ratio
+    }
+
+    #[must_use]
+    pub const fn cache_write_ratio(&self) -> &UsageRatio {
+        &self.cache_write_ratio
     }
 
     #[must_use]
@@ -817,6 +981,10 @@ impl UsageRollup {
             .observe(attempt.requested_service_tier());
         self.cost_unknown_attempts = self.cost_unknown_attempts.saturating_add(1);
         let Some(usage) = &attempt.usage else {
+            self.cache_read_ratio
+                .observe(None, None, UsageAccuracy::Exact);
+            self.cache_write_ratio
+                .observe(None, None, UsageAccuracy::Exact);
             for quantity in [
                 &mut self.input_tokens,
                 &mut self.cached_input_tokens,
@@ -832,6 +1000,7 @@ impl UsageRollup {
         };
         self.usage_records = self.usage_records.saturating_add(1);
         let accuracy = usage.accuracy();
+        self.observe_cache_ratios(usage, accuracy);
         self.input_tokens.observe(usage.input_tokens(), accuracy);
         self.cached_input_tokens
             .observe(usage.cached_input_tokens(), accuracy);
@@ -842,6 +1011,24 @@ impl UsageRollup {
             .observe(usage.reasoning_output_tokens(), accuracy);
         self.total_tokens.observe(usage.total_tokens(), accuracy);
         self.service_tiers.observe(usage.service_tier());
+    }
+
+    fn observe_cache_ratios(&mut self, usage: &UsageRecord, accuracy: UsageAccuracy) {
+        let input = usage.input_tokens();
+        let cached = usage.cached_input_tokens();
+        let cache_write = usage.cache_write_input_tokens();
+        if let (Some(input), Some(cached), Some(cache_write)) = (input, cached, cache_write) {
+            let inconsistent = cached
+                .checked_add(cache_write)
+                .is_none_or(|total| total > input);
+            if inconsistent {
+                self.cache_read_ratio.observe_inconsistent();
+                self.cache_write_ratio.observe_inconsistent();
+                return;
+            }
+        }
+        self.cache_read_ratio.observe(cached, input, accuracy);
+        self.cache_write_ratio.observe(cache_write, input, accuracy);
     }
 
     fn observe_cost_evaluation(&mut self, outcome: &CostEstimateOutcome) {
@@ -864,6 +1051,8 @@ impl UsageRollup {
         self.cached_input_tokens.merge(&other.cached_input_tokens);
         self.cache_write_input_tokens
             .merge(&other.cache_write_input_tokens);
+        self.cache_read_ratio.merge(&other.cache_read_ratio);
+        self.cache_write_ratio.merge(&other.cache_write_ratio);
         self.output_tokens.merge(&other.output_tokens);
         self.reasoning_output_tokens
             .merge(&other.reasoning_output_tokens);

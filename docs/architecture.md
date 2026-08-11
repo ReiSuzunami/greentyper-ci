@@ -120,7 +120,7 @@ The Model Catalog merges release seeds, lazy provider discovery, and explicit us
 
 ## Usage and Context Observability
 
-Every inference attempt records provider/profile identity, requested and observed model, dialect, start and completion time, reasoning effort, service tier, token classes, cache reads and writes when reported, and cost provenance. Unsupported values remain unknown.
+Every inference attempt records provider/profile identity, requested and observed model, dialect, start and completion time, reasoning effort, service tier, token classes, cache reads and writes when reported, and cost provenance. Rollups derive token-weighted cache-read/input and cache-write/input ratios while preserving exact, estimated, missing, internally inconsistent, and overflowed states. Unsupported values remain unknown.
 
 Usage Rollups provide current Turn, Thread, Agent, Agent Team, rolling 1-hour/1-day/7-day, and named Usage Window views without scanning history during render. Context status combines projected next-request occupancy, output reserve, last provider-reported usage, and an exact/estimated marker.
 

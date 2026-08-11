@@ -4460,7 +4460,47 @@ favorite = true
             .collect::<Vec<_>>();
         assert!(token_rows.contains(&"cached input 20"));
         assert!(token_rows.contains(&"cache write input 10"));
+        assert!(token_rows.contains(&"cache read ratio 10%"));
+        assert!(token_rows.contains(&"cache write ratio 5%"));
         assert!(token_rows.contains(&"reasoning output 4"));
+        let mut thread_detail =
+            TerminalSession::new("/stats", 80, 24).expect("thread detail session");
+        thread_detail
+            .handle_with_view_and_connection_tester(
+                TerminalInputEvent::Enter,
+                Some(&mut config),
+                Some(&view),
+                None,
+            )
+            .expect("activate Stats for thread detail");
+        for _ in 0..4 {
+            thread_detail
+                .handle_with_view_and_connection_tester(
+                    TerminalInputEvent::Tab,
+                    Some(&mut config),
+                    Some(&view),
+                    None,
+                )
+                .expect("advance to Thread group");
+        }
+        thread_detail
+            .handle_with_view_and_connection_tester(
+                TerminalInputEvent::Enter,
+                Some(&mut config),
+                Some(&view),
+                None,
+            )
+            .expect("open Thread detail");
+        let thread_layout = thread_detail
+            .layout(Some(&config), &view)
+            .expect("thread detail layout");
+        let thread_rows = thread_layout
+            .body()
+            .iter()
+            .map(|row| row.text())
+            .collect::<Vec<_>>();
+        assert!(thread_rows.contains(&"cache read ratio 10%"));
+        assert!(thread_rows.contains(&"cache write ratio 5%"));
         assert_eq!(std::fs::read(&ledger).expect("reread stats ledger"), before);
         assert_eq!(
             std::fs::read(&team_ledger).expect("reread stats Team Ledger"),
@@ -4581,6 +4621,8 @@ favorite = true
         assert!(output.contains("attempt 1"));
         assert!(output.contains("input 100"));
         assert!(output.contains("cached input 10"));
+        assert!(output.contains("10%"));
+        assert!(output.contains("5%"));
         let external_bytes = external_bytes
             .borrow()
             .clone()

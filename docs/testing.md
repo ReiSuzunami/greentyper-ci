@@ -435,8 +435,12 @@ Exact layout assertions pin requested/observed and unknown distribution buckets
 plus cache-read, cache-write, and reasoning-token quantities. Empty and
 unavailable snapshots clamp stale selection, close detail, render explicit
 empty state, and create no Ledger. Runtime, Team, and Tool Ledger bytes remain
-unchanged. These tests do not prove richer cache distributions or background
-refresh.
+unchanged. Core replay tests separate exact and estimated cache ratios, retain
+missing and internally inconsistent records, and fail closed on accumulator
+overflow. A subprocess `stats` test verifies the JSON numerator/denominator
+projection and byte-identical read-only Ledger inspection. These tests do not
+infer provider-specific cache lifetime or eviction telemetry, and do not prove
+background refresh.
 A real-key loop now opens `/agent` over a valid Runtime plus Team and Tool
 sidecars, selects a Dormant child Agent, opens bounded detail, redraws after
 resize, and closes detail before returning to the Slash Panel. The fixture adds
@@ -471,8 +475,9 @@ A second set of real-key loops proves manual snapshot refresh. One loop adds a
 configured Preset and selected model externally, then verifies `/model` and the
 statusline update without credential disclosure or Config/Ledger writes. Another
 completes an external Agent-scoped Turn and verifies `/stats` receives its
-Attempt and token/cache detail while Runtime, Team, and Tool Ledger bytes remain
-unchanged. The Agent loop adds a child, temporarily removes one Product sidecar
+Attempt, token/cache detail, and 10%/5% cache read/write ratios while Runtime,
+Team, and Tool Ledger bytes remain unchanged. The Agent loop adds a child,
+temporarily removes one Product sidecar
 to force a failed refresh, opens the old child detail, restores state, adds a
 second child, and refreshes successfully. The final Config and all three Ledger
 byte streams match the external writer exactly. Input tests pin F6 and Ctrl-R,
@@ -600,7 +605,7 @@ read-only `config catalog` integration test proves the snapshot contains no
 local path or credential reference.
 
 Remaining terminal-backend evidence covers real terminal/ConPTY resize and input,
-project/new-Agent Preset defaults, richer cache distributions, Agent Center
+project/new-Agent Preset defaults, Agent Center
 lifecycle actions, background refresh, broader multi-Tool/App Server approval,
 panic-abort cleanup, final host cell
 geometry, and input-ready/idle resource budgets.

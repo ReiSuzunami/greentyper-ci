@@ -264,8 +264,10 @@ Enter opens bounded detail. Turn views read the cached Turn rollups directly.
 The distribution groups expose per-Turn provider, requested/observed model,
 dialect, reasoning, and requested/observed service-tier counts while preserving
 unknown buckets. The browser renders 1-hour, 1-day, and 7-day summaries without
-writing the Runtime, Team, or Tool Ledger. Richer cache distributions remain
-Phase 3 work.
+writing the Runtime, Team, or Tool Ledger. Token & Cache and each scoped rollup
+detail expose token-weighted cache-read/input and cache-write/input ratios.
+Exact and estimated records remain separate, while missing, internally
+inconsistent, and overflowed facts remain explicit rather than becoming zero.
 Existing `/config stats-window` field routes use the rendered schema editor
 described above.
 
@@ -750,11 +752,12 @@ and durable
 attempt detail with Provider Profile, requested and observed model, reasoning
 effort, service tier, tokens, cost, outcome, and timestamps. It also presents
 current Thread, Agent, Team, and named-window rollups plus rolling token-class,
-cache-read, and cache-write quantities. Aggregate labels preserve exact,
-estimated, unknown-record, and overflow states. Cached Turn aggregates and
-per-Turn Provider/Model/Dialect/Policy distributions are available; richer cache
-distributions remain target behavior, and automatic/background refresh is not
-implemented.
+cache-read, and cache-write quantities and ratios. Ratios aggregate reported
+cache-read or cache-write input over reported input tokens; exact and estimated
+records remain separate. Aggregate labels preserve unknown, internally
+inconsistent, and overflow states. Cached Turn aggregates and per-Turn
+Provider/Model/Dialect/Policy distributions are available. Automatic/background
+refresh is not implemented.
 
 The current Runtime implements durable Usage Attempts, cached rollups, the
 headless JSON projection, schema-owned Price Schedule objects, and immutable
