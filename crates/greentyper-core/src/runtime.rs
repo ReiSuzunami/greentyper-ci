@@ -32,7 +32,8 @@ use crate::pricing::{
 use crate::provider::{
     MAX_PROVIDER_ID_BYTES, MAX_SERVICE_TIER_BYTES, ProviderDialect, ProviderEpoch, ProviderError,
     ProviderEvent, ProviderPricingSource, ProviderProfileSnapshot, ProviderRequest,
-    ProviderRuntime, ProviderToolCall, ProviderToolOutput, UsageAccuracy, UsageRecord,
+    ProviderRuntime, ProviderToolCall, ProviderToolOutput, ProviderUnavailableStage, UsageAccuracy,
+    UsageRecord,
 };
 use crate::schema::SchemaKind;
 use crate::tool_runtime::{
@@ -270,6 +271,12 @@ impl PreparedOutput {
 pub enum AcknowledgeOutcome {
     Durable(DurabilityReceipt),
     AlreadyAcknowledged,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CancelTurnOutcome {
+    Durable(DurabilityReceipt),
+    AlreadyCancelled,
 }
 
 pub struct ProviderToolApproval {
@@ -978,6 +985,19 @@ impl RuntimeKernel {
         }
     }
 
+    pub fn cancel_blocked_turn(&mut self, turn: TurnId) -> Result<CancelTurnOutcome, RuntimeError> {
+        self.cancel_provider_blocked_turn(None, turn)
+    }
+
+    pub fn cancel_blocked_provider_turn(
+        &mut self,
+        session: AgentSession,
+        turn: TurnId,
+    ) -> Result<CancelTurnOutcome, RuntimeError> {
+        self.require_provider_session(session)?;
+        self.cancel_provider_blocked_turn(Some(session.agent()), turn)
+    }
+
     pub fn resolve_provider_tool_call(
         &mut self,
         approval: Box<ProviderToolApproval>,
@@ -1152,6 +1172,37 @@ impl RuntimeKernel {
         team.require_ready()?;
         team.active_agent_context(session)?;
         Ok(())
+    }
+
+    fn cancel_provider_blocked_turn(
+        &mut self,
+        agent: Option<AgentId>,
+        turn: TurnId,
+    ) -> Result<CancelTurnOutcome, RuntimeError> {
+        let record = self
+            .state
+            .turns
+            .get(&turn)
+            .ok_or(RuntimeError::UnknownTurn(turn))?;
+        if record.agent != agent {
+            return Err(RuntimeError::TurnCancellationNotAllowed(turn));
+        }
+        if record.cancelled {
+            return Ok(CancelTurnOutcome::AlreadyCancelled);
+        }
+        let pending = self
+            .state
+            .pending
+            .as_ref()
+            .filter(|pending| pending.turn == turn)
+            .ok_or(RuntimeError::TurnCancellationNotAllowed(turn))?;
+        if pending.phase != PendingPhase::Blocked
+            || pending.block_origin != Some(TurnBlockOrigin::Provider)
+        {
+            return Err(RuntimeError::TurnCancellationNotAllowed(turn));
+        }
+        let receipt = self.commit(&[RuntimeEvent::TurnCancelled { turn }])?;
+        Ok(CancelTurnOutcome::Durable(receipt))
     }
 
     fn admit_turn(
@@ -1657,6 +1708,7 @@ impl RuntimeKernel {
         events.push(RuntimeEvent::TurnBlocked {
             turn,
             reason: bounded_reason(reason),
+            origin: TurnBlockOrigin::Provider,
         });
         self.commit(&events)?;
         Ok(())
@@ -1730,7 +1782,11 @@ impl RuntimeKernel {
 
     fn block_pending(&mut self, turn: TurnId, reason: &str) -> Result<(), RuntimeError> {
         let reason = bounded_reason(reason);
-        self.commit(&[RuntimeEvent::TurnBlocked { turn, reason }])?;
+        self.commit(&[RuntimeEvent::TurnBlocked {
+            turn,
+            reason,
+            origin: TurnBlockOrigin::Other,
+        }])?;
         Ok(())
     }
 
@@ -2007,6 +2063,10 @@ enum RuntimeEvent {
     TurnBlocked {
         turn: TurnId,
         reason: String,
+        origin: TurnBlockOrigin,
+    },
+    TurnCancelled {
+        turn: TurnId,
     },
     UsageAttemptStarted {
         turn: TurnId,
@@ -2113,10 +2173,19 @@ impl RuntimeEvent {
                 payload.u64(turn.get());
                 9
             }
-            Self::TurnBlocked { turn, reason } => {
+            Self::TurnBlocked {
+                turn,
+                reason,
+                origin,
+            } => {
                 payload.u64(turn.get());
                 payload.string(reason)?;
+                payload.u8(turn_block_origin_tag(*origin)?);
                 10
+            }
+            Self::TurnCancelled { turn } => {
+                payload.u64(turn.get());
+                15
             }
             Self::UsageAttemptStarted {
                 turn,
@@ -2273,6 +2342,14 @@ impl RuntimeEvent {
             10 => Self::TurnBlocked {
                 turn: TurnId::new(payload.u64()?).map_err(RuntimeError::Model)?,
                 reason: payload.string(MAX_BLOCK_REASON_BYTES)?,
+                origin: if event.data.schema >= 10 {
+                    decode_turn_block_origin(payload.u8()?)?
+                } else {
+                    TurnBlockOrigin::Legacy
+                },
+            },
+            15 if event.data.schema >= 10 => Self::TurnCancelled {
+                turn: TurnId::new(payload.u64()?).map_err(RuntimeError::Model)?,
             },
             11 if event.data.schema >= 4 => Self::UsageAttemptStarted {
                 turn: TurnId::new(payload.u64()?).map_err(RuntimeError::Model)?,
@@ -2352,6 +2429,14 @@ struct TurnRecord {
     assistant_item: Option<ItemId>,
     delivery: Option<DeliveryId>,
     completed: bool,
+    cancelled: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TurnBlockOrigin {
+    Legacy,
+    Provider,
+    Other,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2398,6 +2483,7 @@ struct PendingTurn {
     prepared: Option<PreparedState>,
     acknowledged: bool,
     blocked_reason: Option<String>,
+    block_origin: Option<TurnBlockOrigin>,
     next_usage_attempt: u32,
     open_usage_attempt: Option<OpenUsageAttempt>,
 }
@@ -2573,6 +2659,7 @@ impl RuntimeState {
                         assistant_item: None,
                         delivery: None,
                         completed: false,
+                        cancelled: false,
                     },
                 );
                 self.pending = Some(PendingTurn {
@@ -2587,6 +2674,7 @@ impl RuntimeState {
                     prepared: None,
                     acknowledged: false,
                     blocked_reason: None,
+                    block_origin: None,
                     next_usage_attempt: 1,
                     open_usage_attempt: None,
                 });
@@ -2771,7 +2859,11 @@ impl RuntimeState {
                 record.completed = true;
                 self.pending = None;
             }
-            RuntimeEvent::TurnBlocked { turn, reason } => {
+            RuntimeEvent::TurnBlocked {
+                turn,
+                reason,
+                origin,
+            } => {
                 if reason.trim().is_empty()
                     || reason.len() > MAX_BLOCK_REASON_BYTES
                     || reason.chars().any(char::is_control)
@@ -2784,6 +2876,29 @@ impl RuntimeState {
                 }
                 pending.phase = PendingPhase::Blocked;
                 pending.blocked_reason = Some(reason);
+                pending.block_origin = Some(origin);
+            }
+            RuntimeEvent::TurnCancelled { turn } => {
+                let pending = self.pending_for(turn)?;
+                if pending.phase != PendingPhase::Blocked
+                    || pending.block_origin != Some(TurnBlockOrigin::Provider)
+                    || pending.open_usage_attempt.is_some()
+                    || pending.prepared.is_some()
+                    || pending.assistant_item.is_some()
+                    || !pending.streamed_text.is_empty()
+                    || pending.acknowledged
+                {
+                    return Err(RuntimeError::CorruptState("invalid Turn cancellation"));
+                }
+                let record = self
+                    .turns
+                    .get_mut(&turn)
+                    .ok_or(RuntimeError::CorruptState("cancelled Turn is missing"))?;
+                if record.completed || record.cancelled {
+                    return Err(RuntimeError::CorruptState("invalid Turn cancellation"));
+                }
+                record.cancelled = true;
+                self.pending = None;
             }
             RuntimeEvent::UsageAttemptStarted {
                 turn,
@@ -2986,6 +3101,25 @@ impl RuntimeState {
             if record.completed && record.delivery.is_none() {
                 return Err(RuntimeError::CorruptState("completed Turn has no delivery"));
             }
+            if record.completed && record.cancelled {
+                return Err(RuntimeError::CorruptState(
+                    "Turn has conflicting terminal states",
+                ));
+            }
+            if record.cancelled && (record.assistant_item.is_some() || record.delivery.is_some()) {
+                return Err(RuntimeError::CorruptState(
+                    "cancelled Turn has prepared output",
+                ));
+            }
+            let is_pending = self
+                .pending
+                .as_ref()
+                .is_some_and(|pending| pending.turn == *turn);
+            if is_pending == (record.completed || record.cancelled) {
+                return Err(RuntimeError::CorruptState(
+                    "Turn terminal state disagrees with pending state",
+                ));
+            }
         }
         Ok(())
     }
@@ -3070,7 +3204,18 @@ fn provider_block_reason(error: &ProviderError) -> &'static str {
         ProviderError::InvalidConfiguration(_) => "Provider configuration was rejected",
         ProviderError::InvalidRequest(_) => "Provider request was rejected",
         ProviderError::InvalidResponse(_) => "Provider response was rejected",
-        ProviderError::Unavailable { .. } => "Provider became unavailable",
+        ProviderError::Unavailable {
+            stage: ProviderUnavailableStage::BeforeResponse,
+            ..
+        } => "Provider became unavailable before a response",
+        ProviderError::Unavailable {
+            stage: ProviderUnavailableStage::BeforeFirstEvent,
+            ..
+        } => "Provider stream failed before its first event",
+        ProviderError::Unavailable {
+            stage: ProviderUnavailableStage::AfterFirstEvent,
+            ..
+        } => "Provider stream was interrupted after a partial response",
     }
 }
 
@@ -3402,6 +3547,24 @@ fn decode_provider_dialect(tag: u8) -> Result<ProviderDialect, RuntimeError> {
         2 => Ok(ProviderDialect::ChatCompletions),
         3 => Ok(ProviderDialect::Messages),
         _ => Err(RuntimeError::CorruptEvent("invalid Provider dialect tag")),
+    }
+}
+
+fn turn_block_origin_tag(origin: TurnBlockOrigin) -> Result<u8, RuntimeError> {
+    match origin {
+        TurnBlockOrigin::Provider => Ok(1),
+        TurnBlockOrigin::Other => Ok(2),
+        TurnBlockOrigin::Legacy => Err(RuntimeError::CorruptState(
+            "legacy blocked origin cannot be encoded",
+        )),
+    }
+}
+
+fn decode_turn_block_origin(tag: u8) -> Result<TurnBlockOrigin, RuntimeError> {
+    match tag {
+        1 => Ok(TurnBlockOrigin::Provider),
+        2 => Ok(TurnBlockOrigin::Other),
+        _ => Err(RuntimeError::CorruptEvent("invalid Turn block origin tag")),
     }
 }
 
@@ -3961,6 +4124,8 @@ pub enum RuntimeError {
         pressure: ContextPressureSnapshot,
     },
     Busy(RecoveryStatus),
+    UnknownTurn(TurnId),
+    TurnCancellationNotAllowed(TurnId),
     UnknownDelivery(DeliveryId),
     InvalidInput(&'static str),
     InvalidProviderOutput(&'static str),
@@ -4003,6 +4168,10 @@ impl fmt::Display for RuntimeError {
                     .expect("hard Context Pressure has a known occupancy")
             ),
             Self::Busy(status) => write!(formatter, "Runtime requires reconciliation: {status}"),
+            Self::UnknownTurn(turn) => write!(formatter, "unknown Turn {}", turn.get()),
+            Self::TurnCancellationNotAllowed(turn) => {
+                write!(formatter, "Turn {} cannot be cancelled", turn.get())
+            }
             Self::UnknownDelivery(delivery) => {
                 write!(formatter, "unknown output delivery {}", delivery.get())
             }
@@ -4101,6 +4270,45 @@ mod tests {
     }
 
     #[test]
+    fn schema_ten_records_provider_block_origin_and_turn_cancellation() {
+        let turn = TurnId::new(1).expect("Turn ID");
+        let blocked = RuntimeEvent::TurnBlocked {
+            turn,
+            reason: "Provider stream failed before its first event".to_owned(),
+            origin: TurnBlockOrigin::Provider,
+        };
+        let encoded = blocked.encode().expect("encode provider block");
+        assert_eq!(encoded.schema, 10);
+        assert_eq!(encoded.kind, 10);
+        assert_eq!(
+            RuntimeEvent::decode(&stored_runtime_event(encoded.clone()))
+                .expect("decode provider block"),
+            blocked
+        );
+
+        let mut legacy = encoded;
+        legacy.schema = 9;
+        assert_eq!(legacy.payload.pop(), Some(1));
+        assert_eq!(
+            RuntimeEvent::decode(&stored_runtime_event(legacy)).expect("decode legacy block"),
+            RuntimeEvent::TurnBlocked {
+                turn,
+                reason: "Provider stream failed before its first event".to_owned(),
+                origin: TurnBlockOrigin::Legacy,
+            }
+        );
+
+        let cancelled = RuntimeEvent::TurnCancelled { turn };
+        let encoded = cancelled.encode().expect("encode Turn cancellation");
+        assert_eq!(encoded.schema, 10);
+        assert_eq!(encoded.kind, 15);
+        assert_eq!(
+            RuntimeEvent::decode(&stored_runtime_event(encoded)).expect("decode Turn cancellation"),
+            cancelled
+        );
+    }
+
+    #[test]
     fn schema_two_provider_epoch_remains_replayable() {
         let mut payload = Encoder::default();
         payload.u64(1);
@@ -4132,7 +4340,7 @@ mod tests {
         }
         .encode()
         .expect("encode Config Epoch");
-        assert_eq!(schema_six.schema, 9);
+        assert_eq!(schema_six.schema, RUNTIME_EVENT_SCHEMA);
         assert_eq!(schema_six.payload.pop(), Some(0));
         assert_eq!(schema_six.payload.pop(), Some(0));
         schema_six.schema = 6;
@@ -4304,7 +4512,7 @@ mod tests {
         }
         .encode()
         .expect("encode mirrored Provider Epoch");
-        assert_eq!(encoded.schema, 9);
+        assert_eq!(encoded.schema, RUNTIME_EVENT_SCHEMA);
         assert_eq!(
             RuntimeEvent::decode(&stored_runtime_event(encoded.clone()))
                 .expect("decode mirrored Provider Epoch"),

@@ -1,8 +1,8 @@
-use greentyper_core::provider::ProviderEvent;
 use greentyper_core::provider::responses::{
     ResponsesError, ResponsesEvent, ResponsesEventKind, ResponsesSseDecoder, ResponsesUsage,
     normalize_responses_events,
 };
+use greentyper_core::provider::{ProviderEvent, ProviderUnavailableStage};
 
 const TEXT_AND_FUNCTION_CALL: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -134,6 +134,10 @@ fn responses_normalization_preserves_canonical_facts_and_redacts_terminal_failur
     let error = normalize_responses_events(&decode(FAILED).expect("failed Responses stream"))
         .expect_err("failed Responses stream must not normalize as output");
     assert_eq!(error.to_string(), "provider unavailable");
+    assert_eq!(
+        error.unavailable_stage(),
+        Some(ProviderUnavailableStage::AfterFirstEvent)
+    );
     assert!(!error.to_string().contains("synthetic fixture failure"));
 }
 

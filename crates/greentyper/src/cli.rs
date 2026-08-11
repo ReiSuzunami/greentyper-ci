@@ -10,12 +10,13 @@ use greentyper_core::config::{
     CONFIG_FILE_SCHEMA_VERSION, ConfigDocument, ConfigPaths, ConfigRuntime, ConfigRuntimeError,
     ConfigScope, config_schema,
 };
-use greentyper_core::model::DeliveryId;
+use greentyper_core::model::{DeliveryId, TurnId};
 use greentyper_core::pricing::PriceScheduleBook;
 use greentyper_core::provider::{ProviderDialect, ProviderError};
 use greentyper_core::provider_catalog::ProviderCatalog;
 use greentyper_core::runtime::{
-    AcknowledgeOutcome, PreparedOutput, ProviderToolApproval, RecoveryStatus, RuntimeKernel,
+    AcknowledgeOutcome, CancelTurnOutcome, PreparedOutput, ProviderToolApproval, RecoveryStatus,
+    RuntimeKernel,
 };
 use greentyper_core::tool_runtime::{
     ToolCallRecord, ToolCallStatus, ToolEffectExecutor, ToolReconciliationDecision, ToolSnapshot,
@@ -35,8 +36,8 @@ use crate::local_process::{
 use crate::presentation::PresentationSmokeError;
 use crate::product_driver::{
     ProductDriver, ProductDriverError, ProductInteraction, ProductToolDecision,
-    apply_model_preset_to_next_turn, freeze_model_selection, has_product_driver_state,
-    inspect_product_tools, reconcile_product_tool,
+    apply_model_preset_to_next_turn, cancel_product_provider_turn, freeze_model_selection,
+    has_product_driver_state, inspect_product_tools, reconcile_product_tool,
 };
 use crate::provider_connection::{ModelsHttpConnectionTester, ProviderConnectionTester};
 use crate::provider_http::{
@@ -192,6 +193,19 @@ pub fn run(arguments: impl Iterator<Item = String>) -> Result<(), CliError> {
                     write_json(&stats)
                 }
             }
+        }
+        Command::Cancel { ledger, turn } => {
+            let outcome = if has_product_driver_state(&ledger)? {
+                cancel_product_provider_turn(&ledger, turn)?
+            } else {
+                let mut runtime = RuntimeKernel::open_existing_strict(&ledger)?;
+                runtime.cancel_blocked_turn(turn)?
+            };
+            match outcome {
+                CancelTurnOutcome::Durable(_) => write_stdout_line("cancelled")?,
+                CancelTurnOutcome::AlreadyCancelled => write_stdout_line("already-cancelled")?,
+            }
+            Ok(())
         }
         Command::Reconcile { ledger, delivery } => {
             let mut runtime = open_runtime(&ledger)?;
@@ -606,6 +620,10 @@ enum Command {
         at: Option<UsageTimestamp>,
         query: Option<RuntimeUsageQuery>,
     },
+    Cancel {
+        ledger: PathBuf,
+        turn: TurnId,
+    },
     Reconcile {
         ledger: PathBuf,
         delivery: DeliveryId,
@@ -751,6 +769,9 @@ fn parse(mut arguments: impl Iterator<Item = String>) -> Result<Command, CliErro
     }
     if command == "app-server" {
         return parse_app_server(arguments);
+    }
+    if command == "cancel" {
+        return parse_cancel(arguments);
     }
     if command == "__local-process-child" {
         let mode = LocalProcessChildMode::parse(arguments.next().as_deref())
@@ -931,6 +952,41 @@ fn parse(mut arguments: impl Iterator<Item = String>) -> Result<Command, CliErro
         }
         _ => Err(CliError::Usage("unknown command")),
     }
+}
+
+fn parse_cancel(mut arguments: impl Iterator<Item = String>) -> Result<Command, CliError> {
+    let mut ledger = None;
+    let mut turn = None;
+    while let Some(argument) = arguments.next() {
+        let slot = match argument.as_str() {
+            "--ledger" => &mut ledger,
+            "--turn" => &mut turn,
+            _ => return Err(CliError::Usage("unknown option")),
+        };
+        if slot.is_some() {
+            return Err(CliError::Usage("duplicate option"));
+        }
+        let value = arguments
+            .next()
+            .ok_or(CliError::Usage("option is missing its value"))?;
+        if value.starts_with('-') {
+            return Err(CliError::Usage("option is missing its value"));
+        }
+        *slot = Some(value);
+    }
+    let ledger = match ledger {
+        Some(path) if path.is_empty() => {
+            return Err(CliError::Usage("ledger path cannot be empty"));
+        }
+        Some(path) => PathBuf::from(path),
+        None => default_ledger_path()?,
+    };
+    let turn = turn
+        .ok_or(CliError::Usage("cancel requires --turn"))?
+        .parse::<u64>()
+        .map_err(|_| CliError::Usage("Turn must be a positive integer"))?;
+    let turn = TurnId::new(turn).map_err(|_| CliError::Usage("Turn must be a positive integer"))?;
+    Ok(Command::Cancel { ledger, turn })
 }
 
 fn parse_app_server(mut arguments: impl Iterator<Item = String>) -> Result<Command, CliError> {
@@ -1663,6 +1719,7 @@ Usage:\n\
   greentyper resume [--ledger PATH] [--tool local.echo]\n\
   greentyper status [--ledger PATH]\n\
   greentyper stats [--ledger PATH] [--at UNIX_MS] [--summary-only | --limit N [--cursor CURSOR]]\n\
+  greentyper cancel [--ledger PATH] --turn ID\n\
   greentyper reconcile [--ledger PATH] --delivery ID\n\
   greentyper tool status [--ledger PATH]\n\
   greentyper tool reconcile [--ledger PATH] --call ID (--failed | --succeeded-digest SHA256)\n\
@@ -2010,6 +2067,36 @@ mod tests {
         assert!(
             parse(["stats".to_owned(), "--at".to_owned(), "later".to_owned()].into_iter()).is_err()
         );
+    }
+
+    #[test]
+    fn parser_requires_an_exact_turn_for_provider_cancellation() {
+        assert!(matches!(
+            parse(
+                [
+                    "cancel".to_owned(),
+                    "--ledger".to_owned(),
+                    "runtime.ledger".to_owned(),
+                    "--turn".to_owned(),
+                    "7".to_owned(),
+                ]
+                .into_iter()
+            ),
+            Ok(Command::Cancel { ledger, turn })
+                if ledger == Path::new("runtime.ledger") && turn.get() == 7
+        ));
+        for arguments in [
+            vec!["cancel"],
+            vec!["cancel", "--turn", "0"],
+            vec!["cancel", "--turn", "later"],
+            vec!["cancel", "--turn", "1", "--turn", "2"],
+            vec!["cancel", "--turn", "1", "--delivery", "2"],
+        ] {
+            assert!(
+                parse(arguments.into_iter().map(str::to_owned)).is_err(),
+                "accepted invalid cancellation command"
+            );
+        }
     }
 
     #[test]

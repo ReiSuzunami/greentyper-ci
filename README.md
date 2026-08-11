@@ -78,6 +78,7 @@ cargo run -p greentyper -- headless --ledger ./target/dev-runtime.ledger --input
 cargo run -p greentyper -- headless --preset frontier --ledger ./target/dev-runtime.ledger --input "hello"
 cargo run -p greentyper -- headless --ledger ./target/tool-runtime.ledger --tool local.echo --input "echo this"
 cargo run -p greentyper -- status --ledger ./target/dev-runtime.ledger
+cargo run -p greentyper -- cancel --ledger ./target/dev-runtime.ledger --turn 1
 cargo run -p greentyper -- stats --ledger ./target/dev-runtime.ledger
 cargo run -p greentyper -- stats --ledger ./target/dev-runtime.ledger --summary-only
 cargo run -p greentyper -- stats --ledger ./target/dev-runtime.ledger --limit 100
@@ -101,6 +102,22 @@ fails closed unless the product has an explicit adapter for that exact identity.
 freezes its Profile, model, dialect, and optional output-token limit for the
 Turn. It cannot be combined with `--dialect`; missing IDs fail rather than
 falling back to a model-name match.
+
+All three HTTP dialect adapters classify unavailability at one of three stable
+boundaries: before a streaming response, after the response but before the
+first decoded event, or after at least one event. Early EOF and interrupted SSE
+framing retain that boundary; other malformed Provider data remains an invalid
+response. No boundary triggers an automatic retry or reconnect, and the
+requests carry no inference idempotency key, so an absent response is not proof
+that the remote service did no work or incurred no usage. A blocked Turn whose
+schema-10 event explicitly records a Provider-origin failure can be closed with
+`cancel --turn ID`. Cancellation appends one durable terminal event, preserves
+the existing Usage/cost facts and frozen Config/Provider Epochs, never invokes
+the Provider or a Tool, and is idempotent for that exact Turn. It rejects
+missing state, prepared output, resume-required or incomplete streaming state,
+Tool-derived blocks, Tool reconciliation, and historical untyped blocks. The
+Product path additionally requires the one recovered Active Agent Session and
+leaves the Team and Tool Ledgers unchanged.
 
 The core Agent Team policy, Config Runtime, recoverable single-Agent Runtime,
 and first Tool Runtime policy slice compile and run through interface-level and
@@ -210,8 +227,9 @@ Flash, maps `max_output_tokens` plus `reasoning.effort` values `low`, `high`, an
 continuation reconstructs bounded input items instead of using
 `previous_response_id`. Reasoning text is bounded and transition-validated by
 the dialect decoder but is not projected as visible output or persisted raw.
-Runtime Event schema 9 freezes the selected Preset's optional output-token
-limit, typed reasoning effort, and typed service tier in the Config Epoch.
+Runtime Event schema 10 preserves the schema-9 selected Preset output-token,
+typed reasoning-effort, and typed service-tier fields in the Config Epoch and
+adds typed Provider-block origin plus durable `TurnCancelled` recovery.
 OpenAI Responses sends reasoning as `reasoning.effort`, OpenAI Chat Completions
 sends `reasoning_effort`, and both send `service_tier`; their output-token
 fields are `max_output_tokens` and `max_completion_tokens`. DeepSeek Chat and
@@ -222,7 +240,7 @@ Unset fields remain omitted, except Messages retains its 4096 token fallback.
 One in-process Tool continuation uses the same policy; replay reconstructs it
 after restart without making continuation resumable. Requested effort/tier
 enter durable Usage Attempts separately from observed Provider metadata.
-Schema 8 also preserves the schema-7 request-policy and schema-6 Usage and Cost contract, which
+Historical schema 8 preserves the schema-7 request-policy and schema-6 Usage and Cost contract, which
 brackets every Provider invocation with a durable
 Usage Attempt, records UTC start/completion and outcome, preserves exact,
 estimated, and unknown token classes, and rebuilds cached Turn, Thread, Agent,
@@ -411,7 +429,7 @@ snapshot. The terminal and App Server approval surfaces are limited to the exact
 pending `local.echo` call; neither is a general Tool policy editor, audited
 ConPTY integration, secret-entry/bind surface, starter-preset
 workflow, or persistent live catalog discovery. Live inference conformance,
-reconnect/retry, OpenCode Go Messages execution,
+automatic retry or resumable reconnect, OpenCode Go Messages execution,
 Messages reasoning blocks, Preset context/fallback execution, broader multi-Tool approval
 presentation, broader Provider and Tool adapters,
 Workspace, project/new-Agent Preset defaults, richer cache distributions,

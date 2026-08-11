@@ -36,7 +36,7 @@ Each deep module is tested through its Interface:
 
 - Runtime Kernel: Turn admission, cancellation, budgets, recovery, and terminal outcomes
 - Ledger Store: append, sync boundaries, replay, migration, backup, compare-and-swap, and corrupt-tail handling
-- Provider Runtime: capability freeze, dialect/transport fallback, epoch changes, retry classification, and usage normalization
+- Provider Runtime: capability freeze, dialect/transport fallback, epoch changes, interruption classification, explicit recovery, and usage normalization
 - Tool Runtime: approvals, idempotency, ambiguous outcomes, sandbox policy, and MCP isolation
 - Agent Team Runtime: Task ownership, Runtime-issued Agent Sessions, Delegation, messaging, Blocked resolution, failure propagation, Completion Capsules, and transaction recovery
 - Workspace Coordinator: leases, worktree allocation, Read Set revalidation, merge, and conflict reporting
@@ -165,8 +165,9 @@ effort, service tier, and distinct template-mirror pricing provenance while
 rejecting fingerprint, outcome, timestamp, and transition tampering. A schema-5
 Config Epoch without the optional token field, a schema-6 Config Epoch without
 request-policy fields, and a schema-7 Config Epoch without template-mirror tags
-remain replayable under current Runtime Event schema 9; schema 8 Ledgers remain
-compatible before the schema-9 Model-selection event is appended.
+remain replayable under current Runtime Event schema 10; schema 8 Ledgers remain
+compatible before the schema-9 Model-selection event, and schema-9 Ledgers
+replay with legacy untyped block origin before schema-10 cancellation events.
 
 Product integration tests also run the configured Responses, Chat Completions,
 and Messages adapters against concrete loopback HTTP tracers. They resolve and
@@ -215,9 +216,25 @@ also includes canonical text/usage, missing credential
 and unsupported-template rejection before network access, HTTP 503, wrong
 content type, provider error SSE redaction, and one exact `tool_use`/
 `tool_result` continuation with two Usage Records.
+All three HTTP dialects also have one-connection interruption fixtures. They
+prove an early EOF before any decoded event reports `BeforeFirstEvent`, an EOF
+after one event reports `AfterFirstEvent`, malformed semantics remain
+`InvalidResponse`, and no path reconnects or retries. Core redaction tests cover
+the separate `BeforeResponse` stage and prove diagnostics retain only the stage
+and bounded byte count.
+
+Provider cancellation tests first persist a blocked Turn, completed failed
+Usage/cost evaluation, and immutable Config/Provider Epochs. Core replay proves
+one schema-10 `TurnCancelled` returns the Runtime to ready, repeating it is a
+no-op, and the next Turn invokes the Provider only once. Product and public CLI
+tests prove exact recovered Agent ownership, strict no-create/no-repair opens,
+Team/Tool byte identity, restart recovery, and a successful next headless Turn.
+Negative tests preserve bytes while rejecting missing state, prepared output,
+Tool denial or reconciliation, and the corresponding delivery/tool recovery
+still succeeds afterward.
 Windows-only tests exercise Credential Manager bind, replace, resolve, and
 forget. This does not cover live credentials, proxy authentication,
-reconnect/retry, live Providers, or broader Tool presentation.
+automatic retry or resumable reconnect, live Providers, or broader Tool presentation.
 
 The first Usage projection suite durably records Provider request and
 continuation attempts, closes interrupted attempts only on explicit resume,
@@ -573,9 +590,11 @@ The Anthropic Messages decoder has redacted fixtures for ordered message and
 content-block transitions, fragmented text and one `tool_use`, cumulative
 usage, incomplete/error terminals, bounds, redaction, and Tool continuation.
 Fixture Providers pass normalized events through the Kernel and Tool Runtime
-for one approved call and continuation. The remaining scenarios land with
-reconnect, multiple tools, broader delta kinds, Messages reasoning blocks, and
-broader usage normalization.
+for one approved call and continuation. HTTP interruption fixtures now classify
+zero-event and post-event EOF separately without reconnecting or retrying. The
+remaining scenarios land with resumable reconnect, automatic retry, multiple
+tools, broader delta kinds, Messages reasoning blocks, and broader usage
+normalization.
 
 The product connection-test adapter has deterministic loopback coverage for one
 explicit GET to the frozen Profile's `models` route. Tests validate the synthetic

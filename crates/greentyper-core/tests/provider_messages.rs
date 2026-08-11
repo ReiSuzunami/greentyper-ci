@@ -1,8 +1,8 @@
-use greentyper_core::provider::ProviderEvent;
 use greentyper_core::provider::messages::{
     MessagesError, MessagesEvent, MessagesEventKind, MessagesSseDecoder, MessagesUsage,
     normalize_messages_events,
 };
+use greentyper_core::provider::{ProviderEvent, ProviderUnavailableStage};
 
 const TEXT_AND_TOOL_USE: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -95,6 +95,10 @@ fn messages_normalization_preserves_canonical_facts_and_redacts_incomplete_text(
         normalize_messages_events(&decode(INCOMPLETE).expect("bounded incomplete Messages stream"))
             .expect_err("token-limited message must not normalize as success");
     assert_eq!(error.to_string(), "provider unavailable");
+    assert_eq!(
+        error.unavailable_stage(),
+        Some(ProviderUnavailableStage::AfterFirstEvent)
+    );
     assert!(!format!("{error:?}").contains("private partial output"));
 }
 

@@ -753,7 +753,7 @@ reasoning_output_micros_per_million = 3000000
 ```
 
 The resolved schedule book rejects duplicate or overlapping selectors. Config
-Epoch creation freezes the book and its fingerprints. Runtime Event schema 9
+Epoch creation freezes the book and its fingerprints. Runtime Event schema 10
 appends normalized Usage first and its cost evaluation second in one transaction;
 replay recomputes the result from that frozen evidence. Missing token classes,
 missing selectors, inconsistent accounting, and arithmetic overflow remain

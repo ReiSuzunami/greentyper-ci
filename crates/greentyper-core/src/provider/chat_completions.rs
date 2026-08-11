@@ -211,6 +211,11 @@ impl ChatCompletionsSseDecoder {
         &self.events
     }
 
+    #[must_use]
+    pub const fn has_stream_progress(&self) -> bool {
+        self.processed_sse_events != 0
+    }
+
     pub fn finish(mut self) -> Result<Vec<ChatCompletionsEvent>, ChatCompletionsError> {
         if self.poisoned {
             return Err(ChatCompletionsError::Poisoned);

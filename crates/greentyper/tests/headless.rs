@@ -5,6 +5,10 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use greentyper_core::agent_team::{
+    Capability, CapabilitySnapshot, CommandOutcome, ResourceBudget, TaskScope, TaskSpec,
+    TeamCommand, TeamOperationAcknowledgeOutcome,
+};
 use greentyper_core::config::{
     ConfigDocument, ConfigEpoch, ConfigLayers, ConfigPaths, ConfigRuntime,
 };
@@ -16,7 +20,8 @@ use greentyper_core::provider::{
     DeterministicProvider, ProviderDialect, ProviderError, ProviderEvent, ProviderRequest,
     ProviderRuntime, UsageRecord,
 };
-use greentyper_core::runtime::{ModelSelection, RuntimeKernel};
+use greentyper_core::runtime::{ModelSelection, RecoveryStatus, RuntimeError, RuntimeKernel};
+use greentyper_core::tool_runtime::ToolResources;
 use greentyper_core::usage::UsageTimestamp;
 
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(1);
@@ -89,6 +94,22 @@ fn status_of_an_unused_path_is_ready_and_read_only() {
     assert!(status.status.success(), "{status:?}");
     assert_eq!(status.stdout, b"ready\n");
     assert!(!path.exists());
+}
+
+#[test]
+fn cancel_command_requires_existing_state_without_creating_a_ledger() {
+    let path = temp_path("missing-cancel");
+    let cancelled = binary()
+        .args(["cancel", "--ledger"])
+        .arg(&path)
+        .args(["--turn", "1"])
+        .output()
+        .expect("reject cancellation without state");
+    assert!(!cancelled.status.success(), "{cancelled:?}");
+    assert!(cancelled.stdout.is_empty(), "{cancelled:?}");
+    assert!(!path.exists());
+    assert!(!sidecar(&path, "team").exists());
+    assert!(!sidecar(&path, "tool").exists());
 }
 
 #[test]
@@ -368,6 +389,107 @@ fn headless_local_echo_mode_uses_the_product_driver_and_returns_ready() {
 }
 
 #[test]
+fn cancel_command_abandons_one_provider_block_without_replaying_or_mutating_sidecars() {
+    let ledger = temp_path("provider-cancel");
+    let team_path = sidecar(&ledger, "team");
+    let tool_path = sidecar(&ledger, "tool");
+    let (mut runtime, recovery) =
+        RuntimeKernel::open_with_team_and_tools(&ledger, &team_path, &tool_path, 1)
+            .expect("open Product Runtime");
+    assert!(recovery.into_sessions().is_empty());
+    let admission = runtime
+        .dispatch_team(TeamCommand::AdmitRoot {
+            task: TaskSpec::new(
+                "recover Provider interruption",
+                TaskScope::from_labels(["runtime"]),
+            ),
+            budget: ResourceBudget::new(1_000, 8),
+            capabilities: CapabilitySnapshot::from_capabilities([Capability::Process]),
+        })
+        .expect("admit Product Agent");
+    let session = match admission.commit.outcome {
+        CommandOutcome::RootAdmitted { session, .. } => session,
+        other => panic!("unexpected Team outcome: {other:?}"),
+    };
+    assert!(matches!(
+        runtime
+            .acknowledge_team_operation(admission.operation)
+            .expect("acknowledge Team admission"),
+        TeamOperationAcknowledgeOutcome::Durable(_)
+    ));
+    let mut provider = UnavailableProvider;
+    assert!(matches!(
+        runtime.execute_provider_turn(
+            session,
+            &ConfigLayers::default(),
+            "private blocked input",
+            &mut provider,
+            |_| Ok(ToolResources::default()),
+        ),
+        Err(RuntimeError::Provider(ProviderError::Unavailable { .. }))
+    ));
+    let RecoveryStatus::Blocked { turn, .. } = runtime.snapshot().status else {
+        panic!("Provider failure did not block the Product Turn")
+    };
+    drop(runtime);
+
+    let team_before = fs::read(&team_path).expect("read Team Ledger");
+    let tool_before = fs::read(&tool_path).expect("read Tool Ledger");
+    let cancelled = binary()
+        .args(["cancel", "--ledger"])
+        .arg(&ledger)
+        .args(["--turn", &turn.get().to_string()])
+        .output()
+        .expect("cancel blocked Provider Turn");
+    assert!(cancelled.status.success(), "{cancelled:?}");
+    assert_eq!(cancelled.stdout, b"cancelled\n");
+    assert!(cancelled.stderr.is_empty(), "{cancelled:?}");
+    assert_eq!(
+        fs::read(&team_path).expect("reread Team Ledger"),
+        team_before
+    );
+    assert_eq!(
+        fs::read(&tool_path).expect("reread Tool Ledger"),
+        tool_before
+    );
+
+    let runtime_after = fs::read(&ledger).expect("read cancelled Runtime Ledger");
+    let repeated = binary()
+        .args(["cancel", "--ledger"])
+        .arg(&ledger)
+        .args(["--turn", &turn.get().to_string()])
+        .output()
+        .expect("repeat Provider Turn cancellation");
+    assert!(repeated.status.success(), "{repeated:?}");
+    assert_eq!(repeated.stdout, b"already-cancelled\n");
+    assert!(repeated.stderr.is_empty(), "{repeated:?}");
+    assert_eq!(
+        fs::read(&ledger).expect("reread Runtime Ledger after repeat"),
+        runtime_after
+    );
+
+    let status = binary()
+        .args(["status", "--ledger"])
+        .arg(&ledger)
+        .output()
+        .expect("inspect cancelled Runtime");
+    assert!(status.status.success(), "{status:?}");
+    assert_eq!(status.stdout, b"ready\n");
+    let next = binary()
+        .args(["headless", "--ledger"])
+        .arg(&ledger)
+        .args(["--input", "next Turn"])
+        .output()
+        .expect("execute after Provider cancellation");
+    assert!(next.status.success(), "{next:?}");
+    assert_eq!(next.stdout, b"simulated: next Turn\n");
+
+    fs::remove_file(ledger).expect("cleanup Runtime Ledger");
+    fs::remove_file(team_path).expect("cleanup Team Ledger");
+    fs::remove_file(tool_path).expect("cleanup Tool Ledger");
+}
+
+#[test]
 fn headless_refuses_to_repeat_prepared_unacknowledged_output() {
     let path = temp_path("reconcile");
     let mut runtime = RuntimeKernel::open(&path).expect("open Runtime");
@@ -376,7 +498,26 @@ fn headless_refuses_to_repeat_prepared_unacknowledged_output() {
         .execute(&ConfigLayers::default(), "print once", &mut provider)
         .expect("prepare output");
     let delivery = prepared.delivery();
+    let turn = prepared.turn();
     drop(runtime);
+
+    let before_cancel = fs::read(&path).expect("read prepared Runtime Ledger");
+    let cancelled = binary()
+        .args(["cancel", "--ledger"])
+        .arg(&path)
+        .args(["--turn", &turn.get().to_string()])
+        .output()
+        .expect("reject prepared Turn cancellation");
+    assert!(!cancelled.status.success(), "{cancelled:?}");
+    assert!(cancelled.stdout.is_empty(), "{cancelled:?}");
+    assert!(
+        String::from_utf8_lossy(&cancelled.stderr).contains("cannot be cancelled"),
+        "{cancelled:?}"
+    );
+    assert_eq!(
+        fs::read(&path).expect("reread prepared Runtime Ledger"),
+        before_cancel
+    );
 
     let blocked = binary()
         .args(["headless", "--ledger"])
@@ -793,6 +934,14 @@ struct PanicProvider;
 impl ProviderRuntime for PanicProvider {
     fn run(&mut self, _request: &ProviderRequest) -> Result<Vec<ProviderEvent>, ProviderError> {
         panic!("injected crash after admission")
+    }
+}
+
+struct UnavailableProvider;
+
+impl ProviderRuntime for UnavailableProvider {
+    fn run(&mut self, _request: &ProviderRequest) -> Result<Vec<ProviderEvent>, ProviderError> {
+        Err(ProviderError::unavailable("private Provider interruption"))
     }
 }
 

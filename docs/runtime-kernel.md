@@ -111,12 +111,30 @@ as durability-ambiguous; callers must close and recover instead of retrying.
 | No pending Turn | `ready` | Admit a new Turn |
 | Admission durable, Provider not completed | `resume-required` | Explicit `resume`; never automatic |
 | Output prepared, acknowledgement absent | `reconciliation-required` | Explicit `reconcile`; never print or rerun automatically |
-| Provider failed or emitted malformed canonical events | `blocked` | Inspect; later retry/cancel policy is a separate slice |
+| Provider failed or emitted malformed canonical events | `blocked` | Inspect, or explicitly `cancel --turn ID` when schema 10 records a Provider-origin block; never retry automatically |
 | Output acknowledged and Turn completed | `ready` | Duplicate acknowledgement is a no-op |
 
 The headless CLI exposes these states through `status`. `headless` refuses every
 non-ready state. `resume` and `reconcile` are explicit commands so restart
 cannot silently repeat provider work or visible output.
+
+Provider unavailability records a redacted stage before a streaming response,
+before the first decoded event, or after the first event. Responses, Chat
+Completions, and Messages never retry or reconnect automatically at any of
+those boundaries. Because inference requests have no idempotency key, a missing
+response does not establish that the remote service did no work or incurred no
+usage.
+
+Runtime Event schema 10 types each new `TurnBlocked` origin and permits one
+`TurnCancelled` transaction only for the exact Provider-origin blocked Turn.
+The transaction clears pending recovery while retaining the Turn, its completed
+Usage/cost evidence, and immutable Config and Provider Epochs. A repeated exact
+cancel is idempotent. Missing state is not created. Prepared output,
+resume-required admission, incomplete streaming state, Tool-derived blocks,
+Tool approval or reconciliation, and historical schema-9-or-earlier blocks
+remain on their original fail-closed recovery path. A Product cancellation also
+requires the recovered Active Agent Session that owns the Turn and does not
+modify Team or Tool state. Cancellation does not call a Provider or Tool.
 
 Agent Team recovery is separate from Turn output recovery. `open_with_team`
 holds both dedicated writers, validates the Team replay, and returns one
@@ -157,18 +175,18 @@ descriptors while Tool Runtime remains the authority gate. Approval and
 `EffectPrepared` are durable before the injected executor runs. A successful
 UTF-8 result may then enter one Provider continuation. The final
 `OutputPrepared` transaction stores the combined canonical text and one or two
-bounded Usage Records. Runtime Event schema 9 also durably brackets every
-Provider request or continuation with Usage Attempt start/finish Events and
+bounded Usage Records. Runtime Event schema 10 preserves the schema-6 contract
+that durably brackets every Provider request or continuation with Usage Attempt start/finish Events and
 carries the Agent scope, Provider dialect, frozen Usage Windows, UTC times,
 outcome, exact/estimated marker, optional token/cache classes, service tier, and
 frozen Provider Profile snapshot, then records one frozen Price Schedule cost
 evaluation plus optional selected-Preset output-token, typed reasoning-effort,
 and typed service-tier policy in the Config Epoch. Requested effort/tier are
-kept distinct from observed Provider metadata. Schema 9 adds a bounded
+kept distinct from observed Provider metadata. Schema 9 added a bounded
 `ModelSelectionStaged` Event bound to the authenticated current Agent. The next
 matching `TurnAdmitted` consumes it in the same transaction as Config and
 Provider freeze; pre-admission failure leaves it pending. Historical schema-1
-through schema-8 Runtime transactions replay and can be followed by schema-9
+through schema-9 Runtime transactions replay and can be followed by schema-10
 transactions; schema-1 token counts become explicitly estimated legacy attempts.
 
 This tracer bullet intentionally stores only the Tool result digest. If the
@@ -312,8 +330,8 @@ checkpoints, and stale-result CAS handling.
 
 Prompt/provider text and credential material are not part of the Usage domain.
 Requested or observed metadata not supplied by the current Provider remains
-unknown. Runtime Event schema 9 records `UsageAttemptFinished` before
-`UsageAttemptCostEvaluated` in the same transaction. The Config Epoch freezes
+unknown. Runtime Event schema 10 preserves the rule that records
+`UsageAttemptFinished` before `UsageAttemptCostEvaluated` in the same transaction. The Config Epoch freezes
 the resolved Price Schedule book; replay recomputes the cost claim from that
 book and the normalized Usage Record, rejecting a changed schedule fingerprint,
 amount, or unknown reason.
@@ -437,7 +455,8 @@ charges still require a future dedicated authority path.
   rebuild the active row projection; manual refresh is available after leaving
   the editor.
 - Live inference conformance, non-Windows credential backends, configurable proxy
-  policy, broader TLS platform evidence, reconnect policy, multiple or parallel
+  policy, broader TLS platform evidence, automatic retry and resumable reconnect
+  policy, multiple or parallel
   Tool calls, resumable result references, broader canonical Items, and the
   unimplemented Provider event kinds. The bounded SSE, OpenAI Responses and
   Chat Completions decoders, neutral normalizers, typed frozen Provider Profile

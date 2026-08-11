@@ -7,7 +7,9 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use super::sse::{SseError, SseEvent, SseLimits, SseParser};
-use super::{ProviderError, ProviderEvent, ProviderToolCall, UsageRecord};
+use super::{
+    ProviderError, ProviderEvent, ProviderToolCall, ProviderUnavailableStage, UsageRecord,
+};
 use crate::config::MAX_OUTPUT_BYTES;
 
 const MAX_STREAM_BYTES: usize = 4 * 1024 * 1024;
@@ -204,6 +206,11 @@ impl MessagesSseDecoder {
     #[must_use]
     pub fn events(&self) -> &[MessagesEvent] {
         &self.events
+    }
+
+    #[must_use]
+    pub const fn has_stream_progress(&self) -> bool {
+        self.processed_sse_events != 0
     }
 
     pub fn finish(mut self) -> Result<Vec<MessagesEvent>, MessagesError> {
@@ -568,12 +575,14 @@ pub fn normalize_messages_events(
                 completed = true;
             }
             MessagesEventKind::Incomplete { .. } => {
-                return Err(ProviderError::unavailable(
+                return Err(ProviderError::unavailable_during(
+                    ProviderUnavailableStage::AfterFirstEvent,
                     "Messages request ended incomplete",
                 ));
             }
             MessagesEventKind::Error { .. } => {
-                return Err(ProviderError::unavailable(
+                return Err(ProviderError::unavailable_during(
+                    ProviderUnavailableStage::AfterFirstEvent,
                     "Messages stream reported an error",
                 ));
             }

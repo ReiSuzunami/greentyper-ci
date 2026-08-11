@@ -49,8 +49,9 @@ GPT-5.6 Luna with `--dialect responses`, and
 retains the
 deterministic simulator only when no custom profile is selected. Windows
 Credential Manager is the current platform
-backend; non-Windows product credential access fails closed. Retry, reconnect,
-live inference conformance, and broader Tool presentation remain separate work.
+backend; non-Windows product credential access fails closed. Automatic retry,
+resumable reconnect, live inference conformance, and broader Tool presentation
+remain separate work.
 All three HTTP dialect paths reject serialized request bodies above 128 KiB
 before network I/O. A Tool continuation also rejects any second Tool call at
 the adapter boundary; the Runtime repeats that invariant before projection.
@@ -68,6 +69,39 @@ distinct `template_mirror` source. An explicit `unknown`, `manual`, or
 `provider_reported` source overrides that default. Templates without a bundled
 rate card still require an explicit pricing decision. Mirroring a rate card
 never mirrors credentials, origin authority, or Provider identity.
+
+## Transport Interruption and Explicit Cancellation
+
+`ProviderUnavailableStage` gives every adapter the same redacted transport
+boundary: `BeforeResponse`, `BeforeFirstEvent`, or `AfterFirstEvent`. Responses,
+Chat Completions, and Messages classify response-body read failures and an early
+EOF from incomplete SSE at the exact decoder-progress boundary. Invalid event
+shape, identity, ordering, bounds, or terminal semantics remains
+`InvalidResponse`; interruption is not used to excuse malformed Provider data.
+Errors expose only the stage and bounded diagnostic byte count, never the
+upstream body, Provider text, Tool arguments, endpoint, or credential.
+
+The adapters make one network attempt. They do not automatically retry a
+status failure, reconnect a partial stream, or join bytes from two responses.
+Inference requests currently carry no idempotency key, so even a
+`BeforeResponse` classification does not prove that the remote service did no
+work or incurred no usage. Each attempted request is already closed as one
+durable failed Usage Attempt with its cost evaluation before the Turn becomes
+blocked.
+
+`greentyper cancel --ledger PATH --turn ID` is the explicit terminal recovery
+for a current-schema Provider-origin block. Runtime Event schema 10 records the
+block origin and appends `TurnCancelled` as a validated transaction. The event
+clears only the pending Turn; it retains its user item, immutable Usage/cost
+history, and frozen Config and Provider Epochs. Repeating the exact cancellation
+is a no-op. Product cancellation strictly opens existing Runtime, Team, and Tool
+Ledgers, authenticates the recovered Active Agent Session that owns the Turn,
+and leaves Team and Tool bytes unchanged. Missing or incomplete state is never
+created or repaired. Prepared delivery, admission awaiting resume, incomplete
+streaming state, Tool approval or reconciliation, Tool-derived blocks, and
+schema-9-or-earlier untyped blocks remain fail-closed on their existing recovery
+paths. Cancellation itself never calls a Provider or Tool and creates no Usage
+Attempt.
 
 ## Interface
 
@@ -403,7 +437,7 @@ plus the [OpenCode Go endpoint matrix](https://opencode.ai/docs/go/).
 
 - Live inference conformance, persistent catalog discovery/refresh,
   starter-preset acceptance, configurable proxy policy, broader TLS platform
-  evidence, reconnect classification, and retry policy. Release Provider
+  evidence, automatic retry policy, and resumable reconnect. Release Provider
   Template defaults and seed catalog facts are bundled, but the current adapters
   do not reconnect or retry partial streams.
 - Broader normalization into the eventual provider-neutral canonical Item

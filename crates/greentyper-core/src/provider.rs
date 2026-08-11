@@ -906,19 +906,42 @@ fn validate_provider_text(
     Ok(())
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProviderUnavailableStage {
+    BeforeResponse,
+    BeforeFirstEvent,
+    AfterFirstEvent,
+}
+
 #[derive(Clone, Eq, PartialEq)]
 pub enum ProviderError {
     InvalidConfiguration(&'static str),
     InvalidRequest(&'static str),
     InvalidResponse(&'static str),
-    Unavailable { diagnostic_bytes: usize },
+    Unavailable {
+        stage: ProviderUnavailableStage,
+        diagnostic_bytes: usize,
+    },
 }
 
 impl ProviderError {
     pub fn unavailable(message: impl Into<String>) -> Self {
+        Self::unavailable_during(ProviderUnavailableStage::BeforeResponse, message)
+    }
+
+    pub fn unavailable_during(stage: ProviderUnavailableStage, message: impl Into<String>) -> Self {
         let message = message.into();
         Self::Unavailable {
+            stage,
             diagnostic_bytes: message.len().min(MAX_PROVIDER_ERROR_BYTES),
+        }
+    }
+
+    #[must_use]
+    pub const fn unavailable_stage(&self) -> Option<ProviderUnavailableStage> {
+        match self {
+            Self::Unavailable { stage, .. } => Some(*stage),
+            _ => None,
         }
     }
 }
@@ -938,8 +961,12 @@ impl fmt::Debug for ProviderError {
                 .debug_tuple("InvalidResponse")
                 .field(reason)
                 .finish(),
-            Self::Unavailable { diagnostic_bytes } => formatter
+            Self::Unavailable {
+                stage,
+                diagnostic_bytes,
+            } => formatter
                 .debug_struct("Unavailable")
+                .field("stage", stage)
                 .field("message_bytes", diagnostic_bytes)
                 .finish(),
         }

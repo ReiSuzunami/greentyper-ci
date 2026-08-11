@@ -2,7 +2,7 @@ use greentyper_core::config::{ConfigEpoch, ConfigLayers};
 use greentyper_core::model::{ConfigEpochId, ProviderEpochId, ThreadId, TurnId};
 use greentyper_core::provider::{
     DeterministicProvider, ProviderEpoch, ProviderError, ProviderEvent, ProviderRequest,
-    ProviderRuntime, ProviderToolCall,
+    ProviderRuntime, ProviderToolCall, ProviderUnavailableStage,
 };
 
 const SINGLE_TURN_SUCCESS: &str =
@@ -112,5 +112,16 @@ fn provider_request_and_error_debug_redact_external_text() {
     let error = ProviderError::unavailable("https://provider.test/?token=private-token");
     let error_debug = format!("{error:?}");
     assert!(!error_debug.contains("private-token"));
+    assert!(error_debug.contains("BeforeResponse"));
     assert!(error_debug.contains("message_bytes"));
+
+    let partial = ProviderError::unavailable_during(
+        ProviderUnavailableStage::AfterFirstEvent,
+        "private partial response",
+    );
+    assert_eq!(
+        partial.unavailable_stage(),
+        Some(ProviderUnavailableStage::AfterFirstEvent)
+    );
+    assert!(!format!("{partial:?}").contains("private partial response"));
 }

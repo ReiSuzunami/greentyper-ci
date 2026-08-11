@@ -15,14 +15,14 @@ use greentyper_core::agent_team::{
 };
 use greentyper_core::config::{ConfigEpoch, ConfigLayers, ModelPresetView};
 use greentyper_core::ledger::{DurabilityReceipt, LedgerHead};
-use greentyper_core::model::{ConfigEpochId, DeliveryId};
+use greentyper_core::model::{ConfigEpochId, DeliveryId, TurnId};
 use greentyper_core::pricing::PriceScheduleBook;
 use greentyper_core::provider::{ProviderEpoch, ProviderRuntime};
 #[cfg(test)]
 use greentyper_core::runtime::RuntimeSnapshot;
 use greentyper_core::runtime::{
-    AcknowledgeOutcome, KernelTeamSnapshot, ModelSelection, PreparedOutput, ProviderToolApproval,
-    ProviderTurnOutcome, RuntimeError, RuntimeKernel,
+    AcknowledgeOutcome, CancelTurnOutcome, KernelTeamSnapshot, ModelSelection, PreparedOutput,
+    ProviderToolApproval, ProviderTurnOutcome, RuntimeError, RuntimeKernel,
 };
 use greentyper_core::tool_runtime::{
     ApprovalDecision, ToolCallRecord, ToolCallStatus, ToolEffectExecutor,
@@ -389,6 +389,34 @@ pub(crate) fn stage_product_model_selection(
         .map_err(ProductDriverError::Runtime)
 }
 
+pub(crate) fn cancel_product_provider_turn(
+    runtime_path: &Path,
+    turn: TurnId,
+) -> Result<CancelTurnOutcome, ProductDriverError> {
+    if !path_entry_exists(runtime_path)? || !has_product_driver_state(runtime_path)? {
+        return Err(ProductDriverError::ProviderTurnStateUnavailable);
+    }
+    let team_path = sidecar_path(runtime_path, "team");
+    let tool_path = sidecar_path(runtime_path, "tool");
+    let (mut kernel, recovery) = RuntimeKernel::open_with_team_and_tools_existing_strict(
+        runtime_path,
+        team_path,
+        tool_path,
+        1,
+    )?;
+    let mut sessions = recovery.into_sessions();
+    let session = match sessions.len() {
+        1 => sessions
+            .pop()
+            .ok_or(ProductDriverError::UnexpectedRecovery)?,
+        0 => return Err(ProductDriverError::ProviderTurnOwnerUnavailable(turn.get())),
+        _ => return Err(ProductDriverError::UnexpectedRecovery),
+    };
+    kernel
+        .cancel_blocked_provider_turn(session, turn)
+        .map_err(ProductDriverError::Runtime)
+}
+
 fn path_entry_exists(path: &Path) -> Result<bool, ProductDriverError> {
     match fs::symlink_metadata(path) {
         Ok(_) => Ok(true),
@@ -531,6 +559,8 @@ pub(crate) enum ProductDriverError {
     ToolOwnerUnavailable(u64),
     ToolApprovalUnavailable(u64),
     ToolApprovalMismatch { expected: u64, actual: u64 },
+    ProviderTurnStateUnavailable,
+    ProviderTurnOwnerUnavailable(u64),
     UnexpectedRecovery,
 }
 
@@ -568,6 +598,15 @@ impl fmt::Display for ProductDriverError {
                 formatter,
                 "selected Tool call {expected} does not match pending call {actual}"
             ),
+            Self::ProviderTurnStateUnavailable => {
+                write!(formatter, "Product Provider Turn state is unavailable")
+            }
+            Self::ProviderTurnOwnerUnavailable(turn) => {
+                write!(
+                    formatter,
+                    "Provider Turn {turn} has no recoverable Agent owner"
+                )
+            }
             Self::UnexpectedRecovery => {
                 write!(formatter, "Product driver recovery is inconsistent")
             }
@@ -589,6 +628,8 @@ impl Error for ProductDriverError {
             | Self::ToolOwnerUnavailable(_)
             | Self::ToolApprovalUnavailable(_)
             | Self::ToolApprovalMismatch { .. }
+            | Self::ProviderTurnStateUnavailable
+            | Self::ProviderTurnOwnerUnavailable(_)
             | Self::UnexpectedRecovery => None,
         }
     }
@@ -616,8 +657,8 @@ mod tests {
         ModelPresetView, ReasoningEffort, ServiceTier,
     };
     use greentyper_core::provider::{
-        ProviderError, ProviderEvent, ProviderProfileSnapshot, ProviderRequest, ProviderRuntime,
-        ProviderToolCall, ProviderToolOutput, UsageRecord,
+        DeterministicProvider, ProviderError, ProviderEvent, ProviderProfileSnapshot,
+        ProviderRequest, ProviderRuntime, ProviderToolCall, ProviderToolOutput, UsageRecord,
     };
     use greentyper_core::runtime::{ProviderToolApproval, RecoveryStatus};
     use greentyper_core::tool_runtime::{AuthorizedToolCall, ToolEffectExecutor, ToolExecution};
@@ -923,11 +964,130 @@ source = "unknown"
 
         assert!(matches!(result, Err(ProductDriverError::Runtime(_))));
         assert_eq!(calls.get(), 0);
-        assert!(matches!(
-            driver.snapshot().status,
-            RecoveryStatus::Blocked { .. }
-        ));
+        let RecoveryStatus::Blocked { turn, .. } = driver.snapshot().status else {
+            panic!("denied Tool did not block the Turn")
+        };
         drop(driver);
+        let ledger_paths = [
+            ledger.clone(),
+            sidecar_path(&ledger, "team"),
+            sidecar_path(&ledger, "tool"),
+        ];
+        let before = ledger_paths
+            .iter()
+            .map(|path| fs::read(path).expect("read Product Ledger"))
+            .collect::<Vec<_>>();
+        assert!(matches!(
+            cancel_product_provider_turn(&ledger, turn),
+            Err(ProductDriverError::Runtime(
+                RuntimeError::TurnCancellationNotAllowed(actual)
+            )) if actual == turn
+        ));
+        assert_eq!(
+            ledger_paths
+                .iter()
+                .map(|path| fs::read(path).expect("reread Product Ledger"))
+                .collect::<Vec<_>>(),
+            before
+        );
+        cleanup(&ledger);
+    }
+
+    #[test]
+    fn provider_blocked_product_turn_cancels_strictly_once_without_sidecar_mutation() {
+        let missing = temp_path("provider-cancel-missing");
+        assert!(matches!(
+            cancel_product_provider_turn(&missing, TurnId::new(1).expect("Turn ID")),
+            Err(ProductDriverError::ProviderTurnStateUnavailable)
+        ));
+        assert!(!missing.exists());
+        assert!(!sidecar_path(&missing, "team").exists());
+        assert!(!sidecar_path(&missing, "tool").exists());
+
+        let ledger = temp_path("provider-cancel");
+        let calls = Rc::new(Cell::new(0));
+        let mut interaction = RecordingInteraction::approve();
+        let mut driver = ProductDriver::open_with_executor(
+            &ledger,
+            CountingEchoExecutor::new(Rc::new(Cell::new(0))),
+            &mut interaction,
+        )
+        .expect("open Product driver");
+        let mut unavailable = CountingUnavailableProvider {
+            calls: Rc::clone(&calls),
+        };
+        assert!(matches!(
+            driver.execute(
+                &ConfigLayers::default(),
+                "cancel this Provider failure",
+                &mut unavailable,
+                &mut interaction,
+            ),
+            Err(ProductDriverError::Runtime(RuntimeError::Provider(
+                ProviderError::Unavailable { .. }
+            )))
+        ));
+        assert_eq!(calls.get(), 1);
+        let RecoveryStatus::Blocked { turn, .. } = driver.snapshot().status else {
+            panic!("Provider failure did not block the Product Turn")
+        };
+        drop(driver);
+
+        let team_path = sidecar_path(&ledger, "team");
+        let tool_path = sidecar_path(&ledger, "tool");
+        let runtime_before = fs::read(&ledger).expect("read blocked Runtime Ledger");
+        let team_before = fs::read(&team_path).expect("read Team Ledger");
+        let tool_before = fs::read(&tool_path).expect("read Tool Ledger");
+        assert!(matches!(
+            cancel_product_provider_turn(&ledger, turn).expect("cancel Product Turn"),
+            CancelTurnOutcome::Durable(_)
+        ));
+        assert_ne!(
+            fs::read(&ledger).expect("read cancelled Runtime Ledger"),
+            runtime_before
+        );
+        assert_eq!(
+            fs::read(&team_path).expect("reread Team Ledger"),
+            team_before
+        );
+        assert_eq!(
+            fs::read(&tool_path).expect("reread Tool Ledger"),
+            tool_before
+        );
+
+        let runtime_after = fs::read(&ledger).expect("read Runtime Ledger after cancellation");
+        assert_eq!(
+            cancel_product_provider_turn(&ledger, turn).expect("repeat Product cancellation"),
+            CancelTurnOutcome::AlreadyCancelled
+        );
+        assert_eq!(
+            fs::read(&ledger).expect("reread Runtime Ledger after repeat"),
+            runtime_after
+        );
+        assert_eq!(calls.get(), 1);
+
+        let mut interaction = RecordingInteraction::approve();
+        let mut recovered = ProductDriver::open_existing_with_executor(
+            &ledger,
+            CountingEchoExecutor::new(Rc::new(Cell::new(0))),
+            &mut interaction,
+        )
+        .expect("reopen cancelled Product state");
+        let mut provider = DeterministicProvider::default();
+        let output = recovered
+            .execute(
+                &ConfigLayers::default(),
+                "next Product Turn",
+                &mut provider,
+                &mut interaction,
+            )
+            .expect("execute after cancellation");
+        recovered
+            .acknowledge(output.delivery())
+            .expect("acknowledge next Product Turn");
+        assert_eq!(recovered.snapshot().status, RecoveryStatus::Ready);
+        assert_eq!(calls.get(), 1);
+        drop(recovered);
         cleanup(&ledger);
     }
 
@@ -1454,6 +1614,17 @@ source = "unknown"
     struct SnapshotTextProvider {
         profile: ProviderProfileSnapshot,
         runs: usize,
+    }
+
+    struct CountingUnavailableProvider {
+        calls: Rc<Cell<usize>>,
+    }
+
+    impl ProviderRuntime for CountingUnavailableProvider {
+        fn run(&mut self, _request: &ProviderRequest) -> Result<Vec<ProviderEvent>, ProviderError> {
+            self.calls.set(self.calls.get() + 1);
+            Err(ProviderError::unavailable("private Provider diagnostic"))
+        }
     }
 
     impl ProviderRuntime for SnapshotTextProvider {

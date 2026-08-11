@@ -79,7 +79,7 @@ Exit criteria:
 
 ## Phase 2: Provider and Tool Tracer Bullet
 
-Add OpenAI Responses SSE, canonical tool calls, Tool Ledger identities, Approval Grants, one local process tool, Windows process control, usage normalization, and provider retry/recovery behavior.
+Add OpenAI Responses SSE, canonical tool calls, Tool Ledger identities, Approval Grants, one local process tool, Windows process control, usage normalization, and explicit Provider interruption/recovery behavior.
 
 The first core Tool Runtime slice is implemented behind
 `RuntimeKernel::open_with_team_and_tools`. It uses a dedicated locked Ledger,
@@ -127,13 +127,14 @@ existing durable Tool approval/effect state machine, feeds one successful UTF-8
 result into a Provider continuation, and durably prepares combined canonical
 output. Recovery tests prove stale Sessions cannot invoke the Provider,
 ambiguous effects cannot continue, and process death after a durable Tool
-success blocks rather than repeating the effect. Runtime Event schema 9 stores
+success blocks rather than repeating the effect. Runtime Event schema 10 stores
 durable Usage Attempt boundaries, frozen Usage Windows, Provider dialect, the
 expanded optional Usage Records, frozen Provider Profile snapshot, and the
 subsequent frozen Price Schedule cost evaluation plus an optional selected-Preset
 output-token limit, typed reasoning/service-tier policy, distinct template-mirror
-pricing provenance, and pending current-Agent Model selection while replaying
-historical schema 1 through schema 8.
+pricing provenance, pending current-Agent Model selection, typed Provider-block
+origin, and durable cancellation while replaying historical schema 1 through
+schema 9.
 
 A product-private `local.echo` tracer now exercises the concrete process seam.
 It launches a fixed same-binary child without a shell, clears inherited
@@ -186,6 +187,19 @@ and the exact GPT-5.6 Luna Responses pair, which uses the frozen Responses
 route, `max_output_tokens`, Bearer authorization, the same policy rejection,
 and one Responses Tool continuation through durable approval.
 
+The Provider interruption/recovery batch is implemented across all three HTTP
+dialects. Each adapter classifies unavailability before a response, before the
+first decoded event, or after the first event; early EOF uses the same decoder
+progress while semantic format failures remain invalid responses. Loopback
+fixtures assert one connection and therefore no automatic retry. Runtime Event
+schema 10 records a typed Provider block and an exact idempotent
+`TurnCancelled`; the CLI can cancel only that blocked Turn. Cancellation keeps
+its immutable Usage/cost and Config/Provider Epoch evidence, invokes neither
+Provider nor Tool, requires recovered Active Agent authority for Product state,
+and leaves Team/Tool Ledgers byte-identical. Missing, incomplete, prepared,
+resume-required, streaming, Tool-derived, reconciliation-required, and legacy
+untyped states fail closed.
+
 The remaining slices are still policy, protocol, and fault-adapter work:
 live inference conformance, non-Windows credential backends, configurable proxy
 policy, persistent live catalog discovery, OpenCode Go Messages execution, DeepSeek
@@ -194,7 +208,7 @@ context/fallback execution, broader canonical Items, multiple
 Tool calls,
 durable resumable Tool result references, richer TUI/App Server
 approval/delivery, caller-selected process policy, complete Windows Job
-lifetime/resource evidence, reconnect/retry behavior, and cross-process crash
+lifetime/resource evidence, automatic retry/resumable reconnect behavior, and cross-process crash
 matrices for the remaining Runtime, Provider, Tool, delivery, and product
 acknowledgement boundaries remain pending.
 
@@ -210,8 +224,8 @@ Exit criteria:
 
 Add VT/ConPTY TUI, hierarchical Command Paths, global command palette, Config Schema-driven editors, Provider wizard, model selector, adaptive statusline, Context Pressure, Usage Records/Rollups, `/stats`, and named Usage Windows.
 
-The first observability slice is implemented. Runtime Event schema 9 durably
-brackets each Provider request and continuation with an immutable Usage Attempt,
+The first observability slice is implemented. Runtime Event schema 10 preserves
+the schema-6 contract that durably brackets each Provider request and continuation with an immutable Usage Attempt,
 including UTC start/completion, outcome, Agent scope when present, frozen
 Provider Profile/model/dialect, exact or estimated Usage Records, and explicit
 unknown cost provenance. Recovery closes an interrupted attempt before an

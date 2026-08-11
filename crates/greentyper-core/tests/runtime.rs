@@ -12,7 +12,9 @@ use greentyper_core::provider::{
     DeterministicProvider, ProviderError, ProviderEvent, ProviderProfileSnapshot, ProviderRequest,
     ProviderRuntime, UsageAccuracy, UsageRecord,
 };
-use greentyper_core::runtime::{AcknowledgeOutcome, RecoveryStatus, RuntimeError, RuntimeKernel};
+use greentyper_core::runtime::{
+    AcknowledgeOutcome, CancelTurnOutcome, RecoveryStatus, RuntimeError, RuntimeKernel,
+};
 use greentyper_core::usage::{UsageAttemptOutcome, UsageCostProvenance, UsageTimestamp};
 
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(1);
@@ -345,11 +347,17 @@ fn malformed_provider_output_is_durably_blocked() {
     ));
     drop(runtime);
 
-    let recovered = RuntimeKernel::open(&path).expect("recover Runtime");
+    let mut recovered = RuntimeKernel::open(&path).expect("recover Runtime");
+    let RecoveryStatus::Blocked { turn, .. } = recovered.snapshot().status else {
+        panic!("malformed Provider output did not replay as blocked")
+    };
     assert!(matches!(
-        recovered.snapshot().status,
-        RecoveryStatus::Blocked { .. }
+        recovered
+            .cancel_blocked_turn(turn)
+            .expect("cancel malformed Provider Turn"),
+        CancelTurnOutcome::Durable(_)
     ));
+    assert_eq!(recovered.snapshot().status, RecoveryStatus::Ready);
     drop(recovered);
     fs::remove_file(path).expect("cleanup Runtime ledger");
 }
@@ -366,7 +374,7 @@ fn provider_error_details_never_enter_the_runtime_ledger() {
     let RecoveryStatus::Blocked { reason, .. } = runtime.snapshot().status else {
         panic!("Provider error did not block the Turn");
     };
-    assert_eq!(reason, "Provider became unavailable");
+    assert_eq!(reason, "Provider became unavailable before a response");
     drop(runtime);
 
     let bytes = fs::read(&path).expect("read Runtime Ledger");
@@ -379,8 +387,70 @@ fn provider_error_details_never_enter_the_runtime_ledger() {
     assert!(matches!(
         recovered.snapshot().status,
         RecoveryStatus::Blocked { ref reason, .. }
-            if reason == "Provider became unavailable"
+            if reason == "Provider became unavailable before a response"
     ));
+    drop(recovered);
+    fs::remove_file(path).expect("cleanup Runtime ledger");
+}
+
+#[test]
+fn provider_blocked_turn_cancels_once_and_allows_a_new_turn_without_replay() {
+    let path = temp_path("provider-cancel");
+    let mut runtime = RuntimeKernel::open(&path).expect("open Runtime");
+    assert!(matches!(
+        runtime.execute(
+            &ConfigLayers::default(),
+            "blocked input",
+            &mut UnavailableProvider
+        ),
+        Err(RuntimeError::Provider(ProviderError::Unavailable { .. }))
+    ));
+    let RecoveryStatus::Blocked { turn, .. } = runtime.snapshot().status else {
+        panic!("Provider failure did not block the Turn")
+    };
+    let before_cancel = runtime.snapshot().head;
+    assert!(matches!(
+        runtime
+            .cancel_blocked_turn(turn)
+            .expect("cancel blocked Provider Turn"),
+        CancelTurnOutcome::Durable(_)
+    ));
+    let cancelled_head = runtime.snapshot().head;
+    assert_ne!(cancelled_head, before_cancel);
+    assert_eq!(runtime.snapshot().status, RecoveryStatus::Ready);
+    assert_eq!(
+        runtime
+            .usage_snapshot(UsageTimestamp::now().unwrap())
+            .attempts()
+            .len(),
+        1
+    );
+    assert_eq!(
+        runtime
+            .cancel_blocked_turn(turn)
+            .expect("repeat cancellation is idempotent"),
+        CancelTurnOutcome::AlreadyCancelled
+    );
+    assert_eq!(runtime.snapshot().head, cancelled_head);
+    drop(runtime);
+
+    let mut recovered = RuntimeKernel::open(&path).expect("recover cancelled Runtime");
+    assert_eq!(recovered.snapshot().status, RecoveryStatus::Ready);
+    assert_eq!(
+        recovered
+            .cancel_blocked_turn(turn)
+            .expect("replayed cancellation is idempotent"),
+        CancelTurnOutcome::AlreadyCancelled
+    );
+    let mut provider = CountingProvider::default();
+    let output = recovered
+        .execute(&ConfigLayers::default(), "next input", &mut provider)
+        .expect("execute next Turn");
+    assert_eq!(provider.calls, 1);
+    recovered
+        .acknowledge(output.delivery())
+        .expect("acknowledge next Turn");
+    assert_eq!(recovered.snapshot().status, RecoveryStatus::Ready);
     drop(recovered);
     fs::remove_file(path).expect("cleanup Runtime ledger");
 }
@@ -393,7 +463,7 @@ fn unsupported_runtime_event_schema_fails_closed() {
         .append(
             LedgerHead::default(),
             &[EventData {
-                schema: 10,
+                schema: 11,
                 kind: 1,
                 payload: 1_u64.to_le_bytes().to_vec(),
             }],
@@ -403,8 +473,8 @@ fn unsupported_runtime_event_schema_fails_closed() {
     assert!(matches!(
         RuntimeKernel::open(&path),
         Err(RuntimeError::UnsupportedRuntimeEventSchema {
-            supported: 9,
-            actual: 10
+            supported: 10,
+            actual: 11
         })
     ));
     fs::remove_file(path).expect("cleanup Runtime ledger");

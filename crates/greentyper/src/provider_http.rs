@@ -11,16 +11,19 @@ use greentyper_core::config::{
     ReasoningEffort,
 };
 use greentyper_core::provider::chat_completions::{
-    ChatCompletionsSseDecoder, normalize_chat_completions_events,
+    ChatCompletionsError, ChatCompletionsSseDecoder, normalize_chat_completions_events,
 };
-use greentyper_core::provider::messages::{MessagesSseDecoder, normalize_messages_events};
+use greentyper_core::provider::messages::{
+    MessagesError, MessagesSseDecoder, normalize_messages_events,
+};
 use greentyper_core::provider::responses::{
-    ResponsesEventKind, ResponsesSseDecoder, normalize_responses_events,
+    ResponsesError, ResponsesEventKind, ResponsesSseDecoder, normalize_responses_events,
 };
+use greentyper_core::provider::sse::SseError;
 use greentyper_core::provider::{
     DeterministicProvider, ProviderDialect, ProviderEpoch, ProviderError, ProviderEvent,
     ProviderPricingSource, ProviderProfileSnapshot, ProviderRequest, ProviderRuntime,
-    ProviderToolCall, ProviderToolOutput,
+    ProviderToolCall, ProviderToolOutput, ProviderUnavailableStage,
 };
 use greentyper_core::provider_catalog::ProviderCatalog;
 use greentyper_core::runtime::{RuntimeError, RuntimeKernel};
@@ -57,6 +60,9 @@ const READ_CHUNK_BYTES: usize = 8 * 1024;
 const PRIVATE_ERROR_BODY: &[u8] = b"provider-private-error-marker";
 const SUCCESS_SSE: &[u8] =
     include_bytes!("../../../tests/fixtures/provider/responses/v1/http-text.sse");
+#[cfg(test)]
+const RESPONSES_FAILED_SSE: &[u8] =
+    include_bytes!("../../../tests/fixtures/provider/responses/v1/failed.sse");
 #[cfg(test)]
 const CHAT_TEXT_SSE: &[u8] =
     include_bytes!("../../../tests/fixtures/provider/chat_completions/v1/http-text.sse");
@@ -468,9 +474,15 @@ impl<V: CredentialVault> ResponsesHttpProvider<V> {
         })?;
         let mut buffer = [0_u8; READ_CHUNK_BYTES];
         loop {
-            let read = response
-                .read(&mut buffer)
-                .map_err(|_| ProviderError::unavailable("Responses HTTP stream failed"))?;
+            let read = match response.read(&mut buffer) {
+                Ok(read) => read,
+                Err(_) => {
+                    return Err(ProviderError::unavailable_during(
+                        provider_stream_stage(decoder.has_stream_progress()),
+                        "Responses HTTP stream failed",
+                    ));
+                }
+            };
             if read == 0 {
                 break;
             }
@@ -478,9 +490,13 @@ impl<V: CredentialVault> ResponsesHttpProvider<V> {
                 ProviderError::InvalidResponse("Responses HTTP stream was rejected")
             })?;
         }
-        let events = decoder
-            .finish()
-            .map_err(|_| ProviderError::InvalidResponse("Responses HTTP stream ended invalidly"))?;
+        let stage = provider_stream_stage(decoder.has_stream_progress());
+        let events = decoder.finish().map_err(|error| match error {
+            ResponsesError::IncompleteStream | ResponsesError::Sse(SseError::IncompleteEvent) => {
+                ProviderError::unavailable_during(stage, "Responses HTTP stream ended early")
+            }
+            _ => ProviderError::InvalidResponse("Responses HTTP stream ended invalidly"),
+        })?;
         let response_id = match events.first().map(|event| &event.kind) {
             Some(ResponsesEventKind::Created { response_id }) => response_id.clone(),
             _ => {
@@ -801,9 +817,15 @@ impl<V: CredentialVault> ChatCompletionsHttpProvider<V> {
         })?;
         let mut buffer = [0_u8; READ_CHUNK_BYTES];
         loop {
-            let read = response
-                .read(&mut buffer)
-                .map_err(|_| ProviderError::unavailable("Chat Completions HTTP stream failed"))?;
+            let read = match response.read(&mut buffer) {
+                Ok(read) => read,
+                Err(_) => {
+                    return Err(ProviderError::unavailable_during(
+                        provider_stream_stage(decoder.has_stream_progress()),
+                        "Chat Completions HTTP stream failed",
+                    ));
+                }
+            };
             if read == 0 {
                 break;
             }
@@ -811,8 +833,13 @@ impl<V: CredentialVault> ChatCompletionsHttpProvider<V> {
                 ProviderError::InvalidResponse("Chat Completions HTTP stream was rejected")
             })?;
         }
-        let events = decoder.finish().map_err(|_| {
-            ProviderError::InvalidResponse("Chat Completions HTTP stream ended invalidly")
+        let stage = provider_stream_stage(decoder.has_stream_progress());
+        let events = decoder.finish().map_err(|error| match error {
+            ChatCompletionsError::IncompleteStream
+            | ChatCompletionsError::Sse(SseError::IncompleteEvent) => {
+                ProviderError::unavailable_during(stage, "Chat Completions HTTP stream ended early")
+            }
+            _ => ProviderError::InvalidResponse("Chat Completions HTTP stream ended invalidly"),
         })?;
         normalize_chat_completions_events(&events)
     }
@@ -1122,9 +1149,15 @@ impl<V: CredentialVault> MessagesHttpProvider<V> {
         })?;
         let mut buffer = [0_u8; READ_CHUNK_BYTES];
         loop {
-            let read = response
-                .read(&mut buffer)
-                .map_err(|_| ProviderError::unavailable("Messages HTTP stream failed"))?;
+            let read = match response.read(&mut buffer) {
+                Ok(read) => read,
+                Err(_) => {
+                    return Err(ProviderError::unavailable_during(
+                        provider_stream_stage(decoder.has_stream_progress()),
+                        "Messages HTTP stream failed",
+                    ));
+                }
+            };
             if read == 0 {
                 break;
             }
@@ -1132,9 +1165,13 @@ impl<V: CredentialVault> MessagesHttpProvider<V> {
                 .push(&buffer[..read])
                 .map_err(|_| ProviderError::InvalidResponse("Messages HTTP stream was rejected"))?;
         }
-        let events = decoder
-            .finish()
-            .map_err(|_| ProviderError::InvalidResponse("Messages HTTP stream ended invalidly"))?;
+        let stage = provider_stream_stage(decoder.has_stream_progress());
+        let events = decoder.finish().map_err(|error| match error {
+            MessagesError::IncompleteStream | MessagesError::Sse(SseError::IncompleteEvent) => {
+                ProviderError::unavailable_during(stage, "Messages HTTP stream ended early")
+            }
+            _ => ProviderError::InvalidResponse("Messages HTTP stream ended invalidly"),
+        })?;
         normalize_messages_events(&events)
     }
 
@@ -1665,6 +1702,14 @@ fn classify_http_status(status: StatusCode) -> ProviderError {
             ProviderError::InvalidRequest("Responses HTTP request was rejected")
         }
         _ => ProviderError::InvalidResponse("Responses HTTP status was invalid"),
+    }
+}
+
+const fn provider_stream_stage(has_progress: bool) -> ProviderUnavailableStage {
+    if has_progress {
+        ProviderUnavailableStage::AfterFirstEvent
+    } else {
+        ProviderUnavailableStage::BeforeFirstEvent
     }
 }
 
@@ -4887,6 +4932,12 @@ source = "unknown"
             } else {
                 assert!(matches!(error, ProviderError::InvalidResponse(_)));
             }
+            if index == 2 {
+                assert_eq!(
+                    error.unavailable_stage(),
+                    Some(ProviderUnavailableStage::AfterFirstEvent)
+                );
+            }
             let rendered = format!("{error:?} {error}");
             assert!(!rendered.contains("provider-private-error-marker"));
             assert!(!rendered.contains("private input"));
@@ -5326,6 +5377,187 @@ source = "unknown"
             classify_http_status(StatusCode::SERVICE_UNAVAILABLE),
             ProviderError::Unavailable { .. }
         ));
+    }
+
+    #[test]
+    fn responses_stream_interruptions_report_progress_without_retrying() {
+        const CREATED_EVENT: &[u8] = b"event: response.created\ndata: {\"type\":\"response.created\",\"sequence_number\":1,\"response\":{\"id\":\"resp_interrupted\",\"object\":\"response\",\"status\":\"in_progress\",\"output\":[],\"usage\":null}}\n\n";
+
+        for (name, body, expected_stage) in [
+            (
+                "before-first-event",
+                &b""[..],
+                ProviderUnavailableStage::BeforeFirstEvent,
+            ),
+            (
+                "after-first-event",
+                CREATED_EVENT,
+                ProviderUnavailableStage::AfterFirstEvent,
+            ),
+            (
+                "provider-failed-terminal",
+                RESPONSES_FAILED_SSE,
+                ProviderUnavailableStage::AfterFirstEvent,
+            ),
+        ] {
+            let listener = TcpListener::bind(("127.0.0.1", 0)).expect("interrupt listener");
+            let address = listener.local_addr().expect("interrupt address");
+            let server = thread::spawn(move || {
+                let (mut stream, _) = listener.accept().expect("accept interrupted request");
+                let _ = read_test_request_body(&mut stream);
+                write_fixture_response(&mut stream, "200 OK", "text/event-stream", body, true)
+                    .expect("write interrupted response");
+                drop(stream);
+
+                listener
+                    .set_nonblocking(true)
+                    .expect("nonblocking retry guard");
+                let deadline = Instant::now() + Duration::from_millis(250);
+                while Instant::now() < deadline {
+                    match listener.accept() {
+                        Ok(_) => panic!("interrupted Provider request was retried"),
+                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                            thread::sleep(Duration::from_millis(10));
+                        }
+                        Err(error) => panic!("retry guard failed: {error}"),
+                    }
+                }
+            });
+
+            let base_url = format!("http://{address}");
+            let runtime = provider_config_runtime(
+                &base_url,
+                true,
+                test_config_paths(&format!("responses-{name}")),
+            )
+            .expect("valid interrupted Responses Config");
+            let profile = runtime
+                .selected_provider_profile()
+                .expect("resolve interrupted Responses Profile")
+                .expect("interrupted Responses Profile");
+            let scope = ProviderCredentialScope::from_profile(&profile).expect("credential scope");
+            let mut vault = InMemoryCredentialVault::default();
+            vault
+                .bind(&scope, SecretValue::new(SYNTHETIC_SECRET.to_vec()).unwrap())
+                .expect("bind interrupted credential");
+            let mut provider =
+                ResponsesHttpProvider::with_timeout(profile.clone(), vault, Duration::from_secs(1))
+                    .expect("interrupted Responses provider");
+
+            let error = provider
+                .run(&provider_request(profile, "interrupted stream"))
+                .expect_err("interrupted stream must fail closed");
+            assert_eq!(error.unavailable_stage(), Some(expected_stage));
+            server.join().expect("join interruption server");
+        }
+    }
+
+    #[test]
+    fn chat_and_messages_interruptions_report_progress_without_retrying() {
+        const CHAT_EVENT: &[u8] = b"data: {\"id\":\"chatcmpl_interrupted\",\"object\":\"chat.completion.chunk\",\"created\":1786310400,\"model\":\"fixture-model\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":null},\"finish_reason\":null}],\"service_tier\":\"default\",\"usage\":null}\n\n";
+        const MESSAGES_EVENT: &[u8] = b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_interrupted\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"fixture-model\",\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":4,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":0}}}\n\n";
+
+        fn interrupted_server(
+            expected_route: &'static str,
+            body: &'static [u8],
+            messages: bool,
+        ) -> (std::net::SocketAddr, JoinHandle<()>) {
+            let listener = TcpListener::bind(("127.0.0.1", 0)).expect("interrupt listener");
+            let address = listener.local_addr().expect("interrupt address");
+            let server = thread::spawn(move || {
+                let (mut stream, _) = listener.accept().expect("accept interrupted request");
+                if messages {
+                    let _ = read_messages_request_body(&mut stream);
+                } else {
+                    let _ = read_test_request_body_for(&mut stream, expected_route);
+                }
+                write_fixture_response(&mut stream, "200 OK", "text/event-stream", body, true)
+                    .expect("write interrupted response");
+                drop(stream);
+
+                listener
+                    .set_nonblocking(true)
+                    .expect("nonblocking retry guard");
+                let deadline = Instant::now() + Duration::from_millis(250);
+                while Instant::now() < deadline {
+                    match listener.accept() {
+                        Ok(_) => panic!("interrupted Provider request was retried"),
+                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                            thread::sleep(Duration::from_millis(10));
+                        }
+                        Err(error) => panic!("retry guard failed: {error}"),
+                    }
+                }
+            });
+            (address, server)
+        }
+
+        for (name, body, expected_stage) in [
+            (
+                "before-first-event",
+                &b""[..],
+                ProviderUnavailableStage::BeforeFirstEvent,
+            ),
+            (
+                "after-first-event",
+                CHAT_EVENT,
+                ProviderUnavailableStage::AfterFirstEvent,
+            ),
+        ] {
+            let (address, server) = interrupted_server("/v1/chat/completions", body, false);
+            let profile = chat_fixture_profile(
+                &format!("http://{address}"),
+                &format!("chat-interrupted-{name}"),
+            );
+            let vault = bound_chat_vault(&profile);
+            let mut provider = ChatCompletionsHttpProvider::with_timeout(
+                profile.clone(),
+                vault,
+                Duration::from_secs(1),
+            )
+            .expect("interrupted Chat provider");
+            let error = provider
+                .run(&provider_request_with_dialect(
+                    profile,
+                    "interrupted stream",
+                    ProviderDialect::ChatCompletions,
+                ))
+                .expect_err("interrupted Chat stream must fail closed");
+            assert_eq!(error.unavailable_stage(), Some(expected_stage));
+            server.join().expect("join Chat interruption server");
+        }
+
+        for (name, body, expected_stage) in [
+            (
+                "before-first-event",
+                &b""[..],
+                ProviderUnavailableStage::BeforeFirstEvent,
+            ),
+            (
+                "after-first-event",
+                MESSAGES_EVENT,
+                ProviderUnavailableStage::AfterFirstEvent,
+            ),
+        ] {
+            let (address, server) = interrupted_server("/anthropic/v1/messages", body, true);
+            let profile = messages_fixture_profile(
+                &format!("http://{address}"),
+                &format!("messages-interrupted-{name}"),
+            );
+            let vault = bound_messages_vault(&profile);
+            let mut provider =
+                MessagesHttpProvider::with_timeout(profile.clone(), vault, Duration::from_secs(1))
+                    .expect("interrupted Messages provider");
+            let error = provider
+                .run(&provider_request_with_dialect(
+                    profile,
+                    "interrupted stream",
+                    ProviderDialect::Messages,
+                ))
+                .expect_err("interrupted Messages stream must fail closed");
+            assert_eq!(error.unavailable_stage(), Some(expected_stage));
+            server.join().expect("join Messages interruption server");
+        }
     }
 
     #[test]
