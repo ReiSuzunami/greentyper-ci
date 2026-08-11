@@ -351,6 +351,21 @@ fn reject_continuation_tool_calls(
     Ok(events)
 }
 
+fn single_initial_tool_call<'a>(
+    events: &'a [ProviderEvent],
+    error: &'static str,
+) -> Result<Option<&'a ProviderToolCall>, ProviderError> {
+    let mut calls = events.iter().filter_map(|event| match event {
+        ProviderEvent::FunctionCall(call) => Some(call),
+        ProviderEvent::TextDelta(_) | ProviderEvent::Completed(_) => None,
+    });
+    let call = calls.next();
+    if calls.next().is_some() {
+        return Err(ProviderError::InvalidResponse(error));
+    }
+    Ok(call)
+}
+
 fn provider_messages(request: &ProviderRequest) -> Vec<serde_json::Value> {
     let context_items = request
         .context
@@ -1078,6 +1093,7 @@ pub(crate) struct MessagesHttpProvider<V> {
     endpoint: Url,
     adapter: MessagesAdapter,
     profile: ProviderProfileSnapshot,
+    model: String,
     credential_scope: ProviderCredentialScope,
     vault: V,
     local_echo_enabled: bool,
@@ -1102,20 +1118,22 @@ impl<V> fmt::Debug for MessagesHttpProvider<V> {
 }
 
 impl<V: CredentialVault> MessagesHttpProvider<V> {
-    fn new(profile: ProviderProfileSnapshot, vault: V) -> Result<Self, ProviderError> {
-        Self::with_timeout(profile, vault, PROVIDER_TIMEOUT)
+    fn new(profile: ProviderProfileSnapshot, model: &str, vault: V) -> Result<Self, ProviderError> {
+        Self::with_timeout(profile, model, vault, PROVIDER_TIMEOUT)
     }
 
     fn with_timeout(
         profile: ProviderProfileSnapshot,
+        model: &str,
         vault: V,
         timeout: Duration,
     ) -> Result<Self, ProviderError> {
-        Self::with_client_builder(profile, vault, timeout, Client::builder())
+        Self::with_client_builder(profile, model, vault, timeout, Client::builder())
     }
 
     fn with_client_builder(
         profile: ProviderProfileSnapshot,
+        model: &str,
         vault: V,
         timeout: Duration,
         client: ClientBuilder,
@@ -1152,6 +1170,7 @@ impl<V: CredentialVault> MessagesHttpProvider<V> {
             endpoint,
             adapter,
             profile,
+            model: model.to_owned(),
             credential_scope,
             vault,
             local_echo_enabled: false,
@@ -1237,10 +1256,11 @@ impl<V: CredentialVault> MessagesHttpProvider<V> {
     fn require_request_identity(&self, request: &ProviderRequest) -> Result<(), ProviderError> {
         if request.provider.profile() != self.profile.profile()
             || request.provider.profile_snapshot() != Some(&self.profile)
+            || request.provider.model() != self.model
             || request.provider.dialect() != Some(ProviderDialect::Messages)
         {
             return Err(ProviderError::InvalidConfiguration(
-                "Messages provider identity does not match its frozen Profile and dialect",
+                "Messages provider identity does not match its frozen model, Profile, and dialect",
             ));
         }
         Ok(())
@@ -1295,7 +1315,7 @@ impl<V: CredentialVault> ProviderRuntime for MessagesHttpProvider<V> {
             serde_json::json!({
                 "max_tokens": max_output_tokens,
                 "messages": messages.clone(),
-                "model": request.provider.model(),
+                "model": &self.model,
                 "stream": true,
                 "tool_choice": {"type": "auto", "disable_parallel_tool_use": true},
                 "tools": [messages_local_echo_tool_definition()],
@@ -1304,7 +1324,7 @@ impl<V: CredentialVault> ProviderRuntime for MessagesHttpProvider<V> {
             serde_json::json!({
                 "max_tokens": max_output_tokens,
                 "messages": messages.clone(),
-                "model": request.provider.model(),
+                "model": &self.model,
                 "stream": true,
             })
         };
@@ -1315,14 +1335,10 @@ impl<V: CredentialVault> ProviderRuntime for MessagesHttpProvider<V> {
         } else {
             events
         };
-        let calls = events
-            .iter()
-            .filter_map(|event| match event {
-                ProviderEvent::FunctionCall(call) => Some(call),
-                ProviderEvent::TextDelta(_) | ProviderEvent::Completed(_) => None,
-            })
-            .collect::<Vec<_>>();
-        if let [call] = calls.as_slice() {
+        if let Some(call) = single_initial_tool_call(
+            &events,
+            "Messages response returned more than one Tool call",
+        )? {
             self.pending_continuation = Some(MessagesPendingContinuation {
                 call_id: call.call_id().to_owned(),
                 messages,
@@ -1376,7 +1392,7 @@ impl<V: CredentialVault> ProviderRuntime for MessagesHttpProvider<V> {
         let mut body = serde_json::json!({
             "max_tokens": max_output_tokens,
             "messages": messages,
-            "model": request.provider.model(),
+            "model": &self.model,
             "stream": true,
             "tool_choice": {"type": "none"},
             "tools": [messages_local_echo_tool_definition()],
@@ -1576,7 +1592,7 @@ impl<V: CredentialVault> ConfiguredProvider<V> {
             ProviderDialect::ChatCompletions => ChatCompletionsHttpProvider::new(profile, vault)
                 .map(Box::new)
                 .map(Self::ChatCompletions),
-            ProviderDialect::Messages => MessagesHttpProvider::new(profile, vault)
+            ProviderDialect::Messages => MessagesHttpProvider::new(profile, model, vault)
                 .map(Box::new)
                 .map(Self::Messages),
         }
@@ -2339,6 +2355,7 @@ mod tests {
     use greentyper_core::tool_runtime::{
         ApprovalDecision, AuthorizedToolCall, ToolEffectExecutor, ToolExecution, ToolResources,
     };
+    use greentyper_core::usage::UsageTimestamp;
     use rcgen::{CertifiedKey, generate_simple_self_signed};
     use rustls::pki_types::PrivatePkcs8KeyDer;
     use rustls::{ServerConfig, ServerConnection, StreamOwned};
@@ -4718,6 +4735,30 @@ source = "unknown"
     }
 
     #[test]
+    fn initial_tool_call_guard_rejects_parallel_calls() {
+        let events = vec![
+            ProviderEvent::FunctionCall(
+                ProviderToolCall::new("call_one", "local.echo", r#"{"message":"one"}"#)
+                    .expect("first Provider Tool call"),
+            ),
+            ProviderEvent::FunctionCall(
+                ProviderToolCall::new("call_two", "local.echo", r#"{"message":"two"}"#)
+                    .expect("second Provider Tool call"),
+            ),
+        ];
+
+        assert!(matches!(
+            single_initial_tool_call(
+                &events,
+                "Messages response returned more than one Tool call"
+            ),
+            Err(ProviderError::InvalidResponse(
+                "Messages response returned more than one Tool call"
+            ))
+        ));
+    }
+
+    #[test]
     fn deepseek_chat_continues_one_approved_tool_call_with_frozen_policy() {
         let listener = TcpListener::bind(("127.0.0.1", 0)).expect("DeepSeek Chat Tool listener");
         let address = listener
@@ -4983,6 +5024,7 @@ source = "unknown"
         assert!(matches!(
             MessagesHttpProvider::with_timeout(
                 profile.clone(),
+                FIXTURE_MODEL,
                 InMemoryCredentialVault::default(),
                 HTTP_TIMEOUT,
             ),
@@ -5020,6 +5062,7 @@ source = "unknown"
         assert!(matches!(
             MessagesHttpProvider::with_timeout(
                 unsupported,
+                FIXTURE_MODEL,
                 InMemoryCredentialVault::default(),
                 HTTP_TIMEOUT,
             ),
@@ -5058,6 +5101,24 @@ source = "unknown"
         )
         .expect("release-verified OpenCode Go Messages provider");
         assert_eq!(provider.dialect(), Some(ProviderDialect::Messages));
+        let mismatched_request = provider_request_with_model_policy(
+            profile.clone(),
+            "minimax-m3",
+            "must not change the frozen Messages model",
+            ProviderDialect::Messages,
+            3_072,
+            None,
+            None,
+        );
+        let ConfiguredProvider::Messages(messages) = &provider else {
+            panic!("OpenCode Go Messages must construct the Messages adapter");
+        };
+        assert_eq!(
+            messages.require_request_identity(&mismatched_request),
+            Err(ProviderError::InvalidConfiguration(
+                "Messages provider identity does not match its frozen model, Profile, and dialect"
+            ))
+        );
 
         let error = match ConfiguredProvider::for_new_turn_with_dialect(
             profile,
@@ -5324,6 +5385,10 @@ source = "unknown"
             .expect("continue OpenCode Go Messages after Tool output");
         assert_eq!(output.text(), "Echoed: tool says hi");
         assert_eq!(output.usage_records().len(), 2);
+        assert_eq!(output.usage_records()[0].input_tokens(), Some(8));
+        assert_eq!(output.usage_records()[0].output_tokens(), Some(4));
+        assert_eq!(output.usage_records()[1].input_tokens(), Some(16));
+        assert_eq!(output.usage_records()[1].output_tokens(), Some(5));
         assert_eq!(calls.load(Ordering::Relaxed), 1);
         let delivery = output.delivery();
         assert!(matches!(
@@ -5345,6 +5410,57 @@ source = "unknown"
             RuntimeKernel::open_with_team_and_tools(&runtime_path, &team_path, &tool_path, 1)
                 .expect("reopen OpenCode Go Messages Kernel");
         assert_eq!(recovery.into_sessions().len(), 1);
+        let recovered_snapshot = recovered.snapshot();
+        assert_eq!(
+            recovered_snapshot.items.last().map(CanonicalItem::text),
+            Some(output.text())
+        );
+        assert!(matches!(
+            recovered_snapshot.status,
+            RecoveryStatus::ReconciliationRequired {
+                delivery: pending,
+                ..
+            } if pending == delivery
+        ));
+        let epoch = recovered
+            .pending_provider_epoch()
+            .expect("recovered OpenCode Go Messages Provider Epoch");
+        assert_eq!(epoch.model(), "minimax-m2.7");
+        assert_eq!(epoch.dialect(), Some(ProviderDialect::Messages));
+        assert_eq!(epoch.profile_snapshot(), Some(&profile));
+        let recovered_usage = recovered.usage_snapshot(
+            UsageTimestamp::now().expect("OpenCode Go Messages recovery timestamp"),
+        );
+        let recovered_attempts = recovered_usage
+            .attempts()
+            .iter()
+            .filter(|attempt| attempt.turn() == output.turn().get())
+            .collect::<Vec<_>>();
+        assert_eq!(recovered_attempts.len(), 2);
+        assert_eq!(
+            recovered_attempts[0]
+                .usage()
+                .and_then(|usage| usage.input_tokens()),
+            Some(8)
+        );
+        assert_eq!(
+            recovered_attempts[0]
+                .usage()
+                .and_then(|usage| usage.output_tokens()),
+            Some(4)
+        );
+        assert_eq!(
+            recovered_attempts[1]
+                .usage()
+                .and_then(|usage| usage.input_tokens()),
+            Some(16)
+        );
+        assert_eq!(
+            recovered_attempts[1]
+                .usage()
+                .and_then(|usage| usage.output_tokens()),
+            Some(5)
+        );
         recovered
             .acknowledge(delivery)
             .expect("acknowledge recovered OpenCode Go Messages output");
@@ -5375,6 +5491,7 @@ source = "unknown"
         let profile = messages_fixture_profile(&base_url, "messages-request-policy");
         let mut provider = MessagesHttpProvider::with_timeout(
             profile.clone(),
+            FIXTURE_MODEL,
             bound_messages_vault(&profile),
             HTTP_TIMEOUT,
         )
@@ -5405,6 +5522,7 @@ source = "unknown"
             messages_fixture_profile("http://127.0.0.1:9", "messages-pending-continuation");
         let mut provider = MessagesHttpProvider::with_timeout(
             profile.clone(),
+            FIXTURE_MODEL,
             bound_messages_vault(&profile),
             HTTP_TIMEOUT,
         )
@@ -5447,6 +5565,7 @@ source = "unknown"
             let profile = messages_fixture_profile(&base_url, &format!("messages-failure-{index}"));
             let mut provider = MessagesHttpProvider::with_timeout(
                 profile.clone(),
+                FIXTURE_MODEL,
                 bound_messages_vault(&profile),
                 HTTP_TIMEOUT,
             )
@@ -5590,6 +5709,7 @@ source = "unknown"
         let profile = messages_fixture_profile(&base_url, "messages-tool");
         let mut provider = MessagesHttpProvider::with_timeout(
             profile.clone(),
+            FIXTURE_MODEL,
             bound_messages_vault(&profile),
             Duration::from_secs(2),
         )
@@ -6091,9 +6211,13 @@ source = "unknown"
                 &format!("messages-interrupted-{name}"),
             );
             let vault = bound_messages_vault(&profile);
-            let mut provider =
-                MessagesHttpProvider::with_timeout(profile.clone(), vault, Duration::from_secs(1))
-                    .expect("interrupted Messages provider");
+            let mut provider = MessagesHttpProvider::with_timeout(
+                profile.clone(),
+                FIXTURE_MODEL,
+                vault,
+                Duration::from_secs(1),
+            )
+            .expect("interrupted Messages provider");
             let error = provider
                 .run(&provider_request_with_dialect(
                     profile,
