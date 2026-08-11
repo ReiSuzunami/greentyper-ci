@@ -569,27 +569,31 @@ where
                     Ok(draft) => draft,
                     Err(error) => return config_error_response(request.id, &error),
                 };
-                let Some(next_draft_id) = self.next_draft_id.checked_add(1) else {
+                self.store_draft(request.id, draft)
+            }
+            "config.starter.begin" => {
+                let params = match parse_params::<BeginStarterParams>(request.params) {
+                    Ok(params) => params,
+                    Err(()) => return invalid_params(request.id),
+                };
+                if self.drafts.len() >= MAX_ACTIVE_DRAFTS {
                     return error_response(
                         Some(request.id),
                         "resource_busy",
-                        "draft identifiers are exhausted",
+                        "too many active drafts",
                         None,
                     );
+                }
+                let draft = match self.config.begin_model_starter(
+                    params.scope.into(),
+                    &params.preset,
+                    &params.provider,
+                    &params.catalog_key,
+                ) {
+                    Ok(draft) => draft,
+                    Err(error) => return config_error_response(request.id, &error),
                 };
-                let draft_id = self.next_draft_id;
-                self.next_draft_id = next_draft_id;
-                let scope = draft.scope();
-                let base_revision = draft.base_revision().to_string();
-                self.drafts.insert(draft_id, draft);
-                success_response(
-                    request.id,
-                    json!({
-                        "draft_id": draft_id,
-                        "scope": scope,
-                        "base_revision": base_revision,
-                    }),
-                )
+                self.store_draft(request.id, draft)
             }
             "config.draft.set" => {
                 let params = match parse_params::<SetDraftParams>(request.params) {
@@ -767,6 +771,30 @@ where
         if matches!(error, ConfigRuntimeError::RevisionConflict { .. }) {
             let _ = self.config.reload();
         }
+    }
+
+    fn store_draft(&mut self, request_id: u64, draft: ConfigDraft) -> Value {
+        let Some(next_draft_id) = self.next_draft_id.checked_add(1) else {
+            return error_response(
+                Some(request_id),
+                "resource_busy",
+                "draft identifiers are exhausted",
+                None,
+            );
+        };
+        let draft_id = self.next_draft_id;
+        self.next_draft_id = next_draft_id;
+        let scope = draft.scope();
+        let base_revision = draft.base_revision().to_string();
+        self.drafts.insert(draft_id, draft);
+        success_response(
+            request_id,
+            json!({
+                "draft_id": draft_id,
+                "scope": scope,
+                "base_revision": base_revision,
+            }),
+        )
     }
 }
 
@@ -1203,6 +1231,15 @@ struct GetParams {
 #[serde(deny_unknown_fields)]
 struct BeginDraftParams {
     scope: WireConfigScope,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BeginStarterParams {
+    scope: WireConfigScope,
+    preset: String,
+    provider: String,
+    catalog_key: String,
 }
 
 #[derive(Clone, Copy, Deserialize)]

@@ -435,9 +435,10 @@ plus the [OpenCode Go endpoint matrix](https://opencode.ai/docs/go/).
 
 ## Still Pending
 
-- Live inference conformance, persistent catalog discovery/refresh,
-  starter-preset acceptance, configurable proxy policy, broader TLS platform
-  evidence, automatic retry policy, and resumable reconnect. Release Provider
+- Live inference conformance, persistent catalog discovery/refresh, automatic
+  Provider Profile starter offers and updates, configurable proxy policy,
+  broader TLS platform evidence, automatic retry policy, and resumable
+  reconnect. Release Provider
   Template defaults and seed catalog facts are bundled, but the current adapters
   do not reconnect or retry partial streams.
 - Broader normalization into the eventual provider-neutral canonical Item

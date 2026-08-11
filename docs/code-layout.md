@@ -70,8 +70,11 @@ atomically.
 The same private terminal composition now owns `/model`, `/stats`, `/agent`, and `/blockers`
 browsers over local Config Catalog, Usage, and strict Team-sidecar projections.
 All provide bounded query/group/row/detail navigation. Stats and Agent browsing
-remain read-only. On configured Model detail, a second Enter may stage one
-bounded Runtime selection for the authenticated current Agent's next Turn; it
+remain read-only. On compatible release detail, a second Enter creates an
+ordinary revision-bound user-scope Preset Draft through the core Config Runtime;
+CLI and App Server entry points reuse the same operation. On configured Model
+detail, a second Enter may stage one bounded Runtime selection for the
+authenticated current Agent's next Turn; it
 does not mutate Config, contact a Provider, read credentials, or affect child
 Agents. Team inspection uses a
 shared lock, never creates or repairs state, exposes no Agent Session authority,

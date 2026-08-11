@@ -92,6 +92,12 @@ fn assert_success(output: &std::process::Output) {
     );
 }
 
+fn lock_path(path: &Path) -> PathBuf {
+    let mut value = path.as_os_str().to_owned();
+    value.push(".lock");
+    PathBuf::from(value)
+}
+
 fn set_model(temp: &TempTree, value: &str) -> Value {
     let output = temp
         .config_command("set")
@@ -219,6 +225,74 @@ fn config_catalog_emits_the_versioned_public_release_seed_only() {
     assert!(!stdout.contains(temp.root.to_string_lossy().as_ref()));
     assert!(!stdout.contains("credential"));
     assert!(output.stderr.is_empty(), "{output:?}");
+}
+
+#[test]
+fn config_cli_accepts_a_release_starter_with_preview_commit_and_reopen() {
+    let temp = TempTree::new();
+    fs::create_dir_all(temp.user_config().parent().expect("user Config parent"))
+        .expect("create user Config parent");
+    let before = b"schema_version = 1\n\n[providers.openai-main]\ntemplate = \"openai\"\ncredential = \"synthetic-starter-reference\"\n";
+    fs::write(temp.user_config(), before).expect("write Provider profile");
+
+    let preview = temp
+        .config_command("accept-starter")
+        .args([
+            "frontier",
+            "openai-main",
+            "openai/gpt-5.6-sol",
+            "--scope",
+            "user",
+            "--dry-run",
+        ])
+        .output()
+        .expect("preview release starter");
+    assert_success(&preview);
+    assert_eq!(json(&preview.stdout)["written"], false);
+    assert_eq!(
+        fs::read(temp.user_config()).expect("read preview bytes"),
+        before
+    );
+    assert!(!lock_path(&temp.user_config()).exists());
+    assert!(!lock_path(&temp.project_config()).exists());
+
+    let committed = temp
+        .config_command("accept-starter")
+        .args([
+            "frontier",
+            "openai-main",
+            "openai/gpt-5.6-sol",
+            "--scope",
+            "user",
+        ])
+        .output()
+        .expect("commit release starter");
+    assert_success(&committed);
+    let commit = json(&committed.stdout);
+    assert_eq!(commit["written"], true);
+    assert_eq!(commit["scope"], "user");
+    assert_eq!(commit["changes"].as_array().map(Vec::len), Some(3));
+
+    let reopened = temp
+        .config_command("get")
+        .arg("model_presets.frontier.model")
+        .output()
+        .expect("reopen accepted starter");
+    assert_success(&reopened);
+    assert_eq!(
+        json(&reopened.stdout)["entry"]["value"]["value"],
+        "gpt-5.6-sol"
+    );
+    let output = format!(
+        "{}{}{}",
+        String::from_utf8_lossy(&preview.stdout),
+        String::from_utf8_lossy(&committed.stdout),
+        String::from_utf8_lossy(&reopened.stdout)
+    );
+    assert!(!output.contains("synthetic-starter-reference"));
+    assert!(preview.stderr.is_empty(), "{preview:?}");
+    assert!(committed.stderr.is_empty(), "{committed:?}");
+    assert!(reopened.stderr.is_empty(), "{reopened:?}");
 }
 
 #[test]

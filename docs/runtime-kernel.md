@@ -413,9 +413,9 @@ charges still require a future dedicated authority path.
   Product sidecars fail closed before terminal entry. Manual read-only snapshot
   refresh is available; all Agent lifecycle actions remain pending.
 - Complete Config Schema default/constraint/normalization/migration metadata,
-  live catalog discovery, and the rendered
-  template-picker/starter-preset workflow. Release Provider Template defaults
-  and seed catalog facts are present. The
+  live catalog discovery, and automatic Provider Profile starter offers and
+  update suggestions. Release Provider Template defaults, seed catalog facts,
+  and explicit compatible release-to-user-Preset acceptance are present. The
   terminal-neutral schema route, field view, revision-bound editor session,
   dry-run validation, atomic commit path, interaction controller, Provider
   Profile candidate/connection-test flow, and deterministic viewport-row

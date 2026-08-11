@@ -1192,6 +1192,82 @@ fn app_server_commit_updates_effective_config_and_survives_reopen() {
 }
 
 #[test]
+fn app_server_starter_draft_validates_commits_and_survives_reopen() {
+    let temp = TempTree::new();
+    fs::create_dir_all(temp.user_config().parent().expect("user Config parent"))
+        .expect("create user Config parent");
+    fs::write(
+        temp.user_config(),
+        "schema_version = 1\n\n[providers.openai-main]\ntemplate = \"openai\"\ncredential = \"private-app-server-starter-reference\"\n",
+    )
+    .expect("write starter Provider profile");
+    let requests = concat!(
+        "{\"id\":1,\"operation\":\"config.starter.begin\",\"params\":{\"scope\":\"user\",\"preset\":\"frontier\",\"provider\":\"openai-main\",\"catalog_key\":\"openai/gpt-5.6-sol\"}}\n",
+        "{\"id\":2,\"operation\":\"config.draft.validate\",\"params\":{\"draft_id\":1}}\n",
+        "{\"id\":3,\"operation\":\"config.draft.commit\",\"params\":{\"draft_id\":1}}\n",
+        "{\"id\":4,\"operation\":\"config.get\",\"params\":{\"path\":\"model_presets.frontier.dialect\"}}\n",
+    );
+
+    let output = temp.run(requests.as_bytes());
+    let results = responses(&output);
+    assert_eq!(results.len(), 4);
+    assert_eq!(results[0]["result"]["draft_id"], 1);
+    assert_eq!(results[0]["result"]["scope"], "user");
+    assert_eq!(
+        results[1]["result"]["changes"].as_array().map(Vec::len),
+        Some(3)
+    );
+    assert_eq!(results[2]["result"]["written"], true);
+    assert_eq!(results[3]["result"]["entry"]["value"]["value"], "responses");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(!stdout.contains("private-app-server-starter-reference"));
+    assert!(output.stderr.is_empty(), "{output:?}");
+    assert!(!temp.runtime_ledger().exists());
+    assert!(!temp.team_ledger().exists());
+    assert!(!temp.tool_ledger().exists());
+
+    let reopened = temp.run(
+        b"{\"id\":5,\"operation\":\"config.get\",\"params\":{\"path\":\"model_presets.frontier.model\"}}\n",
+    );
+    let reopened = responses(&reopened);
+    assert_eq!(
+        reopened[0]["result"]["entry"]["value"]["value"],
+        "gpt-5.6-sol"
+    );
+}
+
+#[test]
+fn app_server_rejected_starter_keeps_capacity_and_recovers_with_a_valid_profile() {
+    let temp = TempTree::new();
+    fs::create_dir_all(temp.user_config().parent().expect("user Config parent"))
+        .expect("create user Config parent");
+    let before = "schema_version = 1\n\n[providers.chat-only]\ntemplate = \"openai\"\ncredential = \"private-chat-reference\"\ndialects = [\"chat_completions\"]\n\n[providers.openai-main]\ntemplate = \"openai\"\ncredential = \"private-openai-reference\"\n";
+    fs::write(temp.user_config(), before).expect("write starter recovery profiles");
+    let requests = concat!(
+        "{\"id\":1,\"operation\":\"config.starter.begin\",\"params\":{\"scope\":\"user\",\"preset\":\"frontier\",\"provider\":\"chat-only\",\"catalog_key\":\"openai/gpt-5.6-sol\"}}\n",
+        "{\"id\":2,\"operation\":\"config.starter.begin\",\"params\":{\"scope\":\"user\",\"preset\":\"frontier\",\"provider\":\"openai-main\",\"catalog_key\":\"openai/gpt-5.6-sol\"}}\n",
+        "{\"id\":3,\"operation\":\"config.draft.commit\",\"params\":{\"draft_id\":1}}\n",
+    );
+
+    let output = temp.run(requests.as_bytes());
+    let results = responses(&output);
+    assert_eq!(results[0]["error"]["category"], "invalid_value");
+    assert_eq!(
+        results[0]["error"]["path"],
+        "model_presets.frontier.dialect"
+    );
+    assert_eq!(results[1]["result"]["draft_id"], 1);
+    assert_eq!(results[2]["result"]["written"], true);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(!stdout.contains("private-chat-reference"));
+    assert!(!stdout.contains("private-openai-reference"));
+    assert!(output.stderr.is_empty(), "{output:?}");
+    assert!(!temp.runtime_ledger().exists());
+    assert!(!temp.team_ledger().exists());
+    assert!(!temp.tool_ledger().exists());
+}
+
+#[test]
 fn app_server_no_change_commit_consumes_the_draft_without_creating_config() {
     let temp = TempTree::new();
     let output = temp.run(

@@ -55,6 +55,12 @@ fn backup_path(path: &Path) -> PathBuf {
     PathBuf::from(value)
 }
 
+fn lock_path(path: &Path) -> PathBuf {
+    let mut value = path.as_os_str().to_owned();
+    value.push(".lock");
+    PathBuf::from(value)
+}
+
 fn write(path: &Path, contents: &str) {
     fs::create_dir_all(path.parent().expect("config parent")).expect("create config parent");
     fs::write(path, contents).expect("write config fixture");
@@ -2027,6 +2033,157 @@ mode = "discovery"
             .iter()
             .all(|model| model.provider() != "discovery-openai")
     );
+}
+
+#[test]
+fn release_starter_builds_a_revision_bound_user_preset_without_writing_config() {
+    let temp = TempTree::new("release-model-starter");
+    let paths = temp.paths();
+    let config = ConfigDocument::parse(
+        r#"
+schema_version = 1
+
+[providers.openai-main]
+template = "openai"
+credential = "synthetic-openai-credential-reference"
+"#,
+    )
+    .expect("parse starter Provider profile");
+    let mut runtime =
+        ConfigRuntime::open(paths.clone(), config).expect("resolve starter Provider profile");
+
+    let draft = runtime
+        .begin_model_starter(
+            ConfigScope::User,
+            "frontier",
+            "openai-main",
+            "openai/gpt-5.6-sol",
+        )
+        .expect("build starter draft");
+    let base_revision = draft.base_revision();
+
+    assert_eq!(
+        draft
+            .get("model_presets.frontier.provider")
+            .expect("read starter provider"),
+        Some(value_string("openai-main"))
+    );
+    assert_eq!(
+        draft
+            .get("model_presets.frontier.model")
+            .expect("read starter model"),
+        Some(value_string("gpt-5.6-sol"))
+    );
+    assert_eq!(
+        draft
+            .get("model_presets.frontier.dialect")
+            .expect("read starter dialect"),
+        Some(value_string("responses"))
+    );
+    let preview = runtime.commit(draft, true).expect("preview starter draft");
+    assert!(!preview.written);
+    assert_eq!(preview.base_revision, base_revision);
+    assert_eq!(
+        preview
+            .changes
+            .iter()
+            .map(|change| change.path.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "model_presets.frontier.dialect",
+            "model_presets.frontier.model",
+            "model_presets.frontier.provider",
+        ]
+    );
+    assert!(
+        runtime
+            .model_presets()
+            .expect("configured presets")
+            .is_empty()
+    );
+    assert!(!paths.user().exists());
+    assert!(!paths.project().exists());
+    assert!(!lock_path(paths.user()).exists());
+    assert!(!lock_path(paths.project()).exists());
+}
+
+#[test]
+fn release_starter_rejections_leave_both_config_scopes_untouched() {
+    let temp = TempTree::new("release-model-starter-rejections");
+    let paths = temp.paths();
+    let config = ConfigDocument::parse(
+        r#"
+schema_version = 1
+
+[providers.openai-main]
+template = "openai"
+credential = "synthetic-openai-credential-reference"
+
+[providers.chat-only]
+template = "openai"
+credential = "synthetic-chat-credential-reference"
+dialects = ["chat_completions"]
+
+[model_presets.existing]
+provider = "openai-main"
+model = "gpt-5.6-sol"
+dialect = "responses"
+"#,
+    )
+    .expect("parse starter rejection fixture");
+    let runtime = ConfigRuntime::open(paths.clone(), config).expect("resolve rejection fixture");
+
+    assert!(matches!(
+        runtime.begin_model_starter(
+            ConfigScope::BuiltIn,
+            "frontier",
+            "openai-main",
+            "openai/gpt-5.6-sol",
+        ),
+        Err(ConfigRuntimeError::ReadOnlyScope(ConfigScope::BuiltIn))
+    ));
+    assert!(matches!(
+        runtime.begin_model_starter(
+            ConfigScope::User,
+            "existing",
+            "openai-main",
+            "openai/gpt-5.6-sol",
+        ),
+        Err(ConfigRuntimeError::InvalidValue { path, .. })
+            if path == "model_presets.existing"
+    ));
+    assert!(matches!(
+        runtime.begin_model_starter(
+            ConfigScope::User,
+            "frontier",
+            "missing-profile",
+            "openai/gpt-5.6-sol",
+        ),
+        Err(ConfigRuntimeError::UnknownObject(path))
+            if path == "catalog.models.openai/gpt-5.6-sol"
+    ));
+    assert!(matches!(
+        runtime.begin_model_starter(
+            ConfigScope::User,
+            "frontier",
+            "chat-only",
+            "openai/gpt-5.6-sol",
+        ),
+        Err(ConfigRuntimeError::InvalidValue { path, .. })
+            if path == "model_presets.frontier.dialect"
+    ));
+    assert!(matches!(
+        runtime.begin_model_starter(
+            ConfigScope::User,
+            "frontier",
+            "openai-main",
+            "openai/not-a-release-model",
+        ),
+        Err(ConfigRuntimeError::UnknownObject(path))
+            if path == "catalog.models.openai/not-a-release-model"
+    ));
+    assert!(!paths.user().exists());
+    assert!(!paths.project().exists());
 }
 
 #[test]

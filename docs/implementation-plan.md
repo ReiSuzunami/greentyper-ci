@@ -371,8 +371,8 @@ Draft. Provider, model, and dialect remain required; reasoning effort, service
 tier, maximum output tokens, context mode, favorite, and fallback list are
 optional. Preview, CAS commit, cross-reference/cycle validation, stale-revision
 retention, explicit discard, and reopen persistence use the same terminal-neutral
-editor path. Application is a separate `/model` action; starter acceptance and
-live catalog data remain outside the form.
+editor path. Application and compatible release-starter acceptance are separate
+`/model` actions; live catalog data remains outside the form.
 `/config stats-window add` now supplies a third rendered object-name workflow.
 It collects a bounded ID plus start, end, weekday-list, and IANA-time-zone text
 in one schema-driven Draft. Structured weekday input is visibly buffered until
@@ -398,7 +398,10 @@ fuzzy query input, Favorites/Recent/Compatible/All groups, selected-row
 navigation, and source-tagged detail while preserving explicit unknown Recent
 and availability facts. A second Enter on configured detail stages a bounded,
 Session-authenticated Runtime Event for the current Agent's next Turn; the
-pending ID is visible and replaceable. Release rows remain detail-only. The next
+pending ID is visible and replaceable. On compatible release detail, a second
+Enter creates a prefilled ordinary user-scope Preset Draft and uses the existing
+preview/CAS-commit path; incompatible or duplicate candidates remain
+recoverable without Config overwrite. The next
 headless admission rechecks the exact Preset and Config fingerprint, consumes the
 selection atomically with Config/Provider freeze, and leaves it pending on
 preflight failure. Selection performs no Config write, credential lookup,
@@ -499,8 +502,8 @@ This does not complete Phase 3. Audited Windows ConPTY behavior, broader
 multi-Tool/App Server policy, general Runtime resume/control, remote App Server
 transport,
 automatic/background snapshot refresh, rendered secret binding,
-custom-template/starter-preset workflow, live catalog discovery and Recent
-evidence, automatic Context View/token-source
+custom-template and automatic starter-offer/update workflow, live catalog
+discovery and Recent evidence, automatic Context View/token-source
 projection, provider-reported
 charge and subscription-quota accounting, richer observed Provider metadata,
 project/new-Agent Preset defaults, richer cache distributions, Agent lifecycle
@@ -519,7 +522,7 @@ Exit criteria:
 
 Continue the release templates and seed catalog with OpenCode Go adapter
 execution, lazy discovery,
-starter-preset acceptance, provider capability probes, explicit fallback
+automatic starter updates, provider capability probes, explicit fallback
 chains, observed availability, and provider/model epoch switching. The
 OpenAI/openai-compatible Responses and Chat Completions adapters, official
 DeepSeek Responses, Chat Completions, and Messages pairs, and release-verified
@@ -537,8 +540,8 @@ Chat/Messages reject both unsupported policy fields before network I/O. Flash
 keeps a preferred Responses dialect and Pro resolves that preference to Chat
 before admission. Configured Presets can now be staged from `/model` for the
 existing current Agent's next Turn and are consumed at durable admission.
-Project/new-Agent defaults, context mode, general fallback execution, starter
-acceptance, and live discovery remain pending.
+Project/new-Agent defaults, context mode, general fallback execution, automatic
+starter updates, and live discovery remain pending.
 
 Exit criteria:
 

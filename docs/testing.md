@@ -374,8 +374,8 @@ context mode, favorite, and fallback list. It previews, commits, reopens, and
 checks every optional value. A recovery test leaves the Draft live when model is
 missing, repairs it, then proves a competing revision cannot be overwritten,
 dirty quit is blocked, and explicit discard preserves the winner. Schema tests
-pin every Model Preset interaction and parseable choice. These Config-editor
-tests do not prove starter acceptance or live catalog refresh.
+pin every Model Preset interaction and parseable choice. These manual editor
+tests do not prove live catalog refresh.
 A real-key loop now opens `/model`, filters configured Presets, moves to the
 Favorites group, opens the selected detail, redraws after resize, and proves
 Config bytes and the absent Ledger remain unchanged. Projection tests separately
@@ -383,15 +383,21 @@ freeze explicit unknown Recent and live availability, release compatibility and
 provenance detail, and credential-reference redaction. A second real-key flow
 opens configured detail, stages `fast`, replaces it with `careful`, renders the
 pending next-Turn ID, and proves Config plus Team and Tool Ledgers are unchanged
-while the Runtime Ledger gains the selection Event. Missing current-Agent state
-creates no files; a release-catalog detail returns an unavailable action. Core
-recovery tests prove stale Session rejection, replacement, shared read-only
+while the Runtime Ledger gains the selection Event. A third real-key flow opens
+a compatible release detail, enters a bounded Preset ID, previews and commits
+the prefilled user-scope Draft, manually refreshes, reopens the configured
+Preset, and stages it for the current Agent. Core, CLI, and App Server tests pin
+dry-run/no-write, commit/reopen, incompatible Profile, duplicate ID, unknown
+catalog key, read-only scope, revision conflict, capacity recovery, credential
+redaction, and zero Runtime/Team/Tool Ledger creation. Missing current-Agent
+state still creates no files; incompatible release detail cannot start a Draft.
+Core recovery tests prove stale Session rejection, replacement, shared read-only
 inspection, and restart persistence. Product tests prove Config drift makes no
 Provider call or Ledger write, then exact admission consumes one selection and
 freezes the expected Provider Epoch. Headless integration proves automatic
 pending-ID resolution plus credential-preflight and explicit-ID-conflict
 failure preserve all three Ledger byte streams. These tests do not prove
-Provider-backed catalog discovery, starter acceptance, project/new-Agent
+Provider-backed catalog discovery, automatic starter updates, project/new-Agent
 defaults, context-mode execution, or fallback execution.
 A real-key loop now carries `/config stats-window add` through its bounded ID
 prompt and start/end/days/time-zone fields, previews, commits, and reopens the

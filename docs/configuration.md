@@ -71,10 +71,11 @@ field-level provenance. Effective Profiles inherit those defaults unless the
 user overrides a field. A custom origin under a template with a bundled,
 versioned release rate card defaults to `template_mirror`; other custom origins
 still require an explicit pricing decision.
-Default/constraint/normalization/migration metadata in Config Schema, the App
-Server Config surface, live discovery, and starter-preset workflows remain later
-work. The product now provides origin-bound credential bind, replace,
-test, and forget operations backed by Windows Credential Manager; non-Windows
+Default/constraint/normalization/migration metadata in Config Schema, live
+discovery, and automatic starter-update workflows remain later work. The App
+Server Config surface is implemented. The product now provides origin-bound
+credential bind, replace, test, and forget operations backed by Windows
+Credential Manager; non-Windows
 access fails closed until another platform backend is implemented.
 
 | Config Object | Type and constraint | Application timing |
@@ -134,8 +135,9 @@ mode, favorite, and fallback list are optional and editable. Choices remain
 schema-owned; numeric and TOML-list values stay in the local dirty buffer until
 they parse. Missing fields, unknown fallback references, cycles, invalid limits,
 and stale revisions stay recoverable. The form manually defines a Preset; the
-separate `/model` action applies a configured Preset to the current Agent. The
-form does not accept release starters.
+separate `/model` action accepts a compatible release starter into the same
+ordinary user-owned Draft flow and applies a configured Preset to the current
+Agent.
 `/config stats-window add` prompts for a bounded Usage Window ID, then uses
 Tab/Shift-Tab across start, end, days, and time-zone fields. All four raw inputs
 are bounded to 512 bytes. Days uses a TOML array of weekday strings; partial
@@ -183,8 +185,9 @@ rebuild the active projection. Secret-entry/bind UI remains pending. The Config
 and secure-store App Server described below is implemented. The current
 terminal-neutral Provider Profile wizard resolves release template defaults into
 user-configured Profile Drafts and supports the explicit bounded connection and
-model-list observation described below; it does not merge discovered records,
-change selector availability, or install starter presets.
+model-list observation described below; it does not merge discovered records or
+change selector availability. Starter acceptance is an explicit `/model` action,
+not an automatic Provider Profile side effect.
 
 The root Slash Panel exposes `/config` as one Command Path. It does not register one flat command for every field.
 
@@ -215,9 +218,9 @@ Panel.
 `/stats` browses the latest successful Usage report and never mutates
 configuration.
 Likewise, `/model` browses configured Presets and release candidates while
-`/config model` edits preset definitions. A second Enter from a configured
-Preset's detail selects it for the current Agent's next Turn; release candidates
-remain detail-only.
+`/config model` edits preset definitions. A second Enter from compatible release
+detail opens a user-scope starter Draft; after preview and commit, the resulting
+configured Preset can be selected for the current Agent's next Turn.
 `/agent` browses the latest successful Team sidecar projection. It is an
 inspection surface,
 not a route for lifecycle commands or Agent Session authority.
@@ -312,6 +315,7 @@ The current operations are:
 | `config.schema` | List addressable objects, types, scopes, editor metadata, and application timing |
 | `config.get` | Return the requested path, effective value with source layer, and redacted repair status; secret values are never addressable |
 | `config.draft.begin` | Open a draft for one writable layer and return its base revision |
+| `config.starter.begin` | Open an ordinary revision-bound Model Preset Draft from one exact compatible Profile-bound release candidate; perform no write, network request, or credential lookup |
 | `config.draft.set` / `config.draft.reset` | Stage a typed change without affecting the current Config Epoch |
 | `config.draft.validate` | Return the normalized diff and field-addressed validation errors |
 | `config.draft.commit` | Compare the base revision, write atomically, and return the new revision and application timing |
@@ -504,8 +508,8 @@ does not commit Config or mutate a Provider Epoch, and is not yet a commit gate.
 The rendered TUI now supplies the narrow release-template and opaque
 credential-reference creation flow plus the explicit F5 connection-test control
 and typed target-layer deletion confirmation described above. Secure credential
-secret binding, custom template editing, and the starter preset workflow remain
-pending.
+secret binding, custom template editing, and automatic starter offers or updates
+remain pending.
 
 ## Model Catalog and Presets
 
@@ -525,8 +529,8 @@ mode includes template data. The terminal-neutral selector searches configured
 presets and those bound release candidates. It derives compatibility only from
 the frozen Profile's declared support for the record's primary dialect and the
 product adapters currently installed for that template/dialect pair; live
-availability and Recent remain unknown. User/discovery precedence, lazy refresh,
-and starter-preset acceptance remain target behavior. Pricing still resolves
+availability and Recent remain unknown. User/discovery precedence and lazy
+refresh remain target behavior. Pricing still resolves
 through a Price Schedule rather than becoming an unversioned catalog number.
 The Direct VT `/model` browser uses the latest successful local projection.
 Character input
@@ -560,7 +564,19 @@ Release work must refresh this snapshot from the [OpenAI model guide](https://de
 
 Target Provider discovery runs lazily when the model selector opens or the user requests refresh. It never runs as an idle background task. Discovered records augment seed fields with provenance; a model with no verified dialect remains visible but unavailable until an explicit override supplies one. Remote discovery cannot add credentials, arbitrary endpoints, instructions, or capabilities. The current `test-provider` observation is ephemeral and is not merged into the catalog or selector; persistent discovery, freshness, and precedence are not implemented yet.
 
-Target rendered Provider Profile creation offers versioned starter Model Presets copied from the release snapshot and bound to that profile. The release set covers GPT-5.6 Sol, Terra, and Luna for OpenAI plus DeepSeek V4 Flash and Pro using only the dialects verified for each model at release time. OpenCode Go starter choices come from its heterogeneous per-model catalog. Accepting starters will write ordinary user-owned presets; later catalog refreshes may offer an update but never rewrite them silently. This starter workflow is not implemented yet.
+The Direct VT `/model` browser accepts one compatible release candidate only
+after its detail is opened and Enter is pressed again. It requests a bounded
+Preset ID and creates an ordinary user-scope Draft prefilled with the exact
+Profile, model, and primary dialect. Preview and commit use the existing
+revision CAS; incompatible candidates, duplicate IDs, validation failures, and
+stale revisions remain recoverable without overwriting Config. The equivalent
+CLI is `greentyper config accept-starter PRESET_ID PROVIDER CATALOG_KEY --scope
+user|project [--dry-run]`; the App Server uses `config.starter.begin` followed
+by the ordinary validate/commit operations. None of these paths reads a
+credential, contacts a Provider, writes a Ledger, or grants Agent authority.
+Later catalog refreshes may offer updates but never rewrite accepted presets
+silently. Automatic Provider Profile starter offers and update suggestions
+remain target behavior.
 
 A Model Preset is a runnable choice rather than catalog metadata:
 
@@ -621,10 +637,11 @@ remain visible; richer reasons and Provider-backed catalog discovery/freshness
 refresh remain target behavior. Manual TUI snapshot refresh only reloads local
 Config plus the bundled release projection and performs no network request.
 
-After detail opens, a second Enter on a configured Preset durably selects it for
-the existing current Agent's next Turn. The pending Preset ID is rendered in the
-browser and can be replaced by another configured Preset. Release-catalog rows
-remain detail-only. Selection is bound to the recovered Active Agent Session;
+After detail opens, a second Enter on a compatible release candidate starts the
+explicit user-owned starter Draft described above; an incompatible release
+stays in detail and cannot start a Draft. A second Enter on a configured Preset
+durably selects it for the existing current Agent's next Turn. The pending Preset ID is rendered in the
+browser and can be replaced by another configured Preset. Selection is bound to the recovered Active Agent Session;
 it does not mutate Config, read a credential, contact a Provider, or affect a
 running child Agent. The next headless Turn without `--preset` resolves the exact
 pending ID, rechecks its Config fingerprint and provider/model identity, and

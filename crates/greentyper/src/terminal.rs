@@ -1157,9 +1157,14 @@ impl TerminalSession {
                         self.pending_model_selection = Some(preset);
                         Ok(TerminalLoopOutcome::ApplyModelSelection)
                     }
+                    ModelEntryAction::AcceptRelease => {
+                        self.notice =
+                            Some("Enter a Preset ID to accept this release starter".to_owned());
+                        Ok(TerminalLoopOutcome::Redraw)
+                    }
                     ModelEntryAction::ReleaseUnavailable => {
                         self.notice = Some(
-                            "Release model must be saved as a configured Preset before selection"
+                            "Release model is incompatible with the selected Provider Profile"
                                 .to_owned(),
                         );
                         Ok(TerminalLoopOutcome::Redraw)
@@ -3204,6 +3209,153 @@ dialect = "responses"
             config_before
         );
         std::fs::remove_dir_all(root).expect("remove model selection fixture");
+    }
+
+    #[test]
+    fn terminal_loop_accepts_a_release_starter_then_selects_it_for_the_next_turn() {
+        let root = terminal_test_root("model-starter-acceptance");
+        let ledger = root.join("runtime.ledger");
+        let team_ledger = terminal_sidecar_path(&ledger, "team");
+        let tool_ledger = terminal_sidecar_path(&ledger, "tool");
+        let paths = ConfigPaths::new(root.join("user.toml"), root.join("project.toml"));
+        std::fs::create_dir_all(&root).expect("create starter acceptance fixture directory");
+        std::fs::write(
+            paths.user(),
+            r#"schema_version = 1
+
+[providers.openai-main]
+template = "openai"
+credential = "synthetic-starter-acceptance-reference"
+"#,
+        )
+        .expect("write starter Provider profile");
+        let (mut runtime, _) =
+            RuntimeKernel::open_with_team_and_tools(&ledger, &team_ledger, &tool_ledger, 1)
+                .expect("open starter Product state");
+        let root_commit = runtime
+            .dispatch_team(TeamCommand::AdmitRoot {
+                task: TaskSpec::new("accept a release starter", TaskScope::default()),
+                budget: ResourceBudget::new(1_000, 1),
+                capabilities: CapabilitySnapshot::default(),
+            })
+            .expect("admit starter current Agent");
+        let current_agent = match root_commit.commit.outcome {
+            CommandOutcome::RootAdmitted { session, .. } => session.agent(),
+            other => panic!("unexpected root outcome: {other:?}"),
+        };
+        runtime
+            .acknowledge_team_operation(root_commit.operation)
+            .expect("acknowledge starter Agent admission");
+        drop(runtime);
+
+        let mut config =
+            ConfigRuntime::open(paths.clone(), ConfigDocument::empty()).expect("Config Runtime");
+        let runtime_before = std::fs::read(&ledger).expect("read Runtime Ledger");
+        let team_before = std::fs::read(&team_ledger).expect("read Team Ledger");
+        let tool_before = std::fs::read(&tool_ledger).expect("read Tool Ledger");
+        let view = build_terminal_view(&ledger, &config, "/").expect("starter Model view");
+        let mut events = "model"
+            .chars()
+            .map(|character| {
+                Event::Key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
+            })
+            .collect::<VecDeque<_>>();
+        events.push_back(Event::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )));
+        events.extend("sol".chars().map(|character| {
+            Event::Key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
+        }));
+        events.extend([
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        ]);
+        events.extend("frontier".chars().map(|character| {
+            Event::Key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
+        }));
+        events.extend([
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::F(6), KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        ]);
+        events.extend("frontier".chars().map(|character| {
+            Event::Key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
+        }));
+        events.extend([
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL)),
+        ]);
+
+        let output = run_terminal_loop_with_snapshot_refresh(
+            Vec::new(),
+            FakeTerminalMode::default(),
+            &mut config,
+            &view,
+            &ledger,
+            Viewport::new(120, 24).expect("starter acceptance viewport"),
+            move || {
+                Ok(events
+                    .pop_front()
+                    .expect("bounded starter acceptance events"))
+            },
+        )
+        .expect("starter acceptance loop");
+        let output = String::from_utf8(output).expect("starter acceptance VT output");
+
+        assert!(
+            output.contains("Enter a Preset ID to accept this release starter"),
+            "{output}"
+        );
+        assert!(output.contains("Config draft validated"), "{output}");
+        assert!(output.contains("Snapshot refreshed"), "{output}");
+        assert!(
+            output.contains("Preset 'frontier' selected for current Agent next Turn"),
+            "{output}"
+        );
+        assert!(!output.contains("synthetic-starter-acceptance-reference"));
+        let preset = config
+            .model_preset("frontier")
+            .expect("resolve accepted starter");
+        assert_eq!(preset.provider, "openai-main");
+        assert_eq!(preset.model, "gpt-5.6-sol");
+        assert_eq!(preset.dialect, ProviderDialect::Responses);
+        let pending = RuntimeKernel::inspect(&ledger)
+            .expect("inspect starter selection")
+            .pending_model_selection
+            .expect("pending starter selection");
+        assert_eq!(pending.agent(), current_agent);
+        assert_eq!(pending.selection().preset_id(), "frontier");
+        assert_eq!(pending.selection().provider_profile(), "openai-main");
+        assert_eq!(pending.selection().provider_model(), "gpt-5.6-sol");
+        assert_ne!(
+            std::fs::read(&ledger).expect("reread Runtime Ledger"),
+            runtime_before
+        );
+        assert_eq!(
+            std::fs::read(&team_ledger).expect("reread Team Ledger"),
+            team_before
+        );
+        assert_eq!(
+            std::fs::read(&tool_ledger).expect("reread Tool Ledger"),
+            tool_before
+        );
+        drop(config);
+        let reopened = ConfigRuntime::open(paths, ConfigDocument::empty())
+            .expect("reopen accepted starter Config");
+        assert_eq!(
+            reopened
+                .model_preset("frontier")
+                .expect("reopen accepted starter")
+                .model,
+            "gpt-5.6-sol"
+        );
+        std::fs::remove_dir_all(root).expect("remove starter acceptance fixture");
     }
 
     #[test]

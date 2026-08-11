@@ -97,6 +97,28 @@ impl ConfigEditorSession {
         if draft.contains_object(&object)? {
             return Err(ConfigEditorError::ConfigObjectAlreadyExists);
         }
+        Self::create_with_draft(runtime, draft, object)
+    }
+
+    pub fn create_model_starter(
+        runtime: &ConfigRuntime,
+        scope: ConfigScope,
+        object: ConfigObjectRef,
+        provider: &str,
+        catalog_key: &str,
+    ) -> Result<Self, ConfigEditorError> {
+        if object.kind() != ConfigObjectKind::ModelPreset {
+            return Err(ConfigEditorError::ConfigObjectMismatch);
+        }
+        let draft = runtime.begin_model_starter(scope, object.id(), provider, catalog_key)?;
+        Self::create_with_draft(runtime, draft, object)
+    }
+
+    fn create_with_draft(
+        runtime: &ConfigRuntime,
+        draft: ConfigDraft,
+        object: ConfigObjectRef,
+    ) -> Result<Self, ConfigEditorError> {
         let fields = runtime.draft_object_fields(&draft, object.kind(), object.id())?;
         let field = fields
             .iter()

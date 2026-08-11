@@ -309,6 +309,19 @@ fn run_config(command: ConfigCommand) -> Result<(), CliError> {
             "entries": config_schema(),
         })),
         ConfigCommand::Catalog => write_json(ProviderCatalog::release()),
+        ConfigCommand::AcceptStarter {
+            paths,
+            scope,
+            preset,
+            provider,
+            catalog_key,
+            dry_run,
+        } => {
+            let mut runtime = open_config_runtime(paths)?;
+            let draft = runtime.begin_model_starter(scope, &preset, &provider, &catalog_key)?;
+            let commit = runtime.commit(draft, dry_run)?;
+            write_json(&commit)
+        }
         ConfigCommand::Get { paths, path } => {
             let runtime = open_config_runtime(paths)?;
             let entry = runtime.get_effective(&path)?;
@@ -666,6 +679,14 @@ enum ToolCommand {
 enum ConfigCommand {
     Schema,
     Catalog,
+    AcceptStarter {
+        paths: ConfigPaths,
+        scope: ConfigScope,
+        preset: String,
+        provider: String,
+        catalog_key: String,
+        dry_run: bool,
+    },
     Get {
         paths: ConfigPaths,
         path: String,
@@ -1474,6 +1495,23 @@ fn parse_config(mut arguments: impl Iterator<Item = String>) -> Result<ConfigCom
 
     let paths = config_paths_with_overrides(user_config, project_config)?;
     match action.as_str() {
+        "accept-starter" => {
+            let scope = scope.ok_or(CliError::Usage("config accept-starter requires --scope"))?;
+            let [preset, provider, catalog_key]: [String; 3] =
+                positionals.try_into().map_err(|_| {
+                    CliError::Usage(
+                        "config accept-starter requires a Preset ID, Provider Profile, and catalog key",
+                    )
+                })?;
+            Ok(ConfigCommand::AcceptStarter {
+                paths,
+                scope,
+                preset,
+                provider,
+                catalog_key,
+                dry_run,
+            })
+        }
         "get" => {
             reject_config_scope(scope)?;
             reject_dry_run(dry_run, "--dry-run is not valid for config get")?;
@@ -1725,6 +1763,7 @@ Usage:\n\
   greentyper tool reconcile [--ledger PATH] --call ID (--failed | --succeeded-digest SHA256)\n\
   greentyper config schema\n\
   greentyper config catalog\n\
+  greentyper config accept-starter PRESET_ID PROVIDER CATALOG_KEY --scope user|project [--dry-run]\n\
   greentyper config get PATH [--user-config PATH] [--project-config PATH]\n\
   greentyper config set PATH VALUE --scope user|project [--dry-run]\n\
   greentyper config reset PATH --scope user|project [--dry-run]\n\

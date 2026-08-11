@@ -341,8 +341,10 @@ numeric and TOML-list input is buffered until it parses atomically. Existing
 Preset field routes use the same selector and Draft. Tests commit and reopen
 required and optional values. Missing references, fallback cycles, invalid
 limits, and revision conflicts keep the Draft live for repair or explicit
-discard. This form defines and edits Presets; the separate `/model` flow applies
-a configured Preset. Starter-preset installation remains unavailable.
+discard. This form defines and edits Presets; the separate `/model` flow can
+accept one compatible release candidate into an ordinary user-owned Preset,
+then apply a configured Preset. Automatic starter offers and updates remain
+unavailable.
 `/config stats-window add` now prompts for a bounded Usage Window ID and moves
 across start, end, weekday-list, and IANA-time-zone fields in one user-scope
 Draft. Each input is bounded to 512 bytes. The weekday list accepts a TOML
@@ -368,11 +370,16 @@ running TUI's frozen Price Schedule book or add rich cost presentation.
 configured Presets and release-catalog candidates. Character input filters the
 snapshot, Tab and
 Shift-Tab move across Favorites, Recent, Compatible, and All, Up/Down move the
-selection, and Enter opens bounded source and capability detail. A second Enter
-on a configured Preset durably selects it for the existing current Agent's next
-Turn; the pending ID is visible and another configured Preset replaces it.
-Release-catalog candidates remain detail-only and are never installed or
-executed implicitly. Selection authenticates the recovered Active Agent Session,
+selection, and Enter opens bounded source and capability detail. On compatible
+release detail, a second Enter requests a bounded Preset ID, opens a prefilled
+user-scope Draft for the exact Profile/model/dialect, and uses the normal
+preview/CAS-commit flow. The accepted result is an ordinary user-owned Preset;
+duplicate IDs, incompatible Profiles, validation failures, and stale revisions
+never overwrite Config. F6 or Ctrl-R then reloads it into the browser. A second
+Enter on configured detail durably selects that Preset for the existing current
+Agent's next Turn; the pending ID is visible and another configured Preset
+replaces it. Nothing is installed or executed implicitly. Selection
+authenticates the recovered Active Agent Session,
 writes no Config, reads no credential, and performs no Provider request. The
 next headless Turn without an explicit Preset resolves the exact pending ID,
 rechecks its Config fingerprint and identity, and consumes the selection in the
@@ -427,7 +434,7 @@ is no background polling or automatic refresh. Runtime, Team, and Tool Ledgers
 are inspected independently, so one refresh is not a cross-Ledger transactional
 snapshot. The terminal and App Server approval surfaces are limited to the exact
 pending `local.echo` call; neither is a general Tool policy editor, audited
-ConPTY integration, secret-entry/bind surface, starter-preset
+ConPTY integration, secret-entry/bind surface, automatic starter-update
 workflow, or persistent live catalog discovery. Live inference conformance,
 automatic retry or resumable reconnect, OpenCode Go Messages execution,
 Messages reasoning blocks, Preset context/fallback execution, broader multi-Tool approval

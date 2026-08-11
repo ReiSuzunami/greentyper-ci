@@ -285,6 +285,7 @@ pub(crate) struct ModelSelectorEntryView {
 pub(crate) enum ModelEntryAction {
     DetailChanged,
     ApplyConfigured(ModelPresetView),
+    AcceptRelease,
     ReleaseUnavailable,
     None,
 }
@@ -884,6 +885,13 @@ enum PresentationState {
 struct ActiveConfigObjectCreate {
     kind: ConfigObjectKind,
     id: String,
+    starter: Option<ModelStarterSource>,
+}
+
+#[derive(Clone)]
+struct ModelStarterSource {
+    provider: String,
+    catalog_key: String,
 }
 
 struct ActiveConfigEditor {
@@ -1131,6 +1139,20 @@ impl PresentationController {
         match &entry.choice {
             ModelSelectorChoiceView::ConfiguredPreset { preset } => {
                 ModelEntryAction::ApplyConfigured(preset.clone())
+            }
+            ModelSelectorChoiceView::ReleaseCatalog { model }
+                if entry.compatibility == Availability::Known(true) =>
+            {
+                self.object_create = Some(ActiveConfigObjectCreate {
+                    kind: ConfigObjectKind::ModelPreset,
+                    id: String::new(),
+                    starter: Some(ModelStarterSource {
+                        provider: model.provider().to_owned(),
+                        catalog_key: model.record().key().to_owned(),
+                    }),
+                });
+                self.state = PresentationState::ConfigObjectCreate;
+                ModelEntryAction::AcceptRelease
             }
             ModelSelectorChoiceView::ReleaseCatalog { .. } => ModelEntryAction::ReleaseUnavailable,
         }
@@ -1479,6 +1501,7 @@ impl PresentationController {
                     self.object_create = Some(ActiveConfigObjectCreate {
                         kind,
                         id: String::new(),
+                        starter: None,
                     });
                     self.state = PresentationState::ConfigObjectCreate;
                     return Ok(());
@@ -1613,23 +1636,42 @@ impl PresentationController {
         runtime: &mut ConfigRuntime,
         scope: ConfigScope,
     ) -> Result<(), PresentationControllerError> {
-        let create = self
-            .object_create
-            .as_ref()
-            .filter(|_| self.state == PresentationState::ConfigObjectCreate)
-            .ok_or(PresentationControllerError::NotConfigObjectCreate)?;
-        let object = ConfigObjectRef::new(create.kind, create.id.clone());
-        let session = ConfigEditorSession::create_object(runtime, scope, object.clone())?;
+        let (object, starter) = {
+            let create = self
+                .object_create
+                .as_ref()
+                .filter(|_| self.state == PresentationState::ConfigObjectCreate)
+                .ok_or(PresentationControllerError::NotConfigObjectCreate)?;
+            (
+                ConfigObjectRef::new(create.kind, create.id.clone()),
+                create.starter.clone(),
+            )
+        };
+        let session = match starter.as_ref() {
+            Some(starter) => ConfigEditorSession::create_model_starter(
+                runtime,
+                scope,
+                object.clone(),
+                &starter.provider,
+                &starter.catalog_key,
+            )?,
+            None => ConfigEditorSession::create_object(runtime, scope, object.clone())?,
+        };
         let view = session.current_view(runtime)?;
         self.editor = Some(ActiveConfigEditor {
             object: Some(object),
             session,
             view,
-            dirty: false,
+            dirty: starter.is_some(),
             validated: false,
             connection: ProviderConnectionTestStatus::Untested,
         });
-        self.state = if create.kind == ConfigObjectKind::ProviderProfile {
+        self.state = if self
+            .editor
+            .as_ref()
+            .and_then(|editor| editor.object.as_ref())
+            .is_some_and(|object| object.kind() == ConfigObjectKind::ProviderProfile)
+        {
             PresentationState::ProviderWizard
         } else {
             PresentationState::ConfigEditor
@@ -5408,8 +5450,15 @@ credential = "synthetic-deepseek-credential-reference"
         );
         assert_eq!(
             controller.activate_model_entry(&selector),
-            ModelEntryAction::ReleaseUnavailable
+            ModelEntryAction::AcceptRelease
         );
+        assert!(matches!(
+            controller.screen(Some(&runtime)).expect("starter ID prompt"),
+            PresentationScreenView::ConfigObjectCreate {
+                kind: ConfigObjectKind::ModelPreset,
+                ref id,
+            } if id.is_empty()
+        ));
 
         let deepseek = ModelSelectorView::build(&[], &catalog_models, "deepseek-v4-pro")
             .expect("catalog model with DeepSeek Chat adapter");
@@ -5434,6 +5483,49 @@ credential = "synthetic-deepseek-credential-reference"
             deepseek_responses.compatible,
             Availability::Known(deepseek_responses.all.clone())
         );
+    }
+
+    #[test]
+    fn incompatible_release_stays_in_detail_without_starting_a_preset_draft() {
+        let temp = TempTree::new("incompatible-release-starter");
+        let config = ConfigDocument::parse(
+            r#"
+schema_version = 1
+
+[providers.chat-only]
+template = "openai"
+credential = "synthetic-chat-only-reference"
+dialects = ["chat_completions"]
+"#,
+        )
+        .expect("parse incompatible release profile");
+        let runtime = ConfigRuntime::open(temp.paths(), config).expect("open incompatible profile");
+        let models = runtime.catalog_models().expect("catalog candidates");
+        let selector =
+            ModelSelectorView::build(&[], &models, "sol").expect("incompatible selector");
+        assert_eq!(selector.all.len(), 1);
+        assert_eq!(selector.all[0].compatibility, Availability::Known(false));
+        let mut controller = PresentationController::new();
+        controller.state = PresentationState::ModelSelector {
+            group: ModelSelectorGroup::All,
+            selected: 0,
+            detail: false,
+        };
+
+        assert_eq!(
+            controller.activate_model_entry(&selector),
+            ModelEntryAction::DetailChanged
+        );
+        assert_eq!(
+            controller.activate_model_entry(&selector),
+            ModelEntryAction::ReleaseUnavailable
+        );
+        assert!(matches!(
+            controller.screen(Some(&runtime)).expect("release detail"),
+            PresentationScreenView::ModelSelector { detail: true, .. }
+        ));
+        assert!(!runtime.paths().user().exists());
+        assert!(!runtime.paths().project().exists());
     }
 
     #[test]

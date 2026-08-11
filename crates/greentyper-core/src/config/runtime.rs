@@ -1675,6 +1675,58 @@ impl ConfigRuntime {
         Ok(models)
     }
 
+    pub fn begin_model_starter(
+        &self,
+        scope: ConfigScope,
+        preset_id: &str,
+        provider: &str,
+        catalog_key: &str,
+    ) -> Result<ConfigDraft, ConfigRuntimeError> {
+        let mut draft = self.begin_draft(scope)?;
+        validate_id("model_presets.<id>", preset_id)?;
+        validate_id("model_presets.<id>.provider", provider)?;
+        validate_string("catalog model key", catalog_key)?;
+        if self
+            .model_presets()?
+            .iter()
+            .any(|preset| preset.id == preset_id)
+        {
+            return Err(invalid(
+                format!("model_presets.{preset_id}"),
+                "starter cannot replace an existing model preset",
+            ));
+        }
+        let model = self
+            .catalog_models()?
+            .into_iter()
+            .find(|model| model.provider() == provider && model.record().key() == catalog_key)
+            .ok_or_else(|| {
+                ConfigRuntimeError::UnknownObject(format!("catalog.models.{catalog_key}"))
+            })?;
+        if !model.profile_compatible() {
+            return Err(invalid(
+                format!("model_presets.{preset_id}.dialect"),
+                "starter dialect is not supported by the selected provider profile",
+            ));
+        }
+
+        let prefix = format!("model_presets.{preset_id}");
+        draft.set(
+            &format!("{prefix}.provider"),
+            ConfigValue::String(provider.to_owned()),
+        )?;
+        draft.set(
+            &format!("{prefix}.model"),
+            ConfigValue::String(model.record().model_id().value().to_owned()),
+        )?;
+        draft.set(
+            &format!("{prefix}.dialect"),
+            ConfigValue::String(model.record().primary_dialect().value().as_str().to_owned()),
+        )?;
+        self.validate_draft(&draft)?;
+        Ok(draft)
+    }
+
     pub fn inspect_field(
         &self,
         target_scope: ConfigScope,
@@ -1948,7 +2000,11 @@ impl ConfigRuntime {
         if !draft.scope.is_writable() {
             return Err(ConfigRuntimeError::ReadOnlyScope(draft.scope));
         }
-        let _locks = lock_config_paths(&self.paths)?;
+        let _locks = if dry_run {
+            None
+        } else {
+            Some(lock_config_paths(&self.paths)?)
+        };
         let user = read_layer(self.paths.user())?;
         let project = read_layer(self.paths.project())?;
         let current = match draft.scope {
