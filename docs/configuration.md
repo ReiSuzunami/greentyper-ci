@@ -289,8 +289,9 @@ bounded value on standard input. Existing values are never returned.
 Generic effective-value reads also reject credential-reference fields; editor
 views expose only whether the target and effective layers are bound.
 
-`greentyper app-server --stdio` exposes the Config Runtime and local credential
-vault through a bounded newline-delimited JSON stream. Each request carries an
+`greentyper app-server --stdio [--ledger PATH]` exposes the Config Runtime,
+local credential vault, and read-only operational projections through a bounded
+newline-delimited JSON stream. Each request carries an
 unsigned `id`, an `operation`, and optional object `params`; each flushed
 response carries the same `id` and exactly one `result` or `error`. A request
 frame is limited to 64 KiB. Malformed or oversized frames receive a fixed error
@@ -315,6 +316,10 @@ The current operations are:
 | `config.draft.commit` | Compare the base revision, write atomically, and return the new revision and application timing |
 | `credential.bind` / `replace` | Store a new or replacement origin-bound secret and return only `bound` or `replaced` status |
 | `credential.test` / `credential.forget` | Return only `available`, `forgotten`, or `not_found`; `test` checks vault presence and performs no Provider request |
+| `runtime.status` | Inspect the Runtime Ledger and return its head, recovery status, numeric Turn/delivery/thread facts, item count, pending-selection presence, and incomplete-tail byte count without returning item text, block reasons, or selection contents |
+| `runtime.stats` | Return the revision-bound Usage summary; optional `limit` and `cursor` expose a bounded Attempt page, and optional `as_of_unix_ms` pins the reporting instant |
+| `agent.list` | Return the redacted Agent Center projection: canonical identities, status, Task identity/state, budgets, reservations, bounded counts, Team head/revision, message count, and incomplete-tail bytes; never Task titles, message/capsule contents, labels, or Sessions |
+| `tool.status` | Return the Tool head and redacted calls containing only Call/Agent/Tool/status, approval expiry, and terminal result digest; never call identity, arguments, resources, hashes, or reasons |
 
 Credential operations require `reference`, `profile`, and `origin` params.
 `bind` and `replace` additionally require a JSON string `secret`; its UTF-8
@@ -333,6 +338,24 @@ HTTP is accepted only for loopback. These operations neither write Config or a
 Ledger nor grant Provider, Agent, Tool, or workspace authority. The stdio loop
 serializes one process's requests, but platform-vault mutations are not a
 cross-process CAS or transaction.
+
+Operational inspection always uses the server's startup Ledger path; a request
+cannot select a filesystem path. Missing Runtime or product sidecars return an
+empty ready/unavailable projection without creating files. Existing Runtime,
+Team, and Tool Ledgers are opened through their shared read-only inspection
+paths, so incomplete final bytes are reported but never truncated or repaired.
+Corruption, unsafe paths, locks, and incomplete product-sidecar pairs fail with
+fixed public errors while the JSON stream remains usable. The four projections
+are separate reads, not one cross-Ledger transactional snapshot. None performs a
+Provider request, credential lookup, Config/Ledger write, Agent action, Tool
+approval, Runtime resume, output delivery, or acknowledgement.
+
+`runtime.stats` defaults to summary-only. `limit` must use the core bounded page
+range and is required when `cursor` is present. A follow-up page must reuse the
+`summary.as_of` instant returned with the Cursor; stale revisions and mismatched
+instants fail explicitly. Usage reports contain durable provider/model/policy,
+token, cost, outcome, and timing metadata but no prompt, output, Tool argument,
+workspace, or credential material.
 
 `config.draft.set` accepts the schema-owned tagged value forms `string`,
 `positive_integer`, `non_negative_integer`, `boolean`, and `string_list`.
@@ -362,6 +385,10 @@ transport categories including `invalid_request`, `request_too_large`,
 its last valid Config Epoch after an invalid external edit; startup with no
 valid epoch enters a configuration-repair surface instead of silently dropping
 a layer.
+Operational inspection additionally uses fixed `runtime_unavailable`,
+`team_unavailable`, `tool_unavailable`, `usage_unavailable`, `stale_cursor`, and
+`cursor_query_mismatch` categories without returning a Ledger path or underlying
+storage/parser text.
 
 ## Provider Profiles
 

@@ -5,6 +5,12 @@ use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use greentyper_core::agent_team::{
+    Capability, CapabilitySnapshot, CommandOutcome, MessageRecipient, ResourceBudget, TaskScope,
+    TaskSpec, TeamCommand, TeamOperationAcknowledgeOutcome,
+};
+use greentyper_core::runtime::RuntimeKernel;
+use greentyper_core::tool_runtime::{ToolArguments, ToolIntent, ToolRequestOutcome, ToolResources};
 use serde_json::Value;
 
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(1);
@@ -56,9 +62,29 @@ impl TempTree {
         self.root.join(".greentyper").join("config.toml")
     }
 
+    fn runtime_ledger(&self) -> PathBuf {
+        self.root.join("runtime.ledger")
+    }
+
+    fn sidecar_ledger(&self, suffix: &str) -> PathBuf {
+        let mut path = self.runtime_ledger().into_os_string();
+        path.push(".");
+        path.push(suffix);
+        PathBuf::from(path)
+    }
+
+    fn team_ledger(&self) -> PathBuf {
+        self.sidecar_ledger("team")
+    }
+
+    fn tool_ledger(&self) -> PathBuf {
+        self.sidecar_ledger("tool")
+    }
+
     fn run(&self, requests: &[u8]) -> std::process::Output {
         let mut child = Command::new(env!("CARGO_BIN_EXE_greentyper"))
-            .args(["app-server", "--stdio"])
+            .args(["app-server", "--stdio", "--ledger"])
+            .arg(self.runtime_ledger())
             .current_dir(&self.root)
             .env("HOME", &self.root)
             .env("APPDATA", &self.root)
@@ -79,7 +105,8 @@ impl TempTree {
 
     fn spawn(&self) -> AppServerProcess {
         let mut child = Command::new(env!("CARGO_BIN_EXE_greentyper"))
-            .args(["app-server", "--stdio"])
+            .args(["app-server", "--stdio", "--ledger"])
+            .arg(self.runtime_ledger())
             .current_dir(&self.root)
             .env("HOME", &self.root)
             .env("APPDATA", &self.root)
@@ -99,6 +126,118 @@ impl TempTree {
             stderr: Some(stderr),
             finished: false,
         }
+    }
+
+    fn run_headless(&self, input: &str) {
+        let output = Command::new(env!("CARGO_BIN_EXE_greentyper"))
+            .args(["headless", "--ledger"])
+            .arg(self.runtime_ledger())
+            .args(["--input", input])
+            .current_dir(&self.root)
+            .env("HOME", &self.root)
+            .env("APPDATA", &self.root)
+            .env("XDG_CONFIG_HOME", &self.root)
+            .output()
+            .expect("run deterministic headless Turn");
+        assert!(
+            output.status.success(),
+            "status={:?}, stderr={}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn create_agent_state(&self) {
+        let (mut kernel, recovery) = RuntimeKernel::open_with_team_and_tools(
+            self.runtime_ledger(),
+            self.team_ledger(),
+            self.tool_ledger(),
+            1,
+        )
+        .expect("open App Server Agent fixture");
+        assert!(recovery.into_sessions().is_empty());
+        let admission = kernel
+            .dispatch_team(TeamCommand::AdmitRoot {
+                task: TaskSpec::new(
+                    "private App Server task title",
+                    TaskScope::from_labels(["private-app-server-scope"]),
+                ),
+                budget: ResourceBudget::new(2_000, 4),
+                capabilities: CapabilitySnapshot::from_capabilities([
+                    Capability::WorkspaceRead,
+                    Capability::Tool("private-app-server-tool".into()),
+                ]),
+            })
+            .expect("admit App Server Agent fixture");
+        assert!(matches!(
+            kernel
+                .acknowledge_team_operation(admission.operation)
+                .expect("acknowledge App Server Agent admission"),
+            TeamOperationAcknowledgeOutcome::Durable(_)
+        ));
+        let root = match admission.commit.outcome {
+            CommandOutcome::RootAdmitted { session, .. } => session,
+            other => panic!("unexpected root admission: {other:?}"),
+        };
+        let message = kernel
+            .dispatch_team(TeamCommand::SendMessage {
+                from: root,
+                recipient: MessageRecipient::Team,
+                body: "private App Server message body".into(),
+            })
+            .expect("send App Server Agent fixture message");
+        assert!(matches!(
+            kernel
+                .acknowledge_team_operation(message.operation)
+                .expect("acknowledge App Server Agent message"),
+            TeamOperationAcknowledgeOutcome::Durable(_)
+        ));
+    }
+
+    fn create_tool_state(&self) {
+        let (mut kernel, recovery) = RuntimeKernel::open_with_team_and_tools(
+            self.runtime_ledger(),
+            self.team_ledger(),
+            self.tool_ledger(),
+            1,
+        )
+        .expect("open App Server Tool fixture");
+        assert!(recovery.into_sessions().is_empty());
+        let admission = kernel
+            .dispatch_team(TeamCommand::AdmitRoot {
+                task: TaskSpec::new(
+                    "private App Server Tool task",
+                    TaskScope::from_labels(["private-tool-scope"]),
+                ),
+                budget: ResourceBudget::new(1_000, 1),
+                capabilities: CapabilitySnapshot::from_capabilities([Capability::Tool(
+                    "local.echo".into(),
+                )]),
+            })
+            .expect("admit App Server Tool owner");
+        assert!(matches!(
+            kernel
+                .acknowledge_team_operation(admission.operation)
+                .expect("acknowledge App Server Tool owner"),
+            TeamOperationAcknowledgeOutcome::Durable(_)
+        ));
+        let root = match admission.commit.outcome {
+            CommandOutcome::RootAdmitted { session, .. } => session,
+            other => panic!("unexpected Tool owner admission: {other:?}"),
+        };
+        let intent = ToolIntent::new(
+            "private-tool-call-identity",
+            "local.echo",
+            ToolArguments::parse(r#"{"message":"private Tool argument"}"#).expect("Tool arguments"),
+            ToolResources::default(),
+        )
+        .expect("Tool intent");
+        assert!(matches!(
+            kernel
+                .request_tool_call(root, intent)
+                .expect("request App Server Tool call"),
+            ToolRequestOutcome::ApprovalRequired(_)
+        ));
     }
 }
 
@@ -245,6 +384,228 @@ fn app_server_schema_get_and_bounded_errors_are_streamed_without_writes() {
     assert_eq!(responses[6]["result"]["schema_version"], 1);
     assert!(!temp.user_config().exists());
     assert!(!temp.project_config().exists());
+}
+
+#[test]
+fn app_server_runtime_status_inspects_missing_state_without_creating_it() {
+    let temp = TempTree::new();
+    let output = temp.run(
+        concat!(
+            "{\"id\":1,\"operation\":\"runtime.status\"}\n",
+            "{\"id\":2,\"operation\":\"runtime.status\",\"params\":{\"extra\":true}}\n",
+            "{\"id\":3,\"operation\":\"config.schema\"}\n",
+        )
+        .as_bytes(),
+    );
+    let results = responses(&output);
+    assert_eq!(results.len(), 3);
+    assert_eq!(results[0]["result"]["status"], "ready");
+    assert_eq!(results[0]["result"]["ledger"]["transaction"], 0);
+    assert_eq!(results[0]["result"]["ledger"]["sequence"], 0);
+    assert_eq!(results[0]["result"]["recovered_tail_bytes"], 0);
+    assert_eq!(results[0]["result"]["thread"], Value::Null);
+    assert_eq!(results[0]["result"]["item_count"], 0);
+    assert_eq!(results[0]["result"]["pending_model_selection"], false);
+    assert_eq!(results[1]["error"]["category"], "invalid_request");
+    assert_eq!(results[2]["result"]["schema_version"], 1);
+    assert!(!temp.runtime_ledger().exists());
+    assert!(!temp.user_config().exists());
+    assert!(!temp.project_config().exists());
+}
+
+#[test]
+fn app_server_runtime_stats_pages_a_frozen_read_only_report() {
+    let temp = TempTree::new();
+    temp.run_headless("first App Server usage Turn");
+    temp.run_headless("second App Server usage Turn");
+    let before = fs::read(temp.runtime_ledger()).expect("read Runtime Ledger before stats");
+    let mut server = temp.spawn();
+
+    let summary = server.request(r#"{"id":1,"operation":"runtime.stats"}"#);
+    assert_eq!(summary["result"]["summary"]["total"]["attempts"], 2);
+    assert_eq!(summary["result"]["page"], Value::Null);
+
+    let first = server.request(r#"{"id":2,"operation":"runtime.stats","params":{"limit":1}}"#);
+    let first_page = first["result"]["page"]["attempts"]
+        .as_array()
+        .expect("first Usage page");
+    assert_eq!(first_page.len(), 1);
+    assert_eq!(first_page[0]["turn"], 1);
+    let cursor = first["result"]["page"]["next_cursor"]
+        .as_str()
+        .expect("next Usage cursor");
+    let as_of = first["result"]["summary"]["as_of"]
+        .as_i64()
+        .expect("Usage report instant");
+
+    let second = server.request(&format!(
+        r#"{{"id":3,"operation":"runtime.stats","params":{{"as_of_unix_ms":{as_of},"limit":1,"cursor":"{cursor}"}}}}"#
+    ));
+    let second_page = second["result"]["page"]["attempts"]
+        .as_array()
+        .expect("second Usage page");
+    assert_eq!(second_page.len(), 1);
+    assert_eq!(second_page[0]["turn"], 2);
+    assert_eq!(second["result"]["page"]["next_cursor"], Value::Null);
+
+    let invalid =
+        server.request(r#"{"id":4,"operation":"runtime.stats","params":{"cursor":"v1:invalid"}}"#);
+    assert_eq!(invalid["error"]["category"], "invalid_value");
+    let status = server.request(r#"{"id":5,"operation":"runtime.status"}"#);
+    assert_eq!(status["result"]["status"], "ready");
+    server.finish();
+
+    assert_eq!(
+        fs::read(temp.runtime_ledger()).expect("read Runtime Ledger after stats"),
+        before
+    );
+    assert!(!temp.user_config().exists());
+    assert!(!temp.project_config().exists());
+}
+
+#[test]
+fn app_server_agent_list_is_read_only_and_redacts_team_content() {
+    let temp = TempTree::new();
+    let missing = temp.run(b"{\"id\":1,\"operation\":\"agent.list\"}\n");
+    let missing_results = responses(&missing);
+    assert_eq!(missing_results[0]["result"]["available"], false);
+    assert_eq!(missing_results[0]["result"]["team"], Value::Null);
+    assert!(!temp.runtime_ledger().exists());
+    assert!(!temp.team_ledger().exists());
+    assert!(!temp.tool_ledger().exists());
+
+    temp.create_agent_state();
+    let runtime_before = fs::read(temp.runtime_ledger()).expect("read Runtime Ledger before Agent");
+    let team_before = fs::read(temp.team_ledger()).expect("read Team Ledger before Agent");
+    let tool_before = fs::read(temp.tool_ledger()).expect("read Tool Ledger before Agent");
+    let output = temp.run(
+        concat!(
+            "{\"id\":2,\"operation\":\"agent.list\"}\n",
+            "{\"id\":3,\"operation\":\"runtime.status\"}\n",
+        )
+        .as_bytes(),
+    );
+    let results = responses(&output);
+    let team = &results[0]["result"]["team"];
+    assert_eq!(results[0]["result"]["available"], true);
+    assert!(
+        team["revision"]
+            .as_u64()
+            .is_some_and(|revision| revision > 0)
+    );
+    assert_eq!(team["message_count"], 1);
+    assert_eq!(team["operations_awaiting_acknowledgement"], 0);
+    let agents = team["agents"].as_array().expect("Agent list");
+    assert_eq!(agents.len(), 1);
+    assert_eq!(agents[0]["id"], 1);
+    assert_eq!(agents[0]["status"], "active");
+    assert_eq!(agents[0]["token_budget"], 2_000);
+    assert_eq!(agents[0]["tool_budget"], 4);
+    assert_eq!(agents[0]["capability_count"], 2);
+    assert_eq!(agents[0]["scope_count"], 1);
+    assert_eq!(results[1]["result"]["status"], "ready");
+    let output_text = String::from_utf8(output.stdout).expect("UTF-8 App Server Agent output");
+    for private in [
+        "private App Server task title",
+        "private-app-server-scope",
+        "private-app-server-tool",
+        "private App Server message body",
+    ] {
+        assert!(!output_text.contains(private));
+    }
+    assert_eq!(
+        fs::read(temp.runtime_ledger()).expect("read Runtime Ledger after Agent"),
+        runtime_before
+    );
+    assert_eq!(
+        fs::read(temp.team_ledger()).expect("read Team Ledger after Agent"),
+        team_before
+    );
+    assert_eq!(
+        fs::read(temp.tool_ledger()).expect("read Tool Ledger after Agent"),
+        tool_before
+    );
+    assert!(!temp.user_config().exists());
+    assert!(!temp.project_config().exists());
+}
+
+#[test]
+fn app_server_tool_status_is_redacted_read_only_and_recovers_after_sidecar_failure() {
+    let missing = TempTree::new();
+    let missing_output = missing.run(b"{\"id\":1,\"operation\":\"tool.status\"}\n");
+    let missing_results = responses(&missing_output);
+    assert_eq!(
+        missing_results[0]["result"]["calls"]
+            .as_array()
+            .expect("empty Tool calls")
+            .len(),
+        0
+    );
+    assert!(!missing.runtime_ledger().exists());
+    assert!(!missing.team_ledger().exists());
+    assert!(!missing.tool_ledger().exists());
+
+    let temp = TempTree::new();
+    temp.create_tool_state();
+    let runtime_before = fs::read(temp.runtime_ledger()).expect("read Runtime Ledger before Tool");
+    let team_before = fs::read(temp.team_ledger()).expect("read Team Ledger before Tool");
+    let tool_before = fs::read(temp.tool_ledger()).expect("read Tool Ledger before Tool");
+    let output = temp.run(b"{\"id\":2,\"operation\":\"tool.status\"}\n");
+    let results = responses(&output);
+    let calls = results[0]["result"]["calls"]
+        .as_array()
+        .expect("Tool calls");
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0]["call"], 1);
+    assert_eq!(calls[0]["agent"], 1);
+    assert_eq!(calls[0]["tool"], "local.echo");
+    assert_eq!(calls[0]["status"], "awaiting_approval");
+    assert_eq!(calls[0]["approval_expires_at_unix_ms"], Value::Null);
+    assert_eq!(calls[0]["result_sha256"], Value::Null);
+    let output_text = String::from_utf8(output.stdout).expect("UTF-8 App Server Tool output");
+    for private in [
+        "private-tool-call-identity",
+        "private Tool argument",
+        "private App Server Tool task",
+        "private-tool-scope",
+    ] {
+        assert!(!output_text.contains(private));
+    }
+    assert_eq!(
+        fs::read(temp.runtime_ledger()).expect("read Runtime Ledger after Tool"),
+        runtime_before
+    );
+    assert_eq!(
+        fs::read(temp.team_ledger()).expect("read Team Ledger after Tool"),
+        team_before
+    );
+    assert_eq!(
+        fs::read(temp.tool_ledger()).expect("read Tool Ledger after Tool"),
+        tool_before
+    );
+
+    let incomplete = TempTree::new();
+    fs::write(incomplete.team_ledger(), b"private-incomplete-sidecar")
+        .expect("write incomplete Team sidecar");
+    let before = fs::read(incomplete.team_ledger()).expect("read incomplete Team sidecar");
+    let failed = incomplete.run(
+        concat!(
+            "{\"id\":3,\"operation\":\"tool.status\"}\n",
+            "{\"id\":4,\"operation\":\"runtime.status\"}\n",
+        )
+        .as_bytes(),
+    );
+    let failed_results = responses(&failed);
+    assert_eq!(failed_results[0]["error"]["category"], "tool_unavailable");
+    assert_eq!(failed_results[1]["result"]["status"], "ready");
+    assert_eq!(
+        fs::read(incomplete.team_ledger()).expect("reread incomplete Team sidecar"),
+        before
+    );
+    assert!(!incomplete.runtime_ledger().exists());
+    assert!(!incomplete.tool_ledger().exists());
+    assert!(!incomplete.user_config().exists());
+    assert!(!incomplete.project_config().exists());
 }
 
 #[cfg(not(windows))]

@@ -114,7 +114,7 @@ availability explicit. A first Direct VT product tracer now renders the Slash
 Panel, controller screens, and adaptive status rows through `greentyper tui` and
 includes rendered user-scope interactions for every Config Schema field,
 complete Config Object creation, existing-object field editing, and typed
-deletion confirmations. `greentyper app-server --stdio` now exposes the same
+deletion confirmations. `greentyper app-server --stdio [--ledger PATH]` now exposes the same
 non-secret Config Schema, effective reads with redacted repair errors and status,
 process-local typed Drafts,
 validation, and atomic CAS commit path over bounded newline-delimited JSON.
@@ -125,7 +125,11 @@ accept the secret only in the bounded request frame and scrub the product-owned
 frame after dispatch. The product CLI exposes the same operations without
 putting secret material in arguments, Config, or Ledgers. Windows stores values
 in the current user's Credential Manager; other platforms currently fail
-closed. Tool call identity, argument hashing, approval binding, independent
+closed. The same stream has read-only `runtime.status`, bounded `runtime.stats`,
+redacted `agent.list`, and redacted `tool.status` operations. Missing state does
+not create files; inspection never repairs a partial Ledger tail. These local
+views expose no Runtime, Agent, Tool, approval, or delivery mutation authority.
+Tool call identity, argument hashing, approval binding, independent
 authority checks, and ambiguous-effect reconciliation are durable core policy.
 The product has a private `local.echo` process tracer: it launches only a fixed
 same-binary child after the durable effect boundary, clears ambient environment
@@ -398,8 +402,8 @@ reconnect/retry, OpenCode Go Messages execution,
 Messages reasoning blocks, Preset context/fallback execution, broader multi-Tool approval
 presentation, broader Provider and Tool adapters,
 Workspace, project/new-Agent Preset defaults, richer cache distributions,
-Agent lifecycle actions, and App Server Runtime and
-approval surfaces remain. The loopback Provider tracer remains
+Agent lifecycle actions, and App Server Runtime mutation and approval surfaces
+remain. The loopback Provider tracer remains
 an internal harness; `local.echo` is intentionally a fixed opt-in command rather
 than a general process runner. The file Ledger remains
 provisional. The acceptance runner can emit bound raw evidence,

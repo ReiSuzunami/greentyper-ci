@@ -2,11 +2,15 @@ use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
 use std::io::{self, BufRead, Write};
+use std::path::PathBuf;
 
 use greentyper_core::config::{
     CONFIG_FILE_SCHEMA_VERSION, ConfigCommit, ConfigDraft, ConfigErrorCategory, ConfigRuntime,
     ConfigRuntimeError, ConfigScope, ConfigValue, MAX_CONFIG_STRING_BYTES, config_schema,
 };
+use greentyper_core::runtime::{RecoveryStatus, RuntimeError, RuntimeKernel};
+use greentyper_core::tool_runtime::{ToolCallRecord, ToolCallStatus};
+use greentyper_core::usage::{RuntimeUsageQuery, UsageCursor, UsageError, UsageTimestamp};
 use serde::{Deserialize, Deserializer};
 use serde_json::value::RawValue;
 use serde_json::{Value, json};
@@ -15,6 +19,8 @@ use crate::credential_vault::{
     CredentialVault, CredentialVaultError, PlatformCredentialVault, ProviderCredentialScope,
     SecretValue,
 };
+use crate::presentation::AgentCenterView;
+use crate::product_driver::{inspect_product_team, inspect_product_tools};
 
 const MAX_REQUEST_BYTES: usize = 64 * 1024;
 const MAX_ACTIVE_DRAFTS: usize = 64;
@@ -23,18 +29,20 @@ pub(crate) fn run_stdio(
     input: impl BufRead,
     output: impl Write,
     config: ConfigRuntime,
+    runtime_path: PathBuf,
 ) -> Result<(), AppServerError> {
     let mut vault = PlatformCredentialVault;
-    run_stdio_with_vault(input, output, config, &mut vault)
+    run_stdio_with_vault(input, output, config, runtime_path, &mut vault)
 }
 
 fn run_stdio_with_vault(
     mut input: impl BufRead,
     mut output: impl Write,
     config: ConfigRuntime,
+    runtime_path: PathBuf,
     vault: &mut impl CredentialVault,
 ) -> Result<(), AppServerError> {
-    let mut server = AppServer::new(config, vault);
+    let mut server = AppServer::new(config, runtime_path, vault);
     loop {
         let response = match read_request_line(&mut input)? {
             RequestLine::End => return Ok(()),
@@ -58,15 +66,17 @@ fn run_stdio_with_vault(
 
 struct AppServer<'vault, V> {
     config: ConfigRuntime,
+    runtime_path: PathBuf,
     drafts: BTreeMap<u64, ConfigDraft>,
     next_draft_id: u64,
     vault: &'vault mut V,
 }
 
 impl<'vault, V: CredentialVault> AppServer<'vault, V> {
-    fn new(config: ConfigRuntime, vault: &'vault mut V) -> Self {
+    fn new(config: ConfigRuntime, runtime_path: PathBuf, vault: &'vault mut V) -> Self {
         Self {
             config,
+            runtime_path,
             drafts: BTreeMap::new(),
             next_draft_id: 1,
             vault,
@@ -94,6 +104,68 @@ impl<'vault, V: CredentialVault> AppServer<'vault, V> {
             );
         }
         match request.operation.as_str() {
+            "runtime.status" => match parse_params::<EmptyParams>(request.params) {
+                Ok(_) => match RuntimeKernel::inspect(&self.runtime_path) {
+                    Ok(snapshot) => success_response(request.id, runtime_status(snapshot)),
+                    Err(_) => runtime_inspection_error(request.id),
+                },
+                Err(()) => invalid_params(request.id),
+            },
+            "runtime.stats" => {
+                let params = match parse_params::<RuntimeStatsParams>(request.params) {
+                    Ok(params) => params,
+                    Err(()) => return invalid_params(request.id),
+                };
+                let (as_of, query) = match runtime_stats_query(params) {
+                    Ok(query) => query,
+                    Err(error) => return usage_error_response(request.id, error),
+                };
+                match RuntimeKernel::inspect_usage_report(&self.runtime_path, as_of, query) {
+                    Ok(report) => success_response(request.id, json!(report)),
+                    Err(error) => runtime_usage_error_response(request.id, error),
+                }
+            }
+            "agent.list" => match parse_params::<EmptyParams>(request.params) {
+                Ok(_) => match inspect_product_team(&self.runtime_path) {
+                    Ok(Some(team)) => success_response(
+                        request.id,
+                        json!({
+                            "available": true,
+                            "team": AgentCenterView::from(&team),
+                        }),
+                    ),
+                    Ok(None) => success_response(
+                        request.id,
+                        json!({ "available": false, "team": Value::Null }),
+                    ),
+                    Err(_) => team_inspection_error(request.id),
+                },
+                Err(()) => invalid_params(request.id),
+            },
+            "tool.status" => match parse_params::<EmptyParams>(request.params) {
+                Ok(_) => match inspect_product_tools(&self.runtime_path) {
+                    Ok(snapshot) => {
+                        let calls = snapshot
+                            .calls
+                            .iter()
+                            .map(tool_status_record)
+                            .collect::<Vec<_>>();
+                        success_response(
+                            request.id,
+                            json!({
+                                "ledger": {
+                                    "transaction": snapshot.ledger_head.transaction,
+                                    "sequence": snapshot.ledger_head.sequence,
+                                },
+                                "recovered_tail_bytes": snapshot.recovered_tail_bytes,
+                                "calls": calls,
+                            }),
+                        )
+                    }
+                    Err(_) => tool_inspection_error(request.id),
+                },
+                Err(()) => invalid_params(request.id),
+            },
             "config.schema" => match parse_params::<EmptyParams>(request.params) {
                 Ok(_) => success_response(
                     request.id,
@@ -350,6 +422,135 @@ impl<'vault, V: CredentialVault> AppServer<'vault, V> {
     }
 }
 
+fn runtime_status(snapshot: greentyper_core::runtime::RuntimeSnapshot) -> Value {
+    let (status, turn, delivery) = match snapshot.status {
+        RecoveryStatus::Ready => ("ready", None, None),
+        RecoveryStatus::ResumeRequired { turn } => ("resume_required", Some(turn.get()), None),
+        RecoveryStatus::ReconciliationRequired { turn, delivery } => (
+            "reconciliation_required",
+            Some(turn.get()),
+            Some(delivery.get()),
+        ),
+        RecoveryStatus::Blocked { turn, .. } => ("blocked", Some(turn.get()), None),
+    };
+    json!({
+        "ledger": {
+            "transaction": snapshot.head.transaction,
+            "sequence": snapshot.head.sequence,
+        },
+        "recovered_tail_bytes": snapshot.recovered_tail_bytes,
+        "status": status,
+        "turn": turn,
+        "delivery": delivery,
+        "thread": snapshot.thread.map(|thread| thread.get()),
+        "item_count": snapshot.items.len(),
+        "pending_model_selection": snapshot.pending_model_selection.is_some(),
+    })
+}
+
+fn runtime_inspection_error(id: u64) -> Value {
+    error_response(
+        Some(id),
+        "runtime_unavailable",
+        "Runtime state could not be inspected",
+        None,
+    )
+}
+
+fn team_inspection_error(id: u64) -> Value {
+    error_response(
+        Some(id),
+        "team_unavailable",
+        "Agent Team state could not be inspected",
+        None,
+    )
+}
+
+fn tool_status_record(record: &ToolCallRecord) -> Value {
+    json!({
+        "call": record.call.get(),
+        "agent": record.agent.get(),
+        "tool": record.tool,
+        "status": match record.status {
+            ToolCallStatus::AwaitingApproval => "awaiting_approval",
+            ToolCallStatus::Denied => "denied",
+            ToolCallStatus::ReconciliationRequired => "reconciliation_required",
+            ToolCallStatus::Succeeded => "succeeded",
+            ToolCallStatus::Failed => "failed",
+        },
+        "approval_expires_at_unix_ms": record.approval_expires_at_unix_ms,
+        "result_sha256": record.result_digest.map(encode_sha256),
+    })
+}
+
+fn encode_sha256(digest: [u8; 32]) -> String {
+    let mut encoded = String::with_capacity(64);
+    for byte in digest {
+        fmt::write(&mut encoded, format_args!("{byte:02x}"))
+            .expect("writing to a String cannot fail");
+    }
+    encoded
+}
+
+fn tool_inspection_error(id: u64) -> Value {
+    error_response(
+        Some(id),
+        "tool_unavailable",
+        "Tool state could not be inspected",
+        None,
+    )
+}
+
+fn runtime_stats_query(
+    params: RuntimeStatsParams,
+) -> Result<(UsageTimestamp, RuntimeUsageQuery), UsageError> {
+    let as_of = match params.as_of_unix_ms {
+        Some(value) => UsageTimestamp::from_unix_millis(value)?,
+        None => UsageTimestamp::now()?,
+    };
+    let query = match (params.limit, params.cursor) {
+        (None, None) => RuntimeUsageQuery::summary_only(),
+        (None, Some(_)) => return Err(UsageError::InvalidPageSize),
+        (Some(limit), cursor) => {
+            let cursor = cursor
+                .map(|cursor| cursor.parse::<UsageCursor>())
+                .transpose()?;
+            RuntimeUsageQuery::page(limit, cursor)?
+        }
+    };
+    Ok((as_of, query))
+}
+
+fn runtime_usage_error_response(id: u64, error: RuntimeError) -> Value {
+    match error {
+        RuntimeError::Usage(error) => usage_error_response(id, error),
+        _ => runtime_inspection_error(id),
+    }
+}
+
+fn usage_error_response(id: u64, error: UsageError) -> Value {
+    let (category, message) = match error {
+        UsageError::InvalidPageSize => (
+            "invalid_value",
+            "usage limit must be within the supported range",
+        ),
+        UsageError::InvalidCursor => ("invalid_value", "usage cursor is invalid"),
+        UsageError::StaleCursor => (
+            "stale_cursor",
+            "usage cursor refers to a stale Runtime revision",
+        ),
+        UsageError::CursorQueryMismatch => (
+            "cursor_query_mismatch",
+            "usage cursor does not match the requested instant",
+        ),
+        UsageError::ClockBeforeUnixEpoch | UsageError::TimestampRange => {
+            ("invalid_value", "usage timestamp is invalid")
+        }
+        _ => ("usage_unavailable", "Usage state could not be inspected"),
+    };
+    error_response(Some(id), category, message, None)
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Request<'request> {
@@ -362,6 +563,14 @@ struct Request<'request> {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct EmptyParams {}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RuntimeStatsParams {
+    as_of_unix_ms: Option<i64>,
+    limit: Option<usize>,
+    cursor: Option<String>,
+}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -792,6 +1001,7 @@ mod tests {
             Cursor::new(requests.as_bytes()),
             &mut output,
             config,
+            root.join("runtime.ledger"),
             &mut vault,
         )
         .expect("run App Server credential flow");
@@ -865,6 +1075,7 @@ mod tests {
             Cursor::new(requests.as_bytes()),
             &mut output,
             config,
+            root.join("runtime.ledger"),
             &mut vault,
         )
         .expect("run App Server credential status flow");
@@ -983,6 +1194,7 @@ mod tests {
             Cursor::new(requests.as_bytes()),
             &mut output,
             config,
+            root.join("runtime.ledger"),
             &mut vault,
         )
         .expect("run App Server credential boundary flow");

@@ -479,9 +479,24 @@ stdio test proves macOS and Linux return `credential_unavailable` for all four
 operations without writing Config; its Windows branch performs the same flow
 against the current user's Credential Manager, including duplicate bind,
 replace, forget, and final not-found status. Tests assert secret bytes never
-appear in stdout or stderr. They do not prove App Server Runtime or Tool
-approval, remote network transport, multi-client authentication, non-Windows
+appear in stdout or stderr. They do not prove App Server Runtime mutation or
+Tool approval, remote network transport, multi-client authentication, non-Windows
 credential backends, OS-level memory locking, or long-lived resource behavior.
+Additional real-process JSONL tests pin the App Server's fixed Ledger path and
+four read-only operational flows. Missing `runtime.status`, `agent.list`, and
+`tool.status` state returns ready/empty projections without creating files.
+Two completed Turns prove `runtime.stats` summary and revision/as-of-bound Cursor
+paging while the Runtime Ledger remains byte-identical. A persisted Team proves
+Agent identity/status/budget projection while Task titles, message bodies,
+capability labels, and scope labels remain absent. An awaiting Tool approval
+proves only Call/Agent/Tool/status/expiry/digest fields cross the wire while call
+identity, arguments, resources, and Task metadata remain absent. Runtime, Team,
+and Tool Ledger bytes are compared before and after inspection. A one-sided
+product sidecar returns a fixed error, preserves its bytes, creates no missing
+files, and the next request on the same stream succeeds. These tests do not
+prove a cross-Ledger transactional snapshot, remote transport, Runtime resume,
+Agent lifecycle mutation, Tool approval/reconciliation, output delivery, or
+multi-client authentication.
 Context Pressure tests freeze exact 65%/90% threshold transitions, estimated and
 missing-fact propagation, invalid policy/limit and arithmetic failure, and the
 no-side-effect hard admission gate. Product presentation tests assert estimated

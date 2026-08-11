@@ -387,10 +387,15 @@ charges still require a future dedicated authority path.
   dry-run validation, atomic commit path, interaction controller, Provider
   Profile candidate/connection-test flow, and deterministic viewport-row
   projection are present. The bounded stdio App Server now exposes non-secret
-  schema/get, connection-local typed Draft begin/set/reset/validate/commit, and
-  origin-bound credential bind/replace/test/forget. Credential requests return
-  status only, use the platform vault, and contain no Provider, Runtime, Team,
-  Tool, Agent, or approval authority.
+  schema/get, connection-local typed Draft begin/set/reset/validate/commit,
+  origin-bound credential bind/replace/test/forget, and read-only
+  `runtime.status`, `runtime.stats`, `agent.list`, and `tool.status` projections.
+  Operational reads use fixed startup paths, never create or repair Ledger
+  state, and redact Runtime item/block contents, Team text/labels/Sessions, and
+  Tool arguments/resources/reasons. Credential requests return status only and
+  use the platform vault. None of these operations grants Runtime, Team, Tool,
+  Agent, approval, delivery, or Provider authority. Each Ledger is inspected
+  independently rather than under one cross-Ledger transaction.
 - Automatic/background terminal Usage refresh and richer cache distributions,
   automatic Context View construction/compaction, provider-reported charge
   and subscription-quota values, richer observed model/effort/tier

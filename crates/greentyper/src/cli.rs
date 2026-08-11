@@ -45,11 +45,11 @@ use crate::provider_http::{
 
 pub fn run(arguments: impl Iterator<Item = String>) -> Result<(), CliError> {
     match parse(arguments)? {
-        Command::AppServer => {
+        Command::AppServer { ledger } => {
             let config = open_config_runtime(default_config_paths()?)?;
             let stdin = io::stdin();
             let stdout = io::stdout();
-            crate::app_server::run_stdio(stdin.lock(), stdout.lock(), config)?;
+            crate::app_server::run_stdio(stdin.lock(), stdout.lock(), config, ledger)?;
             Ok(())
         }
         Command::Tui { ledger } => {
@@ -581,7 +581,9 @@ fn open_runtime(path: &Path) -> Result<RuntimeKernel, CliError> {
 
 #[derive(Debug, Eq, PartialEq)]
 enum Command {
-    AppServer,
+    AppServer {
+        ledger: PathBuf,
+    },
     Tui {
         ledger: PathBuf,
     },
@@ -748,10 +750,7 @@ fn parse(mut arguments: impl Iterator<Item = String>) -> Result<Command, CliErro
         return parse_tool(arguments).map(Command::Tool);
     }
     if command == "app-server" {
-        if arguments.next().as_deref() != Some("--stdio") || arguments.next().is_some() {
-            return Err(CliError::Usage("app-server requires exactly --stdio"));
-        }
-        return Ok(Command::AppServer);
+        return parse_app_server(arguments);
     }
     if command == "__local-process-child" {
         let mode = LocalProcessChildMode::parse(arguments.next().as_deref())
@@ -932,6 +931,34 @@ fn parse(mut arguments: impl Iterator<Item = String>) -> Result<Command, CliErro
         }
         _ => Err(CliError::Usage("unknown command")),
     }
+}
+
+fn parse_app_server(mut arguments: impl Iterator<Item = String>) -> Result<Command, CliError> {
+    let mut stdio = false;
+    let mut ledger = None;
+    while let Some(argument) = arguments.next() {
+        match argument.as_str() {
+            "--stdio" if !stdio => stdio = true,
+            "--stdio" => return Err(CliError::Usage("duplicate --stdio")),
+            "--ledger" if ledger.is_none() => {
+                let value = arguments
+                    .next()
+                    .ok_or(CliError::Usage("--ledger is missing its value"))?;
+                if value.is_empty() || value.starts_with('-') {
+                    return Err(CliError::Usage("--ledger is missing its value"));
+                }
+                ledger = Some(PathBuf::from(value));
+            }
+            "--ledger" => return Err(CliError::Usage("duplicate --ledger")),
+            _ => return Err(CliError::Usage("unknown app-server option")),
+        }
+    }
+    if !stdio {
+        return Err(CliError::Usage("app-server requires --stdio"));
+    }
+    Ok(Command::AppServer {
+        ledger: ledger.unwrap_or(default_ledger_path()?),
+    })
 }
 
 fn parse_provider_dialect(value: &str) -> Result<ProviderDialect, CliError> {
@@ -1630,7 +1657,7 @@ const USAGE: &str = "\
 GreenTyper Runtime\n\
 \n\
 Usage:\n\
-  greentyper app-server --stdio\n\
+  greentyper app-server --stdio [--ledger PATH]\n\
   greentyper tui [--ledger PATH]\n\
   greentyper headless [--ledger PATH] [--preset ID | --dialect DIALECT] [--tool local.echo] --input TEXT\n\
   greentyper resume [--ledger PATH] [--tool local.echo]\n\

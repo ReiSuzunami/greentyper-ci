@@ -453,9 +453,19 @@ bounded stdio stream. Secrets are moved into the zeroing vault value, the owned
 request frame is scrubbed, responses are status-only, and non-Windows platform
 vaults fail closed. Credential operations add no Provider request or Runtime,
 Team, Tool, Agent, or approval authority.
+A third contiguous App Server slice adds local read-only operational inspection.
+`runtime.status` projects bounded recovery facts without item text or block
+reasons. `runtime.stats` reuses revision/as-of-bound summary and Attempt paging.
+`agent.list` reuses the redacted Agent Center projection, while `tool.status`
+returns only call and Agent numbers, Tool/status, expiry, and result digest.
+Missing state creates nothing; incomplete product sidecars fail closed and the
+stream remains usable; Runtime, Team, and Tool Ledger bytes stay unchanged.
+These independently read projections do not add Provider calls, credential
+lookup, Runtime/Team/Tool mutation, approval, delivery, or acknowledgement.
 
 This does not complete Phase 3. Audited Windows ConPTY behavior, broader
-multi-Tool/App Server approval interaction, automatic/background snapshot refresh, rendered secret binding,
+multi-Tool/App Server approval and Runtime-control interaction,
+automatic/background snapshot refresh, rendered secret binding,
 custom-template/starter-preset workflow, live catalog discovery and Recent
 evidence, automatic Context View/token-source
 projection, provider-reported

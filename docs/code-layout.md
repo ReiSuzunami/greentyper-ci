@@ -85,12 +85,18 @@ approval context until Escape, Approve, or Deny. The
 terminal never converts an Agent ID into authority, and it delegates approval,
 effect ordering, denial, and delivery acknowledgement back to the Kernel.
 The private App Server module owns a bounded newline-delimited JSON stdio loop
-over the existing Config Runtime. It keeps at most 64 connection-local Drafts,
+over the existing Config Runtime and fixed startup Runtime Ledger path. It keeps
+at most 64 connection-local Drafts,
 maps typed values and fixed public errors, rejects secret reads, and delegates
 validation, revision CAS, backup, and atomic commit policy to core instead of
 reimplementing it. Its write-only credential operations delegate origin-bound
 bind/replace/test/forget policy to the credential adapter, scrub the owned input
 frame, return status only, and never acquire Provider or Agent authority.
+Its read-only Runtime status/Usage, Agent Team, and Tool status operations call
+existing strict inspection adapters and then apply narrow wire projections.
+They never create or repair Ledgers, return Runtime/Team/Tool text payloads, or
+acquire Runtime, Agent, Tool, approval, delivery, or Provider authority. The
+three Ledgers are inspected independently, not as a transactional snapshot.
 Project/new-Agent Preset defaults,
 richer cache distributions, and Agent lifecycle actions remain outside that
 browser boundary. The Stats browser already exposes cached Turn aggregates and
@@ -98,8 +104,9 @@ per-Turn Provider/Model/Dialect/Policy distributions without adding a write or
 Provider authority path.
 Section-filtered typed remove
 routes render exact Config Object deletion confirmations; secret storage stays
-behind the credential adapter. Broader multi-Tool policy, App Server Runtime and
-approval control, and an audited Windows ConPTY wrapper remain pending. Platform wrappers for process, credential, transport,
+behind the credential adapter. Broader multi-Tool policy, App Server Runtime
+mutation and approval control, and an audited Windows ConPTY wrapper remain
+pending. Platform wrappers for process, credential, transport,
 and eventually terminal facilities remain private to
 this package unless a second real caller proves a smaller shared package is
 needed.

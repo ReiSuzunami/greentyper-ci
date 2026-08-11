@@ -167,7 +167,12 @@ acknowledgement succeeds. Recovery or resolution failures return to inspectable
 blocker state; an acknowledgement failure keeps the same output visible for
 retry.
 
-Still pending: broader multi-Tool TUI policy and App Server approval/result presentation,
+The local stdio App Server now has a redacted read-only `tool.status` projection
+with Call/Agent/Tool/status, approval expiry, and terminal digest only. It does
+not expose arguments, resources, call identity strings, or reasons and cannot
+approve, deny, reconcile, or execute a call.
+
+Still pending: broader multi-Tool TUI policy and App Server approval/result mutation,
 caller-selected process policy, complete Windows Job kill-on-close and memory-
 limit evidence on the Target Machine, filesystem/network/MCP adapters,
 credential-vault integration for Tools, multiple Provider Tool calls,
