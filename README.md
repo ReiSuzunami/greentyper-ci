@@ -332,9 +332,12 @@ browser never reads credentials, probes a Provider, writes Config or Ledger
 state, or applies a Preset to an Agent; current-Agent next-Turn application
 remains pending.
 `/stats` now browses the frozen startup Usage snapshot. It shows 1-hour, 1-day,
-and 7-day summaries, selects durable attempts with Up/Down, and opens bounded
-per-attempt provider, model, policy, token, cost, outcome, and timing detail
-with Enter. It does not refresh live, mutate Config, or append to the Ledger.
+and 7-day summaries. Tab and Shift-Tab move across Attempts, current Thread,
+Agent, Team, Named Window, and Token & Cache groups; Up/Down selects a row and
+Enter opens bounded detail. Attempt detail includes provider, model, policy,
+token, cost, outcome, and timing facts. Aggregate detail preserves exact,
+estimated, unknown, and overflow token/cost states. It does not refresh live,
+mutate Config, or append to the Ledger.
 `/agent` now browses a frozen, read-only Team sidecar projection. Up/Down selects
 canonical Agents and Enter shows status, Task identity and state, budgets,
 reservations, and bounded metadata counts. It never renders Task titles,
@@ -352,8 +355,9 @@ workflow, or persistent live catalog discovery. Live inference conformance,
 reconnect/retry, OpenCode Go Messages execution,
 Messages reasoning blocks, Preset context/fallback execution, richer approval
 presentation, broader Provider and Tool adapters,
-Workspace, current-Agent Preset application, richer Usage aggregate browsing,
-live Agent refresh and lifecycle actions, and App Server work remain. The loopback Provider tracer remains
+Workspace, current-Agent Preset application, dedicated Turn Usage navigation,
+richer cache distributions, live Agent refresh and lifecycle actions, and App
+Server work remain. The loopback Provider tracer remains
 an internal harness; `local.echo` is intentionally a fixed opt-in command rather
 than a general process runner. The file Ledger remains
 provisional. The acceptance runner can emit bound raw evidence,

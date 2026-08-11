@@ -70,8 +70,8 @@ projections. They provide bounded query/group/row/detail navigation without
 Config, Ledger, Provider, credential, or Agent mutation. Team inspection uses a
 shared lock, never creates or repairs state, exposes no Agent Session authority,
 and fails closed on corruption or incomplete Product sidecars. Live refresh,
-current-Agent Preset application, richer Usage aggregate screens, and Agent
-lifecycle actions remain outside that browser boundary.
+current-Agent Preset application, dedicated Turn Usage aggregates, richer cache
+distributions, and Agent lifecycle actions remain outside that browser boundary.
 Section-filtered typed remove
 routes render exact Config Object deletion confirmations; secret storage stays
 behind the credential adapter. Approval interaction, live refresh, the App

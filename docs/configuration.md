@@ -231,11 +231,13 @@ user path and `.greentyper/config.toml` in the current project.
 The current headless `stats` command reads the immutable Runtime usage
 projection and accepts an optional Unix-millisecond `--at` instant for
 deterministic rolling-window queries. TUI `/stats` now reads the same frozen
-startup projection, renders 1-hour, 1-day, and 7-day summaries, and browses
-bounded per-attempt detail without writing the Ledger. Live refresh and richer
-Thread, Agent, Team, and named-window navigation remain Phase 3 work. Existing
-`/config stats-window` field routes use the rendered schema editor described
-above.
+startup projection. Tab and Shift-Tab move across Attempts, current Thread,
+Agent, Team, Named Window, and Token & Cache groups; Up/Down selects a row and
+Enter opens bounded detail. The browser renders 1-hour, 1-day, and 7-day
+summaries without writing the Runtime, Team, or Tool Ledger. Live refresh,
+dedicated Turn aggregates, and richer cache distributions remain Phase 3 work.
+Existing `/config stats-window` field routes use the rendered schema editor
+described above.
 
 TUI `/agent` uses shared read-only replay of the dedicated Team sidecar. It
 lists canonical Agent IDs, parent and Task IDs, lifecycle and Task state,
@@ -539,9 +541,11 @@ Usage Windows are half-open intervals: the example includes 10:00 and excludes 2
 The statusline may show a compact selected window such as `work 87.2K/$1.43`.
 The current frozen `/stats` browser presents rolling summaries and durable
 attempt detail with Provider Profile, requested and observed model, reasoning
-effort, service tier, tokens, cost, outcome, and timestamps. Dedicated Turn,
-Thread, Agent, Team, named-window, token-class, and cache-distribution views
-remain target behavior.
+effort, service tier, tokens, cost, outcome, and timestamps. It also presents
+current Thread, Agent, Team, and named-window rollups plus rolling token-class,
+cache-read, and cache-write quantities. Aggregate labels preserve exact,
+estimated, unknown-record, and overflow states. Dedicated Turn aggregates,
+richer cache distributions, and live refresh remain target behavior.
 
 The current Runtime implements durable Usage Attempts, cached rollups, the
 headless JSON projection, schema-owned Price Schedule objects, and immutable

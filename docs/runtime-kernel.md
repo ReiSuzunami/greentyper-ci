@@ -369,15 +369,17 @@ charges still require a future dedicated authority path.
   dry-run validation, atomic commit path, interaction controller, Provider
   Profile candidate/connection-test flow, and deterministic viewport-row
   projection are present.
-- Live terminal-backed Usage refresh and richer aggregate navigation,
+- Live terminal-backed Usage refresh, dedicated Turn aggregates, and richer
+  cache distributions,
   automatic Context View construction/compaction, provider-reported charge
   and subscription-quota values, richer observed model/effort/tier
   metadata, and FMDev P6 measurements. The durable attempts, cached rollups,
   pinned Usage Windows, revision-bound summary/page `stats` projections, and
   terminal-neutral width-degradation and Context Pressure projection contracts
-  are present. The first Direct VT tracer now browses the frozen rolling Usage
-  summaries and durable attempt details, but it does not refresh them or expose
-  dedicated Thread, Agent-usage, Team-usage, or named-window aggregate screens.
+  are present. The Direct VT tracer now browses the frozen rolling Usage
+  summaries, durable attempt details, current Thread, Agent-usage, Team-usage,
+  named-window, and rolling token/cache aggregate screens. It does not refresh
+  them or expose a dedicated Turn aggregate screen.
   The separate `/agent` browser exposes frozen Team orchestration state, not a
   Usage aggregate or mutation surface. It can also
   persist every user-scope Config Schema field, can create a complete Provider

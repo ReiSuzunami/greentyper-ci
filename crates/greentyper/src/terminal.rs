@@ -470,6 +470,7 @@ enum TerminalIntent {
     MoveModelGroup(isize),
     MoveModelSelection(isize),
     ToggleModelDetail,
+    MoveStatsGroup(isize),
     MoveStatsSelection(isize),
     ToggleStatsDetail,
     MoveAgentSelection(isize),
@@ -600,6 +601,12 @@ impl TerminalInputState {
             }
             TerminalInputEvent::Enter if context == TerminalInputContext::Stats => {
                 TerminalIntent::ToggleStatsDetail
+            }
+            TerminalInputEvent::Tab if context == TerminalInputContext::Stats => {
+                TerminalIntent::MoveStatsGroup(1)
+            }
+            TerminalInputEvent::BackTab if context == TerminalInputContext::Stats => {
+                TerminalIntent::MoveStatsGroup(-1)
             }
             TerminalInputEvent::Up if context == TerminalInputContext::AgentCenter => {
                 TerminalIntent::MoveAgentSelection(-1)
@@ -871,6 +878,11 @@ impl TerminalSession {
             TerminalIntent::MoveStatsSelection(offset) => {
                 let view = view.ok_or(TerminalError::ViewModelRequired)?;
                 self.controller.move_stats_selection(&view.stats, offset);
+                self.notice = None;
+                Ok(TerminalLoopOutcome::Redraw)
+            }
+            TerminalIntent::MoveStatsGroup(offset) => {
+                self.controller.move_stats_group(offset);
                 self.notice = None;
                 Ok(TerminalLoopOutcome::Redraw)
             }
@@ -1749,10 +1761,11 @@ mod tests {
     };
     use greentyper_core::pricing::PriceScheduleSource;
     use greentyper_core::provider::{
-        DeterministicProvider, ProviderDialect, ProviderPricingSource, ProviderProfileSnapshot,
+        ProviderDialect, ProviderError, ProviderEvent, ProviderPricingSource,
+        ProviderProfileSnapshot, ProviderRequest, ProviderRuntime, UsageRecord,
     };
-    use greentyper_core::runtime::RuntimeKernel;
-    use greentyper_core::usage::UsageWeekday;
+    use greentyper_core::runtime::{ProviderTurnOutcome, RuntimeKernel};
+    use greentyper_core::usage::{UsageWeekday, UsageWindow};
 
     use crate::presentation::{PresentationScreenView, build_smoke_view};
     use crate::provider_connection::{
@@ -1765,6 +1778,25 @@ mod tests {
         TerminalSession, TerminalSurface, Viewport, build_terminal_view, map_crossterm_event,
         run_terminal_loop, run_terminal_loop_with_connection_tester,
     };
+
+    struct CompleteStatsUsageProvider;
+
+    impl ProviderRuntime for CompleteStatsUsageProvider {
+        fn run(&mut self, _request: &ProviderRequest) -> Result<Vec<ProviderEvent>, ProviderError> {
+            Ok(vec![
+                ProviderEvent::TextDelta("usage recorded".to_owned()),
+                ProviderEvent::Completed(UsageRecord::new(
+                    Some(100),
+                    Some(10),
+                    Some(5),
+                    Some(20),
+                    Some(2),
+                    Some(120),
+                    None,
+                )?),
+            ])
+        }
+    }
 
     static NEXT_TEMP: AtomicU64 = AtomicU64::new(1);
 
@@ -2177,20 +2209,68 @@ dialect = "responses"
     fn terminal_loop_browses_frozen_stats_without_mutating_the_ledger() {
         let root = terminal_test_root("stats-browser");
         let ledger = root.join("runtime.ledger");
+        let team_ledger = terminal_sidecar_path(&ledger, "team");
+        let tool_ledger = terminal_sidecar_path(&ledger, "tool");
         let paths = ConfigPaths::new(root.join("user.toml"), root.join("project.toml"));
         std::fs::create_dir_all(&root).expect("create stats browser fixture directory");
-        let mut runtime = RuntimeKernel::open(&ledger).expect("open stats runtime");
-        let mut provider = DeterministicProvider::default();
+        let (mut runtime, _) =
+            RuntimeKernel::open_with_team_and_tools(&ledger, &team_ledger, &tool_ledger, 1)
+                .expect("open stats runtime");
+        let root_commit = runtime
+            .dispatch_team(TeamCommand::AdmitRoot {
+                task: TaskSpec::new("record usage", TaskScope::default()),
+                budget: ResourceBudget::new(1_000, 2),
+                capabilities: CapabilitySnapshot::default(),
+            })
+            .expect("admit stats root Agent");
+        let root_session = match root_commit.commit.outcome {
+            CommandOutcome::RootAdmitted { session, .. } => session,
+            other => panic!("unexpected root outcome: {other:?}"),
+        };
+        runtime
+            .acknowledge_team_operation(root_commit.operation)
+            .expect("acknowledge stats root admission");
+        let usage_days = [
+            UsageWeekday::Mon,
+            UsageWeekday::Tue,
+            UsageWeekday::Wed,
+            UsageWeekday::Thu,
+            UsageWeekday::Fri,
+            UsageWeekday::Sat,
+            UsageWeekday::Sun,
+        ];
+        let usage_windows = vec![
+            UsageWindow::resolve("day-am", "00:00", "12:00", usage_days, "Etc/UTC")
+                .expect("resolve morning usage window"),
+            UsageWindow::resolve("day-pm", "12:00", "00:00", usage_days, "Etc/UTC")
+                .expect("resolve evening usage window"),
+        ];
+        let mut provider = CompleteStatsUsageProvider;
         for input in ["first usage attempt", "second usage attempt"] {
-            let output = runtime
-                .execute(&ConfigLayers::default(), input, &mut provider)
-                .expect("execute stats fixture turn");
+            let output = match runtime
+                .execute_provider_turn_with_usage_windows(
+                    root_session,
+                    &ConfigLayers::default(),
+                    usage_windows.clone(),
+                    input,
+                    &mut provider,
+                    |_| unreachable!("deterministic provider does not request a Tool"),
+                )
+                .expect("execute stats fixture turn")
+            {
+                ProviderTurnOutcome::Prepared(output) => output,
+                ProviderTurnOutcome::ApprovalRequired(_) => {
+                    panic!("deterministic provider unexpectedly requested approval")
+                }
+            };
             runtime
                 .acknowledge(output.delivery())
                 .expect("acknowledge stats fixture turn");
         }
         drop(runtime);
         let before = std::fs::read(&ledger).expect("read stats ledger");
+        let team_before = std::fs::read(&team_ledger).expect("read stats Team Ledger");
+        let tool_before = std::fs::read(&tool_ledger).expect("read stats Tool Ledger");
         let mut config =
             ConfigRuntime::open(paths.clone(), ConfigDocument::empty()).expect("config runtime");
         let view = build_terminal_view(&ledger, &config, "/").expect("stats browser view");
@@ -2204,6 +2284,26 @@ dialect = "responses"
         events.extend([
             Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
             Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Resize(80, 23),
+            Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Resize(80, 23),
+            Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Resize(80, 22),
+            Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Resize(80, 21),
+            Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Resize(80, 20),
+            Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
             Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
             Event::Resize(80, 24),
             Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL)),
@@ -2220,7 +2320,65 @@ dialect = "responses"
         assert!(output.contains("turn 2"));
         assert!(output.contains("outcome succeeded"));
         assert!(output.contains("deterministic-v1"));
+        assert!(output.contains("Stats / Thread"));
+        assert!(output.contains("thread 1"));
+        assert!(output.contains("attempts 2"));
+        assert!(output.contains("Stats / Agent"));
+        assert!(output.contains("agent 1"));
+        assert!(output.contains("Stats / Team"));
+        assert!(output.contains("team usage"));
+        assert!(output.contains("Stats / Named Window"));
+        assert!(output.contains("window day-"));
+        assert!(output.contains("Stats / Token & Cache"));
+        assert!(output.contains("period 1h"));
+        let mut token_detail =
+            TerminalSession::new("/stats", 80, 24).expect("token detail session");
+        token_detail
+            .handle_with_view_and_connection_tester(
+                TerminalInputEvent::Enter,
+                Some(&mut config),
+                Some(&view),
+                None,
+            )
+            .expect("activate Stats for token detail");
+        for _ in 0..5 {
+            token_detail
+                .handle_with_view_and_connection_tester(
+                    TerminalInputEvent::Tab,
+                    Some(&mut config),
+                    Some(&view),
+                    None,
+                )
+                .expect("advance Stats group");
+        }
+        token_detail
+            .handle_with_view_and_connection_tester(
+                TerminalInputEvent::Enter,
+                Some(&mut config),
+                Some(&view),
+                None,
+            )
+            .expect("open token detail");
+        let token_layout = token_detail
+            .layout(Some(&config), &view)
+            .expect("token detail layout");
+        let token_rows = token_layout
+            .body()
+            .iter()
+            .map(|row| row.text())
+            .collect::<Vec<_>>();
+        assert!(token_rows.contains(&"cached input 20"));
+        assert!(token_rows.contains(&"cache write input 10"));
+        assert!(token_rows.contains(&"reasoning output 4"));
         assert_eq!(std::fs::read(&ledger).expect("reread stats ledger"), before);
+        assert_eq!(
+            std::fs::read(&team_ledger).expect("reread stats Team Ledger"),
+            team_before
+        );
+        assert_eq!(
+            std::fs::read(&tool_ledger).expect("reread stats Tool Ledger"),
+            tool_before
+        );
         assert!(!paths.user().exists());
         assert!(!paths.project().exists());
         std::fs::remove_dir_all(root).expect("remove stats browser fixture");

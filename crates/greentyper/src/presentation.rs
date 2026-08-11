@@ -281,6 +281,53 @@ impl ModelSelectorGroup {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum StatsGroup {
+    Attempts,
+    Thread,
+    Agent,
+    Team,
+    NamedWindow,
+    TokenCache,
+}
+
+impl StatsGroup {
+    const ALL: [Self; 6] = [
+        Self::Attempts,
+        Self::Thread,
+        Self::Agent,
+        Self::Team,
+        Self::NamedWindow,
+        Self::TokenCache,
+    ];
+
+    fn moved(self, offset: isize) -> Self {
+        let index = Self::ALL
+            .iter()
+            .position(|group| *group == self)
+            .expect("Stats group is registered");
+        let len = isize::try_from(Self::ALL.len()).expect("Stats group count fits isize");
+        let next = usize::try_from(
+            (isize::try_from(index).expect("Stats group index fits isize") + offset)
+                .rem_euclid(len),
+        )
+        .expect("wrapped Stats group index is non-negative");
+        Self::ALL[next]
+    }
+
+    fn entry_count(self, stats: &RuntimeUsageSnapshot) -> usize {
+        match self {
+            Self::Attempts => stats.attempts().len(),
+            Self::Thread => usize::from(stats.thread().is_some()),
+            Self::Agent => stats.agents().len(),
+            Self::Team => usize::from(stats.team().is_some()),
+            Self::NamedWindow => stats.named_windows().len(),
+            Self::TokenCache => 3,
+        }
+    }
+}
+
 impl ModelSelectorEntryView {
     fn configured_preset(preset: ModelPresetView) -> Self {
         Self {
@@ -716,6 +763,7 @@ enum PresentationState {
         detail: bool,
     },
     Stats {
+        group: StatsGroup,
         selected: usize,
         detail: bool,
     },
@@ -948,7 +996,12 @@ impl PresentationController {
         stats: &Availability<RuntimeUsageSnapshot>,
         offset: isize,
     ) {
-        let PresentationState::Stats { selected, detail } = &mut self.state else {
+        let PresentationState::Stats {
+            group,
+            selected,
+            detail,
+        } = &mut self.state
+        else {
             return;
         };
         let Availability::Known(stats) = stats else {
@@ -956,24 +1009,38 @@ impl PresentationController {
             *detail = false;
             return;
         };
-        if stats.attempts().is_empty() {
+        let entry_count = group.entry_count(stats);
+        if entry_count == 0 {
             *selected = 0;
         } else {
-            *selected = selected
-                .saturating_add_signed(offset)
-                .min(stats.attempts().len() - 1);
+            *selected = selected.saturating_add_signed(offset).min(entry_count - 1);
         }
         *detail = false;
     }
 
+    pub(crate) fn move_stats_group(&mut self, offset: isize) {
+        if let PresentationState::Stats {
+            group,
+            selected,
+            detail,
+        } = &mut self.state
+        {
+            *group = group.moved(offset);
+            *selected = 0;
+            *detail = false;
+        }
+    }
+
     pub(crate) fn toggle_stats_detail(&mut self, stats: &Availability<RuntimeUsageSnapshot>) {
-        let PresentationState::Stats { selected, detail } = &mut self.state else {
+        let PresentationState::Stats {
+            group,
+            selected,
+            detail,
+        } = &mut self.state
+        else {
             return;
         };
-        if matches!(
-            stats,
-            Availability::Known(stats) if stats.attempts().get(*selected).is_some()
-        ) {
+        if matches!(stats, Availability::Known(stats) if *selected < group.entry_count(stats)) {
             *detail = !*detail;
         }
     }
@@ -1151,6 +1218,7 @@ impl PresentationController {
             }
             CommandTarget::Stats => {
                 self.state = PresentationState::Stats {
+                    group: StatsGroup::Attempts,
                     selected: 0,
                     detail: false,
                 };
@@ -1480,9 +1548,15 @@ impl PresentationController {
                 selected,
                 detail,
             }),
-            PresentationState::Stats { selected, detail } => {
-                Ok(PresentationScreenView::Stats { selected, detail })
-            }
+            PresentationState::Stats {
+                group,
+                selected,
+                detail,
+            } => Ok(PresentationScreenView::Stats {
+                group,
+                selected,
+                detail,
+            }),
             PresentationState::AgentCenter { selected, detail } => {
                 Ok(PresentationScreenView::AgentCenter { selected, detail })
             }
@@ -1592,6 +1666,7 @@ pub(crate) enum PresentationScreenView {
         detail: bool,
     },
     Stats {
+        group: StatsGroup,
         selected: usize,
         detail: bool,
     },
@@ -2015,9 +2090,11 @@ fn screen_rows(screen: &PresentationScreenView, view: &TuiViewModel) -> Vec<Layo
             selected,
             detail,
         } => model_selector_rows(&view.models, query, *group, *selected, *detail),
-        PresentationScreenView::Stats { selected, detail } => {
-            stats_rows(&view.stats, *selected, *detail)
-        }
+        PresentationScreenView::Stats {
+            group,
+            selected,
+            detail,
+        } => stats_rows(&view.stats, *group, *selected, *detail),
         PresentationScreenView::AgentCenter { selected, detail } => {
             agent_center_rows(&view.agents, *selected, *detail)
         }
@@ -2363,6 +2440,7 @@ fn availability_bool_label(value: &Availability<bool>) -> &'static str {
 
 fn stats_rows(
     stats: &Availability<RuntimeUsageSnapshot>,
+    group: StatsGroup,
     selected: usize,
     detail: bool,
 ) -> Vec<LayoutRowView> {
@@ -2372,6 +2450,21 @@ fn stats_rows(
             LayoutRowView::new("Usage unavailable", false),
         ];
     };
+    if group == StatsGroup::Thread {
+        return stats_thread_rows(stats, detail);
+    }
+    if group == StatsGroup::Agent {
+        return stats_agent_rows(stats, selected, detail);
+    }
+    if group == StatsGroup::Team {
+        return stats_team_rows(stats, detail);
+    }
+    if group == StatsGroup::NamedWindow {
+        return stats_named_window_rows(stats, selected, detail);
+    }
+    if group == StatsGroup::TokenCache {
+        return stats_token_cache_rows(stats, selected, detail);
+    }
     let attempts = stats.attempts();
     if detail && !attempts.is_empty() {
         return stats_attempt_detail_rows(&attempts[selected.min(attempts.len() - 1)]);
@@ -2409,6 +2502,248 @@ fn stats_rows(
         )
     }));
     rows
+}
+
+fn stats_token_cache_rows(
+    stats: &RuntimeUsageSnapshot,
+    selected: usize,
+    detail: bool,
+) -> Vec<LayoutRowView> {
+    let rollups = [
+        ("1h", stats.rolling().one_hour()),
+        ("1d", stats.rolling().one_day()),
+        ("7d", stats.rolling().seven_days()),
+    ];
+    let selected = selected.min(rollups.len() - 1);
+    let (period, rollup) = rollups[selected];
+    if detail {
+        return vec![
+            LayoutRowView::new("Stats / Token & Cache", false),
+            LayoutRowView::new(format!("period {period}"), false),
+            LayoutRowView::new(
+                format!(
+                    "input {}",
+                    usage_quantity_label(&rollup.input_tokens().into())
+                ),
+                false,
+            ),
+            LayoutRowView::new(
+                format!(
+                    "cached input {}",
+                    usage_quantity_label(&rollup.cached_input_tokens().into())
+                ),
+                false,
+            ),
+            LayoutRowView::new(
+                format!(
+                    "cache write input {}",
+                    usage_quantity_label(&rollup.cache_write_input_tokens().into())
+                ),
+                false,
+            ),
+            LayoutRowView::new(
+                format!(
+                    "output {}",
+                    usage_quantity_label(&rollup.output_tokens().into())
+                ),
+                false,
+            ),
+            LayoutRowView::new(
+                format!(
+                    "reasoning output {}",
+                    usage_quantity_label(&rollup.reasoning_output_tokens().into())
+                ),
+                false,
+            ),
+            LayoutRowView::new(
+                format!(
+                    "total {}",
+                    usage_quantity_label(&rollup.total_tokens().into())
+                ),
+                false,
+            ),
+        ];
+    }
+
+    let mut rows = vec![
+        LayoutRowView::new("Stats / Token & Cache", false),
+        LayoutRowView::new(format!("as of {} ms", stats.as_of().unix_millis()), false),
+    ];
+    rows.extend(
+        rollups
+            .into_iter()
+            .enumerate()
+            .map(|(index, (period, rollup))| {
+                let is_selected = index == selected;
+                LayoutRowView::new(
+                    format!(
+                        "{} {period} input {} | cached {} | write {} | total {}",
+                        if is_selected { '>' } else { ' ' },
+                        usage_quantity_label(&rollup.input_tokens().into()),
+                        usage_quantity_label(&rollup.cached_input_tokens().into()),
+                        usage_quantity_label(&rollup.cache_write_input_tokens().into()),
+                        usage_quantity_label(&rollup.total_tokens().into())
+                    ),
+                    is_selected,
+                )
+            }),
+    );
+    rows
+}
+
+fn stats_named_window_rows(
+    stats: &RuntimeUsageSnapshot,
+    selected: usize,
+    detail: bool,
+) -> Vec<LayoutRowView> {
+    let windows = stats.named_windows();
+    if windows.is_empty() {
+        return vec![
+            LayoutRowView::new("Stats / Named Window", false),
+            LayoutRowView::new("No named-window usage", false),
+        ];
+    }
+    let selected = selected.min(windows.len() - 1);
+    if detail {
+        let window = &windows[selected];
+        return stats_rollup_detail_rows(
+            "Stats / Named Window",
+            format!("window {}", window.window().id()),
+            window.usage(),
+        );
+    }
+    let mut rows = vec![
+        LayoutRowView::new("Stats / Named Window", false),
+        LayoutRowView::new(format!("as of {} ms", stats.as_of().unix_millis()), false),
+    ];
+    rows.extend(windows.iter().enumerate().map(|(index, window)| {
+        let is_selected = index == selected;
+        LayoutRowView::new(
+            format!(
+                "{} {}",
+                if is_selected { '>' } else { ' ' },
+                stats_rollup_label(&format!("window {}", window.window().id()), window.usage())
+            ),
+            is_selected,
+        )
+    }));
+    rows
+}
+
+fn stats_team_rows(stats: &RuntimeUsageSnapshot, detail: bool) -> Vec<LayoutRowView> {
+    let Some(team) = stats.team() else {
+        return vec![
+            LayoutRowView::new("Stats / Team", false),
+            LayoutRowView::new("No Team usage", false),
+        ];
+    };
+    if detail {
+        return stats_rollup_detail_rows("Stats / Team", "team usage".to_owned(), team);
+    }
+    vec![
+        LayoutRowView::new("Stats / Team", false),
+        LayoutRowView::new(format!("as of {} ms", stats.as_of().unix_millis()), false),
+        LayoutRowView::new(format!("> {}", stats_rollup_label("team", team)), true),
+    ]
+}
+
+fn stats_agent_rows(
+    stats: &RuntimeUsageSnapshot,
+    selected: usize,
+    detail: bool,
+) -> Vec<LayoutRowView> {
+    let agents = stats.agents();
+    if agents.is_empty() {
+        return vec![
+            LayoutRowView::new("Stats / Agent", false),
+            LayoutRowView::new("No Agent usage", false),
+        ];
+    }
+    let selected = selected.min(agents.len() - 1);
+    if detail {
+        let agent = &agents[selected];
+        return stats_rollup_detail_rows(
+            "Stats / Agent",
+            format!("agent {}", agent.id()),
+            agent.usage(),
+        );
+    }
+    let mut rows = vec![
+        LayoutRowView::new("Stats / Agent", false),
+        LayoutRowView::new(format!("as of {} ms", stats.as_of().unix_millis()), false),
+    ];
+    rows.extend(agents.iter().enumerate().map(|(index, agent)| {
+        let is_selected = index == selected;
+        LayoutRowView::new(
+            format!(
+                "{} {}",
+                if is_selected { '>' } else { ' ' },
+                stats_rollup_label(&format!("agent {}", agent.id()), agent.usage())
+            ),
+            is_selected,
+        )
+    }));
+    rows
+}
+
+fn stats_thread_rows(stats: &RuntimeUsageSnapshot, detail: bool) -> Vec<LayoutRowView> {
+    let Some(thread) = stats.thread() else {
+        return vec![
+            LayoutRowView::new("Stats / Thread", false),
+            LayoutRowView::new("No current thread", false),
+        ];
+    };
+    if detail {
+        return stats_rollup_detail_rows(
+            "Stats / Thread",
+            format!("thread {}", thread.id()),
+            thread.usage(),
+        );
+    }
+    vec![
+        LayoutRowView::new("Stats / Thread", false),
+        LayoutRowView::new(format!("as of {} ms", stats.as_of().unix_millis()), false),
+        LayoutRowView::new(
+            format!(
+                "> {}",
+                stats_rollup_label(&format!("thread {}", thread.id()), thread.usage())
+            ),
+            true,
+        ),
+    ]
+}
+
+fn stats_rollup_detail_rows(
+    title: &'static str,
+    identity: String,
+    rollup: &UsageRollup,
+) -> Vec<LayoutRowView> {
+    let summary = UsageSummaryView::from(rollup);
+    vec![
+        LayoutRowView::new(title, false),
+        LayoutRowView::new(identity, false),
+        LayoutRowView::new(
+            format!(
+                "attempts {} | succeeded {} | failed {} | interrupted {}",
+                rollup.attempts(),
+                rollup.succeeded(),
+                rollup.failed(),
+                rollup.interrupted()
+            ),
+            false,
+        ),
+        LayoutRowView::new(format!("usage records {}", rollup.usage_records()), false),
+        LayoutRowView::new(
+            format!(
+                "tokens input {} | output {} | total {}",
+                usage_quantity_label(&rollup.input_tokens().into()),
+                usage_quantity_label(&rollup.output_tokens().into()),
+                usage_quantity_label(&summary.total_tokens)
+            ),
+            false,
+        ),
+        LayoutRowView::new(cost_label(&Availability::Known(summary)), false),
+    ]
 }
 
 fn stats_rollup_label(label: &str, rollup: &UsageRollup) -> String {
