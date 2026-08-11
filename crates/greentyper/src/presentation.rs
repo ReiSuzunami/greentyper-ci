@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
 
-use greentyper_core::agent_team::{TaskStatus, TeamOperationStatus};
+use greentyper_core::agent_team::{AgentStatus, TaskStatus, TeamOperationStatus};
 use greentyper_core::config::{
     CommandMatchKind, CommandQueryError, CommandTarget, ConfigCommit, ConfigEditorError,
     ConfigEditorOperation, ConfigEditorSession, ConfigEditorView, ConfigErrorCategory,
@@ -519,12 +519,82 @@ pub(crate) struct PresentationSources<'a> {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub(crate) struct AgentCenterEntryView {
+    id: u64,
+    parent: Option<u64>,
+    status: &'static str,
+    task: u64,
+    task_status: &'static str,
+    dependency_count: usize,
+    token_budget: u64,
+    tool_budget: u32,
+    reserved_tokens: u64,
+    reserved_tools: u32,
+    capability_count: usize,
+    scope_count: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub(crate) struct AgentCenterView {
+    revision: u64,
+    ledger_transaction: u64,
+    ledger_sequence: u64,
+    recovered_tail_bytes: u64,
+    operations_awaiting_acknowledgement: usize,
+    message_count: usize,
+    agents: Vec<AgentCenterEntryView>,
+}
+
+impl From<&KernelTeamSnapshot> for AgentCenterView {
+    fn from(team: &KernelTeamSnapshot) -> Self {
+        let projection = &team.projection;
+        let agents = projection
+            .agents
+            .iter()
+            .map(|agent| {
+                let task = projection.task(agent.task);
+                AgentCenterEntryView {
+                    id: agent.id.get(),
+                    parent: agent.parent.map(|parent| parent.get()),
+                    status: agent_status_label(agent.status),
+                    task: agent.task.get(),
+                    task_status: task.map_or("unavailable", |task| task_status_label(&task.status)),
+                    dependency_count: task.map_or(0, |task| task.dependencies.len()),
+                    token_budget: agent.budget.token_units,
+                    tool_budget: agent.budget.tool_calls,
+                    reserved_tokens: agent.reserved_budget.token_units,
+                    reserved_tools: agent.reserved_budget.tool_calls,
+                    capability_count: agent.capabilities.iter().count(),
+                    scope_count: task.map_or(0, |task| task.scope.iter().count()),
+                }
+            })
+            .collect();
+        Self {
+            revision: projection.revision.get(),
+            ledger_transaction: team.ledger_head.transaction,
+            ledger_sequence: team.ledger_head.sequence,
+            recovered_tail_bytes: team.recovered_tail_bytes,
+            operations_awaiting_acknowledgement: team
+                .operations
+                .iter()
+                .filter(|operation| {
+                    operation.status == TeamOperationStatus::CommittedAwaitingAcknowledgement
+                })
+                .count(),
+            message_count: projection.messages.len(),
+            agents,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub(crate) struct TuiViewModel {
     pub(crate) slash: SlashPanelView,
     pub(crate) statusline: StatuslineView,
     pub(crate) blockers: Vec<BlockerView>,
     pub(crate) models: ModelSelectorView,
     pub(crate) stats: Availability<RuntimeUsageSnapshot>,
+    pub(crate) agents: Availability<AgentCenterView>,
 }
 
 impl TuiViewModel {
@@ -540,6 +610,10 @@ impl TuiViewModel {
         let stats = sources
             .usage
             .cloned()
+            .map_or(Availability::Unknown, Availability::Known);
+        let agents = sources
+            .team
+            .map(AgentCenterView::from)
             .map_or(Availability::Unknown, Availability::Known);
         let blockers = build_blockers(&sources);
         let blocker_count = if sources.team.is_some() && sources.tools.is_some() {
@@ -577,6 +651,7 @@ impl TuiViewModel {
             blockers,
             models,
             stats,
+            agents,
         })
     }
 }
@@ -644,7 +719,10 @@ enum PresentationState {
         selected: usize,
         detail: bool,
     },
-    AgentCenter,
+    AgentCenter {
+        selected: usize,
+        detail: bool,
+    },
 }
 
 struct ActiveConfigObjectCreate {
@@ -704,6 +782,10 @@ impl PresentationController {
 
     pub(crate) const fn is_stats(&self) -> bool {
         matches!(self.state, PresentationState::Stats { .. })
+    }
+
+    pub(crate) const fn is_agent_center(&self) -> bool {
+        matches!(self.state, PresentationState::AgentCenter { .. })
     }
 
     pub(crate) const fn is_config_object_selector(&self) -> bool {
@@ -896,6 +978,41 @@ impl PresentationController {
         }
     }
 
+    pub(crate) fn move_agent_selection(
+        &mut self,
+        agents: &Availability<AgentCenterView>,
+        offset: isize,
+    ) {
+        let PresentationState::AgentCenter { selected, detail } = &mut self.state else {
+            return;
+        };
+        let Availability::Known(agents) = agents else {
+            *selected = 0;
+            *detail = false;
+            return;
+        };
+        if agents.agents.is_empty() {
+            *selected = 0;
+        } else {
+            *selected = selected
+                .saturating_add_signed(offset)
+                .min(agents.agents.len() - 1);
+        }
+        *detail = false;
+    }
+
+    pub(crate) fn toggle_agent_detail(&mut self, agents: &Availability<AgentCenterView>) {
+        let PresentationState::AgentCenter { selected, detail } = &mut self.state else {
+            return;
+        };
+        if matches!(
+            agents,
+            Availability::Known(agents) if agents.agents.get(*selected).is_some()
+        ) {
+            *detail = !*detail;
+        }
+    }
+
     pub(crate) fn activate(
         &mut self,
         runtime: &mut ConfigRuntime,
@@ -1039,7 +1156,10 @@ impl PresentationController {
                 };
             }
             CommandTarget::AgentCenter => {
-                self.state = PresentationState::AgentCenter;
+                self.state = PresentationState::AgentCenter {
+                    selected: 0,
+                    detail: false,
+                };
             }
         }
         Ok(())
@@ -1136,7 +1256,8 @@ impl PresentationController {
 
     pub(crate) fn back(&mut self) -> Result<(), PresentationControllerError> {
         if let PresentationState::ModelSelector { detail, .. }
-        | PresentationState::Stats { detail, .. } = &mut self.state
+        | PresentationState::Stats { detail, .. }
+        | PresentationState::AgentCenter { detail, .. } = &mut self.state
             && *detail
         {
             *detail = false;
@@ -1362,7 +1483,9 @@ impl PresentationController {
             PresentationState::Stats { selected, detail } => {
                 Ok(PresentationScreenView::Stats { selected, detail })
             }
-            PresentationState::AgentCenter => Ok(PresentationScreenView::AgentCenter),
+            PresentationState::AgentCenter { selected, detail } => {
+                Ok(PresentationScreenView::AgentCenter { selected, detail })
+            }
         }
     }
 
@@ -1382,6 +1505,7 @@ impl PresentationController {
             PresentationScreenView::ConfigCenter { .. }
                 | PresentationScreenView::ModelSelector { detail: false, .. }
                 | PresentationScreenView::Stats { detail: false, .. }
+                | PresentationScreenView::AgentCenter { detail: false, .. }
         ) {
             truncate_rows_keeping_selection(&mut body, body_capacity);
         } else {
@@ -1471,7 +1595,10 @@ pub(crate) enum PresentationScreenView {
         selected: usize,
         detail: bool,
     },
-    AgentCenter,
+    AgentCenter {
+        selected: usize,
+        detail: bool,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -1891,7 +2018,163 @@ fn screen_rows(screen: &PresentationScreenView, view: &TuiViewModel) -> Vec<Layo
         PresentationScreenView::Stats { selected, detail } => {
             stats_rows(&view.stats, *selected, *detail)
         }
-        PresentationScreenView::AgentCenter => vec![LayoutRowView::new("Agents", false)],
+        PresentationScreenView::AgentCenter { selected, detail } => {
+            agent_center_rows(&view.agents, *selected, *detail)
+        }
+    }
+}
+
+fn agent_center_rows(
+    agents: &Availability<AgentCenterView>,
+    selected: usize,
+    detail: bool,
+) -> Vec<LayoutRowView> {
+    let Availability::Known(agents) = agents else {
+        return vec![
+            LayoutRowView::new("Agents", false),
+            LayoutRowView::new("Agent Team unavailable", false),
+        ];
+    };
+    if detail && !agents.agents.is_empty() {
+        return agent_detail_rows(
+            agents,
+            &agents.agents[selected.min(agents.agents.len() - 1)],
+        );
+    }
+
+    let mut rows = vec![
+        LayoutRowView::new("Agents", false),
+        LayoutRowView::new(
+            format!(
+                "revision {} | transactions {} | sequence {}",
+                agents.revision, agents.ledger_transaction, agents.ledger_sequence
+            ),
+            false,
+        ),
+        LayoutRowView::new(
+            format!(
+                "{} agents | {} messages | {} operations awaiting acknowledgement",
+                agents.agents.len(),
+                agents.message_count,
+                agents.operations_awaiting_acknowledgement
+            ),
+            false,
+        ),
+    ];
+    if agents.recovered_tail_bytes > 0 {
+        rows.push(LayoutRowView::new(
+            format!(
+                "recovery required | incomplete tail {} bytes",
+                agents.recovered_tail_bytes
+            ),
+            false,
+        ));
+    }
+    if agents.agents.is_empty() {
+        rows.push(LayoutRowView::new("No agents", false));
+        return rows;
+    }
+    let selected = selected.min(agents.agents.len() - 1);
+    rows.extend(agents.agents.iter().enumerate().map(|(index, agent)| {
+        LayoutRowView::new(
+            format!(
+                "{} agent {} | {} | task {} | {}",
+                if index == selected { '>' } else { ' ' },
+                agent.id,
+                agent.status,
+                agent.task,
+                agent.task_status
+            ),
+            index == selected,
+        )
+    }));
+    rows
+}
+
+fn agent_detail_rows(agents: &AgentCenterView, agent: &AgentCenterEntryView) -> Vec<LayoutRowView> {
+    vec![
+        LayoutRowView::new("Agents / Agent", false),
+        LayoutRowView::new(format!("agent {}", agent.id), false),
+        LayoutRowView::new(
+            format!(
+                "parent {} | status {}",
+                agent
+                    .parent
+                    .map_or_else(|| "root".to_owned(), |parent| parent.to_string()),
+                agent.status
+            ),
+            false,
+        ),
+        LayoutRowView::new(format!("task {}", agent.task), false),
+        LayoutRowView::new(
+            format!(
+                "task status {} | {} dependencies",
+                agent.task_status, agent.dependency_count
+            ),
+            false,
+        ),
+        LayoutRowView::new(
+            format!(
+                "budget {} tokens | {} tool calls",
+                agent.token_budget, agent.tool_budget
+            ),
+            false,
+        ),
+        LayoutRowView::new(
+            format!(
+                "reserved {} tokens | {} tool calls",
+                agent.reserved_tokens, agent.reserved_tools
+            ),
+            false,
+        ),
+        LayoutRowView::new(
+            format!(
+                "{} capabilities | {} scope labels",
+                agent.capability_count, agent.scope_count
+            ),
+            false,
+        ),
+        LayoutRowView::new(
+            format!(
+                "revision {} | {} messages | {} operations awaiting acknowledgement",
+                agents.revision, agents.message_count, agents.operations_awaiting_acknowledgement
+            ),
+            false,
+        ),
+        LayoutRowView::new(
+            if agents.recovered_tail_bytes == 0 {
+                "ledger complete".to_owned()
+            } else {
+                format!(
+                    "recovery required | incomplete tail {} bytes",
+                    agents.recovered_tail_bytes
+                )
+            },
+            false,
+        ),
+    ]
+}
+
+const fn agent_status_label(status: AgentStatus) -> &'static str {
+    match status {
+        AgentStatus::Dormant => "dormant",
+        AgentStatus::Active => "active",
+        AgentStatus::Blocked => "blocked",
+        AgentStatus::Succeeded => "succeeded",
+        AgentStatus::Failed => "failed",
+        AgentStatus::Cancelled => "cancelled",
+    }
+}
+
+const fn task_status_label(status: &TaskStatus) -> &'static str {
+    match status {
+        TaskStatus::Pending => "pending",
+        TaskStatus::Ready => "ready",
+        TaskStatus::Running => "running",
+        TaskStatus::Blocked { .. } => "blocked",
+        TaskStatus::Succeeded => "succeeded",
+        TaskStatus::Failed { .. } => "failed",
+        TaskStatus::Cancelled { .. } => "cancelled",
     }
 }
 

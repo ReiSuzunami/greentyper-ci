@@ -215,6 +215,8 @@ Panel.
 Likewise, `/model` browses configured Presets and release candidates while
 `/config model` edits preset definitions. Applying a browsed Preset to an Agent
 remains a separate target behavior.
+`/agent` browses the frozen Team sidecar projection. It is an inspection surface,
+not a route for lifecycle commands or Agent Session authority.
 
 Slash commands navigate and select scope; mutation occurs in a validated
 dialog. The current headless CLI provides `config schema`, `config get`,
@@ -234,6 +236,19 @@ bounded per-attempt detail without writing the Ledger. Live refresh and richer
 Thread, Agent, Team, and named-window navigation remain Phase 3 work. Existing
 `/config stats-window` field routes use the rendered schema editor described
 above.
+
+TUI `/agent` uses shared read-only replay of the dedicated Team sidecar. It
+lists canonical Agent IDs, parent and Task IDs, lifecycle and Task state,
+budgets, reservations, and only the counts of dependencies, capabilities,
+scopes, messages, and unacknowledged operations. Task titles, message bodies,
+terminal reasons, Completion Capsules, capability and scope labels, and
+process-local Agent Sessions are excluded from the presentation model. Missing
+Product sidecars produce an unavailable empty view without file creation. A
+complete Team prefix followed by an incomplete final frame remains visible with
+an explicit recovery-required byte count and is never repaired by the browser;
+checksum, schema, state, path, lock, or incomplete-sidecar failures stop before
+the terminal enters raw mode. The snapshot stays frozen for the TUI session and
+offers no dispatch, acknowledgement, approval, messaging, or lifecycle action.
 
 The product CLI also exposes `credential bind`, `replace`, `test`, and `forget`
 for one lowercase secure-store reference, Provider Profile, and Provider Origin.

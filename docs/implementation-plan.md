@@ -387,6 +387,14 @@ Usage projection. It renders rolling 1-hour, 1-day, and 7-day summaries plus
 selected durable-attempt detail. Real-key tests prove the Ledger bytes remain
 unchanged. Live refresh and richer aggregate navigation remain outside this
 slice.
+The root `/agent` route now supplies a read-only browser over a shared-lock Team
+sidecar inspection. It navigates canonical Agent rows and bounded detail without
+exposing message bodies, capability/scope labels, Completion Capsules, or Agent
+Session authority. Missing state creates nothing; incomplete final-frame bytes
+are reported without repair; corruption and incomplete Product sidecars fail
+closed. Real-key tests prove Runtime, Team, Tool, and Config bytes remain
+unchanged. Live refresh, lifecycle actions, Team-operation acknowledgement, and
+Workspace presentation remain outside this slice.
 
 This does not complete Phase 3. Audited Windows ConPTY behavior, approval
 interaction, live snapshot refresh, rendered secret binding,
@@ -395,8 +403,8 @@ discovery and Recent
 evidence, automatic Context View/token-source
 projection, provider-reported
 charge and subscription-quota accounting, richer observed Provider metadata,
-current-Agent Preset application, Agent Center data, richer Usage aggregate
-navigation, and the P0/P1/P2/P6
+current-Agent Preset application, richer Usage aggregate navigation, live Agent
+refresh and lifecycle actions, and the P0/P1/P2/P6
 performance evidence remain pending.
 
 Exit criteria:

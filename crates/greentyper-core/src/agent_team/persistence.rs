@@ -4,7 +4,7 @@ use std::fmt;
 use std::path::Path;
 
 use crate::ledger::{
-    DurabilityReceipt, EventData, FileLedger, LedgerError, LedgerHead, StoredEvent,
+    DurabilityReceipt, EventData, FileLedger, LedgerError, LedgerHead, ReplayReport, StoredEvent,
 };
 use crate::schema::SchemaKind;
 
@@ -24,6 +24,36 @@ pub struct DurableTeamRuntime {
     recovered_tail_bytes: u64,
 }
 
+/// Immutable projection recovered through a shared read-only Ledger lock.
+pub struct DurableTeamInspection {
+    snapshot: TeamSnapshot,
+    ledger_head: LedgerHead,
+    recovered_tail_bytes: u64,
+    operation_records: Vec<TeamOperationRecord>,
+}
+
+impl DurableTeamInspection {
+    #[must_use]
+    pub const fn snapshot(&self) -> &TeamSnapshot {
+        &self.snapshot
+    }
+
+    #[must_use]
+    pub const fn ledger_head(&self) -> LedgerHead {
+        self.ledger_head
+    }
+
+    #[must_use]
+    pub const fn recovered_tail_bytes(&self) -> u64 {
+        self.recovered_tail_bytes
+    }
+
+    #[must_use]
+    pub fn operation_records(&self) -> &[TeamOperationRecord] {
+        &self.operation_records
+    }
+}
+
 impl DurableTeamRuntime {
     pub fn open(
         path: impl AsRef<Path>,
@@ -33,25 +63,29 @@ impl DurableTeamRuntime {
             return Err(DurableTeamError::Team(TeamError::InvalidActiveAgentLimit));
         }
         let (ledger, report) = FileLedger::open(path).map_err(DurableTeamError::Ledger)?;
-        let events = report
-            .events
-            .iter()
-            .map(decode_stored_event)
-            .collect::<Result<Vec<_>, _>>()?;
-        let runtime =
-            TeamRuntime::recover(max_active_agents, events).map_err(DurableTeamError::Recovery)?;
-        let team_head = runtime_head(&runtime);
-        if team_head != report.head {
-            return Err(DurableTeamError::HeadMismatch {
-                ledger: report.head,
-                team: team_head,
-            });
-        }
+        let runtime = recover_team(&report, max_active_agents)?;
 
         Ok(Self {
             runtime,
             ledger,
             recovered_tail_bytes: report.truncated_tail_bytes,
+        })
+    }
+
+    pub fn inspect(
+        path: impl AsRef<Path>,
+        max_active_agents: usize,
+    ) -> Result<DurableTeamInspection, DurableTeamError> {
+        if max_active_agents == 0 {
+            return Err(DurableTeamError::Team(TeamError::InvalidActiveAgentLimit));
+        }
+        let report = FileLedger::inspect(path).map_err(DurableTeamError::Ledger)?;
+        let runtime = recover_team(&report, max_active_agents)?;
+        Ok(DurableTeamInspection {
+            snapshot: runtime.snapshot(),
+            ledger_head: report.head,
+            recovered_tail_bytes: report.truncated_tail_bytes,
+            operation_records: runtime.operation_records(),
         })
     }
 
@@ -278,6 +312,27 @@ impl DurableTeamRuntime {
             ledger.append_with_test_io(head, events, write_frame)
         })
     }
+}
+
+fn recover_team(
+    report: &ReplayReport,
+    max_active_agents: usize,
+) -> Result<TeamRuntime, DurableTeamError> {
+    let events = report
+        .events
+        .iter()
+        .map(decode_stored_event)
+        .collect::<Result<Vec<_>, _>>()?;
+    let runtime =
+        TeamRuntime::recover(max_active_agents, events).map_err(DurableTeamError::Recovery)?;
+    let team_head = runtime_head(&runtime);
+    if team_head != report.head {
+        return Err(DurableTeamError::HeadMismatch {
+            ledger: report.head,
+            team: team_head,
+        });
+    }
+    Ok(runtime)
 }
 
 fn runtime_head(runtime: &TeamRuntime) -> LedgerHead {

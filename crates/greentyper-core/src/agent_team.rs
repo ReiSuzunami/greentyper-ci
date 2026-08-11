@@ -7,7 +7,7 @@
 
 mod persistence;
 
-pub use persistence::{DurableTeamError, DurableTeamRuntime};
+pub use persistence::{DurableTeamError, DurableTeamInspection, DurableTeamRuntime};
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;

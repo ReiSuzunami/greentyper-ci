@@ -9,8 +9,9 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use greentyper_core::agent_team::{
-    AgentSession, Capability, CapabilitySnapshot, CommandOutcome, ResourceBudget, TaskScope,
-    TaskSpec, TeamCommand, TeamOperationRecord, TeamOperationStatus,
+    AgentSession, Capability, CapabilitySnapshot, CommandOutcome, DurableTeamError,
+    DurableTeamRuntime, ResourceBudget, TaskScope, TaskSpec, TeamCommand, TeamOperationRecord,
+    TeamOperationStatus,
 };
 use greentyper_core::config::ConfigLayers;
 use greentyper_core::ledger::LedgerHead;
@@ -20,8 +21,8 @@ use greentyper_core::provider::{ProviderEpoch, ProviderRuntime};
 #[cfg(test)]
 use greentyper_core::runtime::RuntimeSnapshot;
 use greentyper_core::runtime::{
-    AcknowledgeOutcome, PreparedOutput, ProviderToolApproval, ProviderTurnOutcome, RuntimeError,
-    RuntimeKernel,
+    AcknowledgeOutcome, KernelTeamSnapshot, PreparedOutput, ProviderToolApproval,
+    ProviderTurnOutcome, RuntimeError, RuntimeKernel,
 };
 use greentyper_core::tool_runtime::{
     ApprovalDecision, ToolCallRecord, ToolEffectExecutor, ToolReconciliationDecision,
@@ -212,12 +213,20 @@ impl<E: ToolEffectExecutor> ProductDriver<E> {
 
 pub(crate) fn has_product_driver_state(runtime_path: &Path) -> Result<bool, ProductDriverError> {
     match (
-        sidecar_path(runtime_path, "team").exists(),
-        sidecar_path(runtime_path, "tool").exists(),
+        path_entry_exists(&sidecar_path(runtime_path, "team"))?,
+        path_entry_exists(&sidecar_path(runtime_path, "tool"))?,
     ) {
         (false, false) => Ok(false),
         (true, true) => Ok(true),
         _ => Err(ProductDriverError::IncompleteState),
+    }
+}
+
+fn path_entry_exists(path: &Path) -> Result<bool, ProductDriverError> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(source) => Err(ProductDriverError::Io(source)),
     }
 }
 
@@ -235,6 +244,25 @@ pub(crate) fn inspect_product_tools(
         return Err(ProductDriverError::IncompleteState);
     }
     inspect_tool_ledger(sidecar_path(runtime_path, "tool")).map_err(ProductDriverError::Tool)
+}
+
+pub(crate) fn inspect_product_team(
+    runtime_path: &Path,
+) -> Result<Option<KernelTeamSnapshot>, ProductDriverError> {
+    if !has_product_driver_state(runtime_path)? {
+        return Ok(None);
+    }
+    if !runtime_path.exists() {
+        return Err(ProductDriverError::IncompleteState);
+    }
+    let inspection = DurableTeamRuntime::inspect(sidecar_path(runtime_path, "team"), 1)
+        .map_err(ProductDriverError::Team)?;
+    Ok(Some(KernelTeamSnapshot {
+        projection: inspection.snapshot().clone(),
+        ledger_head: inspection.ledger_head(),
+        recovered_tail_bytes: inspection.recovered_tail_bytes(),
+        operations: inspection.operation_records().to_vec(),
+    }))
 }
 
 pub(crate) fn reconcile_product_tool(
@@ -323,6 +351,7 @@ pub(crate) enum ProductDriverError {
     Io(io::Error),
     Interaction(io::Error),
     Runtime(RuntimeError),
+    Team(DurableTeamError),
     Tool(ToolRuntimeError),
     IncompleteState,
     ToolStateUnavailable,
@@ -337,6 +366,7 @@ impl fmt::Display for ProductDriverError {
             Self::Io(source) => write!(formatter, "Product driver I/O failed: {source}"),
             Self::Interaction(source) => write!(formatter, "Product interaction failed: {source}"),
             Self::Runtime(source) => write!(formatter, "{source}"),
+            Self::Team(source) => write!(formatter, "{source}"),
             Self::Tool(source) => write!(formatter, "{source}"),
             Self::IncompleteState => {
                 write!(formatter, "Product driver sidecar state is incomplete")
@@ -360,6 +390,7 @@ impl Error for ProductDriverError {
         match self {
             Self::Io(source) | Self::Interaction(source) => Some(source),
             Self::Runtime(source) => Some(source),
+            Self::Team(source) => Some(source),
             Self::Tool(source) => Some(source),
             Self::IncompleteState
             | Self::ToolStateUnavailable
@@ -601,9 +632,104 @@ mod tests {
         );
 
         assert!(matches!(result, Err(ProductDriverError::IncompleteState)));
+        assert!(matches!(
+            inspect_product_team(&ledger),
+            Err(ProductDriverError::IncompleteState)
+        ));
         assert!(!ledger.exists());
         assert!(!sidecar_path(&ledger, "tool").exists());
         fs::remove_file(sidecar_path(&ledger, "team")).expect("cleanup Team sidecar");
+    }
+
+    #[test]
+    fn product_team_inspection_is_read_only_and_missing_safe() {
+        let missing = temp_path("inspect-team-missing");
+        assert!(
+            inspect_product_team(&missing)
+                .expect("inspect missing Product Team")
+                .is_none()
+        );
+        assert!(!missing.exists());
+        assert!(!sidecar_path(&missing, "team").exists());
+        assert!(!sidecar_path(&missing, "tool").exists());
+
+        let ledger = temp_path("inspect-team");
+        let calls = Rc::new(Cell::new(0));
+        let mut interaction = RecordingInteraction::approve();
+        let driver = ProductDriver::open_with_executor(
+            &ledger,
+            CountingEchoExecutor::new(calls),
+            &mut interaction,
+        )
+        .expect("open Product driver for Team inspection");
+        drop(driver);
+        let paths = [
+            ledger.clone(),
+            sidecar_path(&ledger, "team"),
+            sidecar_path(&ledger, "tool"),
+        ];
+        let before = paths
+            .iter()
+            .map(|path| fs::read(path).expect("read Product Ledger"))
+            .collect::<Vec<_>>();
+
+        let snapshot = inspect_product_team(&ledger)
+            .expect("inspect Product Team")
+            .expect("Product Team snapshot");
+        assert_eq!(snapshot.projection.agents.len(), 1);
+        assert_eq!(snapshot.projection.tasks.len(), 1);
+        assert_eq!(snapshot.recovered_tail_bytes, 0);
+        assert_eq!(
+            paths
+                .iter()
+                .map(|path| fs::read(path).expect("reread Product Ledger"))
+                .collect::<Vec<_>>(),
+            before
+        );
+
+        cleanup(&ledger);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn product_team_inspection_rejects_dangling_sidecar_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let ledger = temp_path("inspect-team-dangling-symlinks");
+        let team_path = sidecar_path(&ledger, "team");
+        let tool_path = sidecar_path(&ledger, "tool");
+        let missing_team_target = temp_path("missing-team-target");
+        let missing_tool_target = temp_path("missing-tool-target");
+        drop(RuntimeKernel::open(&ledger).expect("create Runtime Ledger"));
+        symlink(&missing_team_target, &team_path).expect("create dangling Team symlink");
+        symlink(&missing_tool_target, &tool_path).expect("create dangling Tool symlink");
+        let before = fs::read(&ledger).expect("read Runtime Ledger");
+
+        assert!(matches!(
+            inspect_product_team(&ledger),
+            Err(ProductDriverError::Team(DurableTeamError::Ledger(
+                greentyper_core::ledger::LedgerError::SymlinkPath
+            )))
+        ));
+        assert_eq!(fs::read(&ledger).expect("reread Runtime Ledger"), before);
+        assert!(
+            fs::symlink_metadata(&team_path)
+                .expect("inspect Team symlink")
+                .file_type()
+                .is_symlink()
+        );
+        assert!(
+            fs::symlink_metadata(&tool_path)
+                .expect("inspect Tool symlink")
+                .file_type()
+                .is_symlink()
+        );
+        assert!(!missing_team_target.exists());
+        assert!(!missing_tool_target.exists());
+
+        fs::remove_file(team_path).expect("cleanup Team symlink");
+        fs::remove_file(tool_path).expect("cleanup Tool symlink");
+        fs::remove_file(ledger).expect("cleanup Runtime Ledger");
     }
 
     #[test]

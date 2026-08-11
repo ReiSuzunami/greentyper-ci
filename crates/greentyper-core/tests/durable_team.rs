@@ -66,6 +66,10 @@ fn invalid_active_limit_fails_before_creating_a_ledger() {
         DurableTeamRuntime::open(&path, 0),
         Err(DurableTeamError::Team(TeamError::InvalidActiveAgentLimit))
     ));
+    assert!(matches!(
+        DurableTeamRuntime::inspect(&path, 0),
+        Err(DurableTeamError::Team(TeamError::InvalidActiveAgentLimit))
+    ));
     assert!(!path.exists());
 }
 
@@ -102,6 +106,44 @@ fn durable_commit_reopens_exactly_and_invalidates_old_sessions() {
     assert_eq!(recovered.ledger_head(), expected_head);
     drop(recovered);
     fs::remove_file(path).expect("cleanup ledger");
+}
+
+#[test]
+fn read_only_team_inspection_reports_a_torn_tail_without_repairing_it() {
+    let path = temp_path("inspect-tail");
+    let mut team = DurableTeamRuntime::open(&path, 1).expect("create durable Team");
+    admit_root(&mut team);
+    let expected_snapshot = team.snapshot();
+    let expected_head = team.ledger_head();
+    drop(team);
+
+    OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .expect("open Team Ledger tail")
+        .write_all(b"xyz")
+        .expect("append incomplete Team frame");
+    let before = fs::read(&path).expect("read Team Ledger before inspection");
+
+    let inspection = DurableTeamRuntime::inspect(&path, 1).expect("inspect durable Team");
+    assert_eq!(inspection.snapshot(), &expected_snapshot);
+    assert_eq!(inspection.ledger_head(), expected_head);
+    assert_eq!(inspection.recovered_tail_bytes(), 3);
+    assert!(inspection.operation_records().is_empty());
+    assert_eq!(fs::read(&path).expect("reread Team Ledger"), before);
+
+    fs::remove_file(path).expect("cleanup inspected Team Ledger");
+}
+
+#[test]
+fn read_only_team_inspection_never_creates_missing_state() {
+    let path = temp_path("inspect-missing");
+    assert!(matches!(
+        DurableTeamRuntime::inspect(&path, 1),
+        Err(DurableTeamError::Ledger(LedgerError::Io(source)))
+            if source.kind() == std::io::ErrorKind::NotFound
+    ));
+    assert!(!path.exists());
 }
 
 #[test]
@@ -251,6 +293,16 @@ fn checksum_tampering_is_not_reclassified_as_a_recoverable_tail() {
     file.write_all(&byte).expect("tamper checksum byte");
     file.sync_all().expect("sync tampering");
     drop(file);
+    let corrupted = fs::read(&path).expect("read corrupted Team Ledger");
+
+    assert!(matches!(
+        DurableTeamRuntime::inspect(&path, 1),
+        Err(DurableTeamError::Ledger(LedgerError::Corrupt { .. }))
+    ));
+    assert_eq!(
+        fs::read(&path).expect("reread corrupted Team Ledger"),
+        corrupted
+    );
 
     assert!(matches!(
         DurableTeamRuntime::open(&path, 1),

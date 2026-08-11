@@ -354,6 +354,13 @@ charges still require a future dedicated authority path.
   CAS conflict, explicit discard, and Config reopen use the same editor
   contract. The action does not rebuild the frozen Price Schedule book or grant
   provider-reported pricing authority.
+  `/agent` can inspect the dedicated Team sidecar through a shared read-only
+  lock and browse canonical Agent state plus bounded Task/budget metadata. It
+  never creates or repairs Ledger state, exposes Agent Session authority,
+  renders message/capsule contents, or acknowledges an operation. Incomplete
+  final-frame bytes remain visible as recovery required; corruption and partial
+  Product sidecars fail closed before terminal entry. Live refresh and all Agent
+  lifecycle actions remain pending.
 - Complete Config Schema default/constraint/normalization/migration metadata,
   the App Server Config surface, live catalog discovery, and the rendered
   template-picker/starter-preset workflow. Release Provider Template defaults
@@ -370,7 +377,9 @@ charges still require a future dedicated authority path.
   terminal-neutral width-degradation and Context Pressure projection contracts
   are present. The first Direct VT tracer now browses the frozen rolling Usage
   summaries and durable attempt details, but it does not refresh them or expose
-  dedicated Thread, Agent, Team, or named-window aggregate screens. It can also
+  dedicated Thread, Agent-usage, Team-usage, or named-window aggregate screens.
+  The separate `/agent` browser exposes frozen Team orchestration state, not a
+  Usage aggregate or mutation surface. It can also
   persist every user-scope Config Schema field, can create a complete Provider
   Profile or Model Preset, a named Usage Window, and a manual Price Schedule,
   and can confirm typed

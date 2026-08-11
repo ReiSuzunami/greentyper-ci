@@ -378,6 +378,18 @@ selects the second Turn's durable attempt, opens provider/model/outcome detail,
 redraws after resize, and proves the Ledger bytes remain unchanged. It does not
 prove live refresh or dedicated Thread, Agent, Team, named-window, token-class,
 or cache-distribution screens.
+A real-key loop now opens `/agent` over a valid Runtime plus Team and Tool
+sidecars, selects a Dormant child Agent, opens bounded detail, redraws after
+resize, and closes detail before returning to the Slash Panel. The fixture adds
+an incomplete three-byte Team frame and proves the UI reports recovery required
+while Runtime, Team, Tool, and Config bytes remain identical. Task titles,
+capability labels, and scope labels are absent from VT output. Core tests
+separately prove shared-lock
+Team inspection never creates missing state, never repairs a torn final frame,
+and does not rewrite checksum corruption; Product tests prove missing and
+incomplete sidecar handling. These tests do not prove live Agent refresh,
+lifecycle mutation, Team-operation acknowledgement, Workspace coordination, or
+real ConPTY behavior.
 A real-key loop now carries `/config pricing add` through its bounded ID prompt,
 all 17 schema fields, manual provenance choice, preview, commit, and Config
 reopen. Schema tests pin the 64-byte Provider Profile input, 512-byte text and
@@ -419,7 +431,8 @@ local path or credential reference.
 
 Remaining terminal-backend evidence covers real terminal/ConPTY resize and input,
 current-Agent Preset application, richer Usage aggregate navigation, Agent
-Center data, approval/blocker actions, panic-abort cleanup, final host cell
+Center lifecycle actions and live refresh, approval/blocker actions,
+panic-abort cleanup, final host cell
 geometry, and input-ready/idle resource budgets.
 
 Tests assert that `/config pro url` resolves through Provider selection to the

@@ -335,6 +335,16 @@ remains pending.
 and 7-day summaries, selects durable attempts with Up/Down, and opens bounded
 per-attempt provider, model, policy, token, cost, outcome, and timing detail
 with Enter. It does not refresh live, mutate Config, or append to the Ledger.
+`/agent` now browses a frozen, read-only Team sidecar projection. Up/Down selects
+canonical Agents and Enter shows status, Task identity and state, budgets,
+reservations, and bounded metadata counts. It never renders Task titles,
+message bodies, Completion Capsules, capability or scope labels, or
+process-local Agent Session
+authority. Missing Team state stays unavailable without creating files; an
+incomplete final frame is reported as recovery required without truncation or
+repair, while corruption and incomplete Product sidecars fail closed. Browsing
+does not acknowledge Team operations or mutate Runtime, Team, Tool, or Config
+state.
 Config commits do not rebuild the running TUI's frozen status, usage, pricing,
 or Provider projection. The tracer is not an approval surface, live refresh
 loop, audited ConPTY integration, secret-entry/bind surface, starter-preset
@@ -343,7 +353,7 @@ reconnect/retry, OpenCode Go Messages execution,
 Messages reasoning blocks, Preset context/fallback execution, richer approval
 presentation, broader Provider and Tool adapters,
 Workspace, current-Agent Preset application, richer Usage aggregate browsing,
-Agent Center data, and App Server work remain. The loopback Provider tracer remains
+live Agent refresh and lifecycle actions, and App Server work remain. The loopback Provider tracer remains
 an internal harness; `local.echo` is intentionally a fixed opt-in command rather
 than a general process runner. The file Ledger remains
 provisional. The acceptance runner can emit bound raw evidence,

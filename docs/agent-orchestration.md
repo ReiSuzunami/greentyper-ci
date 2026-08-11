@@ -17,6 +17,8 @@ let recovered = TeamRuntime::recover(max_active_agents, events.iter().cloned())?
 
 let mut durable = DurableTeamRuntime::open(team_ledger_path, max_active_agents)?;
 let commit = durable.dispatch(command)?; // CommitDurability::Synchronous
+let inspection = DurableTeamRuntime::inspect(team_ledger_path, max_active_agents)?;
+let read_only = inspection.snapshot(); // shared lock; no create, truncate, or repair
 
 let (mut kernel, recovered) = RuntimeKernel::open_with_team(
     runtime_ledger_path,
@@ -41,8 +43,13 @@ kernel.acknowledge_team_operation(operation.operation)?;
 - `snapshot` returns an immutable, deterministic projection ordered by canonical identifiers.
 - `event_log` exposes the current canonical events for tests and projection inspection.
 - `recover` accepts only contiguous, complete transactions and rebuilds the same projection or fails closed.
+- `DurableTeamRuntime::inspect` reuses the private versioned decoder and Team
+  recovery fold behind a shared read-only Ledger lock. It returns an immutable
+  projection, Head, operation records, and incomplete-tail byte count without
+  creating, truncating, repairing, or minting Sessions. Checksum, schema, state,
+  path, and lock failures remain errors.
 
-Plain `TeamRuntime` commits remain `CommitDurability::Volatile` and cannot drive a user-visible acknowledgement. `DurableTeamRuntime` returns `CommitDurability::Synchronous` only after the dedicated Team Ledger has flushed a complete checksummed transaction. The core Runtime Kernel now owns that adapter when opened with a dedicated Team Ledger, gates root admission, persists operation identity and acknowledgement records, exposes pending operation status through `KernelTeamSnapshot`, and issues one consumable recovery bundle per open for Active, Dormant, and Blocked owners while excluding terminal Agents. Sessions inside the bundle remain ordinary copyable process-local capabilities. Standalone adapter recovery still invalidates every old Session. Operation IDs remain inspection and reconciliation identities, never Agent authority; no caller-selected ID conversion exists. The product CLI now composes this path for one fixed `local.echo` Tool: it presents and durably acknowledges the Team operation receipt, requests an explicit grant or denial, and restores the dedicated Team and Tool Ledgers on reopen. Multi-Agent presentation, broader Tool catalogs, and TUI/App Server acknowledgement remain pending.
+Plain `TeamRuntime` commits remain `CommitDurability::Volatile` and cannot drive a user-visible acknowledgement. `DurableTeamRuntime` returns `CommitDurability::Synchronous` only after the dedicated Team Ledger has flushed a complete checksummed transaction. The core Runtime Kernel now owns that adapter when opened with a dedicated Team Ledger, gates root admission, persists operation identity and acknowledgement records, exposes pending operation status through `KernelTeamSnapshot`, and issues one consumable recovery bundle per open for Active, Dormant, and Blocked owners while excluding terminal Agents. Sessions inside the bundle remain ordinary copyable process-local capabilities. Standalone adapter recovery still invalidates every old Session. Operation IDs remain inspection and reconciliation identities, never Agent authority; no caller-selected ID conversion exists. The product CLI now composes this path for one fixed `local.echo` Tool: it presents and durably acknowledges the Team operation receipt, requests an explicit grant or denial, and restores the dedicated Team and Tool Ledgers on reopen. The Direct VT `/agent` browser now projects canonical Agent/Task state, budgets, reservations, and counts from strict read-only Team replay. It omits messages, terminal reasons, Completion Capsules, capability/scope labels, and Sessions; it cannot acknowledge or mutate Team state. Live multi-Agent interaction, broader Tool catalogs, and TUI/App Server acknowledgement remain pending.
 
 ## Command Flow
 

@@ -23,6 +23,7 @@ use crate::presentation::{
     PresentationController, PresentationControllerError, PresentationError, PresentationLayoutView,
     PresentationSources, TuiViewModel, Viewport, ViewportError,
 };
+use crate::product_driver::{ProductDriverError, inspect_product_team};
 use crate::provider_connection::{ModelsHttpConnectionTester, ProviderConnectionTester};
 
 pub(crate) fn require_interactive() -> Result<(), TerminalError> {
@@ -55,6 +56,7 @@ fn build_terminal_view(
 ) -> Result<TuiViewModel, TerminalError> {
     let runtime = RuntimeKernel::inspect(ledger)?;
     let usage = RuntimeKernel::inspect_usage(ledger, UsageTimestamp::now()?)?;
+    let team = inspect_product_team(ledger)?;
     let status = config.status();
     let resolved = config.config_layers()?.resolve()?;
     let model_presets = config.model_presets()?;
@@ -66,7 +68,7 @@ fn build_terminal_view(
         PresentationSources {
             runtime: &runtime,
             usage: Some(&usage),
-            team: None,
+            team: team.as_ref(),
             tools: None,
             config: &status,
             provider_profile: Some(resolved.provider_profile().value()),
@@ -470,6 +472,8 @@ enum TerminalIntent {
     ToggleModelDetail,
     MoveStatsSelection(isize),
     ToggleStatsDetail,
+    MoveAgentSelection(isize),
+    ToggleAgentDetail,
     EditConfigObjectId(char),
     BackspaceConfigObjectId,
     ClearConfigObjectId,
@@ -499,6 +503,7 @@ enum TerminalInputContext {
     SlashPanel,
     ModelSelector,
     Stats,
+    AgentCenter,
     ConfigObjectId,
     ConfigObject,
     ConfigChoice,
@@ -595,6 +600,15 @@ impl TerminalInputState {
             }
             TerminalInputEvent::Enter if context == TerminalInputContext::Stats => {
                 TerminalIntent::ToggleStatsDetail
+            }
+            TerminalInputEvent::Up if context == TerminalInputContext::AgentCenter => {
+                TerminalIntent::MoveAgentSelection(-1)
+            }
+            TerminalInputEvent::Down if context == TerminalInputContext::AgentCenter => {
+                TerminalIntent::MoveAgentSelection(1)
+            }
+            TerminalInputEvent::Enter if context == TerminalInputContext::AgentCenter => {
+                TerminalIntent::ToggleAgentDetail
             }
             TerminalInputEvent::Character(character)
                 if context == TerminalInputContext::ConfigObjectId && !character.is_control() =>
@@ -866,6 +880,18 @@ impl TerminalSession {
                 self.notice = None;
                 Ok(TerminalLoopOutcome::Redraw)
             }
+            TerminalIntent::MoveAgentSelection(offset) => {
+                let view = view.ok_or(TerminalError::ViewModelRequired)?;
+                self.controller.move_agent_selection(&view.agents, offset);
+                self.notice = None;
+                Ok(TerminalLoopOutcome::Redraw)
+            }
+            TerminalIntent::ToggleAgentDetail => {
+                let view = view.ok_or(TerminalError::ViewModelRequired)?;
+                self.controller.toggle_agent_detail(&view.agents);
+                self.notice = None;
+                Ok(TerminalLoopOutcome::Redraw)
+            }
             TerminalIntent::EditConfigObjectId(character) => {
                 self.edit_config_object_id(Some(character));
                 Ok(TerminalLoopOutcome::Redraw)
@@ -1087,6 +1113,8 @@ impl TerminalSession {
             TerminalInputContext::ModelSelector
         } else if self.controller.is_stats() {
             TerminalInputContext::Stats
+        } else if self.controller.is_agent_center() {
+            TerminalInputContext::AgentCenter
         } else if self.controller.is_config_object_create() {
             TerminalInputContext::ConfigObjectId
         } else if self.controller.is_config_object_selector() {
@@ -1592,6 +1620,7 @@ pub(crate) enum TerminalError {
     ConfigRuntime(ConfigRuntimeError),
     Runtime(RuntimeError),
     Usage(UsageError),
+    ProductDriver(ProductDriverError),
     Io(std::io::Error),
 }
 
@@ -1620,6 +1649,7 @@ impl fmt::Display for TerminalError {
             Self::ConfigRuntime(source) => write!(formatter, "{source}"),
             Self::Runtime(source) => write!(formatter, "{source}"),
             Self::Usage(source) => write!(formatter, "{source}"),
+            Self::ProductDriver(source) => write!(formatter, "{source}"),
             Self::Io(source) => write!(formatter, "terminal I/O failed: {source}"),
         }
     }
@@ -1636,6 +1666,7 @@ impl Error for TerminalError {
             Self::ConfigRuntime(source) => Some(source),
             Self::Runtime(source) => Some(source),
             Self::Usage(source) => Some(source),
+            Self::ProductDriver(source) => Some(source),
             Self::InvalidDimensions
             | Self::DimensionMismatch
             | Self::UnsupportedCellWidth
@@ -1689,14 +1720,28 @@ impl From<UsageError> for TerminalError {
     }
 }
 
+impl From<ProductDriverError> for TerminalError {
+    fn from(source: ProductDriverError) -> Self {
+        Self::ProductDriver(source)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
     use std::collections::VecDeque;
+    use std::ffi::OsString;
+    use std::fs::OpenOptions;
+    use std::io::Write as _;
+    use std::path::{Path, PathBuf};
     use std::rc::Rc;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+    use greentyper_core::agent_team::{
+        Capability, CapabilitySnapshot, CommandOutcome, ResourceBudget, TaskScope, TaskSpec,
+        TeamCommand,
+    };
     use greentyper_core::config::{
         ConfigDocument, ConfigEditorSession, ConfigFieldContents, ConfigLayers, ConfigObjectKind,
         ConfigObjectRef, ConfigPaths, ConfigRuntime, ConfigScope, ConfigValue,
@@ -1820,6 +1865,14 @@ mod tests {
         assert_eq!(
             input.apply(TerminalInputEvent::Enter, TerminalInputContext::Stats),
             TerminalIntent::ToggleStatsDetail
+        );
+        assert_eq!(
+            input.apply(TerminalInputEvent::Down, TerminalInputContext::AgentCenter,),
+            TerminalIntent::MoveAgentSelection(1)
+        );
+        assert_eq!(
+            input.apply(TerminalInputEvent::Enter, TerminalInputContext::AgentCenter,),
+            TerminalIntent::ToggleAgentDetail
         );
         assert_eq!(
             input.apply(TerminalInputEvent::Down, TerminalInputContext::ConfigObject),
@@ -2171,6 +2224,125 @@ dialect = "responses"
         assert!(!paths.user().exists());
         assert!(!paths.project().exists());
         std::fs::remove_dir_all(root).expect("remove stats browser fixture");
+    }
+
+    #[test]
+    fn terminal_loop_browses_agents_without_repairing_or_mutating_ledgers() {
+        let root = terminal_test_root("agent-browser");
+        let ledger = root.join("runtime.ledger");
+        let team_ledger = terminal_sidecar_path(&ledger, "team");
+        let tool_ledger = terminal_sidecar_path(&ledger, "tool");
+        let paths = ConfigPaths::new(root.join("user.toml"), root.join("project.toml"));
+        std::fs::create_dir_all(&root).expect("create agent browser fixture directory");
+        let (mut runtime, _) =
+            RuntimeKernel::open_with_team_and_tools(&ledger, &team_ledger, &tool_ledger, 1)
+                .expect("open agent browser runtime");
+        let root_commit = runtime
+            .dispatch_team(TeamCommand::AdmitRoot {
+                task: TaskSpec::new(
+                    "coordinate browser fixture",
+                    TaskScope::from_labels(["private-root-scope"]),
+                ),
+                budget: ResourceBudget::new(1_000, 8),
+                capabilities: CapabilitySnapshot::from_capabilities([
+                    Capability::WorkspaceRead,
+                    Capability::Tool("private-root-capability".into()),
+                ]),
+            })
+            .expect("admit root Agent");
+        let root_session = match root_commit.commit.outcome {
+            CommandOutcome::RootAdmitted { session, .. } => session,
+            other => panic!("unexpected root outcome: {other:?}"),
+        };
+        runtime
+            .acknowledge_team_operation(root_commit.operation)
+            .expect("acknowledge root operation");
+        let child_commit = runtime
+            .dispatch_team(TeamCommand::Delegate {
+                parent: root_session,
+                task: TaskSpec::new(
+                    "private-child-task-title",
+                    TaskScope::from_labels(["private-root-scope"]),
+                ),
+                budget: ResourceBudget::new(200, 1),
+                capabilities: CapabilitySnapshot::from_capabilities([Capability::Tool(
+                    "private-root-capability".into(),
+                )]),
+            })
+            .expect("delegate browser Agent");
+        runtime
+            .acknowledge_team_operation(child_commit.operation)
+            .expect("acknowledge child operation");
+        drop(runtime);
+
+        OpenOptions::new()
+            .append(true)
+            .open(&team_ledger)
+            .expect("open Team Ledger tail")
+            .write_all(b"xyz")
+            .expect("append incomplete Team frame");
+        let runtime_before = std::fs::read(&ledger).expect("read Runtime Ledger");
+        let team_before = std::fs::read(&team_ledger).expect("read Team Ledger");
+        let tool_before = std::fs::read(&tool_ledger).expect("read Tool Ledger");
+        let mut config =
+            ConfigRuntime::open(paths.clone(), ConfigDocument::empty()).expect("config runtime");
+        let view = build_terminal_view(&ledger, &config, "/").expect("agent browser view");
+        let mode = FakeTerminalMode::default();
+        let mut events = "agent"
+            .chars()
+            .map(|character| {
+                Event::Key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
+            })
+            .collect::<VecDeque<_>>();
+        events.extend([
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Resize(80, 24),
+            Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL)),
+        ]);
+
+        let output = run_terminal_loop(Vec::new(), mode, &mut config, &view, 80, 24, move || {
+            Ok(events.pop_front().expect("bounded agent browser events"))
+        })
+        .expect("agent browser loop");
+        let output = String::from_utf8(output).expect("agent browser VT output");
+
+        assert!(output.contains("Agents / Agent"));
+        assert!(output.contains("agent 2"));
+        assert!(output.contains("dormant"));
+        assert!(output.contains("task 2"));
+        assert!(output.contains("recovery"));
+        assert!(output.contains("incomplete"));
+        assert!(output.contains("tail"));
+        assert!(!output.contains("private-root-capability"));
+        assert!(!output.contains("private-root-scope"));
+        assert!(!output.contains("private-child-task-title"));
+        assert!(!output.contains("coordinate browser fixture"));
+        assert_eq!(
+            std::fs::read(&ledger).expect("reread Runtime Ledger"),
+            runtime_before
+        );
+        assert_eq!(
+            std::fs::read(&team_ledger).expect("reread Team Ledger"),
+            team_before
+        );
+        assert_eq!(
+            std::fs::read(&tool_ledger).expect("reread Tool Ledger"),
+            tool_before
+        );
+        assert!(!paths.user().exists());
+        assert!(!paths.project().exists());
+        std::fs::remove_dir_all(root).expect("remove agent browser fixture");
+    }
+
+    fn terminal_sidecar_path(runtime: &Path, kind: &str) -> PathBuf {
+        let mut path = OsString::from(runtime.as_os_str());
+        path.push(".");
+        path.push(kind);
+        PathBuf::from(path)
     }
 
     #[test]
@@ -4594,7 +4766,7 @@ timezone = "local"
             NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
         ));
         let ledger = root.join("runtime.ledger");
-        let config = ConfigRuntime::open(
+        let mut config = ConfigRuntime::open(
             ConfigPaths::new(root.join("user.toml"), root.join("project.toml")),
             ConfigDocument::empty(),
         )
@@ -4610,7 +4782,28 @@ timezone = "local"
 
         assert!(output.contains("ready"));
         assert!(output.contains("model deterministic-v1"));
+
+        let mut agent_session = TerminalSession::new("/agent", 80, 24).expect("Agent session");
+        agent_session
+            .handle_with_view_and_connection_tester(
+                TerminalInputEvent::Enter,
+                Some(&mut config),
+                Some(&view),
+                None,
+            )
+            .expect("open missing Agent Team view");
+        let agent_layout = agent_session
+            .layout(Some(&config), &view)
+            .expect("missing Agent Team layout");
+        assert!(
+            agent_layout
+                .body()
+                .iter()
+                .any(|row| row.text() == "Agent Team unavailable")
+        );
         assert!(!ledger.exists());
+        assert!(!terminal_sidecar_path(&ledger, "team").exists());
+        assert!(!terminal_sidecar_path(&ledger, "tool").exists());
     }
 
     #[test]
