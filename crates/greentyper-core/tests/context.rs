@@ -1,8 +1,11 @@
 use greentyper_core::context::{
     ContextAdmissionDecision, ContextPressure, ContextPressureAccuracy, ContextPressureError,
     ContextPressureInput, ContextPressurePolicy, ContextPressureState,
-    ContextPressureUnknownReason,
+    ContextPressureUnknownReason, ContextReductionPolicy, ContextView, ContextViewError,
+    ContextViewRole, MAX_CONTEXT_VIEW_BYTES, ReducedContextView,
 };
+use greentyper_core::ledger::LedgerHead;
+use greentyper_core::model::{CanonicalItem, ItemId, ItemRole, TurnId};
 
 #[test]
 fn context_pressure_projects_exact_soft_and_hard_boundaries() {
@@ -175,5 +178,216 @@ fn context_pressure_freezes_every_unknown_reason_and_json_marker() {
             "soft_threshold_percent": 65,
             "hard_threshold_percent": 90
         })
+    );
+}
+
+#[test]
+fn context_view_projects_ordered_canonical_items_from_an_exact_event_range() {
+    let items = vec![
+        CanonicalItem::new(
+            ItemId::new(1).expect("Item"),
+            TurnId::new(1).expect("Turn"),
+            ItemRole::User,
+            "inspect the runtime",
+        )
+        .expect("user Item"),
+        CanonicalItem::new(
+            ItemId::new(2).expect("Item"),
+            TurnId::new(1).expect("Turn"),
+            ItemRole::Assistant,
+            "runtime is ready",
+        )
+        .expect("Assistant Item"),
+        CanonicalItem::new(
+            ItemId::new(3).expect("Item"),
+            TurnId::new(2).expect("Turn"),
+            ItemRole::User,
+            "continue",
+        )
+        .expect("user Item"),
+    ];
+    let view = ContextView::from_items(
+        LedgerHead {
+            transaction: 7,
+            sequence: 19,
+        },
+        &items,
+    )
+    .expect("Context View");
+
+    assert_eq!(view.source().first_sequence(), Some(1));
+    assert_eq!(view.source().last_sequence(), Some(19));
+    assert_eq!(view.source().transaction(), 7);
+    assert_eq!(view.raw_bytes(), 43);
+    assert_eq!(view.estimated_tokens(), 11);
+    assert_eq!(view.items().len(), 3);
+    assert_eq!(view.items()[0].item(), 1);
+    assert_eq!(view.items()[0].turn(), 1);
+    assert_eq!(view.items()[0].role(), ContextViewRole::User);
+    assert_eq!(view.items()[0].text(), "inspect the runtime");
+    assert_eq!(view.items()[1].role(), ContextViewRole::Assistant);
+    assert_eq!(view.items()[2].text(), "continue");
+
+    let empty = ContextView::from_items(LedgerHead::default(), &[]).expect("empty Context View");
+    assert_eq!(empty.source().first_sequence(), None);
+    assert_eq!(empty.source().last_sequence(), None);
+    assert!(empty.items().is_empty());
+}
+
+#[test]
+fn context_view_rejects_cumulative_text_beyond_its_projection_boundary() {
+    let oversized = "x".repeat(MAX_CONTEXT_VIEW_BYTES + 1);
+    let items = [CanonicalItem::new(
+        ItemId::new(1).expect("Item"),
+        TurnId::new(1).expect("Turn"),
+        ItemRole::User,
+        oversized,
+    )
+    .expect("Item fits the canonical one-megabyte boundary")];
+
+    assert_eq!(
+        ContextView::from_items(
+            LedgerHead {
+                transaction: 1,
+                sequence: 1,
+            },
+            &items,
+        ),
+        Err(ContextViewError::ViewTooLarge)
+    );
+}
+
+#[test]
+fn context_reduction_offloads_old_items_and_keeps_a_bounded_recent_raw_tail() {
+    let items = vec![
+        CanonicalItem::new(
+            ItemId::new(1).expect("Item"),
+            TurnId::new(1).expect("Turn"),
+            ItemRole::User,
+            "archived context body",
+        )
+        .expect("Item"),
+        CanonicalItem::new(
+            ItemId::new(2).expect("Item"),
+            TurnId::new(1).expect("Turn"),
+            ItemRole::Assistant,
+            "recent answer",
+        )
+        .expect("Item"),
+        CanonicalItem::new(
+            ItemId::new(3).expect("Item"),
+            TurnId::new(2).expect("Turn"),
+            ItemRole::User,
+            "new request",
+        )
+        .expect("Item"),
+    ];
+    let view = ContextView::from_items(
+        LedgerHead {
+            transaction: 4,
+            sequence: 12,
+        },
+        &items,
+    )
+    .expect("Context View");
+    let reduced = view
+        .reduce(ContextReductionPolicy::new(24, 2).expect("policy"))
+        .expect("reduced Context View");
+
+    assert_eq!(reduced.source(), view.source());
+    assert_eq!(reduced.raw_bytes(), 24);
+    assert_eq!(reduced.recent_items().len(), 2);
+    assert_eq!(reduced.recent_items()[0].text(), "recent answer");
+    assert_eq!(reduced.recent_items()[1].text(), "new request");
+    assert_eq!(reduced.artifacts().len(), 1);
+    assert_eq!(reduced.artifacts()[0].item(), 1);
+    assert_eq!(reduced.artifacts()[0].turn(), 1);
+    assert_eq!(reduced.artifacts()[0].role(), ContextViewRole::User);
+    assert_eq!(reduced.artifacts()[0].byte_len(), 21);
+    assert_eq!(
+        reduced.artifacts()[0].digest_hex(),
+        "57d3c0cbbd188483a5d0aab6e1179bb474a515e2b04d5c1c05b3d39bb2c277a0"
+    );
+    assert_eq!(
+        view.resolve_artifact(&reduced.artifacts()[0])
+            .expect("resolve authoritative Item"),
+        "archived context body"
+    );
+    let json = serde_json::to_string(&reduced).expect("serialize reduction");
+    assert!(!json.contains("archived context body"));
+    assert!(json.contains("recent answer"));
+}
+
+#[test]
+fn context_reduction_rejects_invalid_limits_and_foreign_artifact_references() {
+    assert_eq!(
+        ContextReductionPolicy::new(MAX_CONTEXT_VIEW_BYTES + 1, 1),
+        Err(ContextViewError::InvalidReductionPolicy)
+    );
+
+    let source = ContextView::from_items(
+        LedgerHead {
+            transaction: 1,
+            sequence: 1,
+        },
+        &[CanonicalItem::new(
+            ItemId::new(1).expect("Item"),
+            TurnId::new(1).expect("Turn"),
+            ItemRole::User,
+            "authoritative",
+        )
+        .expect("Item")],
+    )
+    .expect("source View");
+    let foreign = ContextView::from_items(
+        LedgerHead {
+            transaction: 1,
+            sequence: 1,
+        },
+        &[CanonicalItem::new(
+            ItemId::new(1).expect("Item"),
+            TurnId::new(1).expect("Turn"),
+            ItemRole::User,
+            "different",
+        )
+        .expect("Item")],
+    )
+    .expect("foreign View")
+    .reduce(ContextReductionPolicy::new(1, 1).expect("policy"))
+    .expect("foreign reduction");
+
+    assert_eq!(
+        source.resolve_artifact(&foreign.artifacts()[0]),
+        Err(ContextViewError::ArtifactMismatch)
+    );
+}
+
+#[test]
+fn context_reduction_offloads_history_larger_than_the_raw_view_boundary() {
+    let oversized = "x".repeat(MAX_CONTEXT_VIEW_BYTES + 1);
+    let items = [CanonicalItem::new(
+        ItemId::new(1).expect("Item"),
+        TurnId::new(1).expect("Turn"),
+        ItemRole::User,
+        oversized,
+    )
+    .expect("Item fits canonical storage")];
+
+    let reduced = ReducedContextView::from_items(
+        LedgerHead {
+            transaction: 1,
+            sequence: 1,
+        },
+        &items,
+        ContextReductionPolicy::new(64, 1).expect("policy"),
+    )
+    .expect("oversized history is offloaded without retaining raw text");
+
+    assert_eq!(reduced.artifacts().len(), 1);
+    assert!(reduced.recent_items().is_empty());
+    assert_eq!(reduced.raw_bytes(), 0);
+    assert_eq!(
+        reduced.artifacts()[0].byte_len(),
+        MAX_CONTEXT_VIEW_BYTES as u64 + 1
     );
 }

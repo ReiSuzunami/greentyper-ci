@@ -6,11 +6,18 @@
 
 use std::error::Error;
 use std::fmt;
+use std::fmt::Write as _;
 
 use serde::Serialize;
+use sha2::{Digest, Sha256};
+
+use crate::ledger::LedgerHead;
+use crate::model::{CanonicalItem, ItemRole};
 
 pub const DEFAULT_SOFT_CONTEXT_PRESSURE_PERCENT: u8 = 65;
 pub const DEFAULT_HARD_CONTEXT_PRESSURE_PERCENT: u8 = 90;
+pub const MAX_CONTEXT_VIEW_BYTES: usize = 512 * 1024;
+pub const MAX_CONTEXT_VIEW_ITEMS: usize = 4096;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -195,6 +202,561 @@ impl ContextPressureSnapshot {
         self.hard_threshold_percent
     }
 }
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub struct ContextEventRange {
+    first_sequence: Option<u64>,
+    last_sequence: Option<u64>,
+    transaction: u64,
+}
+
+impl ContextEventRange {
+    #[must_use]
+    pub const fn from_head(head: LedgerHead) -> Self {
+        if head.sequence == 0 {
+            Self {
+                first_sequence: None,
+                last_sequence: None,
+                transaction: 0,
+            }
+        } else {
+            Self {
+                first_sequence: Some(1),
+                last_sequence: Some(head.sequence),
+                transaction: head.transaction,
+            }
+        }
+    }
+
+    #[must_use]
+    pub const fn first_sequence(self) -> Option<u64> {
+        self.first_sequence
+    }
+
+    #[must_use]
+    pub const fn last_sequence(self) -> Option<u64> {
+        self.last_sequence
+    }
+
+    #[must_use]
+    pub const fn transaction(self) -> u64 {
+        self.transaction
+    }
+
+    #[must_use]
+    pub const fn head(self) -> LedgerHead {
+        LedgerHead {
+            transaction: self.transaction,
+            sequence: match self.last_sequence {
+                Some(sequence) => sequence,
+                None => 0,
+            },
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextViewRole {
+    User,
+    Assistant,
+}
+
+impl From<ItemRole> for ContextViewRole {
+    fn from(role: ItemRole) -> Self {
+        match role {
+            ItemRole::User => Self::User,
+            ItemRole::Assistant => Self::Assistant,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct ContextViewItem {
+    item: u64,
+    turn: u64,
+    role: ContextViewRole,
+    text: String,
+    estimated_tokens: u64,
+}
+
+impl ContextViewItem {
+    fn from_item(item: &CanonicalItem) -> Result<Self, ContextViewError> {
+        let characters = u64::try_from(item.text().chars().count())
+            .map_err(|_| ContextViewError::ArithmeticOverflow)?;
+        let estimated_tokens = characters.div_ceil(4).max(1);
+        Ok(Self {
+            item: item.id().get(),
+            turn: item.turn().get(),
+            role: item.role().into(),
+            text: item.text().to_owned(),
+            estimated_tokens,
+        })
+    }
+
+    pub(crate) fn from_stored(
+        item: u64,
+        turn: u64,
+        role: ContextViewRole,
+        text: String,
+    ) -> Result<Self, ContextViewError> {
+        let canonical = CanonicalItem::new(
+            crate::model::ItemId::new(item).map_err(|_| ContextViewError::InvalidStoredView)?,
+            crate::model::TurnId::new(turn).map_err(|_| ContextViewError::InvalidStoredView)?,
+            match role {
+                ContextViewRole::User => ItemRole::User,
+                ContextViewRole::Assistant => ItemRole::Assistant,
+            },
+            text,
+        )
+        .map_err(|_| ContextViewError::InvalidStoredView)?;
+        Self::from_item(&canonical)
+    }
+
+    #[must_use]
+    pub const fn item(&self) -> u64 {
+        self.item
+    }
+
+    #[must_use]
+    pub const fn turn(&self) -> u64 {
+        self.turn
+    }
+
+    #[must_use]
+    pub const fn role(&self) -> ContextViewRole {
+        self.role
+    }
+
+    #[must_use]
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    #[must_use]
+    pub const fn estimated_tokens(&self) -> u64 {
+        self.estimated_tokens
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct ContextView {
+    source: ContextEventRange,
+    items: Vec<ContextViewItem>,
+    raw_bytes: u64,
+    estimated_tokens: u64,
+}
+
+impl ContextView {
+    pub fn from_items(head: LedgerHead, items: &[CanonicalItem]) -> Result<Self, ContextViewError> {
+        if items.len() > MAX_CONTEXT_VIEW_ITEMS {
+            return Err(ContextViewError::TooManyItems);
+        }
+        let mut projected = Vec::with_capacity(items.len());
+        let mut raw_bytes = 0_u64;
+        let mut estimated_tokens = 0_u64;
+        for item in items {
+            raw_bytes = raw_bytes
+                .checked_add(
+                    u64::try_from(item.text().len())
+                        .map_err(|_| ContextViewError::ArithmeticOverflow)?,
+                )
+                .ok_or(ContextViewError::ArithmeticOverflow)?;
+            if raw_bytes > MAX_CONTEXT_VIEW_BYTES as u64 {
+                return Err(ContextViewError::ViewTooLarge);
+            }
+            let item = ContextViewItem::from_item(item)?;
+            estimated_tokens = estimated_tokens
+                .checked_add(item.estimated_tokens())
+                .ok_or(ContextViewError::ArithmeticOverflow)?;
+            projected.push(item);
+        }
+        Ok(Self {
+            source: ContextEventRange::from_head(head),
+            items: projected,
+            raw_bytes,
+            estimated_tokens,
+        })
+    }
+
+    #[must_use]
+    pub const fn source(&self) -> ContextEventRange {
+        self.source
+    }
+
+    #[must_use]
+    pub fn items(&self) -> &[ContextViewItem] {
+        &self.items
+    }
+
+    #[must_use]
+    pub const fn raw_bytes(&self) -> u64 {
+        self.raw_bytes
+    }
+
+    #[must_use]
+    pub const fn estimated_tokens(&self) -> u64 {
+        self.estimated_tokens
+    }
+
+    pub fn reduce(
+        &self,
+        policy: ContextReductionPolicy,
+    ) -> Result<ReducedContextView, ContextViewError> {
+        let mut recent_start = self.items.len();
+        let mut recent_raw_bytes = 0_u64;
+        for (index, item) in self.items.iter().enumerate().rev() {
+            if self.items.len() - index > policy.max_raw_items {
+                break;
+            }
+            let item_bytes =
+                u64::try_from(item.text.len()).map_err(|_| ContextViewError::ArithmeticOverflow)?;
+            let Some(next_raw_bytes) = recent_raw_bytes.checked_add(item_bytes) else {
+                return Err(ContextViewError::ArithmeticOverflow);
+            };
+            if next_raw_bytes > policy.max_raw_bytes as u64 {
+                break;
+            }
+            recent_start = index;
+            recent_raw_bytes = next_raw_bytes;
+        }
+
+        let artifacts = self.items[..recent_start]
+            .iter()
+            .map(ContextArtifactRef::from_item)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(ReducedContextView {
+            source: self.source,
+            artifacts,
+            recent_items: self.items[recent_start..].to_vec(),
+            raw_bytes: recent_raw_bytes,
+            estimated_tokens: self.estimated_tokens,
+        })
+    }
+
+    pub fn resolve_artifact(
+        &self,
+        artifact: &ContextArtifactRef,
+    ) -> Result<&str, ContextViewError> {
+        let item = self
+            .items
+            .iter()
+            .find(|item| item.item == artifact.item)
+            .ok_or(ContextViewError::ArtifactMismatch)?;
+        let byte_len =
+            u64::try_from(item.text.len()).map_err(|_| ContextViewError::ArithmeticOverflow)?;
+        let digest: [u8; 32] = Sha256::digest(item.text.as_bytes()).into();
+        if item.turn != artifact.turn
+            || item.role != artifact.role
+            || item.estimated_tokens != artifact.estimated_tokens
+            || byte_len != artifact.byte_len
+            || digest != artifact.digest
+        {
+            return Err(ContextViewError::ArtifactMismatch);
+        }
+        Ok(&item.text)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub struct ContextReductionPolicy {
+    max_raw_bytes: usize,
+    max_raw_items: usize,
+}
+
+impl ContextReductionPolicy {
+    pub const fn new(max_raw_bytes: usize, max_raw_items: usize) -> Result<Self, ContextViewError> {
+        if max_raw_bytes == 0
+            || max_raw_bytes > MAX_CONTEXT_VIEW_BYTES
+            || max_raw_items == 0
+            || max_raw_items > MAX_CONTEXT_VIEW_ITEMS
+        {
+            Err(ContextViewError::InvalidReductionPolicy)
+        } else {
+            Ok(Self {
+                max_raw_bytes,
+                max_raw_items,
+            })
+        }
+    }
+
+    #[must_use]
+    pub const fn max_raw_bytes(self) -> usize {
+        self.max_raw_bytes
+    }
+
+    #[must_use]
+    pub const fn max_raw_items(self) -> usize {
+        self.max_raw_items
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct ContextArtifactRef {
+    item: u64,
+    turn: u64,
+    role: ContextViewRole,
+    byte_len: u64,
+    estimated_tokens: u64,
+    digest: [u8; 32],
+}
+
+impl ContextArtifactRef {
+    fn from_item(item: &ContextViewItem) -> Result<Self, ContextViewError> {
+        Ok(Self {
+            item: item.item,
+            turn: item.turn,
+            role: item.role,
+            byte_len: u64::try_from(item.text.len())
+                .map_err(|_| ContextViewError::ArithmeticOverflow)?,
+            estimated_tokens: item.estimated_tokens,
+            digest: Sha256::digest(item.text.as_bytes()).into(),
+        })
+    }
+
+    pub(crate) fn from_stored(
+        item: u64,
+        turn: u64,
+        role: ContextViewRole,
+        byte_len: u64,
+        estimated_tokens: u64,
+        digest: [u8; 32],
+    ) -> Result<Self, ContextViewError> {
+        if item == 0
+            || turn == 0
+            || byte_len == 0
+            || byte_len > crate::model::MAX_ITEM_TEXT_BYTES as u64
+            || estimated_tokens == 0
+        {
+            return Err(ContextViewError::InvalidStoredView);
+        }
+        Ok(Self {
+            item,
+            turn,
+            role,
+            byte_len,
+            estimated_tokens,
+            digest,
+        })
+    }
+
+    #[must_use]
+    pub const fn item(&self) -> u64 {
+        self.item
+    }
+
+    #[must_use]
+    pub const fn turn(&self) -> u64 {
+        self.turn
+    }
+
+    #[must_use]
+    pub const fn role(&self) -> ContextViewRole {
+        self.role
+    }
+
+    #[must_use]
+    pub const fn byte_len(&self) -> u64 {
+        self.byte_len
+    }
+
+    #[must_use]
+    pub const fn estimated_tokens(&self) -> u64 {
+        self.estimated_tokens
+    }
+
+    #[must_use]
+    pub const fn digest(&self) -> &[u8; 32] {
+        &self.digest
+    }
+
+    #[must_use]
+    pub fn digest_hex(&self) -> String {
+        let mut encoded = String::with_capacity(64);
+        for byte in self.digest {
+            write!(&mut encoded, "{byte:02x}").expect("writing to String cannot fail");
+        }
+        encoded
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct ReducedContextView {
+    source: ContextEventRange,
+    artifacts: Vec<ContextArtifactRef>,
+    recent_items: Vec<ContextViewItem>,
+    raw_bytes: u64,
+    estimated_tokens: u64,
+}
+
+impl ReducedContextView {
+    pub fn from_items(
+        head: LedgerHead,
+        items: &[CanonicalItem],
+        policy: ContextReductionPolicy,
+    ) -> Result<Self, ContextViewError> {
+        if items.len() > MAX_CONTEXT_VIEW_ITEMS {
+            return Err(ContextViewError::TooManyItems);
+        }
+        let mut recent_start = items.len();
+        let mut recent_raw_bytes = 0_u64;
+        for (index, item) in items.iter().enumerate().rev() {
+            if items.len() - index > policy.max_raw_items {
+                break;
+            }
+            let item_bytes = u64::try_from(item.text().len())
+                .map_err(|_| ContextViewError::ArithmeticOverflow)?;
+            let Some(next_raw_bytes) = recent_raw_bytes.checked_add(item_bytes) else {
+                return Err(ContextViewError::ArithmeticOverflow);
+            };
+            if next_raw_bytes > policy.max_raw_bytes as u64 {
+                break;
+            }
+            recent_start = index;
+            recent_raw_bytes = next_raw_bytes;
+        }
+        let artifacts = items[..recent_start]
+            .iter()
+            .map(|item| {
+                ContextViewItem::from_item(item)
+                    .and_then(|item| ContextArtifactRef::from_item(&item))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let recent_items = items[recent_start..]
+            .iter()
+            .map(ContextViewItem::from_item)
+            .collect::<Result<Vec<_>, _>>()?;
+        Self::from_stored(ContextEventRange::from_head(head), artifacts, recent_items)
+    }
+
+    pub(crate) fn from_stored(
+        source: ContextEventRange,
+        artifacts: Vec<ContextArtifactRef>,
+        recent_items: Vec<ContextViewItem>,
+    ) -> Result<Self, ContextViewError> {
+        let item_count = artifacts
+            .len()
+            .checked_add(recent_items.len())
+            .ok_or(ContextViewError::ArithmeticOverflow)?;
+        if item_count > MAX_CONTEXT_VIEW_ITEMS {
+            return Err(ContextViewError::TooManyItems);
+        }
+        let mut last_item = 0_u64;
+        let mut estimated_tokens = 0_u64;
+        for artifact in &artifacts {
+            if artifact.item <= last_item {
+                return Err(ContextViewError::InvalidStoredView);
+            }
+            last_item = artifact.item;
+            estimated_tokens = estimated_tokens
+                .checked_add(artifact.estimated_tokens)
+                .ok_or(ContextViewError::ArithmeticOverflow)?;
+        }
+        let mut raw_bytes = 0_u64;
+        for item in &recent_items {
+            if item.item <= last_item {
+                return Err(ContextViewError::InvalidStoredView);
+            }
+            last_item = item.item;
+            raw_bytes = raw_bytes
+                .checked_add(
+                    u64::try_from(item.text.len())
+                        .map_err(|_| ContextViewError::ArithmeticOverflow)?,
+                )
+                .ok_or(ContextViewError::ArithmeticOverflow)?;
+            estimated_tokens = estimated_tokens
+                .checked_add(item.estimated_tokens)
+                .ok_or(ContextViewError::ArithmeticOverflow)?;
+        }
+        if raw_bytes > MAX_CONTEXT_VIEW_BYTES as u64 {
+            return Err(ContextViewError::ViewTooLarge);
+        }
+        Ok(Self {
+            source,
+            artifacts,
+            recent_items,
+            raw_bytes,
+            estimated_tokens,
+        })
+    }
+
+    pub(crate) fn validate_against_items(
+        &self,
+        authoritative: &[CanonicalItem],
+    ) -> Result<(), ContextViewError> {
+        if self.artifacts.len() + self.recent_items.len() != authoritative.len() {
+            return Err(ContextViewError::ArtifactMismatch);
+        }
+        for (artifact, item) in self.artifacts.iter().zip(authoritative) {
+            let projected = ContextViewItem::from_item(item)?;
+            if *artifact != ContextArtifactRef::from_item(&projected)? {
+                return Err(ContextViewError::ArtifactMismatch);
+            }
+        }
+        for (stored, item) in self
+            .recent_items
+            .iter()
+            .zip(&authoritative[self.artifacts.len()..])
+        {
+            if *stored != ContextViewItem::from_item(item)? {
+                return Err(ContextViewError::ArtifactMismatch);
+            }
+        }
+        Ok(())
+    }
+
+    #[must_use]
+    pub const fn source(&self) -> ContextEventRange {
+        self.source
+    }
+
+    #[must_use]
+    pub fn artifacts(&self) -> &[ContextArtifactRef] {
+        &self.artifacts
+    }
+
+    #[must_use]
+    pub fn recent_items(&self) -> &[ContextViewItem] {
+        &self.recent_items
+    }
+
+    #[must_use]
+    pub const fn raw_bytes(&self) -> u64 {
+        self.raw_bytes
+    }
+
+    #[must_use]
+    pub const fn estimated_tokens(&self) -> u64 {
+        self.estimated_tokens
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ContextViewError {
+    TooManyItems,
+    ViewTooLarge,
+    ArithmeticOverflow,
+    InvalidReductionPolicy,
+    ArtifactMismatch,
+    InvalidStoredView,
+}
+
+impl fmt::Display for ContextViewError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::TooManyItems => "Context View has too many Items",
+            Self::ViewTooLarge => "Context View exceeds its byte boundary",
+            Self::ArithmeticOverflow => "Context View arithmetic overflowed",
+            Self::InvalidReductionPolicy => "Context reduction policy is outside its boundary",
+            Self::ArtifactMismatch => {
+                "Context artifact does not match the authoritative Context View"
+            }
+            Self::InvalidStoredView => "stored Context View is invalid",
+        })
+    }
+}
+
+impl Error for ContextViewError {}
 
 pub struct ContextPressure;
 
