@@ -10,6 +10,7 @@ use greentyper_core::config::{
     ConfigDocument, ConfigPaths, ConfigRuntime, ConfigRuntimeError, DEFAULT_MAX_OUTPUT_BYTES,
     ReasoningEffort,
 };
+use greentyper_core::context::ContextViewRole;
 use greentyper_core::provider::chat_completions::{
     ChatCompletionsError, ChatCompletionsSseDecoder, normalize_chat_completions_events,
 };
@@ -325,6 +326,37 @@ fn reject_continuation_tool_calls(
     Ok(events)
 }
 
+fn provider_messages(request: &ProviderRequest) -> Vec<serde_json::Value> {
+    let context_items = request
+        .context
+        .as_ref()
+        .map_or(0, |context| context.items().len());
+    let mut messages = Vec::with_capacity(context_items.saturating_add(1));
+    if let Some(context) = &request.context {
+        messages.extend(context.items().iter().map(|item| {
+            let role = match item.role() {
+                ContextViewRole::User => "user",
+                ContextViewRole::Assistant => "assistant",
+            };
+            serde_json::json!({"role": role, "content": item.text()})
+        }));
+    }
+    messages.push(serde_json::json!({"role": "user", "content": request.input}));
+    messages
+}
+
+fn responses_input(request: &ProviderRequest, messages: &[serde_json::Value]) -> serde_json::Value {
+    if request
+        .context
+        .as_ref()
+        .is_some_and(|context| !context.items().is_empty())
+    {
+        serde_json::Value::Array(messages.to_vec())
+    } else {
+        serde_json::Value::String(request.input.clone())
+    }
+}
+
 pub(crate) struct ResponsesHttpProvider<V> {
     client: Client,
     endpoint: Url,
@@ -339,7 +371,7 @@ pub(crate) struct ResponsesHttpProvider<V> {
 struct PendingContinuation {
     response_id: String,
     call_id: String,
-    input: String,
+    messages: Vec<serde_json::Value>,
     arguments_json: String,
 }
 
@@ -586,9 +618,11 @@ impl<V: CredentialVault> ProviderRuntime for ResponsesHttpProvider<V> {
             usize::try_from(*request.config.resolved().max_output_bytes().value())
                 .map_err(|_| ProviderError::InvalidConfiguration("output byte limit is invalid"))?;
         self.pending_continuation = None;
+        let messages = provider_messages(request);
+        let input = responses_input(request, &messages);
         let mut body = if self.local_echo_enabled {
             serde_json::json!({
-                "input": request.input,
+                "input": input,
                 "model": request.provider.model(),
                 "stream": true,
                 "tool_choice": "auto",
@@ -596,7 +630,7 @@ impl<V: CredentialVault> ProviderRuntime for ResponsesHttpProvider<V> {
             })
         } else {
             serde_json::json!({
-                "input": request.input,
+                "input": input,
                 "model": request.provider.model(),
                 "stream": true,
             })
@@ -617,7 +651,7 @@ impl<V: CredentialVault> ProviderRuntime for ResponsesHttpProvider<V> {
             self.pending_continuation = Some(PendingContinuation {
                 response_id,
                 call_id: call.call_id().to_owned(),
-                input: request.input.clone(),
+                messages,
                 arguments_json: call.arguments_json().to_owned(),
             });
         }
@@ -640,6 +674,18 @@ impl<V: CredentialVault> ProviderRuntime for ResponsesHttpProvider<V> {
         let max_output_bytes =
             usize::try_from(*request.config.resolved().max_output_bytes().value())
                 .map_err(|_| ProviderError::InvalidConfiguration("output byte limit is invalid"))?;
+        let mut messages = pending.messages;
+        messages.push(serde_json::json!({
+            "type": "function_call",
+            "call_id": pending.call_id,
+            "name": "local_echo",
+            "arguments": pending.arguments_json,
+        }));
+        messages.push(serde_json::json!({
+            "type": "function_call_output",
+            "call_id": output.call_id(),
+            "output": output.output(),
+        }));
         let mut body = match self.adapter {
             ResponsesAdapter::OpenAi | ResponsesAdapter::OpenCodeGo => serde_json::json!({
                 "input": [{
@@ -654,20 +700,7 @@ impl<V: CredentialVault> ProviderRuntime for ResponsesHttpProvider<V> {
                 "tools": [responses_local_echo_tool_definition(self.adapter)],
             }),
             ResponsesAdapter::DeepSeek => serde_json::json!({
-                "input": [
-                    {"role": "user", "content": pending.input},
-                    {
-                        "type": "function_call",
-                        "call_id": pending.call_id,
-                        "name": "local_echo",
-                        "arguments": pending.arguments_json,
-                    },
-                    {
-                        "type": "function_call_output",
-                        "call_id": output.call_id(),
-                        "output": output.output(),
-                    },
-                ],
+                "input": messages,
                 "model": request.provider.model(),
                 "stream": true,
                 "tool_choice": "none",
@@ -694,7 +727,7 @@ pub(crate) struct ChatCompletionsHttpProvider<V> {
 
 struct ChatPendingContinuation {
     call_id: String,
-    input: String,
+    messages: Vec<serde_json::Value>,
     arguments_json: String,
 }
 
@@ -922,9 +955,10 @@ impl<V: CredentialVault> ProviderRuntime for ChatCompletionsHttpProvider<V> {
             usize::try_from(*request.config.resolved().max_output_bytes().value())
                 .map_err(|_| ProviderError::InvalidConfiguration("output byte limit is invalid"))?;
         self.pending_continuation = None;
+        let messages = provider_messages(request);
         let mut body = if self.local_echo_enabled {
             serde_json::json!({
-                "messages": [{"role": "user", "content": request.input}],
+                "messages": messages.clone(),
                 "model": request.provider.model(),
                 "stream": true,
                 "stream_options": {"include_usage": true},
@@ -933,7 +967,7 @@ impl<V: CredentialVault> ProviderRuntime for ChatCompletionsHttpProvider<V> {
             })
         } else {
             serde_json::json!({
-                "messages": [{"role": "user", "content": request.input}],
+                "messages": messages.clone(),
                 "model": request.provider.model(),
                 "stream": true,
                 "stream_options": {"include_usage": true},
@@ -956,7 +990,7 @@ impl<V: CredentialVault> ProviderRuntime for ChatCompletionsHttpProvider<V> {
         if let [call] = calls.as_slice() {
             self.pending_continuation = Some(ChatPendingContinuation {
                 call_id: call.call_id().to_owned(),
-                input: request.input.clone(),
+                messages,
                 arguments_json: call.arguments_json().to_owned(),
             });
         }
@@ -979,27 +1013,26 @@ impl<V: CredentialVault> ProviderRuntime for ChatCompletionsHttpProvider<V> {
         let max_output_bytes =
             usize::try_from(*request.config.resolved().max_output_bytes().value())
                 .map_err(|_| ProviderError::InvalidConfiguration("output byte limit is invalid"))?;
+        let mut messages = pending.messages;
+        messages.push(serde_json::json!({
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [{
+                "id": pending.call_id,
+                "type": "function",
+                "function": {
+                    "name": "local_echo",
+                    "arguments": pending.arguments_json,
+                },
+            }],
+        }));
+        messages.push(serde_json::json!({
+            "role": "tool",
+            "tool_call_id": output.call_id(),
+            "content": output.output(),
+        }));
         let mut body = serde_json::json!({
-            "messages": [
-                {"role": "user", "content": pending.input},
-                {
-                    "role": "assistant",
-                    "content": null,
-                    "tool_calls": [{
-                        "id": pending.call_id,
-                        "type": "function",
-                        "function": {
-                            "name": "local_echo",
-                            "arguments": pending.arguments_json,
-                        },
-                    }],
-                },
-                {
-                    "role": "tool",
-                    "tool_call_id": output.call_id(),
-                    "content": output.output(),
-                },
-            ],
+            "messages": messages,
             "model": request.provider.model(),
             "stream": true,
             "stream_options": {"include_usage": true},
@@ -1028,7 +1061,7 @@ pub(crate) struct MessagesHttpProvider<V> {
 #[derive(Clone)]
 struct MessagesPendingContinuation {
     call_id: String,
-    input: String,
+    messages: Vec<serde_json::Value>,
     arguments_json: String,
 }
 
@@ -1231,10 +1264,11 @@ impl<V: CredentialVault> ProviderRuntime for MessagesHttpProvider<V> {
             .max_output_tokens()
             .map_or(MESSAGES_MAX_TOKENS, |limit| *limit.value());
         self.pending_continuation = None;
+        let messages = provider_messages(request);
         let body = if self.local_echo_enabled {
             serde_json::json!({
                 "max_tokens": max_output_tokens,
-                "messages": [{"role": "user", "content": request.input}],
+                "messages": messages.clone(),
                 "model": request.provider.model(),
                 "stream": true,
                 "thinking": {"type": "disabled"},
@@ -1244,7 +1278,7 @@ impl<V: CredentialVault> ProviderRuntime for MessagesHttpProvider<V> {
         } else {
             serde_json::json!({
                 "max_tokens": max_output_tokens,
-                "messages": [{"role": "user", "content": request.input}],
+                "messages": messages.clone(),
                 "model": request.provider.model(),
                 "stream": true,
                 "thinking": {"type": "disabled"},
@@ -1266,7 +1300,7 @@ impl<V: CredentialVault> ProviderRuntime for MessagesHttpProvider<V> {
         if let [call] = calls.as_slice() {
             self.pending_continuation = Some(MessagesPendingContinuation {
                 call_id: call.call_id().to_owned(),
-                input: request.input.clone(),
+                messages,
                 arguments_json: call.arguments_json().to_owned(),
             });
         }
@@ -1296,28 +1330,27 @@ impl<V: CredentialVault> ProviderRuntime for MessagesHttpProvider<V> {
             .resolved()
             .max_output_tokens()
             .map_or(MESSAGES_MAX_TOKENS, |limit| *limit.value());
+        let mut messages = pending.messages;
+        messages.push(serde_json::json!({
+            "role": "assistant",
+            "content": [{
+                "type": "tool_use",
+                "id": pending.call_id,
+                "name": "local_echo",
+                "input": arguments,
+            }],
+        }));
+        messages.push(serde_json::json!({
+            "role": "user",
+            "content": [{
+                "type": "tool_result",
+                "tool_use_id": output.call_id(),
+                "content": output.output(),
+            }],
+        }));
         let body = serde_json::json!({
             "max_tokens": max_output_tokens,
-            "messages": [
-                {"role": "user", "content": pending.input},
-                {
-                    "role": "assistant",
-                    "content": [{
-                        "type": "tool_use",
-                        "id": pending.call_id,
-                        "name": "local_echo",
-                        "input": arguments,
-                    }],
-                },
-                {
-                    "role": "user",
-                    "content": [{
-                        "type": "tool_result",
-                        "tool_use_id": output.call_id(),
-                        "content": output.output(),
-                    }],
-                },
-            ],
+            "messages": messages,
             "model": request.provider.model(),
             "stream": true,
             "thinking": {"type": "disabled"},
@@ -2265,11 +2298,17 @@ mod tests {
 
     use super::*;
     use greentyper_core::agent_team::{
-        Capability, CapabilitySnapshot, CommandOutcome, ResourceBudget, TaskScope, TaskSpec,
-        TeamCommand,
+        AgentSession, Capability, CapabilitySnapshot, CommandOutcome, ResourceBudget, TaskScope,
+        TaskSpec, TeamCommand,
     };
     use greentyper_core::config::{ConfigEpoch, ConfigLayers, ReasoningEffort, ServiceTier};
-    use greentyper_core::model::{ConfigEpochId, ProviderEpochId, ThreadId, TurnId};
+    use greentyper_core::context::{
+        ContextReductionPolicy, ContextRequestView, ReducedContextView,
+    };
+    use greentyper_core::ledger::LedgerHead;
+    use greentyper_core::model::{
+        CanonicalItem, ConfigEpochId, ItemId, ItemRole, ProviderEpochId, ThreadId, TurnId,
+    };
     use greentyper_core::provider::ProviderEpoch;
     use greentyper_core::runtime::ProviderTurnOutcome;
     use greentyper_core::tool_runtime::{
@@ -2323,6 +2362,66 @@ mod tests {
             context: None,
             input: input.to_owned(),
         }
+    }
+
+    fn request_context() -> ContextRequestView {
+        let items = [
+            CanonicalItem::new(
+                ItemId::new(1).expect("Item"),
+                TurnId::new(1).expect("Turn"),
+                ItemRole::User,
+                "prior question",
+            )
+            .expect("user Item"),
+            CanonicalItem::new(
+                ItemId::new(2).expect("Item"),
+                TurnId::new(1).expect("Turn"),
+                ItemRole::Assistant,
+                "prior answer",
+            )
+            .expect("Assistant Item"),
+        ];
+        ReducedContextView::from_items(
+            LedgerHead {
+                transaction: 1,
+                sequence: 2,
+            },
+            &items,
+            ContextReductionPolicy::new(64, 2).expect("policy"),
+        )
+        .expect("reduced Context View")
+        .materialize_request(&items)
+        .expect("request Context View")
+    }
+
+    fn publish_request_context(kernel: &mut RuntimeKernel, session: AgentSession) {
+        let mut provider = DeterministicProvider::default();
+        let outcome = kernel
+            .execute_provider_turn(
+                session,
+                &ConfigLayers::default(),
+                "prior question",
+                &mut provider,
+                |_| Ok(ToolResources::default()),
+            )
+            .expect("prepare prior Context Turn");
+        let output = match outcome {
+            ProviderTurnOutcome::Prepared(output) => output,
+            ProviderTurnOutcome::ApprovalRequired(_) => {
+                panic!("deterministic Context Turn requested Tool approval")
+            }
+        };
+        kernel
+            .acknowledge(output.delivery())
+            .expect("acknowledge prior Context Turn");
+        let checkpoint = kernel
+            .prepare_context_checkpoint(
+                ContextReductionPolicy::new(128, 2).expect("Context policy"),
+            )
+            .expect("prepare request Context checkpoint");
+        kernel
+            .publish_context_checkpoint(checkpoint)
+            .expect("publish request Context checkpoint");
     }
 
     fn provider_request_with_dialect(
@@ -3107,7 +3206,11 @@ source = "unknown"
                 body,
                 serde_json::json!({
                     "max_completion_tokens": 2048,
-                    "messages": [{"role": "user", "content": "hello Chat"}],
+                    "messages": [
+                        {"role": "user", "content": "prior question"},
+                        {"role": "assistant", "content": "prior answer"},
+                        {"role": "user", "content": "hello Chat"},
+                    ],
                     "model": FIXTURE_MODEL,
                     "reasoning_effort": "high",
                     "service_tier": "fast",
@@ -3128,7 +3231,7 @@ source = "unknown"
         let mut provider =
             ChatCompletionsHttpProvider::with_timeout(profile.clone(), vault, HTTP_TIMEOUT)
                 .expect("Chat Completions provider");
-        let request = provider_request_with_policy(
+        let mut request = provider_request_with_policy(
             profile,
             "hello Chat",
             ProviderDialect::ChatCompletions,
@@ -3136,6 +3239,7 @@ source = "unknown"
             Some(ReasoningEffort::High),
             Some(ServiceTier::Fast),
         );
+        request.context = Some(request_context());
         let events = provider.run(&request).expect("Chat response");
         assert!(matches!(
             events.as_slice(),
@@ -3279,10 +3383,11 @@ source = "unknown"
                 initial_body,
                 serde_json::json!({
                     "max_completion_tokens": 6000,
-                    "messages": [{
-                        "role": "user",
-                        "content": "echo through Chat",
-                    }],
+                    "messages": [
+                        {"role": "user", "content": "prior question"},
+                        {"role": "assistant", "content": "simulated: prior question"},
+                        {"role": "user", "content": "echo through Chat"},
+                    ],
                     "model": FIXTURE_MODEL,
                     "reasoning_effort": "medium",
                     "service_tier": "priority",
@@ -3323,6 +3428,8 @@ source = "unknown"
                 serde_json::json!({
                     "max_completion_tokens": 6000,
                     "messages": [
+                        {"role": "user", "content": "prior question"},
+                        {"role": "assistant", "content": "simulated: prior question"},
                         {"role": "user", "content": "echo through Chat"},
                         {
                             "role": "assistant",
@@ -3450,6 +3557,7 @@ source = "unknown"
             CommandOutcome::RootAdmitted { session, .. } => session,
             other => panic!("unexpected root outcome: {other:?}"),
         };
+        publish_request_context(&mut kernel, root);
         let outcome = kernel
             .execute_provider_turn(root, &layers, "echo through Chat", &mut provider, |_| {
                 Ok(ToolResources::default().with_process("greentyper.local.echo.v1"))
@@ -3640,7 +3748,11 @@ source = "unknown"
             assert_eq!(
                 body,
                 serde_json::json!({
-                    "input": "hello OpenCode Go Responses",
+                    "input": [
+                        {"role": "user", "content": "prior question"},
+                        {"role": "assistant", "content": "prior answer"},
+                        {"role": "user", "content": "hello OpenCode Go Responses"},
+                    ],
                     "max_output_tokens": 4096,
                     "model": model,
                     "stream": true,
@@ -3667,7 +3779,7 @@ source = "unknown"
             vault,
         )
         .expect("configured OpenCode Go Responses provider");
-        let request = provider_request_with_model_policy(
+        let mut request = provider_request_with_model_policy(
             profile.clone(),
             model,
             "hello OpenCode Go Responses",
@@ -3676,6 +3788,7 @@ source = "unknown"
             None,
             None,
         );
+        request.context = Some(request_context());
         let events = provider
             .run(&request)
             .expect("OpenCode Go Responses response");
@@ -4199,6 +4312,14 @@ source = "unknown"
             let initial_body = read_test_request_body_for(&mut initial, "/responses");
             assert_eq!(initial_body["model"], "deepseek-v4-flash");
             assert_eq!(initial_body["tool_choice"], "auto");
+            assert_eq!(
+                initial_body["input"],
+                serde_json::json!([
+                    {"role": "user", "content": "prior question"},
+                    {"role": "assistant", "content": "simulated: prior question"},
+                    {"role": "user", "content": "echo through DeepSeek Responses"},
+                ])
+            );
             assert!(initial_body["tools"][0].get("strict").is_none());
             write_fixture_response(
                 &mut initial,
@@ -4218,6 +4339,8 @@ source = "unknown"
             assert_eq!(
                 continuation_body["input"],
                 serde_json::json!([
+                    {"role": "user", "content": "prior question"},
+                    {"role": "assistant", "content": "simulated: prior question"},
                     {"role": "user", "content": "echo through DeepSeek Responses"},
                     {
                         "type": "function_call",
@@ -4283,6 +4406,7 @@ source = "unknown"
             CommandOutcome::RootAdmitted { session, .. } => session,
             other => panic!("unexpected root outcome: {other:?}"),
         };
+        publish_request_context(&mut kernel, root);
         let outcome = kernel
             .execute_provider_turn(
                 root,
@@ -4716,7 +4840,11 @@ source = "unknown"
                 body,
                 serde_json::json!({
                     "max_tokens": 3072,
-                    "messages": [{"role": "user", "content": "hello Messages"}],
+                    "messages": [
+                        {"role": "user", "content": "prior question"},
+                        {"role": "assistant", "content": "prior answer"},
+                        {"role": "user", "content": "hello Messages"},
+                    ],
                     "model": FIXTURE_MODEL,
                     "stream": true,
                     "thinking": {"type": "disabled"},
@@ -4751,12 +4879,13 @@ source = "unknown"
             vault,
         )
         .expect("configured Messages provider");
-        let request = provider_request_with_output_tokens(
+        let mut request = provider_request_with_output_tokens(
             profile,
             "hello Messages",
             ProviderDialect::Messages,
             3_072,
         );
+        request.context = Some(request_context());
         let events = provider.run(&request).expect("Messages response");
         assert!(matches!(
             events.as_slice(),
@@ -4875,7 +5004,7 @@ source = "unknown"
         .expect("Messages provider");
         provider.pending_continuation = Some(MessagesPendingContinuation {
             call_id: "toolu_once".into(),
-            input: "input".into(),
+            messages: vec![serde_json::json!({"role": "user", "content": "input"})],
             arguments_json: "{}".into(),
         });
 
@@ -4964,7 +5093,11 @@ source = "unknown"
                 initial_body,
                 serde_json::json!({
                     "max_tokens": 6001,
-                    "messages": [{"role": "user", "content": "echo through Messages"}],
+                    "messages": [
+                        {"role": "user", "content": "prior question"},
+                        {"role": "assistant", "content": "simulated: prior question"},
+                        {"role": "user", "content": "echo through Messages"},
+                    ],
                     "model": FIXTURE_MODEL,
                     "stream": true,
                     "thinking": {"type": "disabled"},
@@ -4999,6 +5132,8 @@ source = "unknown"
                 serde_json::json!({
                     "max_tokens": 6001,
                     "messages": [
+                        {"role": "user", "content": "prior question"},
+                        {"role": "assistant", "content": "simulated: prior question"},
                         {"role": "user", "content": "echo through Messages"},
                         {
                             "role": "assistant",
@@ -5085,6 +5220,7 @@ source = "unknown"
             CommandOutcome::RootAdmitted { session, .. } => session,
             other => panic!("unexpected root outcome: {other:?}"),
         };
+        publish_request_context(&mut kernel, root);
         let outcome = kernel
             .execute_provider_turn(
                 root,
@@ -5300,7 +5436,7 @@ source = "unknown"
         provider.pending_continuation = Some(PendingContinuation {
             response_id: "resp_pending_1".into(),
             call_id: "call_pending_1".into(),
-            input: "synthetic input".into(),
+            messages: vec![serde_json::json!({"role": "user", "content": "synthetic input"})],
             arguments_json: r#"{"message":"synthetic"}"#.into(),
         });
 
