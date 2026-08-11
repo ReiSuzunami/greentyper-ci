@@ -2353,7 +2353,8 @@ mod tests {
     use greentyper_core::provider::ProviderEpoch;
     use greentyper_core::runtime::{ProviderTurnOutcome, RecoveryStatus};
     use greentyper_core::tool_runtime::{
-        ApprovalDecision, AuthorizedToolCall, ToolEffectExecutor, ToolExecution, ToolResources,
+        ApprovalDecision, AuthorizedToolCall, ToolCallStatus, ToolEffectExecutor, ToolExecution,
+        ToolResources,
     };
     use greentyper_core::usage::UsageTimestamp;
     use rcgen::{CertifiedKey, generate_simple_self_signed};
@@ -5438,6 +5439,18 @@ source = "unknown"
             .collect::<Vec<_>>();
         assert_eq!(recovered_attempts.len(), 2);
         assert_eq!(
+            recovered_attempts
+                .iter()
+                .map(|attempt| attempt.attempt())
+                .collect::<Vec<_>>(),
+            [1, 2]
+        );
+        assert!(recovered_attempts.iter().all(|attempt| {
+            attempt.provider_profile() == profile.profile()
+                && attempt.requested_model() == "minimax-m2.7"
+                && attempt.dialect() == Some(ProviderDialect::Messages)
+        }));
+        assert_eq!(
             recovered_attempts[0]
                 .usage()
                 .and_then(|usage| usage.input_tokens()),
@@ -5461,6 +5474,12 @@ source = "unknown"
                 .and_then(|usage| usage.output_tokens()),
             Some(5)
         );
+        let recovered_tools = recovered
+            .tool_snapshot()
+            .expect("recovered OpenCode Go Messages Tool snapshot");
+        assert_eq!(recovered_tools.calls.len(), 1);
+        assert_eq!(recovered_tools.calls[0].tool, "local.echo");
+        assert_eq!(recovered_tools.calls[0].status, ToolCallStatus::Succeeded);
         recovered
             .acknowledge(delivery)
             .expect("acknowledge recovered OpenCode Go Messages output");
