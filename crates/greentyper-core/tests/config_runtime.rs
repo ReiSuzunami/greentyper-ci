@@ -399,6 +399,144 @@ fn schema_and_parser_are_versioned_typed_and_secret_safe() {
         );
     }
 
+    for (path_pattern, value_kind, interaction) in [
+        (
+            "price_schedules.<id>.version",
+            ConfigValueKind::String,
+            ConfigFieldInteraction::Text {
+                max_bytes: MAX_CONFIG_STRING_BYTES,
+            },
+        ),
+        (
+            "price_schedules.<id>.currency",
+            ConfigValueKind::String,
+            ConfigFieldInteraction::Text {
+                max_bytes: MAX_CONFIG_STRING_BYTES,
+            },
+        ),
+        (
+            "price_schedules.<id>.provider",
+            ConfigValueKind::String,
+            ConfigFieldInteraction::Text {
+                max_bytes: MAX_CONFIG_ID_BYTES,
+            },
+        ),
+        (
+            "price_schedules.<id>.model",
+            ConfigValueKind::String,
+            ConfigFieldInteraction::Text {
+                max_bytes: MAX_CONFIG_STRING_BYTES,
+            },
+        ),
+        (
+            "price_schedules.<id>.dialect",
+            ConfigValueKind::String,
+            ConfigFieldInteraction::Choice {
+                choices: &["responses", "chat_completions", "messages"],
+            },
+        ),
+        (
+            "price_schedules.<id>.service_tier",
+            ConfigValueKind::String,
+            ConfigFieldInteraction::Text {
+                max_bytes: MAX_CONFIG_STRING_BYTES,
+            },
+        ),
+        (
+            "price_schedules.<id>.minimum_context_tokens",
+            ConfigValueKind::NonNegativeInteger,
+            ConfigFieldInteraction::Text {
+                max_bytes: MAX_CONFIG_STRING_BYTES,
+            },
+        ),
+        (
+            "price_schedules.<id>.maximum_context_tokens",
+            ConfigValueKind::NonNegativeInteger,
+            ConfigFieldInteraction::Text {
+                max_bytes: MAX_CONFIG_STRING_BYTES,
+            },
+        ),
+        (
+            "price_schedules.<id>.effective_from",
+            ConfigValueKind::String,
+            ConfigFieldInteraction::Text {
+                max_bytes: MAX_CONFIG_STRING_BYTES,
+            },
+        ),
+        (
+            "price_schedules.<id>.effective_until",
+            ConfigValueKind::String,
+            ConfigFieldInteraction::Text {
+                max_bytes: MAX_CONFIG_STRING_BYTES,
+            },
+        ),
+        (
+            "price_schedules.<id>.source",
+            ConfigValueKind::String,
+            ConfigFieldInteraction::Choice {
+                choices: &["manual"],
+            },
+        ),
+        (
+            "price_schedules.<id>.source_ref",
+            ConfigValueKind::String,
+            ConfigFieldInteraction::Text {
+                max_bytes: MAX_CONFIG_STRING_BYTES,
+            },
+        ),
+        (
+            "price_schedules.<id>.rates.input_micros_per_million",
+            ConfigValueKind::NonNegativeInteger,
+            ConfigFieldInteraction::Text {
+                max_bytes: MAX_CONFIG_STRING_BYTES,
+            },
+        ),
+        (
+            "price_schedules.<id>.rates.cached_input_micros_per_million",
+            ConfigValueKind::NonNegativeInteger,
+            ConfigFieldInteraction::Text {
+                max_bytes: MAX_CONFIG_STRING_BYTES,
+            },
+        ),
+        (
+            "price_schedules.<id>.rates.cache_write_micros_per_million",
+            ConfigValueKind::NonNegativeInteger,
+            ConfigFieldInteraction::Text {
+                max_bytes: MAX_CONFIG_STRING_BYTES,
+            },
+        ),
+        (
+            "price_schedules.<id>.rates.output_micros_per_million",
+            ConfigValueKind::NonNegativeInteger,
+            ConfigFieldInteraction::Text {
+                max_bytes: MAX_CONFIG_STRING_BYTES,
+            },
+        ),
+        (
+            "price_schedules.<id>.rates.reasoning_output_micros_per_million",
+            ConfigValueKind::NonNegativeInteger,
+            ConfigFieldInteraction::Text {
+                max_bytes: MAX_CONFIG_STRING_BYTES,
+            },
+        ),
+    ] {
+        let field = schema
+            .iter()
+            .find(|entry| entry.path_pattern == path_pattern)
+            .expect("Price Schedule field schema");
+        assert_eq!(field.value_kind, value_kind, "{path_pattern}");
+        assert_eq!(field.interaction(), interaction, "{path_pattern}");
+    }
+    for (path, value) in [
+        ("price_schedules.manual.dialect", "responses"),
+        ("price_schedules.manual.source", "manual"),
+    ] {
+        assert!(
+            parse_config_value(path, value).is_ok(),
+            "Price Schedule interaction offered an invalid value: {path}={value}"
+        );
+    }
+
     assert_eq!(
         parse_config_value("runtime.max_output_bytes", "4096").expect("positive integer"),
         ConfigValue::PositiveInteger(4096)

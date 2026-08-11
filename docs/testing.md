@@ -367,6 +367,15 @@ discard. Further tests repair an invalid equal-time window, then prove a stale
 revision cannot overwrite the winner and leaves the Draft live. These tests do
 not prove live usage refresh, interactive `/stats`, or editing an existing
 Usage Window through every field route.
+A real-key loop now carries `/config pricing add` through its bounded ID prompt,
+all 17 schema fields, manual provenance choice, preview, commit, and Config
+reopen. Schema tests pin the 64-byte Provider Profile input, 512-byte text and
+integer inputs, three optional dialect choices, and manual-only editable source.
+A recovery test rejects an invalid context range without consuming the Draft,
+repairs it, then proves a stale revision cannot overwrite the winner, dirty quit
+is blocked, explicit discard preserves the winner, and Config reopen contains no
+losing schedule. These tests do not prove live pricing-book refresh,
+provider-reported charge ingestion, or rich terminal cost presentation.
 They do not constitute real ConPTY, panic-abort cleanup, secret-store UI,
 remaining mutable editors, approval, live-refresh, or resource evidence.
 Context Pressure tests freeze exact 65%/90% threshold transitions, estimated and

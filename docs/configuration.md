@@ -102,8 +102,9 @@ Schema metadata, provenance-aware field views, typed nested object lifecycle
 actions, and a reusable Config Runtime editor session for focused multi-field
 draft validation, atomic create/edit/delete, and commit. The Direct VT product
 TUI now connects three focused non-secret editors, Provider Profile creation,
-minimal Model Preset creation, Usage Window creation, and typed Config Object
-deletion confirmations to that real session in the user scope.
+minimal Model Preset creation, Usage Window creation, Price Schedule creation,
+and typed Config Object deletion confirmations to that real session in the user
+scope.
 `/config statusline preset` stages a bounded enum choice with Up/Down, previews
 with Enter, commits the currently previewed choice with `c`, and explicitly
 discards with `d`. `/config statusline expansion` uses the same interaction,
@@ -137,6 +138,20 @@ complete window and a second Enter commits it. Invalid local times, empty or
 malformed day lists, invalid IANA time zones, and stale revisions retain the
 Draft for correction or explicit discard. A successful commit affects the next
 Config Epoch; it does not rebuild the running TUI's frozen usage projection.
+`/config pricing add` prompts for a bounded Price Schedule ID and then exposes
+all 17 schema fields through the same Tab/Shift-Tab Draft. Thirteen values are
+required; dialect, service tier, maximum context, and effective-until remain
+optional. The Provider Profile ID is bounded to 64 bytes, while every other text
+or non-negative-integer input is bounded to 512 bytes. The source interaction
+offers only `manual`, because editable schedules cannot claim template,
+template-mirror, or provider-reported provenance, and the referenced Profile
+must also resolve to manual pricing. Partial integer input is buffered visibly
+and counts as dirty until Tab or Enter parses it. Enter on the final
+reasoning-output rate previews and a second Enter commits. Invalid context or
+effective ranges, provenance mismatches, and stale revisions preserve the Draft
+for correction or explicit discard. Commit affects the next Config Epoch; it
+does not rebuild the running TUI's frozen Price Schedule book or add rich cost
+presentation.
 F5 runs the bounded Provider connection and model-list test against the current
 revision-bound Provider candidate. Success and fixed retryable/non-retryable
 failure states render in the wizard; any staged change resets the observation
@@ -157,8 +172,7 @@ target-layer explicit and fails when the resulting effective configuration has
 dangling references. The snapshot-based `tui` tracer renders controller screens
 reachable from the Slash Panel, including the top-level Config Center; only the
 workflows above mutate a Draft. It does not yet ship remaining schema-driven
-terminal editor dialogs, the Price Schedule object-name/creation form,
-secret-entry/bind UI, or the App Server surface
+terminal editor dialogs, secret-entry/bind UI, or the App Server surface
 described below. The current
 terminal-neutral Provider Profile wizard resolves release template defaults into
 user-configured Profile Drafts and supports the explicit bounded connection and

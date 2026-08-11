@@ -60,6 +60,9 @@ creates minimal Model Presets from Provider, model, and dialect fields.
 The third bounded object-name flow creates named Usage Windows from start, end,
 weekday-list, and time-zone fields while keeping partial structured input local
 until it can be parsed atomically.
+The fourth creates manual Price Schedules across all 17 schema fields while
+keeping partial non-negative-integer input local until it can be parsed
+atomically.
 Section-filtered typed remove
 routes render exact Config Object deletion confirmations; secret storage stays
 behind the credential adapter. Remaining

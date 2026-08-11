@@ -368,11 +368,21 @@ validation failure, and stale revisions all remain recoverable. The final text
 field previews and CAS-commits on two explicit Enter actions, and a real-key
 test reopens Config to prove the resolved window persists. This slice does not
 rebuild the frozen usage projection or add interactive `/stats` behavior.
+`/config pricing add` now supplies the fourth rendered object-name workflow and
+completes the Config Object creation set. It traverses all 17 Price Schedule
+schema fields, keeps optional selectors skippable, offers only valid manual
+provenance for an editable schedule, and visibly buffers non-negative-integer
+text until parsing succeeds. The final rate previews and CAS-commits on two
+explicit Enter actions. Real-key and recovery tests prove Config reopen,
+domain-validation repair, stale-revision retention, dirty-quit blocking, and
+explicit discard without overwriting the winner. This slice does not rebuild
+the frozen pricing book, ingest provider-reported charges, or add rich cost
+presentation.
 
 This does not complete Phase 3. Audited Windows ConPTY behavior, remaining
 terminal-backed schema editing and approval interaction, live snapshot refresh,
-the Price Schedule object-name dialog, rendered secret binding,
-custom-template/starter-preset workflow, live catalog discovery and Recent
+rendered secret binding, custom-template/starter-preset workflow, live catalog
+discovery and Recent
 evidence, automatic Context View/token-source
 projection, provider-reported
 charge and subscription-quota accounting, richer observed Provider metadata,

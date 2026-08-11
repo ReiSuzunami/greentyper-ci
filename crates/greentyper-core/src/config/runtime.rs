@@ -120,6 +120,7 @@ const PROVIDER_DIALECT_CHOICES: &[&str] = &[
 ];
 const STATUSLINE_PRESET_CHOICES: &[&str] = &["minimal", "balanced", "diagnostic", "custom"];
 const STATUSLINE_EXPANSION_CHOICES: &[&str] = &["auto", "compact", "expanded"];
+const PRICE_SCHEDULE_SOURCE_CHOICES: &[&str] = &[PriceScheduleSource::Manual.as_str()];
 
 const CONFIG_SCHEMA: &[ConfigSchemaEntry] = &[
     schema_entry(
@@ -637,6 +638,56 @@ fn config_field_interaction(descriptor: &ConfigSchemaEntry) -> ConfigFieldIntera
                 choices: PROVIDER_DIALECT_CHOICES,
             }
         }
+        ("price_schedules.<id>.provider", ConfigValueKind::String, false, "provider_selector") => {
+            ConfigFieldInteraction::Text {
+                max_bytes: MAX_CONFIG_ID_BYTES,
+            }
+        }
+        ("price_schedules.<id>.dialect", ConfigValueKind::String, false, "dialect") => {
+            ConfigFieldInteraction::Choice {
+                choices: PROVIDER_DIALECT_CHOICES,
+            }
+        }
+        ("price_schedules.<id>.source", ConfigValueKind::String, false, "pricing_source") => {
+            ConfigFieldInteraction::Choice {
+                choices: PRICE_SCHEDULE_SOURCE_CHOICES,
+            }
+        }
+        (
+            "price_schedules.<id>.version",
+            ConfigValueKind::String,
+            false,
+            "price_schedule_version",
+        )
+        | ("price_schedules.<id>.currency", ConfigValueKind::String, false, "currency")
+        | ("price_schedules.<id>.model", ConfigValueKind::String, false, "model_selector")
+        | ("price_schedules.<id>.service_tier", ConfigValueKind::String, false, "service_tier")
+        | (
+            "price_schedules.<id>.effective_from" | "price_schedules.<id>.effective_until",
+            ConfigValueKind::String,
+            false,
+            "utc_timestamp",
+        )
+        | ("price_schedules.<id>.source_ref", ConfigValueKind::String, false, "source_reference")
+        | (
+            "price_schedules.<id>.minimum_context_tokens"
+            | "price_schedules.<id>.maximum_context_tokens",
+            ConfigValueKind::NonNegativeInteger,
+            false,
+            "non_negative_integer",
+        )
+        | (
+            "price_schedules.<id>.rates.input_micros_per_million"
+            | "price_schedules.<id>.rates.cached_input_micros_per_million"
+            | "price_schedules.<id>.rates.cache_write_micros_per_million"
+            | "price_schedules.<id>.rates.output_micros_per_million"
+            | "price_schedules.<id>.rates.reasoning_output_micros_per_million",
+            ConfigValueKind::NonNegativeInteger,
+            false,
+            "price_rate",
+        ) => ConfigFieldInteraction::Text {
+            max_bytes: MAX_CONFIG_STRING_BYTES,
+        },
         (
             "stats.windows.<id>.start" | "stats.windows.<id>.end",
             ConfigValueKind::String,

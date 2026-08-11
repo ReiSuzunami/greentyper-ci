@@ -316,10 +316,21 @@ Enter CAS-commits, and tests reopen the file to prove the resolved window
 survives. Invalid arrays, invalid window rules, and revision conflicts keep the
 Draft live for correction or explicit discard. This does not rebuild the
 running TUI's frozen usage projection.
+`/config pricing add` now completes the rendered Config Object creation set. It
+prompts for a bounded Price Schedule ID and moves through all 17 schema fields:
+13 required values plus optional dialect, service tier, maximum context, and
+effective-until selectors. The Provider Profile ID is bounded to 64 bytes; all
+other text and non-negative-integer inputs are bounded to 512 bytes. Editable
+schedules offer only the valid `manual` provenance choice and require the
+referenced Profile to use manual pricing. Partial integer input remains local
+and dirty until Tab or Enter parses it. Enter on the final reasoning-output rate
+previews, a second Enter CAS-commits, and tests reopen the resolved schedule.
+Invalid selector ranges, effective intervals, provenance, and stale revisions
+retain the Draft for repair or explicit discard. This does not rebuild the
+running TUI's frozen Price Schedule book or add rich cost presentation.
 Outside these narrow workflows the tracer remains snapshot-based and read-only. It is not a
 general mutable terminal editor, approval surface, live refresh loop, audited
-ConPTY integration, Price Schedule creation dialog, secret-entry/bind
-surface, starter-preset
+ConPTY integration, secret-entry/bind surface, starter-preset
 workflow, or persistent live catalog discovery. Live inference conformance,
 reconnect/retry, OpenCode Go Messages execution,
 Messages reasoning blocks, Preset context/fallback execution, richer approval

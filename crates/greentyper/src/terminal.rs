@@ -1585,6 +1585,7 @@ mod tests {
         ConfigObjectRef, ConfigPaths, ConfigRuntime, ConfigScope, ConfigValue,
         MAX_CONFIG_STRING_BYTES,
     };
+    use greentyper_core::pricing::PriceScheduleSource;
     use greentyper_core::provider::{ProviderDialect, ProviderProfileSnapshot};
     use greentyper_core::usage::UsageWeekday;
 
@@ -2752,6 +2753,295 @@ mod tests {
     }
 
     #[test]
+    fn terminal_loop_creates_price_schedule_from_real_key_events() {
+        let root = terminal_test_root("price-schedule-create-loop");
+        let ledger = root.join("runtime.ledger");
+        let paths = ConfigPaths::new(root.join("user.toml"), root.join("project.toml"));
+        write_terminal_manual_pricing_provider_config(&paths);
+        let mut config =
+            ConfigRuntime::open(paths.clone(), ConfigDocument::empty()).expect("config runtime");
+        let view = build_terminal_view(&ledger, &config, "/").expect("terminal view");
+        let mut events: VecDeque<_> = "config pricing add"
+            .chars()
+            .map(|character| {
+                Event::Key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
+            })
+            .collect();
+        events.push_back(Event::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )));
+        events.extend("openai-sol".chars().map(|character| {
+            Event::Key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
+        }));
+        events.push_back(Event::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )));
+        for value in ["2026-08-11.1", "USD", "edge", "gpt-5.6-sol"] {
+            events.extend(value.chars().map(|character| {
+                Event::Key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
+            }));
+            events.push_back(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)));
+        }
+        events.extend([
+            Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+        ]);
+        events.extend("priority".chars().map(|character| {
+            Event::Key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
+        }));
+        events.push_back(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)));
+        events.extend("0".chars().map(|character| {
+            Event::Key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
+        }));
+        events.push_back(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)));
+        events.extend("200000".chars().map(|character| {
+            Event::Key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
+        }));
+        events.push_back(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)));
+        events.extend("2026-08-11T00:00:00Z".chars().map(|character| {
+            Event::Key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
+        }));
+        events.push_back(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)));
+        events.extend("2026-09-11T00:00:00Z".chars().map(|character| {
+            Event::Key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
+        }));
+        events.extend([
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+        ]);
+        for value in [
+            "synthetic-manual-rate-card",
+            "1000000",
+            "500000",
+            "0",
+            "2000000",
+            "3000000",
+        ] {
+            events.extend(value.chars().map(|character| {
+                Event::Key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
+            }));
+            if value != "3000000" {
+                events.push_back(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)));
+            }
+        }
+        events.extend([
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL)),
+        ]);
+
+        let output = run_terminal_loop(
+            Vec::new(),
+            FakeTerminalMode::default(),
+            &mut config,
+            &view,
+            80,
+            24,
+            move || Ok(events.pop_front().expect("bounded event sequence")),
+        )
+        .expect("terminal loop");
+
+        let schedules = config
+            .resolved_price_schedules()
+            .expect("resolve created Price Schedule");
+        let schedule = schedules
+            .schedules()
+            .first()
+            .expect("created Price Schedule");
+        assert_eq!(schedules.schedules().len(), 1);
+        assert_eq!(schedule.id(), "openai-sol");
+        assert_eq!(schedule.version(), "2026-08-11.1");
+        assert_eq!(schedule.currency(), "USD");
+        assert_eq!(schedule.provider_profile(), "edge");
+        assert_eq!(schedule.model(), "gpt-5.6-sol");
+        assert_eq!(schedule.dialect(), Some(ProviderDialect::Responses));
+        assert_eq!(schedule.service_tier(), Some("priority"));
+        assert_eq!(schedule.minimum_context_tokens(), 0);
+        assert_eq!(schedule.maximum_context_tokens(), Some(200_000));
+        assert_eq!(schedule.effective_from().unix_millis(), 1_786_406_400_000);
+        assert_eq!(
+            schedule.effective_until().unwrap().unix_millis(),
+            1_789_084_800_000
+        );
+        assert_eq!(schedule.source(), PriceScheduleSource::Manual);
+        assert_eq!(schedule.source_ref(), "synthetic-manual-rate-card");
+        let rates = schedule.rates();
+        assert_eq!(rates.input_micros_per_million(), 1_000_000);
+        assert_eq!(rates.cached_input_micros_per_million(), 500_000);
+        assert_eq!(rates.cache_write_micros_per_million(), 0);
+        assert_eq!(rates.output_micros_per_million(), 2_000_000);
+        assert_eq!(rates.reasoning_output_micros_per_million(), 3_000_000);
+        assert!(output.starts_with(ENTER_TERMINAL));
+        assert!(output.ends_with(LEAVE_TERMINAL));
+        drop(config);
+
+        let reopened = ConfigRuntime::open(paths, ConfigDocument::empty()).expect("reopen config");
+        let schedules = reopened
+            .resolved_price_schedules()
+            .expect("resolve reopened Price Schedule");
+        assert_eq!(schedules.schedules().len(), 1);
+        assert_eq!(schedules.schedules()[0].id(), "openai-sol");
+        assert!(!ledger.exists());
+        std::fs::remove_dir_all(root).expect("remove test config");
+    }
+
+    #[test]
+    fn terminal_price_schedule_recovers_from_validation_and_cas_conflict() {
+        let root = terminal_test_root("price-schedule-create-recovery");
+        let paths = ConfigPaths::new(root.join("user.toml"), root.join("project.toml"));
+        write_terminal_manual_pricing_provider_config(&paths);
+        let mut config =
+            ConfigRuntime::open(paths.clone(), ConfigDocument::empty()).expect("config runtime");
+        let mut session =
+            TerminalSession::new("/config pricing add", 80, 24).expect("terminal session");
+
+        session
+            .handle(TerminalInputEvent::Enter, Some(&mut config))
+            .expect("open Price Schedule ID prompt");
+        type_terminal_config_text(&mut session, &mut config, "openai-sol");
+        session
+            .handle(TerminalInputEvent::Enter, Some(&mut config))
+            .expect("open Price Schedule version field");
+        for value in ["2026-08-11.1", "USD", "edge", "gpt-5.6-sol"] {
+            type_terminal_config_text(&mut session, &mut config, value);
+            session
+                .handle(TerminalInputEvent::Tab, Some(&mut config))
+                .expect("focus next Price Schedule field");
+        }
+        for _ in 0..2 {
+            session
+                .handle(TerminalInputEvent::Tab, Some(&mut config))
+                .expect("skip optional Price Schedule field");
+        }
+        for value in ["0", "0", "2026-08-11T00:00:00Z"] {
+            type_terminal_config_text(&mut session, &mut config, value);
+            session
+                .handle(TerminalInputEvent::Tab, Some(&mut config))
+                .expect("focus next Price Schedule field");
+        }
+        session
+            .handle(TerminalInputEvent::Tab, Some(&mut config))
+            .expect("skip optional effective-until field");
+        session
+            .handle(TerminalInputEvent::Down, Some(&mut config))
+            .expect("select manual Price Schedule source");
+        session
+            .handle(TerminalInputEvent::Tab, Some(&mut config))
+            .expect("focus Price Schedule source reference");
+        for value in [
+            "synthetic-manual-rate-card",
+            "1000000",
+            "500000",
+            "0",
+            "2000000",
+            "3000000",
+        ] {
+            type_terminal_config_text(&mut session, &mut config, value);
+            if value != "3000000" {
+                session
+                    .handle(TerminalInputEvent::Tab, Some(&mut config))
+                    .expect("focus next Price Schedule rate");
+            }
+        }
+
+        session
+            .handle(TerminalInputEvent::Enter, Some(&mut config))
+            .expect("invalid Price Schedule remains live");
+        assert_eq!(
+            session.notice.as_deref(),
+            Some("Config validation failed at price_schedules.openai-sol")
+        );
+        assert!(session.controller.has_unsaved_config_draft());
+
+        for _ in 0..9 {
+            session
+                .handle(TerminalInputEvent::BackTab, Some(&mut config))
+                .expect("return to maximum context field");
+        }
+        assert_eq!(
+            session
+                .controller
+                .config_editor_field()
+                .expect("maximum context field")
+                .path,
+            "price_schedules.openai-sol.maximum_context_tokens"
+        );
+        type_terminal_config_text(&mut session, &mut config, "1");
+        for _ in 0..9 {
+            session
+                .handle(TerminalInputEvent::Tab, Some(&mut config))
+                .expect("return to final Price Schedule rate");
+        }
+        session
+            .handle(TerminalInputEvent::Enter, Some(&mut config))
+            .expect("validate repaired Price Schedule");
+        assert_eq!(session.notice.as_deref(), Some("Config draft validated"));
+
+        let mut winner = ConfigEditorSession::open_from_query(
+            &config,
+            ConfigScope::User,
+            "/config statusline preset",
+            0,
+            None,
+        )
+        .expect("winner editor");
+        winner.stage_raw("minimal").expect("stage winning change");
+        winner.commit(&mut config).expect("commit winning change");
+
+        session
+            .handle(TerminalInputEvent::Enter, Some(&mut config))
+            .expect("stale Price Schedule remains live");
+        assert_eq!(
+            session.notice.as_deref(),
+            Some("Config changed; discard and reopen the editor")
+        );
+        assert!(session.controller.has_unsaved_config_draft());
+        assert_eq!(
+            session
+                .handle(TerminalInputEvent::Quit, Some(&mut config))
+                .expect("dirty Price Schedule blocks quit"),
+            TerminalLoopOutcome::Redraw
+        );
+        session
+            .handle(TerminalInputEvent::Escape, Some(&mut config))
+            .expect("request Price Schedule discard");
+        assert_eq!(session.notice.as_deref(), Some("Discard Config draft?"));
+        session
+            .handle(TerminalInputEvent::Enter, Some(&mut config))
+            .expect("discard stale Price Schedule");
+        assert!(session.controller.is_slash_panel());
+        assert_eq!(
+            config_string_target(&config, "ui.statusline.preset").as_deref(),
+            Some("minimal")
+        );
+        assert!(
+            config
+                .resolved_price_schedules()
+                .unwrap()
+                .schedules()
+                .is_empty()
+        );
+        drop(config);
+
+        let reopened = ConfigRuntime::open(paths, ConfigDocument::empty()).expect("reopen config");
+        assert_eq!(
+            config_string_target(&reopened, "ui.statusline.preset").as_deref(),
+            Some("minimal")
+        );
+        assert!(
+            reopened
+                .resolved_price_schedules()
+                .unwrap()
+                .schedules()
+                .is_empty()
+        );
+        std::fs::remove_dir_all(root).expect("remove test config");
+    }
+
+    #[test]
     fn terminal_usage_window_moves_across_all_editable_fields_and_commits() {
         let root = terminal_test_root("usage-window-create-fields");
         let paths = ConfigPaths::new(root.join("user.toml"), root.join("project.toml"));
@@ -3712,6 +4002,18 @@ mod tests {
         ))
     }
 
+    fn type_terminal_config_text(
+        session: &mut TerminalSession,
+        config: &mut ConfigRuntime,
+        value: &str,
+    ) {
+        for character in value.chars() {
+            session
+                .handle(TerminalInputEvent::Character(character), Some(config))
+                .expect("type terminal Config value");
+        }
+    }
+
     fn write_terminal_provider_config(paths: &ConfigPaths) {
         std::fs::create_dir_all(paths.user().parent().expect("provider config parent"))
             .expect("create provider config directory");
@@ -3733,6 +4035,24 @@ source = "unknown"
 "#,
         )
         .expect("write provider config");
+    }
+
+    fn write_terminal_manual_pricing_provider_config(paths: &ConfigPaths) {
+        std::fs::create_dir_all(paths.user().parent().expect("provider config parent"))
+            .expect("create provider config directory");
+        std::fs::write(
+            paths.user(),
+            r#"schema_version = 1
+
+[providers.edge]
+template = "openai"
+credential = "synthetic-edge-credential-reference"
+
+[providers.edge.pricing]
+source = "manual"
+"#,
+        )
+        .expect("write manual-pricing provider config");
     }
 
     fn config_string_target(config: &ConfigRuntime, path: &str) -> Option<String> {

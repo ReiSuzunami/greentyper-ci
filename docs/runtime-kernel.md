@@ -349,6 +349,11 @@ charges still require a future dedicated authority path.
   stays in a visible dirty buffer until it parses; preview, CAS conflict,
   explicit discard, and Config reopen use the same editor contract. The action
   does not rebuild the running TUI's frozen usage projection.
+  `/config pricing add` can also commit one manual Price Schedule through all 17
+  schema fields. Bounded text and deferred integer input, domain validation,
+  CAS conflict, explicit discard, and Config reopen use the same editor
+  contract. The action does not rebuild the frozen Price Schedule book or grant
+  provider-reported pricing authority.
 - Complete Config Schema default/constraint/normalization/migration metadata,
   remaining mutable rendered TUI/App Server editors, live catalog discovery, and the rendered
   template-picker/starter-preset workflow. Release Provider Template defaults
@@ -366,7 +371,8 @@ charges still require a future dedicated authority path.
   are present. The first Direct VT tracer renders those frozen rows and can
   persist the statusline-preset, statusline-expansion, and existing-Provider
   base-URL/credential-reference fields plus a release-template Provider Profile,
-  can create a minimal required-field Model Preset and a named Usage Window,
+  can create a minimal required-field Model Preset, a named Usage Window, and a
+  manual Price Schedule,
   and can confirm typed
   target-layer Config Object deletion, but it does not
   rebuild the frozen row projection in-process.

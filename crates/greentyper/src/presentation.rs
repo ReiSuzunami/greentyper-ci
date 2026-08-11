@@ -703,6 +703,7 @@ impl PresentationController {
                         kind,
                         ConfigObjectKind::ProviderProfile
                             | ConfigObjectKind::ModelPreset
+                            | ConfigObjectKind::PriceSchedule
                             | ConfigObjectKind::UsageWindow
                     ) {
                         return Err(PresentationControllerError::ConfigObjectRouteUnavailable);
@@ -2994,7 +2995,7 @@ credential = "synthetic-deepseek-credential-reference"
     }
 
     #[test]
-    fn controller_prompts_for_rendered_provider_model_and_usage_window_creation() {
+    fn controller_prompts_for_every_rendered_config_object_creation_form() {
         let temp = TempTree::new("controller-rendered-create-boundary");
         let mut runtime = ConfigRuntime::open(temp.paths(), ConfigDocument::empty())
             .expect("open Config Runtime");
@@ -3042,6 +3043,23 @@ credential = "synthetic-deepseek-credential-reference"
                 .expect("Usage Window prompt"),
             PresentationScreenView::ConfigObjectCreate {
                 kind: ConfigObjectKind::UsageWindow,
+                ref id,
+            } if id.is_empty()
+        ));
+
+        controller.back().expect("close Usage Window prompt");
+        controller
+            .set_slash_query("/config pricing add")
+            .expect("set Price Schedule create route");
+        controller
+            .activate(&mut runtime, ConfigScope::User, None)
+            .expect("open rendered Price Schedule ID prompt");
+        assert!(matches!(
+            controller
+                .screen(Some(&runtime))
+                .expect("Price Schedule prompt"),
+            PresentationScreenView::ConfigObjectCreate {
+                kind: ConfigObjectKind::PriceSchedule,
                 ref id,
             } if id.is_empty()
         ));
