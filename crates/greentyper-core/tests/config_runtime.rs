@@ -1793,13 +1793,123 @@ fn fallback_chain_rejects_more_than_sixteen_provider_candidates() {
     }
 
     write(paths.user(), &document);
-    let runtime = ConfigRuntime::open(paths, ConfigDocument::empty())
+    let mut runtime = ConfigRuntime::open(paths.clone(), ConfigDocument::empty())
         .expect("open oversized fallback config for repair");
     assert!(!runtime.status().ready);
     assert!(runtime.status().issues.iter().any(|issue| {
         issue.detail.contains("model_presets.p0.fallback")
             && issue.detail.contains("16 Provider candidates")
     }));
+
+    let mut repaired = String::from("schema_version = 1\n");
+    for index in 0..16 {
+        repaired.push_str(&format!(
+            "\n[model_presets.p{index}]\nprovider = \"simulator\"\nmodel = \"p{index}\"\ndialect = \"responses\"\n"
+        ));
+        if index < 15 {
+            repaired.push_str(&format!("fallback = [\"p{}\"]\n", index + 1));
+        }
+    }
+    write(paths.user(), &repaired);
+    assert!(runtime.reload().expect("reload repaired fallback").ready);
+    assert_eq!(
+        runtime
+            .model_preset_chain("p0")
+            .expect("resolve repaired fallback")
+            .len(),
+        16
+    );
+}
+
+#[test]
+fn fallback_chain_rejects_policy_and_output_downgrades() {
+    let cases = [
+        (
+            "reasoning",
+            "reasoning_effort = \"high\"",
+            "reasoning_effort = \"low\"",
+        ),
+        (
+            "tier",
+            "service_tier = \"priority\"",
+            "service_tier = \"default\"",
+        ),
+        (
+            "output",
+            "max_output_tokens = 32768",
+            "max_output_tokens = 16384",
+        ),
+        (
+            "context",
+            "context_mode = \"provider_native\"",
+            "context_mode = \"canonical\"",
+        ),
+    ];
+
+    for (label, primary_policy, backup_policy) in cases {
+        let temp = TempTree::new(label);
+        let paths = temp.paths();
+        write(
+            paths.user(),
+            &format!(
+                "schema_version = 1\n\n\
+                 [model_presets.primary]\n\
+                 provider = \"simulator\"\n\
+                 model = \"model-primary\"\n\
+                 dialect = \"responses\"\n\
+                 {primary_policy}\n\
+                 fallback = [\"backup\"]\n\n\
+                 [model_presets.backup]\n\
+                 provider = \"simulator\"\n\
+                 model = \"model-backup\"\n\
+                 dialect = \"chat_completions\"\n\
+                 {backup_policy}\n"
+            ),
+        );
+
+        let runtime = ConfigRuntime::open(paths, ConfigDocument::empty())
+            .expect("open fallback downgrade for repair");
+        assert!(!runtime.status().ready, "{label}");
+        assert!(
+            runtime.status().issues.iter().any(|issue| {
+                issue.detail.contains("model_presets.primary.fallback")
+                    && issue.detail.contains("capability contract")
+            }),
+            "{label}: {:?}",
+            runtime.status().issues
+        );
+    }
+
+    let temp = TempTree::new("capability-preserved");
+    let paths = temp.paths();
+    write(
+        paths.user(),
+        r#"
+schema_version = 1
+
+[model_presets.primary]
+provider = "simulator"
+model = "model-primary"
+dialect = "responses"
+reasoning_effort = "high"
+service_tier = "priority"
+max_output_tokens = 32768
+context_mode = "provider_native"
+fallback = ["backup"]
+
+[model_presets.backup]
+provider = "simulator"
+model = "model-backup"
+dialect = "chat_completions"
+reasoning_effort = "high"
+service_tier = "priority"
+max_output_tokens = 65536
+context_mode = "provider_native"
+"#,
+    );
+    let runtime = ConfigRuntime::open(paths, ConfigDocument::empty())
+        .expect("open capability-preserving fallback");
+    assert!(runtime.status().ready);
 }
 
 #[test]

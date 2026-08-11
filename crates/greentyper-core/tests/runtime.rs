@@ -13,7 +13,8 @@ use greentyper_core::context::{
 use greentyper_core::ledger::{EventData, FileLedger, LedgerHead};
 use greentyper_core::model::ConfigEpochId;
 use greentyper_core::pricing::{
-    PriceSchedule, PriceScheduleBook, PriceScheduleDefinition, PriceScheduleSource, TokenRates,
+    CostEstimateUnknownReason, PriceSchedule, PriceScheduleBook, PriceScheduleDefinition,
+    PriceScheduleSource, TokenRates,
 };
 use greentyper_core::provider::{
     DeterministicProvider, ProviderDialect, ProviderError, ProviderEvent, ProviderProfileSnapshot,
@@ -23,6 +24,7 @@ use greentyper_core::runtime::{
     AcknowledgeOutcome, CancelTurnOutcome, ModelSelection, ProviderFallbackCandidate,
     RecoveryStatus, RuntimeError, RuntimeKernel,
 };
+use greentyper_core::schema::SchemaKind;
 use greentyper_core::usage::{UsageAttemptOutcome, UsageCostProvenance, UsageTimestamp};
 
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(1);
@@ -787,6 +789,11 @@ fn provider_fallback_freezes_each_candidate_and_attributes_usage_and_cost() {
     assert_eq!(usage.attempts().len(), 2);
     assert_eq!(usage.attempts()[0].requested_model(), "model-primary");
     assert_eq!(usage.attempts()[0].outcome(), UsageAttemptOutcome::Failed);
+    assert_eq!(usage.attempts()[0].cost_estimate(), None);
+    assert_eq!(
+        usage.attempts()[0].cost_unknown_reason(),
+        Some(CostEstimateUnknownReason::MissingUsageRecord)
+    );
     assert_eq!(usage.attempts()[1].requested_model(), "model-backup");
     assert_eq!(
         usage.attempts()[1]
@@ -1105,25 +1112,29 @@ fn provider_blocked_turn_cancels_once_and_allows_a_new_turn_without_replay() {
 #[test]
 fn unsupported_runtime_event_schema_fails_closed() {
     let path = temp_path("unsupported-event");
+    let supported = SchemaKind::RuntimeEvent.current().get();
+    let actual = supported.checked_add(1).expect("next schema version");
     let (mut ledger, _) = FileLedger::open(&path).expect("open Ledger");
     ledger
         .append(
             LedgerHead::default(),
             &[EventData {
-                schema: 13,
+                schema: actual,
                 kind: 1,
                 payload: 1_u64.to_le_bytes().to_vec(),
             }],
         )
         .expect("append unsupported Runtime Event");
     drop(ledger);
-    assert!(matches!(
-        RuntimeKernel::open(&path),
-        Err(RuntimeError::UnsupportedRuntimeEventSchema {
-            supported: 12,
-            actual: 13
-        })
-    ));
+    let Err(RuntimeError::UnsupportedRuntimeEventSchema {
+        supported: observed_supported,
+        actual: observed_actual,
+    }) = RuntimeKernel::open(&path)
+    else {
+        panic!("newer Runtime Event schema did not fail closed")
+    };
+    assert_eq!(observed_supported, supported);
+    assert_eq!(observed_actual, actual);
     fs::remove_file(path).expect("cleanup Runtime ledger");
 }
 

@@ -3430,6 +3430,16 @@ fn validate_effective(document: &ConfigDocument) -> Result<(), ConfigRuntimeErro
                     "fallback references an unknown model preset",
                 ));
             }
+            let candidate = document
+                .model_presets
+                .get(fallback)
+                .expect("validated fallback reference is present");
+            if !preserves_fallback_capability_contract(preset, candidate) {
+                return Err(invalid(
+                    format!("{prefix}.fallback"),
+                    "fallback does not preserve the required capability contract",
+                ));
+            }
         }
     }
     validate_fallback_cycles(document)?;
@@ -3477,6 +3487,29 @@ fn validate_effective(document: &ConfigDocument) -> Result<(), ConfigRuntimeErro
         ));
     }
     Ok(())
+}
+
+fn preserves_fallback_capability_contract(
+    required: &ModelPresetLayer,
+    candidate: &ModelPresetLayer,
+) -> bool {
+    required
+        .reasoning_effort
+        .as_ref()
+        .is_none_or(|value| candidate.reasoning_effort.as_ref() == Some(value))
+        && required
+            .service_tier
+            .as_ref()
+            .is_none_or(|value| candidate.service_tier.as_ref() == Some(value))
+        && required.max_output_tokens.is_none_or(|minimum| {
+            candidate
+                .max_output_tokens
+                .is_some_and(|value| value >= minimum)
+        })
+        && required
+            .context_mode
+            .as_ref()
+            .is_none_or(|value| candidate.context_mode.as_ref() == Some(value))
 }
 
 fn validate_provider_origin(
