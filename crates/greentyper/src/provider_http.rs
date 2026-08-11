@@ -314,6 +314,17 @@ fn require_messages_request_policy(request: &ProviderRequest) -> Result<(), Prov
     }
 }
 
+fn insert_messages_adapter_policy(body: &mut serde_json::Value, adapter: MessagesAdapter) {
+    if adapter == MessagesAdapter::DeepSeek {
+        body.as_object_mut()
+            .expect("Messages request body must be an object")
+            .insert(
+                "thinking".to_owned(),
+                serde_json::json!({"type": "disabled"}),
+            );
+    }
+}
+
 fn encode_bounded_request(
     body: &serde_json::Value,
     encoding_error: &'static str,
@@ -1065,6 +1076,7 @@ impl<V: CredentialVault> ProviderRuntime for ChatCompletionsHttpProvider<V> {
 pub(crate) struct MessagesHttpProvider<V> {
     client: Client,
     endpoint: Url,
+    adapter: MessagesAdapter,
     profile: ProviderProfileSnapshot,
     credential_scope: ProviderCredentialScope,
     vault: V,
@@ -1108,11 +1120,10 @@ impl<V: CredentialVault> MessagesHttpProvider<V> {
         timeout: Duration,
         client: ClientBuilder,
     ) -> Result<Self, ProviderError> {
-        if !has_provider_adapter(profile.template(), ProviderDialect::Messages) {
-            return Err(ProviderError::InvalidConfiguration(
+        let adapter =
+            messages_adapter(profile.template()).ok_or(ProviderError::InvalidConfiguration(
                 "Provider Profile template has no configured runtime adapter",
-            ));
-        }
+            ))?;
         if !profile.supports(ProviderDialect::Messages) {
             return Err(ProviderError::InvalidConfiguration(
                 "Messages Provider Profile does not declare Messages support",
@@ -1139,6 +1150,7 @@ impl<V: CredentialVault> MessagesHttpProvider<V> {
         Ok(Self {
             client,
             endpoint,
+            adapter,
             profile,
             credential_scope,
             vault,
@@ -1279,13 +1291,12 @@ impl<V: CredentialVault> ProviderRuntime for MessagesHttpProvider<V> {
             .map_or(MESSAGES_MAX_TOKENS, |limit| *limit.value());
         self.pending_continuation = None;
         let messages = provider_messages(request);
-        let body = if self.local_echo_enabled {
+        let mut body = if self.local_echo_enabled {
             serde_json::json!({
                 "max_tokens": max_output_tokens,
                 "messages": messages.clone(),
                 "model": request.provider.model(),
                 "stream": true,
-                "thinking": {"type": "disabled"},
                 "tool_choice": {"type": "auto", "disable_parallel_tool_use": true},
                 "tools": [messages_local_echo_tool_definition()],
             })
@@ -1295,9 +1306,9 @@ impl<V: CredentialVault> ProviderRuntime for MessagesHttpProvider<V> {
                 "messages": messages.clone(),
                 "model": request.provider.model(),
                 "stream": true,
-                "thinking": {"type": "disabled"},
             })
         };
+        insert_messages_adapter_policy(&mut body, self.adapter);
         let events = self.send_request(body, max_output_bytes)?;
         let events = if self.local_echo_enabled {
             normalize_local_echo_calls(events)?
@@ -1362,15 +1373,15 @@ impl<V: CredentialVault> ProviderRuntime for MessagesHttpProvider<V> {
                 "content": output.output(),
             }],
         }));
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "max_tokens": max_output_tokens,
             "messages": messages,
             "model": request.provider.model(),
             "stream": true,
-            "thinking": {"type": "disabled"},
             "tool_choice": {"type": "none"},
             "tools": [messages_local_echo_tool_definition()],
         });
+        insert_messages_adapter_policy(&mut body, self.adapter);
         let events = self.send_request(body, max_output_bytes)?;
         reject_continuation_tool_calls(events, "Messages continuation returned another Tool call")
     }
@@ -2811,6 +2822,13 @@ source = "unknown"
     }
 
     fn read_messages_request_body(stream: &mut impl Read) -> serde_json::Value {
+        read_messages_request_body_at(stream, "/anthropic/v1/messages")
+    }
+
+    fn read_messages_request_body_at(
+        stream: &mut impl Read,
+        expected_path: &str,
+    ) -> serde_json::Value {
         let mut bytes = Vec::new();
         let mut chunk = [0_u8; 4096];
         let (body_start, content_length) = loop {
@@ -2823,7 +2841,10 @@ source = "unknown"
             let headers =
                 std::str::from_utf8(&bytes[..header_end]).expect("Messages request headers UTF-8");
             let mut lines = headers.split("\r\n");
-            assert_eq!(lines.next(), Some("POST /anthropic/v1/messages HTTP/1.1"));
+            assert_eq!(
+                lines.next(),
+                Some(format!("POST {expected_path} HTTP/1.1").as_str())
+            );
             let mut api_key = None;
             let mut anthropic_version = None;
             let mut authorization = None;
@@ -5056,6 +5077,91 @@ source = "unknown"
         assert!(
             matches!(listener.accept(), Err(error) if error.kind() == io::ErrorKind::WouldBlock)
         );
+    }
+
+    #[test]
+    fn opencode_go_messages_adapter_uses_anthropic_wire_and_frozen_route() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("OpenCode Go Messages listener");
+        let address = listener
+            .local_addr()
+            .expect("OpenCode Go Messages listener address");
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener
+                .accept()
+                .expect("accept OpenCode Go Messages request");
+            configure_fixture_stream(&stream).expect("configure OpenCode Go Messages request");
+            let body = read_messages_request_body_at(&mut stream, "/messages");
+            assert_eq!(
+                body,
+                serde_json::json!({
+                    "max_tokens": 3072,
+                    "messages": [
+                        {"role": "user", "content": "prior question"},
+                        {"role": "assistant", "content": "prior answer"},
+                        {"role": "user", "content": "hello OpenCode Go Messages"},
+                    ],
+                    "model": "minimax-m2.7",
+                    "stream": true,
+                })
+            );
+            write_fixture_response(
+                &mut stream,
+                "200 OK",
+                "text/event-stream",
+                MESSAGES_TEXT_SSE,
+                true,
+            )
+            .expect("write OpenCode Go Messages response");
+        });
+
+        let base_url = format!("http://{address}");
+        let profile = opencode_go_messages_fixture_profile(
+            &base_url,
+            "opencode-go-messages-adapter",
+            "minimax-m2.7",
+        );
+        let mut provider = ConfiguredProvider::for_new_turn_with_dialect(
+            profile.clone(),
+            "minimax-m2.7",
+            ProviderDialect::Messages,
+            bound_messages_vault(&profile),
+        )
+        .expect("configured OpenCode Go Messages provider");
+        let mut request = provider_request_with_model_policy(
+            profile,
+            "minimax-m2.7",
+            "hello OpenCode Go Messages",
+            ProviderDialect::Messages,
+            3_072,
+            None,
+            None,
+        );
+        request.context = Some(request_context());
+
+        let events = provider
+            .run(&request)
+            .expect("OpenCode Go Messages response");
+        assert!(matches!(
+            events.as_slice(),
+            [ProviderEvent::TextDelta(first), ProviderEvent::TextDelta(second), ProviderEvent::Completed(usage)]
+                if first == "Hello "
+                    && second == "Messages"
+                    && usage.input_tokens() == Some(4)
+                    && usage.output_tokens() == Some(2)
+        ));
+        assert_eq!(provider.dialect(), Some(ProviderDialect::Messages));
+        let resumed = ConfiguredProvider::from_epoch(
+            &request.provider,
+            bound_messages_vault(
+                request
+                    .provider
+                    .profile_snapshot()
+                    .expect("frozen OpenCode Go Messages Profile"),
+            ),
+        )
+        .expect("reconstruct frozen OpenCode Go Messages provider");
+        assert_eq!(resumed.dialect(), Some(ProviderDialect::Messages));
+        server.join().expect("join OpenCode Go Messages server");
     }
 
     #[test]
