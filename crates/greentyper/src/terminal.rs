@@ -12,7 +12,8 @@ use unicode_width::UnicodeWidthStr;
 
 use greentyper_core::config::{
     ConfigEditorError, ConfigError, ConfigFieldContents, ConfigFieldInteraction, ConfigRuntime,
-    ConfigRuntimeError, ConfigScope, ConfigValue, MAX_COMMAND_QUERY_BYTES, MAX_CONFIG_ID_BYTES,
+    ConfigRuntimeError, ConfigScope, ConfigValue, ConfigValueKind, MAX_COMMAND_QUERY_BYTES,
+    MAX_CONFIG_ID_BYTES,
 };
 use greentyper_core::runtime::{RuntimeError, RuntimeKernel};
 use greentyper_core::usage::{UsageError, UsageTimestamp};
@@ -701,6 +702,7 @@ struct TerminalSession {
 struct ConfigTextInput {
     value: String,
     replace_on_edit: bool,
+    pending: bool,
 }
 
 impl TerminalSession {
@@ -816,6 +818,9 @@ impl TerminalSession {
             }
             TerminalIntent::MoveConfigField(offset) => {
                 let runtime = runtime.ok_or(TerminalError::ConfigRuntimeRequired)?;
+                if !self.flush_config_text(runtime) {
+                    return Ok(TerminalLoopOutcome::Redraw);
+                }
                 match self.controller.move_config_field(runtime, offset) {
                     Ok(()) => {
                         self.validated_config_choice = None;
@@ -935,7 +940,7 @@ impl TerminalSession {
                 Ok(TerminalLoopOutcome::Redraw)
             }
             TerminalIntent::Back => {
-                if self.config_text.is_some() && self.controller.has_unsaved_config_draft() {
+                if self.config_text.is_some() && self.has_unsaved_config_input() {
                     self.confirming_discard = true;
                     self.notice = Some("Discard Config draft?".to_owned());
                     return Ok(TerminalLoopOutcome::Redraw);
@@ -958,7 +963,7 @@ impl TerminalSession {
                 self.viewport = Viewport::new(width, height)?;
                 Ok(TerminalLoopOutcome::Resize(width, height))
             }
-            TerminalIntent::Quit if self.controller.has_unsaved_config_draft() => {
+            TerminalIntent::Quit if self.has_unsaved_config_input() => {
                 self.notice = Some("Config draft must be committed or discarded".to_owned());
                 Ok(TerminalLoopOutcome::Redraw)
             }
@@ -1037,6 +1042,7 @@ impl TerminalSession {
             self.config_text = Some(ConfigTextInput {
                 value: String::new(),
                 replace_on_edit: true,
+                pending: false,
             });
             self.validated_config_text = None;
             self.confirming_discard = false;
@@ -1054,12 +1060,16 @@ impl TerminalSession {
             .or(effective.as_ref())
             .and_then(|value| match value {
                 ConfigValue::String(value) => Some(value.clone()),
-                _ => None,
+                ConfigValue::PositiveInteger(value) => Some(value.to_string()),
+                ConfigValue::NonNegativeInteger(value) => Some(value.to_string()),
+                ConfigValue::Boolean(value) => Some(value.to_string()),
+                ConfigValue::StringList(values) => serde_json::to_string(values).ok(),
             })
             .unwrap_or_default();
         self.config_text = Some(ConfigTextInput {
             value,
             replace_on_edit: true,
+            pending: false,
         });
         self.validated_config_text = None;
         self.confirming_discard = false;
@@ -1107,8 +1117,26 @@ impl TerminalSession {
                 return Ok(());
             }
         }
-        self.stage_config_text(runtime, next);
+        if self.config_text_requires_deferred_stage() {
+            self.config_text = Some(ConfigTextInput {
+                value: next,
+                replace_on_edit: false,
+                pending: true,
+            });
+            self.validated_config_text = None;
+            self.confirming_discard = false;
+            self.notice = None;
+        } else {
+            self.stage_config_text(runtime, next);
+        }
         Ok(())
+    }
+
+    fn config_text_requires_deferred_stage(&self) -> bool {
+        self.controller.config_editor_field().is_some_and(|field| {
+            !matches!(field.value_kind, ConfigValueKind::String)
+                && matches!(field.interaction, ConfigFieldInteraction::Text { .. })
+        })
     }
 
     fn config_text_limit(&self) -> Option<usize> {
@@ -1136,6 +1164,7 @@ impl TerminalSession {
                 self.config_text = Some(ConfigTextInput {
                     value: next,
                     replace_on_edit: false,
+                    pending: false,
                 });
                 self.validated_config_text = None;
                 self.confirming_discard = false;
@@ -1161,6 +1190,7 @@ impl TerminalSession {
                 self.config_text = Some(ConfigTextInput {
                     value: String::new(),
                     replace_on_edit: true,
+                    pending: false,
                 });
                 self.validated_config_text = None;
                 self.confirming_discard = false;
@@ -1171,6 +1201,9 @@ impl TerminalSession {
     }
 
     fn submit_config_text(&mut self, runtime: &mut ConfigRuntime) {
+        if !self.flush_config_text(runtime) {
+            return;
+        }
         let current = self.config_text.as_ref().map(|input| input.value.clone());
         if !self.controller.has_unsaved_config_draft() {
             self.notice = Some("No Config changes to commit".to_owned());
@@ -1194,6 +1227,31 @@ impl TerminalSession {
                 Err(source) => self.notice = Some(presentation_notice(&source)),
             }
         }
+    }
+
+    fn flush_config_text(&mut self, runtime: &ConfigRuntime) -> bool {
+        let Some(input) = self.config_text.as_ref().filter(|input| input.pending) else {
+            return true;
+        };
+        let value = input.value.clone();
+        match self.controller.stage_config(runtime, &value) {
+            Ok(()) => {
+                if let Some(input) = self.config_text.as_mut() {
+                    input.pending = false;
+                }
+                self.notice = None;
+                true
+            }
+            Err(source) => {
+                self.notice = Some(presentation_notice(&source));
+                false
+            }
+        }
+    }
+
+    fn has_unsaved_config_input(&self) -> bool {
+        self.controller.has_unsaved_config_draft()
+            || self.config_text.as_ref().is_some_and(|input| input.pending)
     }
 
     fn config_choice(&self) -> Option<&str> {
@@ -1260,9 +1318,14 @@ impl TerminalSession {
         runtime: Option<&ConfigRuntime>,
         view: &TuiViewModel,
     ) -> Result<PresentationLayoutView, TerminalError> {
-        self.controller
+        let mut layout = self
+            .controller
             .layout(runtime, view, self.viewport)
-            .map_err(TerminalError::Presentation)
+            .map_err(TerminalError::Presentation)?;
+        if let Some(input) = self.config_text.as_ref().filter(|input| input.pending) {
+            layout.show_pending_config_text(&input.value);
+        }
+        Ok(layout)
     }
 
     fn frame(
@@ -1523,6 +1586,7 @@ mod tests {
         MAX_CONFIG_STRING_BYTES,
     };
     use greentyper_core::provider::{ProviderDialect, ProviderProfileSnapshot};
+    use greentyper_core::usage::UsageWeekday;
 
     use crate::presentation::{PresentationScreenView, build_smoke_view};
     use crate::provider_connection::{
@@ -2595,6 +2659,393 @@ mod tests {
         assert_eq!(preset.model, "fixture-model");
         assert_eq!(preset.dialect, ProviderDialect::Responses);
         assert!(!ledger.exists());
+        std::fs::remove_dir_all(root).expect("remove test config");
+    }
+
+    #[test]
+    fn terminal_loop_creates_usage_window_from_real_key_events() {
+        let root = terminal_test_root("usage-window-create-loop");
+        let ledger = root.join("runtime.ledger");
+        let paths = ConfigPaths::new(root.join("user.toml"), root.join("project.toml"));
+        let mut config =
+            ConfigRuntime::open(paths.clone(), ConfigDocument::empty()).expect("config runtime");
+        let view = build_terminal_view(&ledger, &config, "/").expect("terminal view");
+        let mut events: VecDeque<_> = "config stats-window add"
+            .chars()
+            .map(|character| {
+                Event::Key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
+            })
+            .collect();
+        events.push_back(Event::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )));
+        events.extend("work".chars().map(|character| {
+            Event::Key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
+        }));
+        events.push_back(Event::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )));
+        for value in [
+            "09:00",
+            "17:00",
+            "[\"mon\",\"tue\",\"wed\",\"thu\",\"fri\"]",
+            "Asia/Hong_Kong",
+        ] {
+            events.extend(value.chars().map(|character| {
+                Event::Key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
+            }));
+            if value != "Asia/Hong_Kong" {
+                events.push_back(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)));
+            }
+        }
+        events.extend([
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL)),
+        ]);
+
+        let output = run_terminal_loop(
+            Vec::new(),
+            FakeTerminalMode::default(),
+            &mut config,
+            &view,
+            80,
+            24,
+            move || Ok(events.pop_front().expect("bounded event sequence")),
+        )
+        .expect("terminal loop");
+
+        let windows = config
+            .resolved_usage_windows()
+            .expect("resolve created Usage Window");
+        let window = windows.first().expect("created Usage Window");
+        assert_eq!(windows.len(), 1);
+        assert_eq!(window.id(), "work");
+        assert_eq!(window.start_minute(), 9 * 60);
+        assert_eq!(window.end_minute(), 17 * 60);
+        assert_eq!(
+            window.days().collect::<Vec<_>>(),
+            vec![
+                UsageWeekday::Mon,
+                UsageWeekday::Tue,
+                UsageWeekday::Wed,
+                UsageWeekday::Thu,
+                UsageWeekday::Fri,
+            ]
+        );
+        assert_eq!(window.timezone(), "Asia/Hong_Kong");
+        assert!(output.starts_with(ENTER_TERMINAL));
+        assert!(output.ends_with(LEAVE_TERMINAL));
+        drop(config);
+
+        let reopened = ConfigRuntime::open(paths, ConfigDocument::empty()).expect("reopen config");
+        let windows = reopened
+            .resolved_usage_windows()
+            .expect("resolve reopened Usage Window");
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].id(), "work");
+        assert_eq!(windows[0].timezone(), "Asia/Hong_Kong");
+        assert!(!ledger.exists());
+        std::fs::remove_dir_all(root).expect("remove test config");
+    }
+
+    #[test]
+    fn terminal_usage_window_moves_across_all_editable_fields_and_commits() {
+        let root = terminal_test_root("usage-window-create-fields");
+        let paths = ConfigPaths::new(root.join("user.toml"), root.join("project.toml"));
+        let mut config =
+            ConfigRuntime::open(paths, ConfigDocument::empty()).expect("config runtime");
+        let mut session =
+            TerminalSession::new("/config stats-window add", 80, 24).expect("terminal session");
+
+        session
+            .handle(TerminalInputEvent::Enter, Some(&mut config))
+            .expect("open Usage Window ID prompt");
+        for character in "work".chars() {
+            session
+                .handle(TerminalInputEvent::Character(character), Some(&mut config))
+                .expect("stage Usage Window ID");
+        }
+        session
+            .handle(TerminalInputEvent::Enter, Some(&mut config))
+            .expect("open Usage Window start field");
+
+        for (path, value) in [
+            ("stats.windows.work.start", "09:00"),
+            ("stats.windows.work.end", "17:00"),
+            (
+                "stats.windows.work.days",
+                "[\"mon\",\"tue\",\"wed\",\"thu\",\"fri\"]",
+            ),
+            ("stats.windows.work.timezone", "Asia/Hong_Kong"),
+        ] {
+            assert_eq!(
+                session
+                    .controller
+                    .config_editor_field()
+                    .expect("focused Usage Window field")
+                    .path,
+                path
+            );
+            assert_eq!(session.input_context(), TerminalInputContext::ConfigText);
+            for character in value.chars() {
+                session
+                    .handle(TerminalInputEvent::Character(character), Some(&mut config))
+                    .expect("stage Usage Window field");
+            }
+            if path != "stats.windows.work.timezone" {
+                session
+                    .handle(TerminalInputEvent::Tab, Some(&mut config))
+                    .expect("focus next Usage Window field");
+            }
+        }
+
+        session
+            .handle(TerminalInputEvent::BackTab, Some(&mut config))
+            .expect("return to Usage Window days");
+        assert_eq!(
+            session
+                .config_text
+                .as_ref()
+                .expect("Usage Window days input")
+                .value,
+            "[\"mon\",\"tue\",\"wed\",\"thu\",\"fri\"]"
+        );
+        session
+            .handle(TerminalInputEvent::Tab, Some(&mut config))
+            .expect("return to Usage Window timezone");
+        session
+            .handle(TerminalInputEvent::Enter, Some(&mut config))
+            .expect("preview Usage Window");
+        assert_eq!(session.notice.as_deref(), Some("Config draft validated"));
+        session
+            .handle(TerminalInputEvent::Enter, Some(&mut config))
+            .expect("commit Usage Window");
+        assert!(session.controller.is_slash_panel());
+        assert_eq!(config.resolved_usage_windows().unwrap().len(), 1);
+
+        std::fs::remove_dir_all(root).expect("remove test config");
+    }
+
+    #[test]
+    fn terminal_usage_window_buffers_partial_days_and_requires_discard() {
+        let root = terminal_test_root("usage-window-partial-days");
+        let paths = ConfigPaths::new(root.join("user.toml"), root.join("project.toml"));
+        let mut config =
+            ConfigRuntime::open(paths, ConfigDocument::empty()).expect("config runtime");
+        let mut session =
+            TerminalSession::new("/config stats-window add", 80, 24).expect("terminal session");
+
+        session
+            .handle(TerminalInputEvent::Enter, Some(&mut config))
+            .expect("open Usage Window ID prompt");
+        for character in "work".chars() {
+            session
+                .handle(TerminalInputEvent::Character(character), Some(&mut config))
+                .expect("stage Usage Window ID");
+        }
+        session
+            .handle(TerminalInputEvent::Enter, Some(&mut config))
+            .expect("open Usage Window start field");
+        session
+            .handle(TerminalInputEvent::Tab, Some(&mut config))
+            .expect("focus Usage Window end");
+        session
+            .handle(TerminalInputEvent::Tab, Some(&mut config))
+            .expect("focus Usage Window days");
+        session
+            .handle(TerminalInputEvent::Character('['), Some(&mut config))
+            .expect("buffer partial Usage Window days");
+
+        assert!(!session.controller.has_unsaved_config_draft());
+        assert!(session.has_unsaved_config_input());
+        let smoke = build_smoke_view("/").expect("view");
+        let layout = session
+            .layout(Some(&config), smoke.view())
+            .expect("partial Usage Window layout");
+        assert!(
+            layout
+                .body()
+                .iter()
+                .any(|row| row.is_selected() && row.text() == "> target [")
+        );
+        assert!(
+            layout
+                .body()
+                .iter()
+                .any(|row| row.text() == "draft pending")
+        );
+        for _ in 1..MAX_CONFIG_STRING_BYTES {
+            session
+                .handle(TerminalInputEvent::Character('a'), Some(&mut config))
+                .expect("fill Usage Window days input");
+        }
+        session
+            .handle(TerminalInputEvent::Character('a'), Some(&mut config))
+            .expect("reject oversized Usage Window days input");
+        assert_eq!(
+            session
+                .config_text
+                .as_ref()
+                .expect("bounded Usage Window days input")
+                .value
+                .len(),
+            MAX_CONFIG_STRING_BYTES
+        );
+        assert_eq!(
+            session.notice.as_deref(),
+            Some("Config value exceeds its input limit")
+        );
+        assert_eq!(
+            session
+                .handle(TerminalInputEvent::Quit, Some(&mut config))
+                .expect("partial Usage Window blocks quit"),
+            TerminalLoopOutcome::Redraw
+        );
+        session
+            .handle(TerminalInputEvent::Tab, Some(&mut config))
+            .expect("invalid list remains focused");
+        assert_eq!(
+            session.notice.as_deref(),
+            Some("Config validation failed at stats.windows.work.days")
+        );
+        assert_eq!(
+            session
+                .controller
+                .config_editor_field()
+                .expect("Usage Window days remains focused")
+                .path,
+            "stats.windows.work.days"
+        );
+        session
+            .handle(TerminalInputEvent::Escape, Some(&mut config))
+            .expect("request partial Usage Window discard");
+        assert_eq!(session.notice.as_deref(), Some("Discard Config draft?"));
+        session
+            .handle(TerminalInputEvent::Enter, Some(&mut config))
+            .expect("discard partial Usage Window");
+        assert!(session.controller.is_slash_panel());
+        assert!(config.resolved_usage_windows().unwrap().is_empty());
+
+        if root.exists() {
+            std::fs::remove_dir_all(root).expect("remove test config");
+        }
+    }
+
+    #[test]
+    fn terminal_usage_window_recovers_from_validation_and_cas_conflict() {
+        let root = terminal_test_root("usage-window-create-recovery");
+        let paths = ConfigPaths::new(root.join("user.toml"), root.join("project.toml"));
+        let mut config =
+            ConfigRuntime::open(paths, ConfigDocument::empty()).expect("config runtime");
+        let mut session =
+            TerminalSession::new("/config stats-window add", 80, 24).expect("terminal session");
+
+        session
+            .handle(TerminalInputEvent::Enter, Some(&mut config))
+            .expect("open Usage Window ID prompt");
+        for character in "work".chars() {
+            session
+                .handle(TerminalInputEvent::Character(character), Some(&mut config))
+                .expect("stage Usage Window ID");
+        }
+        session
+            .handle(TerminalInputEvent::Enter, Some(&mut config))
+            .expect("open Usage Window start field");
+        for (value, move_next) in [
+            ("09:00", true),
+            ("09:00", true),
+            ("[\"mon\"]", true),
+            ("Asia/Hong_Kong", false),
+        ] {
+            for character in value.chars() {
+                session
+                    .handle(TerminalInputEvent::Character(character), Some(&mut config))
+                    .expect("stage Usage Window field");
+            }
+            if move_next {
+                session
+                    .handle(TerminalInputEvent::Tab, Some(&mut config))
+                    .expect("focus next Usage Window field");
+            }
+        }
+        session
+            .handle(TerminalInputEvent::Enter, Some(&mut config))
+            .expect("invalid Usage Window remains live");
+        assert_eq!(
+            session.notice.as_deref(),
+            Some("Config validation failed at stats.windows.work")
+        );
+
+        session
+            .handle(TerminalInputEvent::BackTab, Some(&mut config))
+            .expect("return to Usage Window days");
+        session
+            .handle(TerminalInputEvent::BackTab, Some(&mut config))
+            .expect("return to Usage Window end");
+        for character in "17:00".chars() {
+            session
+                .handle(TerminalInputEvent::Character(character), Some(&mut config))
+                .expect("repair Usage Window end");
+        }
+        session
+            .handle(TerminalInputEvent::Tab, Some(&mut config))
+            .expect("return to Usage Window days");
+        session
+            .handle(TerminalInputEvent::Tab, Some(&mut config))
+            .expect("return to Usage Window timezone");
+        session
+            .handle(TerminalInputEvent::Enter, Some(&mut config))
+            .expect("validate repaired Usage Window");
+        assert_eq!(session.notice.as_deref(), Some("Config draft validated"));
+
+        let mut winner = ConfigEditorSession::open_from_query(
+            &config,
+            ConfigScope::User,
+            "/config statusline preset",
+            0,
+            None,
+        )
+        .expect("winner editor");
+        winner.stage_raw("minimal").expect("stage winning change");
+        winner.commit(&mut config).expect("commit winning change");
+
+        session
+            .handle(TerminalInputEvent::Enter, Some(&mut config))
+            .expect("stale Usage Window remains live");
+        assert_eq!(
+            session.notice.as_deref(),
+            Some("Config changed; discard and reopen the editor")
+        );
+        assert!(matches!(
+            session.controller.screen(Some(&config)).expect("editor"),
+            PresentationScreenView::ConfigEditor {
+                dirty: true,
+                validated: true,
+                ..
+            }
+        ));
+        assert_eq!(
+            session
+                .handle(TerminalInputEvent::Quit, Some(&mut config))
+                .expect("dirty quit is blocked"),
+            TerminalLoopOutcome::Redraw
+        );
+        session
+            .handle(TerminalInputEvent::Escape, Some(&mut config))
+            .expect("request stale Usage Window discard");
+        session
+            .handle(TerminalInputEvent::Enter, Some(&mut config))
+            .expect("discard stale Usage Window");
+        assert!(session.controller.is_slash_panel());
+        assert!(config.resolved_usage_windows().unwrap().is_empty());
+        assert_eq!(
+            config_string_target(&config, "ui.statusline.preset").as_deref(),
+            Some("minimal")
+        );
+
         std::fs::remove_dir_all(root).expect("remove test config");
     }
 

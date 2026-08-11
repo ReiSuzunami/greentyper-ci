@@ -380,6 +380,24 @@ fn schema_and_parser_are_versioned_typed_and_secret_safe() {
             "Model Preset dialect interaction offered an invalid choice: {choice}"
         );
     }
+    for (path_pattern, value_kind) in [
+        ("stats.windows.<id>.start", ConfigValueKind::String),
+        ("stats.windows.<id>.end", ConfigValueKind::String),
+        ("stats.windows.<id>.days", ConfigValueKind::StringList),
+        ("stats.windows.<id>.timezone", ConfigValueKind::String),
+    ] {
+        let field = schema
+            .iter()
+            .find(|entry| entry.path_pattern == path_pattern)
+            .expect("Usage Window field schema");
+        assert_eq!(field.value_kind, value_kind);
+        assert_eq!(
+            field.interaction(),
+            ConfigFieldInteraction::Text {
+                max_bytes: MAX_CONFIG_STRING_BYTES,
+            }
+        );
+    }
 
     assert_eq!(
         parse_config_value("runtime.max_output_bytes", "4096").expect("positive integer"),

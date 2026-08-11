@@ -360,10 +360,18 @@ between the three required fields; preview, CAS commit, invalid-field recovery,
 stale-revision retention, explicit discard, and reopen persistence use the same
 terminal-neutral editor path. It does not implement optional Preset policy fields,
 interactive `/model` selection, starter acceptance, or live catalog data.
+`/config stats-window add` now supplies a third rendered object-name workflow.
+It collects a bounded ID plus start, end, weekday-list, and IANA-time-zone text
+in one schema-driven Draft. Structured weekday input is visibly buffered until
+Tab or Enter can parse and stage the complete TOML array; dirty local input,
+validation failure, and stale revisions all remain recoverable. The final text
+field previews and CAS-commits on two explicit Enter actions, and a real-key
+test reopens Config to prove the resolved window persists. This slice does not
+rebuild the frozen usage projection or add interactive `/stats` behavior.
 
 This does not complete Phase 3. Audited Windows ConPTY behavior, remaining
 terminal-backed schema editing and approval interaction, live snapshot refresh,
-Price Schedule and Usage Window object-name dialogs, rendered secret binding,
+the Price Schedule object-name dialog, rendered secret binding,
 custom-template/starter-preset workflow, live catalog discovery and Recent
 evidence, automatic Context View/token-source
 projection, provider-reported

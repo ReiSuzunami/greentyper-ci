@@ -307,9 +307,18 @@ the runnable preset survives. Missing fields and revision conflicts keep the
 Draft live for repair or explicit discard. This is manual preset definition, not
 interactive `/model` selection, starter-preset installation, or optional policy
 field editing.
+`/config stats-window add` now prompts for a bounded Usage Window ID and moves
+across start, end, weekday-list, and IANA-time-zone fields in one user-scope
+Draft. Each input is bounded to 512 bytes. The weekday list accepts a TOML
+string array; incomplete structured text remains visible and dirty until Tab or
+Enter parses it atomically. Enter on the final text field previews, a second
+Enter CAS-commits, and tests reopen the file to prove the resolved window
+survives. Invalid arrays, invalid window rules, and revision conflicts keep the
+Draft live for correction or explicit discard. This does not rebuild the
+running TUI's frozen usage projection.
 Outside these narrow workflows the tracer remains snapshot-based and read-only. It is not a
 general mutable terminal editor, approval surface, live refresh loop, audited
-ConPTY integration, Price Schedule or Usage Window creation dialog, secret-entry/bind
+ConPTY integration, Price Schedule creation dialog, secret-entry/bind
 surface, starter-preset
 workflow, or persistent live catalog discovery. Live inference conformance,
 reconnect/retry, OpenCode Go Messages execution,

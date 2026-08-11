@@ -358,6 +358,15 @@ and explicit discard preserves the winner. Schema tests pin the 64-byte Provider
 ID input, 512-byte model input, and the three parseable dialect choices. These
 tests do not prove interactive `/model` selection, optional Preset field editors,
 starter acceptance, or live catalog refresh.
+A real-key loop now carries `/config stats-window add` through its bounded ID
+prompt and start/end/days/time-zone fields, previews, commits, and reopens the
+resolved window. Focused tests prove all four schema fields expose 512-byte text
+interactions, TOML weekday arrays remain visibly buffered and dirty while
+incomplete, invalid arrays cannot move focus, and dirty quit requires explicit
+discard. Further tests repair an invalid equal-time window, then prove a stale
+revision cannot overwrite the winner and leaves the Draft live. These tests do
+not prove live usage refresh, interactive `/stats`, or editing an existing
+Usage Window through every field route.
 They do not constitute real ConPTY, panic-abort cleanup, secret-store UI,
 remaining mutable editors, approval, live-refresh, or resource evidence.
 Context Pressure tests freeze exact 65%/90% threshold transitions, estimated and

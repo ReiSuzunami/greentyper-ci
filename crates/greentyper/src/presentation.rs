@@ -701,7 +701,9 @@ impl PresentationController {
                 let Some(object) = object else {
                     if !matches!(
                         kind,
-                        ConfigObjectKind::ProviderProfile | ConfigObjectKind::ModelPreset
+                        ConfigObjectKind::ProviderProfile
+                            | ConfigObjectKind::ModelPreset
+                            | ConfigObjectKind::UsageWindow
                     ) {
                         return Err(PresentationControllerError::ConfigObjectRouteUnavailable);
                     }
@@ -1292,6 +1294,16 @@ impl PresentationLayoutView {
 
     pub(crate) fn statusline_rows(&self) -> &[LayoutRowView] {
         &self.statusline.rows
+    }
+
+    pub(crate) fn show_pending_config_text(&mut self, value: &str) {
+        let Some(selected) = self.body.iter().position(|row| row.selected) else {
+            return;
+        };
+        self.body[selected].text = format!("> target {value}");
+        if let Some(draft) = self.body.get_mut(selected + 1) {
+            draft.text = "draft pending".to_owned();
+        }
     }
 }
 
@@ -2982,7 +2994,7 @@ credential = "synthetic-deepseek-credential-reference"
     }
 
     #[test]
-    fn controller_prompts_for_rendered_provider_and_model_creation() {
+    fn controller_prompts_for_rendered_provider_model_and_usage_window_creation() {
         let temp = TempTree::new("controller-rendered-create-boundary");
         let mut runtime = ConfigRuntime::open(temp.paths(), ConfigDocument::empty())
             .expect("open Config Runtime");
@@ -3013,6 +3025,23 @@ credential = "synthetic-deepseek-credential-reference"
             controller.screen(Some(&runtime)).expect("Model prompt"),
             PresentationScreenView::ConfigObjectCreate {
                 kind: ConfigObjectKind::ModelPreset,
+                ref id,
+            } if id.is_empty()
+        ));
+
+        controller.back().expect("close Model prompt");
+        controller
+            .set_slash_query("/config stats-window add")
+            .expect("set Usage Window create route");
+        controller
+            .activate(&mut runtime, ConfigScope::User, None)
+            .expect("open rendered Usage Window ID prompt");
+        assert!(matches!(
+            controller
+                .screen(Some(&runtime))
+                .expect("Usage Window prompt"),
+            PresentationScreenView::ConfigObjectCreate {
+                kind: ConfigObjectKind::UsageWindow,
                 ref id,
             } if id.is_empty()
         ));

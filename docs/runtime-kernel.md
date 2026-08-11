@@ -344,6 +344,11 @@ charges still require a future dedicated authority path.
   `/config model add` can also commit a manually defined minimal Model Preset
   through bounded Provider/model inputs and a schema-owned dialect choice. It
   does not apply that Preset to a running Agent or grant Provider authority.
+  `/config stats-window add` can commit one named Usage Window from bounded
+  start, end, weekday-list, and IANA-time-zone inputs. Structured weekday text
+  stays in a visible dirty buffer until it parses; preview, CAS conflict,
+  explicit discard, and Config reopen use the same editor contract. The action
+  does not rebuild the running TUI's frozen usage projection.
 - Complete Config Schema default/constraint/normalization/migration metadata,
   remaining mutable rendered TUI/App Server editors, live catalog discovery, and the rendered
   template-picker/starter-preset workflow. Release Provider Template defaults
@@ -361,7 +366,8 @@ charges still require a future dedicated authority path.
   are present. The first Direct VT tracer renders those frozen rows and can
   persist the statusline-preset, statusline-expansion, and existing-Provider
   base-URL/credential-reference fields plus a release-template Provider Profile,
-  can create a minimal required-field Model Preset, and can confirm typed
+  can create a minimal required-field Model Preset and a named Usage Window,
+  and can confirm typed
   target-layer Config Object deletion, but it does not
   rebuild the frozen row projection in-process.
 - Live inference conformance, non-Windows credential backends, configurable proxy

@@ -637,6 +637,18 @@ fn config_field_interaction(descriptor: &ConfigSchemaEntry) -> ConfigFieldIntera
                 choices: PROVIDER_DIALECT_CHOICES,
             }
         }
+        (
+            "stats.windows.<id>.start" | "stats.windows.<id>.end",
+            ConfigValueKind::String,
+            false,
+            "local_time",
+        )
+        | ("stats.windows.<id>.timezone", ConfigValueKind::String, false, "timezone")
+        | ("stats.windows.<id>.days", ConfigValueKind::StringList, false, "weekday_list") => {
+            ConfigFieldInteraction::Text {
+                max_bytes: MAX_CONFIG_STRING_BYTES,
+            }
+        }
         _ => ConfigFieldInteraction::ReadOnly,
     }
 }
