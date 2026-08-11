@@ -120,23 +120,29 @@ fn current_agent_model_selection_is_durable_replaceable_and_session_bound() {
     assert_eq!(pending.agent(), root.agent());
     assert_eq!(pending.selection(), &first);
 
+    let before_rejection = fs::read(&runtime_path).expect("read Runtime Ledger");
     let (mut recovered, recovery) =
         RuntimeKernel::open_with_team_and_tools(&runtime_path, &team_path, &tool_path, 1)
             .expect("reopen Product Kernel");
     let sessions = recovery.into_sessions();
-    let fresh_root = session_for_test(&sessions, root);
-    let before_rejection = fs::read(&runtime_path).expect("read Runtime Ledger");
+    session_for_test(&sessions, root);
     assert!(matches!(
         recovered.stage_model_selection(root, first),
         Err(RuntimeError::Team(DurableTeamError::Team(
             TeamError::InvalidAgentSession { agent }
         ))) if agent == root.agent()
     ));
+    drop(recovered);
     assert_eq!(
         fs::read(&runtime_path).expect("reread Runtime Ledger"),
         before_rejection
     );
 
+    let (mut recovered, recovery) =
+        RuntimeKernel::open_with_team_and_tools(&runtime_path, &team_path, &tool_path, 1)
+            .expect("reopen Product Kernel after rejection");
+    let sessions = recovery.into_sessions();
+    let fresh_root = session_for_test(&sessions, root);
     let replacement = ModelSelection::new(
         "careful",
         22,
