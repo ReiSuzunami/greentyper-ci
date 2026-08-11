@@ -346,11 +346,14 @@ drift, an explicit conflicting Preset, missing credentials, or unsupported
 Provider policy fails before Provider execution and preserves the pending
 selection. Running child Agents are unchanged.
 `/stats` now browses the latest successful Usage snapshot. It shows 1-hour, 1-day,
-and 7-day summaries. Tab and Shift-Tab move across Attempts, current Thread,
-Agent, Team, Named Window, and Token & Cache groups; Up/Down selects a row and
-Enter opens bounded detail. Attempt detail includes provider, model, policy,
-token, cost, outcome, and timing facts. Aggregate detail preserves exact,
-estimated, unknown, and overflow token/cost states.
+and 7-day summaries. Tab and Shift-Tab move across Attempts, Turn,
+Provider & Model, Dialect & Policy, current Thread, Agent, Team, Named Window,
+and Token & Cache groups; Up/Down selects a row and Enter opens bounded detail.
+Turn detail uses the cached Turn rollup. Provider, requested/observed model,
+dialect, reasoning, and requested/observed service-tier distributions remain
+scoped to their Turn and keep unknown values explicit. Attempt detail includes
+provider, model, policy, token, cost, outcome, and timing facts. Aggregate
+detail preserves exact, estimated, unknown, and overflow token/cost states.
 `/agent` now browses the latest successful read-only Team sidecar projection.
 Up/Down selects
 canonical Agents and Enter shows status, Task identity and state, budgets,
@@ -376,8 +379,8 @@ workflow, or persistent live catalog discovery. Live inference conformance,
 reconnect/retry, OpenCode Go Messages execution,
 Messages reasoning blocks, Preset context/fallback execution, richer approval
 presentation, broader Provider and Tool adapters,
-Workspace, project/new-Agent Preset defaults, dedicated Turn Usage navigation,
-richer cache distributions, Agent lifecycle actions, and App Server Runtime and
+Workspace, project/new-Agent Preset defaults, richer cache distributions,
+Agent lifecycle actions, and App Server Runtime and
 approval surfaces remain. The loopback Provider tracer remains
 an internal harness; `local.echo` is intentionally a fixed opt-in command rather
 than a general process runner. The file Ledger remains

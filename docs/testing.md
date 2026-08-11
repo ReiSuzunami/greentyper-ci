@@ -387,12 +387,15 @@ tests carry a Usage Window field command through the section selector, commit,
 and reopen. These tests do not exercise the separate manual snapshot refresh.
 A real-key loop now opens `/stats` over two Agent-scoped Turns with pinned named
 Usage Windows and complete token/cache records. It selects the second durable
-attempt, opens provider/model/outcome detail, then cycles through current
-Thread, Agent, Team, Named Window, and Token & Cache groups and opens each
-detail across deterministic resizes. Exact layout assertions pin cache-read,
-cache-write, and reasoning-token quantities. Runtime, Team, and Tool Ledger
-bytes remain unchanged. This does not prove a dedicated Turn aggregate or richer
-cache distributions.
+attempt, opens provider/model/outcome detail, then cycles through Turn,
+Provider & Model, Dialect & Policy, current Thread, Agent, Team, Named Window,
+and Token & Cache groups and opens each detail across deterministic resizes.
+Exact layout assertions pin requested/observed and unknown distribution buckets
+plus cache-read, cache-write, and reasoning-token quantities. Empty and
+unavailable snapshots clamp stale selection, close detail, render explicit
+empty state, and create no Ledger. Runtime, Team, and Tool Ledger bytes remain
+unchanged. These tests do not prove richer cache distributions or background
+refresh.
 A real-key loop now opens `/agent` over a valid Runtime plus Team and Tool
 sidecars, selects a Dormant child Agent, opens bounded detail, redraws after
 resize, and closes detail before returning to the Slash Panel. The fixture adds
@@ -484,8 +487,8 @@ read-only `config catalog` integration test proves the snapshot contains no
 local path or credential reference.
 
 Remaining terminal-backend evidence covers real terminal/ConPTY resize and input,
-project/new-Agent Preset defaults, dedicated Turn Usage navigation, richer cache
-distributions, Agent Center lifecycle actions, background refresh, approval/blocker
+project/new-Agent Preset defaults, richer cache distributions, Agent Center
+lifecycle actions, background refresh, approval/blocker
 actions, panic-abort cleanup, final host cell
 geometry, and input-ready/idle resource budgets.
 

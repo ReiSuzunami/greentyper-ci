@@ -2861,6 +2861,18 @@ favorite = true
             Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
             Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
             Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Resize(80, 20),
+            Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Resize(80, 20),
+            Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Resize(80, 20),
+            Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
             Event::Resize(80, 24),
             Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL)),
         ]);
@@ -2876,6 +2888,10 @@ favorite = true
         assert!(output.contains("turn 2"));
         assert!(output.contains("outcome succeeded"));
         assert!(output.contains("deterministic-v1"));
+        assert!(output.contains("Stats / Turn"));
+        assert!(output.contains("turn 1"));
+        assert!(output.contains("Stats / Provider & Model"));
+        assert!(output.contains("Stats / Dialect & Policy"));
         assert!(output.contains("Stats / Thread"));
         assert!(output.contains("thread 1"));
         assert!(output.contains("attempts 2"));
@@ -2887,6 +2903,85 @@ favorite = true
         assert!(output.contains("window day-"));
         assert!(output.contains("Stats / Token & Cache"));
         assert!(output.contains("period 1h"));
+        let mut provider_model =
+            TerminalSession::new("/stats", 80, 24).expect("provider and model session");
+        provider_model
+            .handle_with_view_and_connection_tester(
+                TerminalInputEvent::Enter,
+                Some(&mut config),
+                Some(&view),
+                None,
+            )
+            .expect("activate Stats for provider and model distributions");
+        for _ in 0..2 {
+            provider_model
+                .handle_with_view_and_connection_tester(
+                    TerminalInputEvent::Tab,
+                    Some(&mut config),
+                    Some(&view),
+                    None,
+                )
+                .expect("advance to provider and model distributions");
+        }
+        let provider_model_layout = provider_model
+            .layout(Some(&config), &view)
+            .expect("provider and model layout");
+        let provider_model_rows = provider_model_layout
+            .body()
+            .iter()
+            .map(|row| row.text())
+            .collect::<Vec<_>>();
+        assert!(
+            provider_model_rows
+                .iter()
+                .any(|row| row.contains("provider simulator"))
+        );
+        assert!(
+            provider_model_rows
+                .iter()
+                .any(|row| row.contains("requested model deterministic-v1"))
+        );
+        assert!(
+            provider_model_rows
+                .iter()
+                .any(|row| row.contains("observed model ?"))
+        );
+        let mut policy = TerminalSession::new("/stats", 80, 24).expect("policy session");
+        policy
+            .handle_with_view_and_connection_tester(
+                TerminalInputEvent::Enter,
+                Some(&mut config),
+                Some(&view),
+                None,
+            )
+            .expect("activate Stats for policy distributions");
+        for _ in 0..3 {
+            policy
+                .handle_with_view_and_connection_tester(
+                    TerminalInputEvent::Tab,
+                    Some(&mut config),
+                    Some(&view),
+                    None,
+                )
+                .expect("advance to policy distributions");
+        }
+        let policy_layout = policy
+            .layout(Some(&config), &view)
+            .expect("policy distribution layout");
+        let policy_rows = policy_layout
+            .body()
+            .iter()
+            .map(|row| row.text())
+            .collect::<Vec<_>>();
+        for expected in [
+            "dialect ?",
+            "requested reasoning ?",
+            "observed reasoning ?",
+            "requested service tier ?",
+            "observed service tier ?",
+        ] {
+            assert!(policy_rows.iter().any(|row| row.contains(expected)));
+        }
         let mut token_detail =
             TerminalSession::new("/stats", 80, 24).expect("token detail session");
         token_detail
@@ -2897,7 +2992,7 @@ favorite = true
                 None,
             )
             .expect("activate Stats for token detail");
-        for _ in 0..5 {
+        for _ in 0..8 {
             token_detail
                 .handle_with_view_and_connection_tester(
                     TerminalInputEvent::Tab,
@@ -2962,6 +3057,9 @@ favorite = true
             Event::Key(KeyEvent::new(KeyCode::F(6), KeyModifiers::NONE)),
             Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
             Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
             Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
             Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
             Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),

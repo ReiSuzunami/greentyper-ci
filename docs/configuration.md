@@ -236,11 +236,14 @@ The current headless `stats` command reads the immutable Runtime usage
 projection and accepts an optional Unix-millisecond `--at` instant for
 deterministic rolling-window queries. TUI `/stats` reads the same immutable
 projection at startup and after an explicit snapshot refresh. Tab and Shift-Tab
-move across Attempts, current Thread,
+move across Attempts, Turn, Provider & Model, Dialect & Policy, current Thread,
 Agent, Team, Named Window, and Token & Cache groups; Up/Down selects a row and
-Enter opens bounded detail. The browser renders 1-hour, 1-day, and 7-day
-summaries without writing the Runtime, Team, or Tool Ledger. Dedicated Turn
-aggregates and richer cache distributions remain Phase 3 work.
+Enter opens bounded detail. Turn views read the cached Turn rollups directly.
+The distribution groups expose per-Turn provider, requested/observed model,
+dialect, reasoning, and requested/observed service-tier counts while preserving
+unknown buckets. The browser renders 1-hour, 1-day, and 7-day summaries without
+writing the Runtime, Team, or Tool Ledger. Richer cache distributions remain
+Phase 3 work.
 Existing `/config stats-window` field routes use the rendered schema editor
 described above.
 
@@ -632,9 +635,10 @@ attempt detail with Provider Profile, requested and observed model, reasoning
 effort, service tier, tokens, cost, outcome, and timestamps. It also presents
 current Thread, Agent, Team, and named-window rollups plus rolling token-class,
 cache-read, and cache-write quantities. Aggregate labels preserve exact,
-estimated, unknown-record, and overflow states. Dedicated Turn aggregates and
-richer cache distributions remain target behavior; automatic/background refresh
-is not implemented.
+estimated, unknown-record, and overflow states. Cached Turn aggregates and
+per-Turn Provider/Model/Dialect/Policy distributions are available; richer cache
+distributions remain target behavior, and automatic/background refresh is not
+implemented.
 
 The current Runtime implements durable Usage Attempts, cached rollups, the
 headless JSON projection, schema-owned Price Schedule objects, and immutable

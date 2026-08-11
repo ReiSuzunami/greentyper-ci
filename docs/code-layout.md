@@ -84,8 +84,10 @@ reimplementing it. Its write-only credential operations delegate origin-bound
 bind/replace/test/forget policy to the credential adapter, scrub the owned input
 frame, return status only, and never acquire Provider or Agent authority.
 Project/new-Agent Preset defaults,
-dedicated Turn Usage aggregates, richer cache
-distributions, and Agent lifecycle actions remain outside that browser boundary.
+richer cache distributions, and Agent lifecycle actions remain outside that
+browser boundary. The Stats browser already exposes cached Turn aggregates and
+per-Turn Provider/Model/Dialect/Policy distributions without adding a write or
+Provider authority path.
 Section-filtered typed remove
 routes render exact Config Object deletion confirmations; secret storage stays
 behind the credential adapter. Approval interaction, the App

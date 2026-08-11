@@ -15,12 +15,13 @@ use greentyper_core::config::{
 };
 use greentyper_core::context::{ContextPressureAccuracy, ContextPressureSnapshot};
 use greentyper_core::ledger::LedgerHead;
+use greentyper_core::provider::UsageAccuracy;
 use greentyper_core::provider_catalog::{CatalogAvailability, ModelCapability};
 use greentyper_core::runtime::{KernelTeamSnapshot, RecoveryStatus, RuntimeSnapshot};
 use greentyper_core::tool_runtime::{ToolCallStatus, ToolSnapshot};
 use greentyper_core::usage::{
-    CostQuantity, RuntimeUsageSnapshot, UsageAttempt, UsageAttemptOutcome, UsageQuantity,
-    UsageRollup,
+    CostQuantity, RuntimeUsageSnapshot, UsageAttempt, UsageAttemptOutcome, UsageDistribution,
+    UsageQuantity, UsageRollup,
 };
 use serde::Serialize;
 use unicode_segmentation::UnicodeSegmentation;
@@ -293,6 +294,9 @@ impl ModelSelectorGroup {
 #[serde(rename_all = "snake_case")]
 pub(crate) enum StatsGroup {
     Attempts,
+    Turn,
+    ProviderModel,
+    Policy,
     Thread,
     Agent,
     Team,
@@ -301,8 +305,11 @@ pub(crate) enum StatsGroup {
 }
 
 impl StatsGroup {
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 9] = [
         Self::Attempts,
+        Self::Turn,
+        Self::ProviderModel,
+        Self::Policy,
         Self::Thread,
         Self::Agent,
         Self::Team,
@@ -327,6 +334,9 @@ impl StatsGroup {
     fn entry_count(self, stats: &RuntimeUsageSnapshot) -> usize {
         match self {
             Self::Attempts => stats.attempts().len(),
+            Self::Turn => stats.turns().len(),
+            Self::ProviderModel => stats_provider_model_entry_count(stats),
+            Self::Policy => stats_policy_entry_count(stats),
             Self::Thread => usize::from(stats.thread().is_some()),
             Self::Agent => stats.agents().len(),
             Self::Team => usize::from(stats.team().is_some()),
@@ -334,6 +344,43 @@ impl StatsGroup {
             Self::TokenCache => 3,
         }
     }
+}
+
+fn stats_provider_model_entry_count(stats: &RuntimeUsageSnapshot) -> usize {
+    stats.turns().iter().fold(0, |total, turn| {
+        [
+            turn.usage().provider_profiles(),
+            turn.usage().requested_models(),
+            turn.usage().observed_models(),
+        ]
+        .into_iter()
+        .fold(total, |count, distribution| {
+            count.saturating_add(stats_distribution_entry_count(distribution))
+        })
+    })
+}
+
+fn stats_policy_entry_count(stats: &RuntimeUsageSnapshot) -> usize {
+    stats.turns().iter().fold(0, |total, turn| {
+        [
+            turn.usage().dialects(),
+            turn.usage().requested_reasoning_efforts(),
+            turn.usage().observed_reasoning_efforts(),
+            turn.usage().requested_service_tiers(),
+            turn.usage().service_tiers(),
+        ]
+        .into_iter()
+        .fold(total, |count, distribution| {
+            count.saturating_add(stats_distribution_entry_count(distribution))
+        })
+    })
+}
+
+fn stats_distribution_entry_count(distribution: &UsageDistribution) -> usize {
+    distribution
+        .values()
+        .len()
+        .saturating_add(usize::from(distribution.unknown() > 0))
 }
 
 impl ModelSelectorEntryView {
@@ -2552,6 +2599,15 @@ fn stats_rows(
             LayoutRowView::new("Usage unavailable", false),
         ];
     };
+    if group == StatsGroup::Turn {
+        return stats_turn_rows(stats, selected, detail);
+    }
+    if group == StatsGroup::ProviderModel {
+        return stats_provider_model_rows(stats, selected, detail);
+    }
+    if group == StatsGroup::Policy {
+        return stats_policy_rows(stats, selected, detail);
+    }
     if group == StatsGroup::Thread {
         return stats_thread_rows(stats, detail);
     }
@@ -2601,6 +2657,203 @@ fn stats_rows(
                 attempt.requested_model()
             ),
             index == selected,
+        )
+    }));
+    rows
+}
+
+struct StatsDistributionEntry<'a> {
+    turn: u64,
+    dimension: &'static str,
+    value: Cow<'a, str>,
+    count: u64,
+    rollup: &'a UsageRollup,
+}
+
+fn stats_provider_model_rows(
+    stats: &RuntimeUsageSnapshot,
+    selected: usize,
+    detail: bool,
+) -> Vec<LayoutRowView> {
+    let mut entries = Vec::new();
+    for turn in stats.turns() {
+        let rollup = turn.usage();
+        push_stats_distribution_entries(
+            &mut entries,
+            turn.id(),
+            "provider",
+            rollup.provider_profiles(),
+            rollup,
+        );
+        push_stats_distribution_entries(
+            &mut entries,
+            turn.id(),
+            "requested model",
+            rollup.requested_models(),
+            rollup,
+        );
+        push_stats_distribution_entries(
+            &mut entries,
+            turn.id(),
+            "observed model",
+            rollup.observed_models(),
+            rollup,
+        );
+    }
+    stats_distribution_rows(
+        "Stats / Provider & Model",
+        "No Provider or Model usage",
+        stats,
+        &entries,
+        selected,
+        detail,
+    )
+}
+
+fn stats_policy_rows(
+    stats: &RuntimeUsageSnapshot,
+    selected: usize,
+    detail: bool,
+) -> Vec<LayoutRowView> {
+    let mut entries = Vec::new();
+    for turn in stats.turns() {
+        let rollup = turn.usage();
+        for (dimension, distribution) in [
+            ("dialect", rollup.dialects()),
+            ("requested reasoning", rollup.requested_reasoning_efforts()),
+            ("observed reasoning", rollup.observed_reasoning_efforts()),
+            ("requested service tier", rollup.requested_service_tiers()),
+            ("observed service tier", rollup.service_tiers()),
+        ] {
+            push_stats_distribution_entries(
+                &mut entries,
+                turn.id(),
+                dimension,
+                distribution,
+                rollup,
+            );
+        }
+    }
+    stats_distribution_rows(
+        "Stats / Dialect & Policy",
+        "No Dialect or Policy usage",
+        stats,
+        &entries,
+        selected,
+        detail,
+    )
+}
+
+fn push_stats_distribution_entries<'a>(
+    entries: &mut Vec<StatsDistributionEntry<'a>>,
+    turn: u64,
+    dimension: &'static str,
+    distribution: &'a UsageDistribution,
+    rollup: &'a UsageRollup,
+) {
+    entries.extend(
+        distribution
+            .values()
+            .iter()
+            .map(|(value, count)| StatsDistributionEntry {
+                turn,
+                dimension,
+                value: Cow::Borrowed(value.as_str()),
+                count: *count,
+                rollup,
+            }),
+    );
+    if distribution.unknown() > 0 {
+        entries.push(StatsDistributionEntry {
+            turn,
+            dimension,
+            value: Cow::Borrowed("?"),
+            count: distribution.unknown(),
+            rollup,
+        });
+    }
+}
+
+fn stats_distribution_rows(
+    title: &'static str,
+    empty: &'static str,
+    stats: &RuntimeUsageSnapshot,
+    entries: &[StatsDistributionEntry<'_>],
+    selected: usize,
+    detail: bool,
+) -> Vec<LayoutRowView> {
+    if entries.is_empty() {
+        return vec![
+            LayoutRowView::new(title, false),
+            LayoutRowView::new(empty, false),
+        ];
+    }
+    let selected = selected.min(entries.len() - 1);
+    let entry = &entries[selected];
+    if detail {
+        return vec![
+            LayoutRowView::new(title, false),
+            LayoutRowView::new(format!("turn {}", entry.turn), false),
+            LayoutRowView::new(format!("{} {}", entry.dimension, entry.value), false),
+            LayoutRowView::new(format!("attempts {}", entry.count), false),
+            LayoutRowView::new(stats_rollup_label("turn total", entry.rollup), false),
+        ];
+    }
+    let mut rows = vec![
+        LayoutRowView::new(title, false),
+        LayoutRowView::new(format!("as of {} ms", stats.as_of().unix_millis()), false),
+    ];
+    rows.extend(entries.iter().enumerate().map(|(index, entry)| {
+        let is_selected = index == selected;
+        LayoutRowView::new(
+            format!(
+                "{} turn {} | {} {} | attempts {}",
+                if is_selected { '>' } else { ' ' },
+                entry.turn,
+                entry.dimension,
+                entry.value,
+                entry.count
+            ),
+            is_selected,
+        )
+    }));
+    rows
+}
+
+fn stats_turn_rows(
+    stats: &RuntimeUsageSnapshot,
+    selected: usize,
+    detail: bool,
+) -> Vec<LayoutRowView> {
+    let turns = stats.turns();
+    if turns.is_empty() {
+        return vec![
+            LayoutRowView::new("Stats / Turn", false),
+            LayoutRowView::new("No Turn usage", false),
+        ];
+    }
+    let selected = selected.min(turns.len() - 1);
+    if detail {
+        let turn = &turns[selected];
+        return stats_rollup_detail_rows(
+            "Stats / Turn",
+            format!("turn {}", turn.id()),
+            turn.usage(),
+        );
+    }
+    let mut rows = vec![
+        LayoutRowView::new("Stats / Turn", false),
+        LayoutRowView::new(format!("as of {} ms", stats.as_of().unix_millis()), false),
+    ];
+    rows.extend(turns.iter().enumerate().map(|(index, turn)| {
+        let is_selected = index == selected;
+        LayoutRowView::new(
+            format!(
+                "{} {}",
+                if is_selected { '>' } else { ' ' },
+                stats_rollup_label(&format!("turn {}", turn.id()), turn.usage())
+            ),
+            is_selected,
         )
     }));
     rows
@@ -2879,6 +3132,7 @@ fn usage_quantity_label(quantity: &UsageQuantityView) -> String {
 
 fn stats_attempt_detail_rows(attempt: &UsageAttempt) -> Vec<LayoutRowView> {
     let usage = attempt.usage();
+    let accuracy = usage.map(|record| record.accuracy());
     let cost = attempt.cost_estimate();
     vec![
         LayoutRowView::new("Stats / Attempt", false),
@@ -2933,15 +3187,18 @@ fn stats_attempt_detail_rows(attempt: &UsageAttempt) -> Vec<LayoutRowView> {
         LayoutRowView::new(
             format!(
                 "tokens input {} | output {} | total {}",
-                usage
-                    .and_then(|record| record.input_tokens())
-                    .map_or_else(|| "?".to_owned(), |value| value.to_string()),
-                usage
-                    .and_then(|record| record.output_tokens())
-                    .map_or_else(|| "?".to_owned(), |value| value.to_string()),
-                usage
-                    .and_then(|record| record.total_tokens())
-                    .map_or_else(|| "?".to_owned(), |value| value.to_string())
+                stats_attempt_quantity_label(
+                    usage.and_then(|record| record.input_tokens()),
+                    accuracy,
+                ),
+                stats_attempt_quantity_label(
+                    usage.and_then(|record| record.output_tokens()),
+                    accuracy,
+                ),
+                stats_attempt_quantity_label(
+                    usage.and_then(|record| record.total_tokens()),
+                    accuracy,
+                )
             ),
             false,
         ),
@@ -2952,7 +3209,10 @@ fn stats_attempt_detail_rows(attempt: &UsageAttempt) -> Vec<LayoutRowView> {
                     format!(
                         "cost {} {}",
                         cost.currency(),
-                        format_cost(cost.amount_pico_units(), cost.scale_decimal_places())
+                        usage_accuracy_label(
+                            format_cost(cost.amount_pico_units(), cost.scale_decimal_places()),
+                            cost.usage_accuracy(),
+                        )
                     )
                 },
             ),
@@ -2971,6 +3231,20 @@ fn stats_attempt_detail_rows(attempt: &UsageAttempt) -> Vec<LayoutRowView> {
             false,
         ),
     ]
+}
+
+fn stats_attempt_quantity_label(value: Option<u64>, accuracy: Option<UsageAccuracy>) -> String {
+    value.map_or_else(
+        || "?".to_owned(),
+        |value| usage_accuracy_label(value.to_string(), accuracy.unwrap_or(UsageAccuracy::Exact)),
+    )
+}
+
+fn usage_accuracy_label(value: String, accuracy: UsageAccuracy) -> String {
+    match accuracy {
+        UsageAccuracy::Exact => value,
+        UsageAccuracy::Estimated => format!("~{value}"),
+    }
 }
 
 const fn usage_attempt_outcome_label(outcome: UsageAttemptOutcome) -> &'static str {
@@ -3568,8 +3842,11 @@ mod tests {
     };
     use greentyper_core::ledger::LedgerHead;
     use greentyper_core::model::{DeliveryId, ThreadId, TurnId};
-    use greentyper_core::provider::ProviderDialect;
-    use greentyper_core::runtime::{KernelTeamSnapshot, RecoveryStatus, RuntimeSnapshot};
+    use greentyper_core::provider::{ProviderDialect, UsageAccuracy};
+    use greentyper_core::runtime::{
+        KernelTeamSnapshot, RecoveryStatus, RuntimeKernel, RuntimeSnapshot,
+    };
+    use greentyper_core::usage::{RuntimeUsageSnapshot, UsageTimestamp};
 
     use crate::provider_connection::{ProviderConnectionTestStatus, ProviderConnectionTester};
 
@@ -3579,7 +3856,8 @@ mod tests {
         PresentationScreenView, PresentationSources, PresentationState, RecoveryBadge,
         SlashPanelView, StatsGroup, StatusSegmentKind, TuiViewModel, UsageQuantityView,
         UsageSummaryView, Viewport, cost_label, display_width, fit_text, model_detail_rows,
-        model_selector_rows, status_segments,
+        model_selector_rows, stats_attempt_quantity_label, stats_rows, status_segments,
+        usage_accuracy_label,
     };
 
     static NEXT_TEMP: AtomicU64 = AtomicU64::new(1);
@@ -4102,6 +4380,26 @@ source = "unknown"
     }
 
     #[test]
+    fn attempt_usage_labels_preserve_estimated_accuracy_and_unknown_values() {
+        assert_eq!(
+            stats_attempt_quantity_label(Some(120), Some(UsageAccuracy::Exact)),
+            "120"
+        );
+        assert_eq!(
+            stats_attempt_quantity_label(Some(120), Some(UsageAccuracy::Estimated)),
+            "~120"
+        );
+        assert_eq!(
+            stats_attempt_quantity_label(None, Some(UsageAccuracy::Estimated)),
+            "?"
+        );
+        assert_eq!(
+            usage_accuracy_label("0.000120000000".to_owned(), UsageAccuracy::Estimated),
+            "~0.000120000000"
+        );
+    }
+
+    #[test]
     fn statusline_formats_known_payg_cost_without_hiding_unknown_attempts() {
         let summary = UsageSummaryView {
             attempts: 2,
@@ -4299,6 +4597,23 @@ source = "unknown"
             }
         );
 
+        controller.state = PresentationState::Stats {
+            group: StatsGroup::Policy,
+            selected: 7,
+            detail: true,
+        };
+        controller.reconcile_snapshot(&view);
+        assert_eq!(
+            controller
+                .screen(None)
+                .expect("reconciled unavailable Stats policy screen"),
+            PresentationScreenView::Stats {
+                group: StatsGroup::Policy,
+                selected: 0,
+                detail: false,
+            }
+        );
+
         controller.state = PresentationState::AgentCenter {
             selected: 7,
             detail: true,
@@ -4311,6 +4626,78 @@ source = "unknown"
                 detail: false,
             }
         );
+    }
+
+    #[test]
+    fn empty_stats_groups_close_stale_detail_without_creating_state() {
+        let temp = TempTree::new("empty-stats-groups");
+        let ledger = temp.root.join("runtime.ledger");
+        let usage = RuntimeKernel::inspect_usage(
+            &ledger,
+            UsageTimestamp::from_unix_millis(1_000).expect("usage instant"),
+        )
+        .expect("inspect missing Runtime Ledger");
+        let runtime = runtime(RecoveryStatus::Ready);
+        let config = ConfigRuntimeStatus {
+            ready: true,
+            issues: Vec::new(),
+        };
+        let view = TuiViewModel::build(
+            "/stats",
+            "",
+            0,
+            PresentationSources {
+                runtime: &runtime,
+                usage: Some(&usage),
+                team: None,
+                tools: None,
+                config: &config,
+                provider_profile: None,
+                model: None,
+                context_pressure: None,
+                model_presets: &[],
+                catalog_models: &[],
+            },
+        )
+        .expect("empty Stats view");
+
+        let mut controller = PresentationController::new();
+        for group in [
+            StatsGroup::Turn,
+            StatsGroup::ProviderModel,
+            StatsGroup::Policy,
+        ] {
+            controller.state = PresentationState::Stats {
+                group,
+                selected: 7,
+                detail: true,
+            };
+            controller.reconcile_snapshot(&view);
+            assert_eq!(
+                controller
+                    .screen(None)
+                    .expect("reconciled empty Stats group"),
+                PresentationScreenView::Stats {
+                    group,
+                    selected: 0,
+                    detail: false,
+                }
+            );
+        }
+
+        for (group, empty) in [
+            (StatsGroup::Turn, "No Turn usage"),
+            (StatsGroup::ProviderModel, "No Provider or Model usage"),
+            (StatsGroup::Policy, "No Dialect or Policy usage"),
+        ] {
+            let rows = stats_rows(&view.stats, group, 7, true);
+            assert_eq!(rows[1].text(), empty);
+        }
+
+        let unknown: Availability<RuntimeUsageSnapshot> = Availability::Unknown;
+        let rows = stats_rows(&unknown, StatsGroup::Policy, 7, true);
+        assert_eq!(rows[1].text(), "Usage unavailable");
+        assert!(!ledger.exists());
     }
 
     #[test]

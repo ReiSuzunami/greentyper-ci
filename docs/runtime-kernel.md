@@ -379,20 +379,20 @@ charges still require a future dedicated authority path.
   origin-bound credential bind/replace/test/forget. Credential requests return
   status only, use the platform vault, and contain no Provider, Runtime, Team,
   Tool, Agent, or approval authority.
-- Automatic/background terminal Usage refresh, dedicated Turn aggregates, and
-  richer cache distributions,
+- Automatic/background terminal Usage refresh and richer cache distributions,
   automatic Context View construction/compaction, provider-reported charge
   and subscription-quota values, richer observed model/effort/tier
   metadata, and FMDev P6 measurements. The durable attempts, cached rollups,
   pinned Usage Windows, revision-bound summary/page `stats` projections, and
   terminal-neutral width-degradation and Context Pressure projection contracts
   are present. The Direct VT tracer now browses the latest successful rolling
-  Usage
-  summaries, durable attempt details, current Thread, Agent-usage, Team-usage,
-  named-window, and rolling token/cache aggregate screens. F6 or Ctrl-R performs
+  Usage summaries, durable attempt details, cached Turn aggregates, per-Turn
+  Provider/Model/Dialect/Policy distributions, current Thread, Agent-usage,
+  Team-usage, named-window, and rolling token/cache aggregate screens. F6 or
+  Ctrl-R performs
   one all-or-old TUI replacement after independent local Ledger and Config
   reads; it is not a cross-Ledger transactional snapshot. No background polling
-  or dedicated Turn aggregate screen exists.
+  exists, and richer cache-distribution browsing remains pending.
   The separate `/agent` browser exposes read-only Team orchestration state, not a
   Usage aggregate or mutation surface. It can also
   persist every user-scope Config Schema field, can create a complete Provider
