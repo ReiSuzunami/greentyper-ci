@@ -1,35 +1,9 @@
-use std::collections::BTreeMap;
 use std::env;
 use std::error::Error;
 use std::fmt;
 use std::fs;
 use std::io::{self, BufRead, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
-
-use greentyper_core::agent_team::TeamOperationRecord;
-use greentyper_core::config::{
-    CONFIG_FILE_SCHEMA_VERSION, ConfigDocument, ConfigDraft, ConfigPaths, ConfigRuntime,
-    ConfigRuntimeError, ConfigScope, config_schema,
-};
-use greentyper_core::model::{DeliveryId, TurnId};
-use greentyper_core::pricing::PriceScheduleBook;
-use greentyper_core::provider::{ProviderDialect, ProviderError};
-use greentyper_core::provider_catalog::{ProviderCatalog, ProviderCatalogMode};
-use greentyper_core::provider_discovery::{
-    DiscoveredProviderModel, PROVIDER_DISCOVERY_SCHEMA_VERSION, ProviderDiscoveryError,
-    ProviderDiscoveryProfile, ProviderDiscoveryState,
-};
-use greentyper_core::runtime::{
-    AcknowledgeOutcome, CancelTurnOutcome, PreparedOutput, ProviderToolApproval, RecoveryStatus,
-    RuntimeKernel,
-};
-use greentyper_core::tool_runtime::{
-    ToolCallRecord, ToolCallStatus, ToolEffectExecutor, ToolReconciliationDecision, ToolSnapshot,
-};
-use greentyper_core::usage::{
-    RuntimeUsageQuery, RuntimeUsageSnapshot, UsageCursor, UsageError, UsageTimestamp, UsageWindow,
-};
-use serde::Serialize;
 
 use crate::credential_vault::{
     CredentialVault, CredentialVaultError, MAX_SECRET_BYTES, PlatformCredentialVault,
@@ -47,8 +21,32 @@ use crate::product_driver::{
     request_product_provider_turn_retry,
 };
 use crate::provider_connection::{ModelsHttpConnectionTester, ProviderConnectionTester};
+use crate::provider_discovery_catalog::{
+    ProviderDiscoveryCatalogView, provider_discovery_catalog as project_provider_discovery_catalog,
+    refresh_provider_discovery as refresh_discovery_observation,
+};
 use crate::provider_http::{
     ConfiguredProvider, ProviderHttpError, ProviderHttpSmokeOutcome, ProviderHttpSmokeScenario,
+};
+use greentyper_core::agent_team::TeamOperationRecord;
+use greentyper_core::config::{
+    CONFIG_FILE_SCHEMA_VERSION, ConfigDocument, ConfigDraft, ConfigPaths, ConfigRuntime,
+    ConfigRuntimeError, ConfigScope, config_schema,
+};
+use greentyper_core::model::{DeliveryId, TurnId};
+use greentyper_core::pricing::PriceScheduleBook;
+use greentyper_core::provider::{ProviderDialect, ProviderError};
+use greentyper_core::provider_catalog::ProviderCatalog;
+use greentyper_core::provider_discovery::{ProviderDiscoveryError, ProviderDiscoveryState};
+use greentyper_core::runtime::{
+    AcknowledgeOutcome, CancelTurnOutcome, PreparedOutput, ProviderToolApproval, RecoveryStatus,
+    RuntimeKernel,
+};
+use greentyper_core::tool_runtime::{
+    ToolCallRecord, ToolCallStatus, ToolEffectExecutor, ToolReconciliationDecision, ToolSnapshot,
+};
+use greentyper_core::usage::{
+    RuntimeUsageQuery, RuntimeUsageSnapshot, UsageCursor, UsageError, UsageTimestamp, UsageWindow,
 };
 
 pub fn run(arguments: impl Iterator<Item = String>) -> Result<(), CliError> {
@@ -461,65 +459,12 @@ fn refresh_provider_discovery<T: ProviderConnectionTester + ?Sized>(
             .ok_or(ProviderError::InvalidConfiguration(
                 "simulator profile has no Provider discovery endpoint",
             ))?;
-    let status = tester.test(&profile);
-    if let crate::provider_connection::ProviderConnectionTestStatus::Succeeded {
-        profile: observed_profile,
-        fingerprint,
-        models,
-    } = &status
-    {
-        if observed_profile != profile.profile() || *fingerprint != profile.fingerprint() {
-            return Err(ProviderDiscoveryError::ObservationMismatch.into());
-        }
-        let models = models
-            .iter()
-            .map(|model| {
-                DiscoveredProviderModel::new(model.id.clone(), model.release_catalog_key.clone())
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let snapshot = ProviderDiscoveryProfile::new(
-            profile.profile(),
-            profile.template(),
-            profile.fingerprint(),
-            observed_at_unix_ms,
-            models,
-        )?;
-        ProviderDiscoveryState::replace_profile(state_path, snapshot)?;
-    }
-    Ok(status)
-}
-
-#[derive(Serialize)]
-struct ProviderDiscoveryCatalogView {
-    schema_version: u16,
-    profile: String,
-    template: String,
-    mode: ProviderCatalogMode,
-    freshness: &'static str,
-    observed_at_unix_ms: Option<i64>,
-    models: Vec<ProviderDiscoveryCatalogModel>,
-}
-
-#[derive(Serialize)]
-struct ProviderDiscoveryCatalogModel {
-    id: String,
-    release_catalog_key: Option<String>,
-    sources: Vec<&'static str>,
-    availability: &'static str,
-    primary_dialect: Option<ProviderDialect>,
-    profile_compatible: bool,
-    configured_presets: Vec<String>,
-    executable: bool,
-    suggestion: &'static str,
-}
-
-#[derive(Default)]
-struct ProviderDiscoveryCatalogModelBuilder {
-    release_catalog_key: Option<String>,
-    primary_dialect: Option<ProviderDialect>,
-    profile_compatible: bool,
-    release: bool,
-    discovery: bool,
+    Ok(refresh_discovery_observation(
+        &profile,
+        state_path,
+        observed_at_unix_ms,
+        tester,
+    )?)
 }
 
 fn provider_discovery_catalog(
@@ -527,118 +472,17 @@ fn provider_discovery_catalog(
     profile_id: &str,
     state_path: &Path,
 ) -> Result<ProviderDiscoveryCatalogView, CliError> {
-    let profile =
-        runtime
-            .provider_profile(profile_id)?
-            .ok_or(ProviderError::InvalidConfiguration(
-                "simulator profile has no Provider discovery catalog",
-            ))?;
-    let mode = runtime.provider_catalog_mode(profile_id)?;
+    if runtime.provider_profile(profile_id)?.is_none() {
+        return Err(ProviderError::InvalidConfiguration(
+            "simulator profile has no Provider discovery catalog",
+        )
+        .into());
+    }
     let state = ProviderDiscoveryState::inspect(state_path)?;
-    let observation = state
-        .profiles()
-        .iter()
-        .find(|candidate| candidate.profile() == profile.profile());
-    let freshness = if !mode.includes_discovery() {
-        "disabled"
-    } else {
-        match observation {
-            None => "missing",
-            Some(observation)
-                if observation.template() == profile.template()
-                    && observation.fingerprint() == profile.fingerprint() =>
-            {
-                "current"
-            }
-            Some(_) => "stale",
-        }
-    };
-
-    let mut builders = BTreeMap::<String, ProviderDiscoveryCatalogModelBuilder>::new();
-    if mode.includes_release_seed() {
-        for record in ProviderCatalog::release()
-            .models()
-            .iter()
-            .filter(|record| record.provider_template() == profile.template())
-        {
-            let builder = builders
-                .entry(record.model_id().value().to_string())
-                .or_default();
-            builder.release_catalog_key = Some(record.key().to_owned());
-            builder.primary_dialect = Some(record.primary_dialect().value());
-            builder.profile_compatible = profile.supports(record.primary_dialect().value());
-            builder.release = true;
-        }
-    }
-    if mode.includes_discovery()
-        && let Some(observation) = observation
-    {
-        for model in observation.models() {
-            builders.entry(model.id().to_owned()).or_default().discovery = true;
-        }
-    }
-
-    let mut configured = BTreeMap::<String, Vec<String>>::new();
-    for preset in runtime
-        .model_presets()?
-        .into_iter()
-        .filter(|preset| preset.provider == profile.profile())
-    {
-        configured.entry(preset.model).or_default().push(preset.id);
-    }
-    let models = builders
-        .into_iter()
-        .map(|(id, builder)| {
-            let configured_presets = configured.remove(&id).unwrap_or_default();
-            let executable = !configured_presets.is_empty();
-            let availability = if builder.discovery && freshness == "current" {
-                "available"
-            } else if builder.discovery && freshness == "stale" {
-                "stale"
-            } else {
-                "unverified"
-            };
-            let suggestion = if executable {
-                "none"
-            } else if builder.release && builder.profile_compatible {
-                "accept_release_starter"
-            } else if builder.discovery && freshness == "current" {
-                "accept_discovered_with_dialect"
-            } else if builder.discovery {
-                "refresh_required"
-            } else {
-                "incompatible"
-            };
-            let mut sources = Vec::with_capacity(2);
-            if builder.release {
-                sources.push("release_seed");
-            }
-            if builder.discovery {
-                sources.push("discovery");
-            }
-            ProviderDiscoveryCatalogModel {
-                id,
-                release_catalog_key: builder.release_catalog_key,
-                sources,
-                availability,
-                primary_dialect: builder.primary_dialect,
-                profile_compatible: builder.profile_compatible,
-                configured_presets,
-                executable,
-                suggestion,
-            }
-        })
-        .collect();
-
-    Ok(ProviderDiscoveryCatalogView {
-        schema_version: PROVIDER_DISCOVERY_SCHEMA_VERSION,
-        profile: profile.profile().to_owned(),
-        template: profile.template().to_owned(),
-        mode,
-        freshness,
-        observed_at_unix_ms: observation.map(ProviderDiscoveryProfile::observed_at_unix_ms),
-        models,
-    })
+    let presets = runtime.model_presets()?;
+    Ok(project_provider_discovery_catalog(
+        runtime, &state, &presets, profile_id,
+    )?)
 }
 
 fn begin_discovered_model_preset(
