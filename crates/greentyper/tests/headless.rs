@@ -885,6 +885,92 @@ max_output_tokens = 2048
 }
 
 #[test]
+fn headless_uses_the_project_default_model_preset_until_explicitly_overridden() {
+    let ledger = temp_path("project-default-preset");
+    let config_root = temp_path("project-default-preset-config");
+    let user_config = user_config_path(&config_root);
+    let project_config = config_root.join(".greentyper").join("config.toml");
+    fs::create_dir_all(user_config.parent().unwrap()).expect("create user config parent");
+    fs::create_dir_all(project_config.parent().unwrap()).expect("create project config parent");
+    fs::write(
+        &user_config,
+        r#"schema_version = 1
+
+[agent]
+default_model_preset = "simulator-default"
+
+[providers.edge]
+template = "openai-compatible"
+credential = "edge-credential"
+base_url = "https://provider.invalid/v1"
+dialects = ["responses"]
+
+[providers.edge.routes]
+responses = "/responses"
+
+[providers.edge.pricing]
+source = "unknown"
+
+[model_presets.simulator-default]
+provider = "simulator"
+model = "deterministic-v1"
+dialect = "responses"
+
+[model_presets.project-default]
+provider = "edge"
+model = "fixture-model"
+dialect = "responses"
+"#,
+    )
+    .expect("write user Preset config");
+    fs::write(
+        &project_config,
+        r#"schema_version = 1
+
+[agent]
+default_model_preset = "project-default"
+"#,
+    )
+    .expect("write project default Preset config");
+
+    let automatic = binary_with_config_root(&config_root)
+        .current_dir(&config_root)
+        .args(["headless", "--ledger"])
+        .arg(&ledger)
+        .args(["--input", "use the project default"])
+        .output()
+        .expect("run project-default headless command");
+    assert!(!automatic.status.success(), "{automatic:?}");
+    let automatic_stderr = String::from_utf8_lossy(&automatic.stderr);
+    assert!(
+        automatic_stderr.contains("Provider credential binding was not found")
+            || automatic_stderr.contains("provider unavailable"),
+        "{automatic:?}"
+    );
+    assert!(
+        !ledger.exists(),
+        "default Preset preflight must precede Turn admission"
+    );
+
+    let explicit = binary_with_config_root(&config_root)
+        .current_dir(&config_root)
+        .args(["headless", "--preset", "simulator-default", "--ledger"])
+        .arg(&ledger)
+        .args(["--input", "override the project default"])
+        .output()
+        .expect("run explicitly overridden headless command");
+    assert!(!explicit.status.success(), "{explicit:?}");
+    assert!(
+        String::from_utf8_lossy(&explicit.stderr)
+            .contains("simulator Provider cannot select a wire dialect"),
+        "{explicit:?}"
+    );
+    assert!(!ledger.exists());
+
+    fs::remove_dir_all(config_root).expect("cleanup Config root");
+}
+
+#[test]
 fn headless_uses_pending_current_agent_preset_and_preserves_it_on_preflight_failure() {
     let ledger = temp_path("pending-model-selection");
     let config_root = temp_path("pending-model-selection-config");

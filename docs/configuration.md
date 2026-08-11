@@ -92,6 +92,7 @@ F7 flow without making credential material a Config value.
 | `providers.<id>.catalog.mode` | `template`, `discovery`, `template_and_discovery`, or `manual` | Next Provider Epoch |
 | `providers.<id>.pricing.source` | `unknown`, `template`, `template_mirror`, `manual`, or `provider_reported` | Next Provider Epoch |
 | `providers.<id>.allow_insecure_loopback` | Boolean; false by default and invalid for a non-loopback host | Next Provider Epoch |
+| `agent.default_model_preset` | Exact configured Model Preset ID; project scope overrides user scope | Next Turn |
 | `model_presets.<id>` | Provider, model, dialect, inference settings, context mode, and explicit fallback list | Next Turn and Provider Epoch when identity changes |
 | `price_schedules.<id>` | Version, currency, Provider Profile, model, optional dialect/service tier/context band, half-open UTC effective interval, provenance, and non-negative integer token-class rates | Next Config Epoch |
 | `ui.statusline` | Preset, expansion policy, segments, and optional named Usage Window reference | Immediate presentation update |
@@ -709,8 +710,14 @@ limit. Runtime advances to the next frozen fallback only after Provider
 unavailability before a response or before the first decoded event. It records
 the failed candidate's Usage/cost evidence first and never switches after a
 partial stream, malformed output, Tool-derived state, or post-Tool continuation
-failure. This candidate switch is not an adapter retry or reconnect. Context
-mode execution and project/default selection remain target behavior.
+failure. This candidate switch is not an adapter retry or reconnect. When no
+explicit `--preset` and no pending current-Agent selection exists, headless
+execution uses the effective `agent.default_model_preset`; project scope
+overrides user scope. A conflicting explicit/pending pair still fails before
+Provider or Ledger mutation. Unknown default IDs fail Config validation, and
+the generic Config set/reset flow can replace or clear the field. Repeating an
+already-applied set/reset returns `written: false` without rewriting the Config
+layer. Context-mode execution and new-Agent inheritance remain target behavior.
 
 The rendered model browser now provides Favorites, Recent, Compatible, and All
 views with fuzzy search and bounded provider, dialect, context, capability,
@@ -727,7 +734,8 @@ the trusted Profile before opening an ordinary user-scope Draft. The Profile
 template/fingerprint, observation timestamp, and exact model membership are
 checked again immediately before Draft creation. Drift returns to `/model` with
 an F5 retry path; revision conflict retains the normal Draft for discard and
-reopen. Discovery acceptance does not modify discovery state or any Ledger. A
+reopen. Discovery acceptance does not modify discovery state or any Ledger. The
+effective configured default is marked in both the `/model` list and detail. A
 second Enter on a configured Preset
 durably selects it for the existing current Agent's next Turn. The pending Preset ID is rendered in the
 browser and can be replaced by another configured Preset. Selection is bound to the recovered Active Agent Session;
@@ -736,8 +744,9 @@ running child Agent. The next headless Turn without `--preset` resolves the exac
 pending ID, rechecks its Config fingerprint and provider/model identity, and
 consumes it atomically with Turn admission and Config/Provider Epoch freeze.
 Config drift, explicit-ID conflict, credential failure, and unsupported policy
-preserve the pending selection before Provider execution. A new-Agent or project
-default remains target behavior. Any provider/model/dialect change starts a
+preserve the pending selection before Provider execution. The default remains a
+Config choice and never becomes current-Agent selection authority; new-Agent
+inheritance remains target behavior. Any provider/model/dialect change starts a
 Provider Epoch.
 Automatic price- or latency-based routing is outside v1; fallback is explicit,
 bounded, frozen before admission, and must preserve the required capability

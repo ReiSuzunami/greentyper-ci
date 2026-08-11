@@ -610,6 +610,13 @@ impl ModelSelectorEntryView {
         )
     }
 
+    fn default(&self) -> bool {
+        matches!(
+            &self.choice,
+            ModelSelectorChoiceView::ConfiguredPreset { preset } if preset.default
+        )
+    }
+
     #[cfg(test)]
     fn is_release_catalog(&self) -> bool {
         matches!(self.choice, ModelSelectorChoiceView::ReleaseCatalog { .. })
@@ -3597,11 +3604,11 @@ fn model_selector_rows(
     ));
     rows.extend(entries.iter().enumerate().map(|(index, entry)| {
         let source = model_source_label(entry);
+        let default = if entry.default() { " default" } else { "" };
         LayoutRowView::new(
             format!(
-                "{} [{}] {} / {} / {}",
+                "{} [{source}{default}] {} / {} / {}",
                 if index == selected { '>' } else { ' ' },
-                source,
                 entry.id(),
                 entry.provider(),
                 entry.model()
@@ -3674,6 +3681,7 @@ fn model_detail_rows(entry: &ModelSelectorEntryView) -> Vec<LayoutRowView> {
                     format!("context {}", preset.context_mode.as_deref().unwrap_or("?")),
                     false,
                 ),
+                LayoutRowView::new(format!("default {}", preset.default), false),
                 LayoutRowView::new(format!("favorite {}", preset.favorite), false),
                 LayoutRowView::new(
                     format!(
@@ -6027,6 +6035,7 @@ source = "unknown"
                 service_tier: None,
                 max_output_tokens: Some(4096),
                 context_mode: None,
+                default: false,
                 favorite: true,
                 fallback: Vec::new(),
             },
@@ -6039,6 +6048,7 @@ source = "unknown"
                 service_tier: None,
                 max_output_tokens: None,
                 context_mode: None,
+                default: false,
                 favorite: false,
                 fallback: Vec::new(),
             },
@@ -6121,6 +6131,7 @@ source = "unknown"
                 service_tier: None,
                 max_output_tokens: None,
                 context_mode: None,
+                default: false,
                 favorite: false,
                 fallback: Vec::new(),
             },
@@ -6133,6 +6144,7 @@ source = "unknown"
                 service_tier: None,
                 max_output_tokens: None,
                 context_mode: None,
+                default: false,
                 favorite: false,
                 fallback: Vec::new(),
             },
@@ -6255,6 +6267,7 @@ source = "unknown"
             service_tier: None,
             max_output_tokens: None,
             context_mode: None,
+            default: false,
             favorite: false,
             fallback: Vec::new(),
         }];

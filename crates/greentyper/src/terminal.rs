@@ -4573,6 +4573,9 @@ mode = "template_and_discovery"
             paths.user(),
             r#"schema_version = 1
 
+[agent]
+default_model_preset = "fast"
+
 [providers.edge]
 template = "openai"
 credential = "synthetic-model-selection-credential-reference"
@@ -4657,6 +4660,10 @@ dialect = "responses"
             output.contains("Preset 'careful' selected for current Agent next Turn"),
             "{output}"
         );
+        assert!(
+            output.contains("[configured default] fast / edge / gpt-5.6-fast"),
+            "{output}"
+        );
         assert!(!output.contains("synthetic-model-selection-credential-reference"));
         let pending = RuntimeKernel::inspect(&ledger)
             .expect("inspect selected Preset")
@@ -4680,6 +4687,20 @@ dialect = "responses"
                 .body()
                 .iter()
                 .any(|row| row.text() == "next turn careful")
+        );
+        display
+            .controller
+            .set_model_query("fast")
+            .expect("filter default Preset");
+        display.controller.activate_model_entry(&final_view.models);
+        let detail_layout = display
+            .layout(Some(&config), &final_view)
+            .expect("default Preset detail layout");
+        assert!(
+            detail_layout
+                .body()
+                .iter()
+                .any(|row| row.text() == "default true")
         );
         assert_ne!(
             std::fs::read(&ledger).expect("reread Runtime Ledger"),

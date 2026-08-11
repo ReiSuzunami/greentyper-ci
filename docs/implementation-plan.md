@@ -557,7 +557,7 @@ custom-template and automatic starter-offer/update workflow,
 automatic/on-open catalog discovery, automatic Context View/token-source
 projection, provider-reported
 charge and subscription-quota accounting, richer observed Provider metadata,
-project/new-Agent Preset defaults, Agent lifecycle
+new-Agent Preset-default inheritance, Agent lifecycle
 actions, and the P0/P1/P2/P6
 performance evidence remain pending.
 
@@ -603,6 +603,18 @@ keeps a preferred Responses dialect and Pro resolves that preference to Chat
 before admission. Configured Presets can now be staged from `/model` for the
 existing current Agent's next Turn and are consumed at durable admission.
 
+A three-slice default-Preset batch now adds the schema-owned
+`agent.default_model_preset` field, resolves user/project precedence, and lets a
+headless Turn use that exact Preset only when neither an explicit ID nor a
+pending current-Agent selection applies. Unknown targets fail validation before
+write or Ledger creation; Config CLI set/reset keeps the failure recoverable.
+An already-effective set/reset is an idempotent zero-write commit.
+The Direct VT `/model` list and detail identify the effective default while a
+second Enter continues to create a separate, Agent-session-bound pending
+selection. Targeted tests prove project-over-user precedence, explicit override
+when no conflicting pending selection exists, Config set/get/reset, and
+Runtime-only mutation for current-Agent selection.
+
 An explicit five-slice fallback batch now resolves each Preset graph depth-first
 with first-occurrence deduplication, rejects unknown/cyclic/over-16 or
 capability-lowering plans, and preflights every adapter before Runtime state
@@ -614,7 +626,7 @@ successful candidate once. Crash recovery selects the next frozen candidate
 before retrying the active one, resumes that exact Provider Epoch, and never
 replays the failed primary. Team and Tool Ledgers remain byte-identical.
 
-Project/new-Agent defaults, context mode, automatic
+New-Agent default inheritance, context mode, automatic
 starter updates, and automatic/on-open/background discovery remain pending.
 
 Exit criteria:

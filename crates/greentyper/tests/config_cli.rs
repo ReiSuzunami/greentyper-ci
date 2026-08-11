@@ -206,6 +206,94 @@ fn config_cli_dry_run_commit_get_repair_and_headless_gate_are_wired() {
 }
 
 #[test]
+fn config_cli_sets_rejects_and_resets_the_project_default_model_preset() {
+    let temp = TempTree::new();
+    fs::create_dir_all(
+        temp.project_config()
+            .parent()
+            .expect("project Config parent"),
+    )
+    .expect("create project Config parent");
+    let before = br#"schema_version = 1
+
+[model_presets.fast]
+provider = "simulator"
+model = "deterministic-v1"
+dialect = "responses"
+"#;
+    fs::write(temp.project_config(), before).expect("write project Preset");
+
+    let rejected = temp
+        .config_command("set")
+        .args([
+            "agent.default_model_preset",
+            "missing",
+            "--scope",
+            "project",
+        ])
+        .output()
+        .expect("reject missing default Preset");
+    assert!(!rejected.status.success(), "{rejected:?}");
+    assert!(rejected.stdout.is_empty());
+    assert!(
+        String::from_utf8_lossy(&rejected.stderr).contains("agent.default_model_preset"),
+        "{rejected:?}"
+    );
+    assert_eq!(
+        fs::read(temp.project_config()).expect("read rejected project Config"),
+        before
+    );
+
+    let committed = temp
+        .config_command("set")
+        .args(["agent.default_model_preset", "fast", "--scope", "project"])
+        .output()
+        .expect("set project default Preset");
+    assert_success(&committed);
+    assert_eq!(json(&committed.stdout)["written"], true);
+
+    let selected = temp
+        .config_command("get")
+        .arg("agent.default_model_preset")
+        .output()
+        .expect("read project default Preset");
+    assert_success(&selected);
+    let selected = json(&selected.stdout);
+    assert_eq!(selected["entry"]["source"], "project");
+    assert_eq!(selected["entry"]["value"]["value"], "fast");
+
+    let reset = temp
+        .config_command("reset")
+        .args(["agent.default_model_preset", "--scope", "project"])
+        .output()
+        .expect("reset project default Preset");
+    assert_success(&reset);
+    assert_eq!(json(&reset.stdout)["written"], true);
+
+    let cleared = temp
+        .config_command("get")
+        .arg("agent.default_model_preset")
+        .output()
+        .expect("read cleared project default Preset");
+    assert_success(&cleared);
+    assert!(json(&cleared.stdout)["entry"].is_null());
+
+    let cleared_bytes = fs::read(temp.project_config()).expect("read cleared project Config");
+    let repeated_reset = temp
+        .config_command("reset")
+        .args(["agent.default_model_preset", "--scope", "project"])
+        .output()
+        .expect("repeat project default Preset reset");
+    assert_success(&repeated_reset);
+    assert_eq!(json(&repeated_reset.stdout)["written"], false);
+    assert_eq!(
+        fs::read(temp.project_config()).expect("read repeated-reset project Config"),
+        cleared_bytes
+    );
+    assert!(!temp.root.join("runtime.ledger").exists());
+}
+
+#[test]
 fn config_catalog_emits_the_versioned_public_release_seed_only() {
     let temp = TempTree::new();
     let output = temp

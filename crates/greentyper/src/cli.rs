@@ -129,6 +129,7 @@ pub fn run(arguments: impl Iterator<Item = String>) -> Result<(), CliError> {
             let pending_selection = RuntimeKernel::inspect(&ledger)?.pending_model_selection;
             let config = open_config_runtime(default_config_paths()?)?;
             let base_layers = config.config_layers()?.clone();
+            let default_preset = config.default_model_preset()?.map(str::to_owned);
             let preset_id =
                 match (preset, pending_selection.as_ref()) {
                     (Some(id), Some(pending)) if id != pending.selection().preset_id() => {
@@ -139,7 +140,7 @@ pub fn run(arguments: impl Iterator<Item = String>) -> Result<(), CliError> {
                     }
                     (Some(id), _) => Some(id),
                     (None, Some(pending)) => Some(pending.selection().preset_id().to_owned()),
-                    (None, None) => None,
+                    (None, None) => default_preset,
                 };
             let preset_chain = preset_id
                 .as_deref()

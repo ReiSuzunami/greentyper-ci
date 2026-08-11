@@ -449,7 +449,14 @@ freezes the expected Provider Epoch. Headless integration proves automatic
 pending-ID resolution plus credential-preflight and explicit-ID-conflict
 failure preserve all three Ledger byte streams. These tests do not prove
 automatic/on-open/background Provider discovery, automatic starter updates,
-project/new-Agent defaults, or context-mode execution.
+new-Agent default inheritance, or context-mode execution. Separate headless and
+Config CLI integration tests now prove project `agent.default_model_preset`
+overrides the user value, an explicit Preset is used when no conflicting
+pending selection exists, missing targets are rejected without file mutation,
+set/get/reset never creates a Runtime Ledger, and a repeated reset returns
+`written: false` with byte-identical Config. The real-key `/model` flow
+also freezes the effective default marker while its explicit current-Agent
+selection continues to modify only the Runtime Ledger.
 A real-key loop now carries `/config stats-window add` through its bounded ID
 prompt and start/end/days/time-zone fields, previews, commits, and reopens the
 resolved window. Focused tests prove all four schema fields expose 512-byte text
@@ -657,7 +664,7 @@ read-only `config catalog` integration test proves the snapshot contains no
 local path or credential reference.
 
 Remaining terminal-backend evidence covers real terminal/ConPTY resize and input,
-project/new-Agent Preset defaults, Agent Center
+new-Agent Preset-default inheritance, Agent Center
 lifecycle actions, background refresh, broader multi-Tool/App Server approval,
 panic-abort cleanup, final host cell
 geometry, and input-ready/idle resource budgets.

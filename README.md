@@ -448,7 +448,9 @@ discovery observation only after success, and preserves the previous file and
 browser on failure. F6 or Ctrl-R remains a local-only snapshot reload and never
 contacts a Provider. The accepted result is an ordinary user-owned Preset;
 duplicate IDs, incompatible Profiles, validation failures, and stale revisions
-never overwrite Config. A second Enter on configured detail durably selects
+never overwrite Config. The effective `agent.default_model_preset` is marked as
+`configured default` in the list and `default true` in detail; project scope
+overrides user scope. A second Enter on configured detail durably selects
 that Preset for the existing current
 Agent's next Turn; the pending ID is visible and another configured Preset
 replaces it. Nothing is installed or executed implicitly. Selection
@@ -459,7 +461,11 @@ rechecks its Config fingerprint and identity, and consumes the selection in the
 same admission transaction that freezes Config and Provider Epochs. Config
 drift, an explicit conflicting Preset, missing credentials, or unsupported
 Provider policy fails before Provider execution and preserves the pending
-selection. Running child Agents are unchanged.
+selection. With no explicit or pending selection, headless execution uses the
+effective configured default. A missing target fails Config validation before
+write or Ledger creation, and the normal Config set/reset flow can replace or
+clear it. Running child Agents are unchanged; new-Agent inheritance remains
+pending.
 `/stats` now browses the latest successful Usage snapshot. It shows 1-hour, 1-day,
 and 7-day summaries. Tab and Shift-Tab move across Attempts, Turn,
 Provider & Model, Dialect & Policy, current Thread, Agent, Team, Named Window,
@@ -516,7 +522,7 @@ Provider discovery. Live inference conformance,
 automatic transport retry or partial-stream reconnect, Messages reasoning
 blocks, Preset context-mode execution, broader multi-Tool approval
 presentation, broader Provider and Tool adapters,
-Workspace, project/new-Agent Preset defaults,
+Workspace, new-Agent Preset-default inheritance,
 Agent lifecycle actions, general App Server Runtime control beyond the exact
 cancel/retry/resume recovery flow, and
 remote App Server transport remain. The loopback Provider tracer remains

@@ -813,6 +813,7 @@ mod tests {
             service_tier: None,
             max_output_tokens: None,
             context_mode: Some("compact".into()),
+            default: false,
             favorite: true,
             fallback: vec!["careful".into()],
         };
@@ -842,6 +843,7 @@ mod tests {
             service_tier: Some(ServiceTier::Fast),
             max_output_tokens: Some(2048),
             context_mode: None,
+            default: false,
             favorite: true,
             fallback: Vec::new(),
         };

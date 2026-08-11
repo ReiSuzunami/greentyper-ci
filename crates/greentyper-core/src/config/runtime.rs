@@ -183,6 +183,15 @@ const CONFIG_SCHEMA: &[ConfigSchemaEntry] = &[
         "integer",
     ),
     schema_entry(
+        "agent.default_model_preset",
+        "/config agent model-preset",
+        ConfigValueKind::String,
+        FILE_SCOPES,
+        ConfigApplicationTiming::NextTurn,
+        false,
+        "preset_selector",
+    ),
+    schema_entry(
         "providers.<id>.template",
         "/config provider template",
         ConfigValueKind::String,
@@ -645,6 +654,11 @@ fn config_field_interaction(descriptor: &ConfigSchemaEntry) -> ConfigFieldIntera
                 max_bytes: MAX_CONFIG_STRING_BYTES,
             }
         }
+        ("agent.default_model_preset", ConfigValueKind::String, false, "preset_selector") => {
+            ConfigFieldInteraction::Text {
+                max_bytes: MAX_CONFIG_ID_BYTES,
+            }
+        }
         ("providers.<id>.template", ConfigValueKind::String, false, "provider_template") => {
             ConfigFieldInteraction::Choice {
                 choices: PROVIDER_TEMPLATE_CHOICES,
@@ -895,6 +909,7 @@ pub struct ModelPresetView {
     pub service_tier: Option<ServiceTier>,
     pub max_output_tokens: Option<u32>,
     pub context_mode: Option<String>,
+    pub default: bool,
     pub favorite: bool,
     pub fallback: Vec<String>,
 }
@@ -1074,6 +1089,8 @@ pub struct ConfigDocument {
     provider: BootstrapProviderLayer,
     #[serde(default, skip_serializing_if = "RuntimeLayer::is_empty")]
     runtime: RuntimeLayer,
+    #[serde(default, skip_serializing_if = "AgentLayer::is_empty")]
+    agent: AgentLayer,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     providers: BTreeMap<String, ProviderProfileLayer>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -1099,6 +1116,7 @@ impl ConfigDocument {
             schema_version: CONFIG_FILE_SCHEMA_VERSION,
             provider: BootstrapProviderLayer::default(),
             runtime: RuntimeLayer::default(),
+            agent: AgentLayer::default(),
             providers: BTreeMap::new(),
             model_presets: BTreeMap::new(),
             price_schedules: BTreeMap::new(),
@@ -1149,6 +1167,19 @@ struct RuntimeLayer {
 impl RuntimeLayer {
     fn is_empty(&self) -> bool {
         self.max_output_bytes.is_none()
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+struct AgentLayer {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    default_model_preset: Option<String>,
+}
+
+impl AgentLayer {
+    fn is_empty(&self) -> bool {
+        self.default_model_preset.is_none()
     }
 }
 
@@ -1568,6 +1599,7 @@ impl ConfigRuntime {
             .last_valid
             .as_ref()
             .ok_or_else(|| ConfigRuntimeError::RepairRequired(self.status().issues))?;
+        let default = resolved.document.agent.default_model_preset.as_deref();
         resolved
             .document
             .model_presets
@@ -1624,6 +1656,7 @@ impl ConfigRuntime {
                     service_tier,
                     max_output_tokens: preset.max_output_tokens,
                     context_mode: preset.context_mode.clone(),
+                    default: default == Some(id.as_str()),
                     favorite: preset.favorite.unwrap_or(false),
                     fallback: preset.fallback.clone().unwrap_or_default(),
                 })
@@ -1637,6 +1670,15 @@ impl ConfigRuntime {
             .into_iter()
             .find(|preset| preset.id == id)
             .ok_or_else(|| ConfigRuntimeError::UnknownObject(format!("model_presets.{id}")))
+    }
+
+    pub fn default_model_preset(&self) -> Result<Option<&str>, ConfigRuntimeError> {
+        Ok(self
+            .resolved_state()?
+            .document
+            .agent
+            .default_model_preset
+            .as_deref())
     }
 
     /// Resolves one explicit Preset fallback graph in deterministic depth-first order.
@@ -2151,6 +2193,15 @@ impl ConfigRuntime {
         };
         resolve_documents(&self.built_in, resolved_user, resolved_project, &self.cli)?;
         let changes = diff_documents(&current.document, &draft.document);
+        if changes.is_empty() {
+            return Ok(ConfigCommit {
+                scope: draft.scope,
+                base_revision: draft.base_revision,
+                revision: current.revision,
+                changes,
+                written: false,
+            });
+        }
         let bytes = draft.document.to_toml()?.into_bytes();
         let revision = revision(&bytes);
         if !dry_run {
@@ -3442,6 +3493,14 @@ fn validate_effective(document: &ConfigDocument) -> Result<(), ConfigRuntimeErro
             }
         }
     }
+    if let Some(default) = &document.agent.default_model_preset
+        && !document.model_presets.contains_key(default)
+    {
+        return Err(invalid(
+            "agent.default_model_preset",
+            "default model preset does not exist",
+        ));
+    }
     validate_fallback_cycles(document)?;
 
     let usage_windows = document.stats.windows.as_deref().unwrap_or_default();
@@ -3907,6 +3966,9 @@ impl ConfigDocument {
             ["runtime", "max_output_bytes"] => {
                 self.runtime.max_output_bytes = Some(take_positive_integer(value))
             }
+            ["agent", "default_model_preset"] => {
+                self.agent.default_model_preset = Some(take_string(value));
+            }
             ["providers", id, field] => {
                 validate_id("providers.<id>", id)?;
                 let profile = self.providers.entry((*id).to_owned()).or_default();
@@ -4078,6 +4140,7 @@ impl ConfigDocument {
             ["provider", "profile"] => self.provider.profile = None,
             ["provider", "model"] => self.provider.model = None,
             ["runtime", "max_output_bytes"] => self.runtime.max_output_bytes = None,
+            ["agent", "default_model_preset"] => self.agent.default_model_preset = None,
             ["providers", id, field] => {
                 let Some(profile) = self.providers.get_mut(*id) else {
                     return Ok(());
@@ -4287,6 +4350,9 @@ impl ConfigDocument {
         for id in self.model_presets.keys() {
             validate_id("model_presets.<id>", id)?;
         }
+        if let Some(default) = &self.agent.default_model_preset {
+            validate_id("agent.default_model_preset", default)?;
+        }
         for id in self.price_schedules.keys() {
             validate_id("price_schedules.<id>", id)?;
         }
@@ -4309,6 +4375,10 @@ impl ConfigDocument {
         merge_option(
             &mut self.runtime.max_output_bytes,
             &overlay.runtime.max_output_bytes,
+        );
+        merge_option(
+            &mut self.agent.default_model_preset,
+            &overlay.agent.default_model_preset,
         );
         for (id, overlay_profile) in &overlay.providers {
             self.providers
@@ -4353,6 +4423,11 @@ impl ConfigDocument {
                 ConfigValue::PositiveInteger(value),
             );
         }
+        insert_string(
+            &mut values,
+            "agent.default_model_preset",
+            &self.agent.default_model_preset,
+        );
         for (id, profile) in &self.providers {
             let prefix = format!("providers.{id}");
             insert_string(
