@@ -1745,6 +1745,15 @@ dialect = "responses"
     let mut runtime = ConfigRuntime::open(paths.clone(), ConfigDocument::empty())
         .expect("shared fallback is acyclic");
     assert!(runtime.status().ready);
+    assert_eq!(
+        runtime
+            .model_preset_chain("a")
+            .expect("resolve explicit fallback chain")
+            .into_iter()
+            .map(|preset| preset.id)
+            .collect::<Vec<_>>(),
+        ["a", "b", "d", "c"]
+    );
 
     write(
         paths.user(),
@@ -1767,6 +1776,30 @@ fallback = ["a"]
     let status = runtime.reload().expect("reload cycle into repair");
     assert!(!status.ready);
     assert!(status.issues[0].detail.contains("cycle"));
+}
+
+#[test]
+fn fallback_chain_rejects_more_than_sixteen_provider_candidates() {
+    let temp = TempTree::new("fallback-limit");
+    let paths = temp.paths();
+    let mut document = String::from("schema_version = 1\n");
+    for index in 0..17 {
+        document.push_str(&format!(
+            "\n[model_presets.p{index}]\nprovider = \"simulator\"\nmodel = \"p{index}\"\ndialect = \"responses\"\n"
+        ));
+        if index < 16 {
+            document.push_str(&format!("fallback = [\"p{}\"]\n", index + 1));
+        }
+    }
+
+    write(paths.user(), &document);
+    let runtime = ConfigRuntime::open(paths, ConfigDocument::empty())
+        .expect("open oversized fallback config for repair");
+    assert!(!runtime.status().ready);
+    assert!(runtime.status().issues.iter().any(|issue| {
+        issue.detail.contains("model_presets.p0.fallback")
+            && issue.detail.contains("16 Provider candidates")
+    }));
 }
 
 #[test]

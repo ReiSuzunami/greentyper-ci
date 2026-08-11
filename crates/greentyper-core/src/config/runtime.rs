@@ -28,6 +28,7 @@ use crate::usage::{MAX_USAGE_WINDOWS, UsageWeekday, UsageWindow};
 
 pub const CONFIG_FILE_SCHEMA_VERSION: u16 = SchemaKind::ConfigFile.current().get();
 pub const MAX_CONFIG_FILE_BYTES: usize = 1024 * 1024;
+pub const MAX_MODEL_PRESET_FALLBACK_CANDIDATES: usize = 16;
 const MAX_CONFIG_LIST_ITEMS: usize = 128;
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
@@ -1636,6 +1637,46 @@ impl ConfigRuntime {
             .into_iter()
             .find(|preset| preset.id == id)
             .ok_or_else(|| ConfigRuntimeError::UnknownObject(format!("model_presets.{id}")))
+    }
+
+    /// Resolves one explicit Preset fallback graph in deterministic depth-first order.
+    ///
+    /// A shared downstream Preset appears only at its first occurrence, so one
+    /// Provider candidate is never executed twice within the same Turn.
+    pub fn model_preset_chain(&self, id: &str) -> Result<Vec<ModelPresetView>, ConfigRuntimeError> {
+        validate_id("model preset", id)?;
+        let presets = self
+            .model_presets()?
+            .into_iter()
+            .map(|preset| (preset.id.clone(), preset))
+            .collect::<BTreeMap<_, _>>();
+        if !presets.contains_key(id) {
+            return Err(ConfigRuntimeError::UnknownObject(format!(
+                "model_presets.{id}"
+            )));
+        }
+
+        fn visit(
+            id: &str,
+            presets: &BTreeMap<String, ModelPresetView>,
+            seen: &mut BTreeSet<String>,
+            chain: &mut Vec<ModelPresetView>,
+        ) {
+            if !seen.insert(id.to_owned()) {
+                return;
+            }
+            let preset = presets
+                .get(id)
+                .expect("validated fallback references remain present");
+            chain.push(preset.clone());
+            for fallback in &preset.fallback {
+                visit(fallback, presets, seen, chain);
+            }
+        }
+
+        let mut chain = Vec::new();
+        visit(id, &presets, &mut BTreeSet::new(), &mut chain);
+        Ok(chain)
     }
 
     pub fn catalog_models(&self) -> Result<Vec<ModelCatalogView>, ConfigRuntimeError> {
@@ -3593,6 +3634,30 @@ fn validate_fallback_cycles(document: &ConfigDocument) -> Result<(), ConfigRunti
     let mut complete = BTreeSet::new();
     for root in document.model_presets.keys() {
         visit(root, root, document, &mut BTreeSet::new(), &mut complete)?;
+    }
+
+    fn collect<'a>(current: &'a str, document: &'a ConfigDocument, seen: &mut BTreeSet<&'a str>) {
+        if !seen.insert(current) {
+            return;
+        }
+        if let Some(preset) = document.model_presets.get(current) {
+            for fallback in preset.fallback.iter().flatten() {
+                collect(fallback, document, seen);
+            }
+        }
+    }
+
+    for root in document.model_presets.keys() {
+        let mut seen = BTreeSet::new();
+        collect(root, document, &mut seen);
+        if seen.len() > MAX_MODEL_PRESET_FALLBACK_CANDIDATES {
+            return Err(invalid(
+                format!("model_presets.{root}.fallback"),
+                format!(
+                    "fallback chain supports at most {MAX_MODEL_PRESET_FALLBACK_CANDIDATES} Provider candidates"
+                ),
+            ));
+        }
     }
     Ok(())
 }
