@@ -19,7 +19,7 @@ use crate::config::{
 };
 use crate::context::{
     ContextAdmissionDecision, ContextArtifactRef, ContextEventRange, ContextPressureSnapshot,
-    ContextReductionPolicy, ContextViewError, ContextViewItem, ContextViewRole,
+    ContextReductionPolicy, ContextRequestView, ContextViewError, ContextViewItem, ContextViewRole,
     MAX_CONTEXT_VIEW_ITEMS, ReducedContextView,
 };
 use crate::ledger::{
@@ -1428,6 +1428,7 @@ impl RuntimeKernel {
                 pressure: context_pressure.expect("hard pressure is present"),
             });
         }
+        self.provider_context_for_history(&self.state.items)?;
 
         let thread = match self.state.thread {
             Some(thread) => thread,
@@ -1711,14 +1712,44 @@ impl RuntimeKernel {
             .state
             .thread
             .ok_or(RuntimeError::CorruptState("pending Thread is missing"))?;
+        let turn = self
+            .state
+            .turns
+            .get(&pending.turn)
+            .ok_or(RuntimeError::CorruptState("pending Turn is missing"))?;
+        let user_index = self
+            .state
+            .items
+            .iter()
+            .position(|item| item.id() == turn.user_item)
+            .ok_or(RuntimeError::CorruptState("pending user Item is missing"))?;
+        if user_index + 1 != self.state.items.len() {
+            return Err(RuntimeError::CorruptState(
+                "pending user Item is not the latest canonical Item",
+            ));
+        }
+        let context = self.provider_context_for_history(&self.state.items[..user_index])?;
         let request = ProviderRequest {
             thread,
             turn: pending.turn,
             config: config.clone(),
             provider: provider_epoch,
+            context,
             input: pending.input.clone(),
         };
         Ok((pending, config, request))
+    }
+
+    fn provider_context_for_history(
+        &self,
+        history: &[CanonicalItem],
+    ) -> Result<Option<ContextRequestView>, RuntimeError> {
+        self.state
+            .context_checkpoint
+            .as_ref()
+            .map(|checkpoint| checkpoint.view.materialize_request(history))
+            .transpose()
+            .map_err(RuntimeError::Context)
     }
 
     fn pending_max_output_bytes(&self, turn: TurnId) -> Result<usize, RuntimeError> {

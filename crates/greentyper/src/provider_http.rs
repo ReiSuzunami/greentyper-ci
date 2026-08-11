@@ -2320,6 +2320,7 @@ mod tests {
                 profile,
             )
             .expect("Provider Epoch"),
+            context: None,
             input: input.to_owned(),
         }
     }
@@ -2386,6 +2387,7 @@ mod tests {
                 Some(dialect),
             )
             .expect("Provider Epoch"),
+            context: None,
             input: input.to_owned(),
         }
     }
@@ -3188,6 +3190,7 @@ source = "unknown"
                 profile.clone(),
             )
             .expect("Provider Epoch without dialect"),
+            context: None,
             input: "must not send".into(),
         };
         assert!(matches!(

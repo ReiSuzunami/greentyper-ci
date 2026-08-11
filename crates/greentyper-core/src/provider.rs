@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use url::{Host, Url};
 
 use crate::config::ConfigEpoch;
+use crate::context::ContextRequestView;
 use crate::model::{ProviderEpochId, ThreadId, TurnId};
 
 pub const MAX_PROVIDER_ID_BYTES: usize = 512;
@@ -343,6 +344,7 @@ pub struct ProviderRequest {
     pub turn: TurnId,
     pub config: ConfigEpoch,
     pub provider: ProviderEpoch,
+    pub context: Option<ContextRequestView>,
     pub input: String,
 }
 
@@ -354,6 +356,25 @@ impl fmt::Debug for ProviderRequest {
             .field("turn", &self.turn)
             .field("config", &self.config.id())
             .field("provider", &self.provider.id())
+            .field(
+                "context_source",
+                &self.context.as_ref().map(ContextRequestView::source),
+            )
+            .field(
+                "context_archived_items",
+                &self
+                    .context
+                    .as_ref()
+                    .map(ContextRequestView::archived_items),
+            )
+            .field(
+                "context_visible_items",
+                &self.context.as_ref().map(|context| context.items().len()),
+            )
+            .field(
+                "context_raw_bytes",
+                &self.context.as_ref().map(ContextRequestView::raw_bytes),
+            )
             .field("input_bytes", &self.input.len())
             .finish()
     }

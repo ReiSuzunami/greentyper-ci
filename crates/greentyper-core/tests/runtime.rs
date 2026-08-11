@@ -6,7 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use greentyper_core::config::{ConfigDocument, ConfigLayers, ConfigPaths, ConfigRuntime};
 use greentyper_core::context::{
     ContextPressure, ContextPressureAccuracy, ContextPressureInput, ContextPressurePolicy,
-    ContextReductionPolicy,
+    ContextReductionPolicy, ContextViewError, MAX_CONTEXT_VIEW_BYTES,
 };
 use greentyper_core::ledger::{EventData, FileLedger, LedgerHead};
 use greentyper_core::provider::{
@@ -112,6 +112,138 @@ fn context_checkpoint_publishes_at_a_safe_barrier_and_replays() {
     assert_eq!(replayed, published);
     assert_eq!(replayed.source().head(), source_head);
     drop(recovered);
+    fs::remove_file(path).expect("cleanup Runtime ledger");
+}
+
+#[test]
+fn published_checkpoint_is_used_by_the_next_provider_request() {
+    let path = temp_path("context-checkpoint-request");
+    let mut runtime = RuntimeKernel::open(&path).expect("open Runtime");
+    let mut provider = CountingProvider::default();
+    let first = runtime
+        .execute(&ConfigLayers::default(), "first", &mut provider)
+        .expect("prepare first output");
+    runtime
+        .acknowledge(first.delivery())
+        .expect("complete first Turn");
+    let checkpoint = runtime
+        .prepare_context_checkpoint(ContextReductionPolicy::new(32, 1).expect("policy"))
+        .expect("prepare checkpoint");
+    runtime
+        .publish_context_checkpoint(checkpoint)
+        .expect("publish checkpoint");
+
+    let second = runtime
+        .execute(&ConfigLayers::default(), "second", &mut provider)
+        .expect("prepare second output");
+
+    assert_eq!(provider.requests.len(), 2);
+    assert!(provider.requests[0].context.is_none());
+    let context = provider.requests[1]
+        .context
+        .as_ref()
+        .expect("checkpoint request Context");
+    assert_eq!(provider.requests[1].input, "second");
+    assert_eq!(context.archived_items(), 1);
+    assert_eq!(context.items().len(), 1);
+    assert_eq!(
+        context.items()[0].role(),
+        greentyper_core::context::ContextViewRole::Assistant
+    );
+    assert_eq!(context.items()[0].text(), "simulated: first");
+
+    runtime
+        .acknowledge(second.delivery())
+        .expect("complete second Turn");
+    drop(runtime);
+    fs::remove_file(path).expect("cleanup Runtime ledger");
+}
+
+#[test]
+fn checkpoint_request_context_survives_admission_crash_and_resume() {
+    let path = temp_path("context-checkpoint-resume");
+    let mut runtime = RuntimeKernel::open(&path).expect("open Runtime");
+    let mut first_provider = CountingProvider::default();
+    let first = runtime
+        .execute(&ConfigLayers::default(), "first", &mut first_provider)
+        .expect("prepare first output");
+    runtime
+        .acknowledge(first.delivery())
+        .expect("complete first Turn");
+    let checkpoint = runtime
+        .prepare_context_checkpoint(ContextReductionPolicy::new(32, 1).expect("policy"))
+        .expect("prepare checkpoint");
+    runtime
+        .publish_context_checkpoint(checkpoint)
+        .expect("publish checkpoint");
+
+    let crashed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut provider = PanicProvider;
+        let _ = runtime.execute(&ConfigLayers::default(), "second", &mut provider);
+    }));
+    assert!(crashed.is_err());
+    drop(runtime);
+
+    let mut recovered = RuntimeKernel::open(&path).expect("recover Runtime");
+    let mut provider = CountingProvider::default();
+    let second = recovered.resume(&mut provider).expect("resume second Turn");
+    let request = provider.requests.first().expect("resumed Provider request");
+    let context = request.context.as_ref().expect("replayed request Context");
+    assert_eq!(request.input, "second");
+    assert_eq!(context.archived_items(), 1);
+    assert_eq!(context.items().len(), 1);
+    assert_eq!(context.items()[0].text(), "simulated: first");
+    recovered
+        .acknowledge(second.delivery())
+        .expect("complete resumed Turn");
+    drop(recovered);
+    fs::remove_file(path).expect("cleanup Runtime ledger");
+}
+
+#[test]
+fn oversized_checkpoint_delta_rejects_before_turn_admission() {
+    let path = temp_path("context-checkpoint-request-limit");
+    let mut runtime = RuntimeKernel::open(&path).expect("open Runtime");
+    let mut provider = ShortProvider::default();
+    let first = runtime
+        .execute(&ConfigLayers::default(), "first", &mut provider)
+        .expect("prepare first output");
+    runtime
+        .acknowledge(first.delivery())
+        .expect("complete first Turn");
+    let checkpoint = runtime
+        .prepare_context_checkpoint(ContextReductionPolicy::new(1, 1).expect("policy"))
+        .expect("prepare checkpoint");
+    runtime
+        .publish_context_checkpoint(checkpoint)
+        .expect("publish checkpoint");
+    let second = runtime
+        .execute(
+            &ConfigLayers::default(),
+            "x".repeat(MAX_CONTEXT_VIEW_BYTES),
+            &mut provider,
+        )
+        .expect("prepare large second output");
+    runtime
+        .acknowledge(second.delivery())
+        .expect("complete second Turn");
+    let before = runtime.snapshot();
+    assert_eq!(provider.calls, 2);
+    drop(runtime);
+    let bytes_before = fs::read(&path).expect("read Runtime ledger");
+
+    let mut runtime = RuntimeKernel::open(&path).expect("reopen Runtime");
+    assert!(matches!(
+        runtime.execute(&ConfigLayers::default(), "third", &mut provider),
+        Err(RuntimeError::Context(ContextViewError::ViewTooLarge))
+    ));
+    assert_eq!(provider.calls, 2);
+    assert_eq!(runtime.snapshot(), before);
+    drop(runtime);
+    assert_eq!(
+        fs::read(&path).expect("read unchanged Runtime ledger"),
+        bytes_before
+    );
     fs::remove_file(path).expect("cleanup Runtime ledger");
 }
 
@@ -1021,11 +1153,28 @@ fn invalid_runtime_transition_in_a_valid_frame_fails_closed() {
 #[derive(Default)]
 struct CountingProvider {
     calls: usize,
+    requests: Vec<ProviderRequest>,
+}
+
+#[derive(Default)]
+struct ShortProvider {
+    calls: usize,
+}
+
+impl ProviderRuntime for ShortProvider {
+    fn run(&mut self, _request: &ProviderRequest) -> Result<Vec<ProviderEvent>, ProviderError> {
+        self.calls += 1;
+        Ok(vec![
+            ProviderEvent::TextDelta("ok".into()),
+            ProviderEvent::Completed(UsageRecord::default()),
+        ])
+    }
 }
 
 impl ProviderRuntime for CountingProvider {
     fn run(&mut self, request: &ProviderRequest) -> Result<Vec<ProviderEvent>, ProviderError> {
         self.calls += 1;
+        self.requests.push(request.clone());
         DeterministicProvider::default().run(request)
     }
 }

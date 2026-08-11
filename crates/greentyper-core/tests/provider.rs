@@ -1,5 +1,9 @@
 use greentyper_core::config::{ConfigEpoch, ConfigLayers};
-use greentyper_core::model::{ConfigEpochId, ProviderEpochId, ThreadId, TurnId};
+use greentyper_core::context::{ContextReductionPolicy, ReducedContextView};
+use greentyper_core::ledger::LedgerHead;
+use greentyper_core::model::{
+    CanonicalItem, ConfigEpochId, ItemId, ItemRole, ProviderEpochId, ThreadId, TurnId,
+};
 use greentyper_core::provider::{
     DeterministicProvider, ProviderEpoch, ProviderError, ProviderEvent, ProviderRequest,
     ProviderRuntime, ProviderToolCall, ProviderUnavailableStage,
@@ -23,6 +27,7 @@ fn request(input: &str) -> ProviderRequest {
             "deterministic-v1",
         )
         .expect("provider"),
+        context: None,
         input: input.to_owned(),
     }
 }
@@ -104,9 +109,32 @@ fn provider_neutral_debug_redacts_text_and_tool_arguments() {
 
 #[test]
 fn provider_request_and_error_debug_redact_external_text() {
-    let request = request("private user input");
+    let history = [CanonicalItem::new(
+        ItemId::new(1).expect("Item"),
+        TurnId::new(1).expect("Turn"),
+        ItemRole::User,
+        "private Context history",
+    )
+    .expect("canonical Item")];
+    let reduced = ReducedContextView::from_items(
+        LedgerHead {
+            transaction: 1,
+            sequence: 1,
+        },
+        &history,
+        ContextReductionPolicy::new(64, 1).expect("policy"),
+    )
+    .expect("reduced Context View");
+    let mut request = request("private user input");
+    request.context = Some(
+        reduced
+            .materialize_request(&history)
+            .expect("request Context View"),
+    );
     let request_debug = format!("{request:?}");
     assert!(!request_debug.contains("private user input"));
+    assert!(!request_debug.contains("private Context history"));
+    assert!(request_debug.contains("context_raw_bytes"));
     assert!(request_debug.contains("input_bytes"));
 
     let error = ProviderError::unavailable("https://provider.test/?token=private-token");
