@@ -29,6 +29,7 @@ pub enum SchemaKind {
     DeterministicFixture,
     LedgerFormat,
     ProviderCatalog,
+    ProviderDiscovery,
     RuntimeEvent,
     TeamEvent,
     ToolEvent,
@@ -44,6 +45,7 @@ impl SchemaKind {
             | Self::DeterministicFixture
             | Self::LedgerFormat
             | Self::ProviderCatalog
+            | Self::ProviderDiscovery
             | Self::ToolEvent => SchemaVersion(1),
             Self::RuntimeEvent => SchemaVersion(11),
             Self::TeamEvent => SchemaVersion(2),

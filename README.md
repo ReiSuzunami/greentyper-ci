@@ -87,6 +87,10 @@ cargo run -p greentyper -- tool status --ledger ./target/tool-runtime.ledger
 cargo run -p greentyper -- tool reconcile --ledger ./target/tool-runtime.ledger --call 1 --failed
 cargo run -p greentyper -- config schema
 cargo run -p greentyper -- config catalog
+cargo run -p greentyper -- config discovery status
+cargo run -p greentyper -- config discovery refresh openai-main
+cargo run -p greentyper -- config discovery catalog openai-main
+cargo run -p greentyper -- config discovery accept frontier-live openai-main gpt-5.6-live --dialect responses --scope user
 cargo run -p greentyper -- config get provider.model
 cargo run -p greentyper -- config test-provider
 ```
@@ -311,7 +315,15 @@ carry their release key; unknown IDs carry no dialect, capability, or execution
 authority. The check does not commit the Draft, merge a live catalog, update a
 Provider Epoch, or return endpoint or credential data. The CLI offers the same
 read-only observation for the currently selected committed Profile through
-`config test-provider`.
+`config test-provider`. The explicit `config discovery refresh PROFILE` path
+reuses that bounded probe for a committed Profile and writes only a separate
+schema-versioned local observation after success. `status` is missing-safe,
+`catalog PROFILE` merges the release seed with the latest
+Profile-fingerprint-bound observation, and failed refreshes preserve the last
+successful bytes. Unknown discovered IDs remain non-executable until
+`config discovery accept PRESET_ID PROFILE MODEL --dialect DIALECT --scope
+user|project` creates an ordinary revision-bound Model Preset. Stale
+observations and unknown IDs fail before Config write or credential lookup.
 Dirty drafts cannot be discarded implicitly, and failed validation or revision
 conflicts leave the editor live. The public `tui` command enters the alternate
 screen and raw mode, maps blocking Crossterm key and resize events into the
@@ -453,7 +465,7 @@ are inspected independently, so one refresh is not a cross-Ledger transactional
 snapshot. The terminal and App Server approval surfaces are limited to the exact
 pending `local.echo` call; neither is a general Tool policy editor, audited
 ConPTY integration, automatic starter-update
-workflow, or persistent live catalog discovery. Live inference conformance,
+workflow, or TUI/lazy catalog discovery. Live inference conformance,
 automatic retry policy or partial-stream reconnect, OpenCode Go Messages execution,
 Messages reasoning blocks, Preset context/fallback execution, broader multi-Tool approval
 presentation, broader Provider and Tool adapters,

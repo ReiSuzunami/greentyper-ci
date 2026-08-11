@@ -127,6 +127,11 @@ impl ProviderCatalogMode {
     pub const fn includes_release_seed(self) -> bool {
         matches!(self, Self::Template | Self::TemplateAndDiscovery)
     }
+
+    #[must_use]
+    pub const fn includes_discovery(self) -> bool {
+        matches!(self, Self::Discovery | Self::TemplateAndDiscovery)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]

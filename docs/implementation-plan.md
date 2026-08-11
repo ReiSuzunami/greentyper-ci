@@ -208,7 +208,7 @@ untyped states fail closed.
 
 The remaining slices are still policy, protocol, and fault-adapter work:
 live inference conformance, non-Windows credential backends, configurable proxy
-policy, persistent live catalog discovery, OpenCode Go Messages execution, DeepSeek
+policy, TUI/lazy catalog discovery and selector merge, OpenCode Go Messages execution, DeepSeek
 Chat/Messages reasoning blocks, general Preset
 context/fallback execution, broader canonical Items, multiple
 Tool calls,
@@ -536,7 +536,7 @@ This does not complete Phase 3. Audited Windows ConPTY behavior, broader
 multi-Tool/App Server policy, general App Server Runtime control beyond the
 exact cancel/retry/resume recovery flow, remote App Server transport,
 automatic/background snapshot refresh,
-custom-template and automatic starter-offer/update workflow, live catalog
+custom-template and automatic starter-offer/update workflow, TUI/lazy catalog
 discovery and Recent evidence, automatic Context View/token-source
 projection, provider-reported
 charge and subscription-quota accounting, richer observed Provider metadata,
@@ -555,7 +555,7 @@ Exit criteria:
 ## Phase 4: Provider Portability
 
 Continue the release templates and seed catalog with OpenCode Go adapter
-execution, lazy discovery,
+execution, TUI-triggered lazy discovery,
 automatic starter updates, provider capability probes, explicit fallback
 chains, observed availability, and provider/model epoch switching. The
 OpenAI/openai-compatible Responses and Chat Completions adapters, official
@@ -563,9 +563,15 @@ DeepSeek Responses, Chat Completions, and Messages pairs, and release-verified
 OpenCode Go Chat Completions pairs plus the exact GPT-5.6 Luna Responses pair
 are implemented; custom gateway routes and
 user-owned Model Presets can be selected explicitly by ID for headless Turns.
-The connection-test port also emits a bounded, one-shot model-list observation;
-it does not persist discovery records, change selector availability, or grant
-unknown models execution authority.
+The connection-test port also emits a bounded, one-shot model-list observation.
+An explicit four-slice CLI flow now adds missing-safe status, successful-only
+atomic refresh into an independent schema-1 state file, read-only release plus
+discovery merge with Profile-fingerprint freshness, and explicit current-model
+acceptance into an ordinary Config Preset. Failed probes preserve prior state;
+stale or absent models and unsupported dialects fail before Config write.
+Unknown remote fields never gain capability, endpoint, pricing, credential,
+instruction, or execution authority. The Direct VT selector still consumes
+only its local release projection.
 Their Profile/model/dialect, optional output-token limit, typed reasoning effort,
 and typed service tier resolve through the frozen Config/Provider Epoch boundary.
 OpenAI Responses and Chat map the supported request fields. DeepSeek Responses
@@ -575,7 +581,7 @@ keeps a preferred Responses dialect and Pro resolves that preference to Chat
 before admission. Configured Presets can now be staged from `/model` for the
 existing current Agent's next Turn and are consumed at durable admission.
 Project/new-Agent defaults, context mode, general fallback execution, automatic
-starter updates, and live discovery remain pending.
+starter updates, and TUI/lazy discovery remain pending.
 
 Exit criteria:
 

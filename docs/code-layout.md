@@ -26,7 +26,10 @@ OpenAI Responses, Chat Completions, and Anthropic Messages dialect decoding,
 recoverable single-Agent Runtime Kernel,
 Agent Team Runtime, durable Tool Runtime policy, and the immutable Usage
 Attempt/window/rollup projection. It also owns the immutable release Provider
-Catalog and its field provenance. Config Runtime owns catalog-template
+Catalog and its field provenance. The independent Provider Discovery module owns
+the bounded schema-1 observation file, no-follow inspection, writer locking,
+validation, and atomic per-Profile replacement; it stores no Config, Ledger,
+credential, origin, capability, or execution authority. Config Runtime owns catalog-template
 resolution, schema-derived Command Paths, and the terminal-neutral
 revision-bound editor session used by future presentation adapters. Later slices
 add Workspace Coordinator and deepen the initial pure Context Pressure projector
@@ -58,7 +61,12 @@ Direct VT cell-diff renderer, blocking Crossterm event adapter, alternate-screen
 and raw-mode lifecycle, the public `tui` command, and metadata-driven rendered
 interactions for every user-scope Config Schema field over the existing Config
 Runtime. Top-level and statusline fields open directly; existing object fields
-use kind-filtered selection. It also owns a bounded Provider Profile ID prompt,
+use kind-filtered selection. The CLI composes the Provider connection tester,
+core discovery store, release catalog, and Config Draft/CAS into explicit
+`discovery status`, `refresh`, `catalog`, and `accept` flows. Failed probes do
+not enter the writer path; merge is read-only; acceptance requires a current
+Profile fingerprint and explicit supported dialect. The Direct VT model browser
+does not yet consume this projection or trigger discovery. It also owns a bounded Provider Profile ID prompt,
 complete non-secret Profile field flow, status-only opaque-reference editor, an
 F5 control that invokes the bounded Provider candidate connection tester, and
 an F7 flow that delegates hidden bind/replace, status-only test, and confirmed

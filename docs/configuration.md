@@ -71,8 +71,9 @@ field-level provenance. Effective Profiles inherit those defaults unless the
 user overrides a field. A custom origin under a template with a bundled,
 versioned release rate card defaults to `template_mirror`; other custom origins
 still require an explicit pricing decision.
-Default/constraint/normalization/migration metadata in Config Schema, live
-discovery, and automatic starter-update workflows remain later work. The App
+Default/constraint/normalization/migration metadata in Config Schema,
+TUI-triggered lazy discovery, and automatic starter-update workflows remain
+later work. The CLI now owns an explicit bounded Provider-discovery flow; the App
 Server Config surface is implemented. The product now provides origin-bound
 credential bind, replace, test, and forget operations backed by Windows
 Credential Manager; non-Windows
@@ -588,7 +589,38 @@ The current release seed contains:
 
 Release work must refresh this snapshot from the [OpenAI model guide](https://developers.openai.com/api/docs/guides/latest-model), [DeepSeek API updates](https://api-docs.deepseek.com/updates), and [OpenCode Go catalog](https://opencode.ai/docs/go/). A release seed never claims to remain current indefinitely. `greentyper config catalog` emits the read-only bundled snapshot without reading Config, credentials, or the network.
 
-Target Provider discovery runs lazily when the model selector opens or the user requests refresh. It never runs as an idle background task. Discovered records augment seed fields with provenance; a model with no verified dialect remains visible but unavailable until an explicit override supplies one. Remote discovery cannot add credentials, arbitrary endpoints, instructions, or capabilities. The current `test-provider` observation is ephemeral and is not merged into the catalog or selector; persistent discovery, freshness, and precedence are not implemented yet.
+The CLI now provides explicit, foreground Provider discovery. `greentyper
+config discovery refresh PROFILE [--discovery-state PATH]` resolves one exact
+committed Profile, requires its catalog mode to include discovery, runs the same
+bounded no-proxy/no-redirect model-list probe, and atomically replaces only that
+Profile's observation after success. A failed probe performs no state write and
+preserves the last successful snapshot. The schema-versioned discovery file is
+independent from Config and every Ledger, bounded to 64 Profiles and 1,024
+sorted model IDs per Profile, opened without following symlinks, and written
+under a private lock with an atomic replacement. Missing read-only status is an
+empty snapshot; corruption, newer schemas, oversized files, non-regular paths,
+and lock contention fail closed without repair.
+
+`config discovery catalog PROFILE` is read-only. It merges release records
+allowed by the Profile's catalog mode with the saved observation, labels the
+observation `current` only when its template and opaque Profile fingerprint
+still match, retains stale IDs visibly as `stale`, and exposes only model IDs,
+release keys derived locally, primary release dialects, configured Preset IDs,
+and fixed acceptance suggestions. A current unknown ID is `available` as an
+observation but has no trusted dialect, capability, endpoint, pricing,
+credential, instruction, or execution authority. `config discovery accept
+PRESET_ID PROFILE MODEL --dialect DIALECT --scope user|project [--dry-run]`
+requires a current exact observation and a Profile-supported explicit dialect,
+then creates an ordinary revision-bound Model Preset through the existing Config
+Draft/CAS path. Stale observations, absent models, duplicate Preset IDs, and
+unsupported dialects fail before Config write. The separate `test-provider`
+command remains ephemeral and never updates discovery state.
+
+The target model-selector path will run discovery lazily when the selector opens
+or the user requests refresh; it will never run as an idle background task.
+TUI selector merge, Recent evidence, richer precedence, automatic starter
+offers, and automatic update suggestions remain pending. Remote discovery can
+never add credentials, arbitrary endpoints, instructions, or capabilities.
 
 The Direct VT `/model` browser accepts one compatible release candidate only
 after its detail is opened and Enter is pressed again. It requests a bounded
@@ -659,8 +691,8 @@ target behavior.
 The rendered model browser now provides Favorites, Recent, Compatible, and All
 views with fuzzy search and bounded provider, dialect, context, capability,
 price-reference, provenance, and availability detail. Incompatible entries
-remain visible; richer reasons and Provider-backed catalog discovery/freshness
-refresh remain target behavior. Manual TUI snapshot refresh only reloads local
+remain visible; richer reasons and Provider-backed discovery/freshness inside
+the TUI remain target behavior. Manual TUI snapshot refresh only reloads local
 Config plus the bundled release projection and performs no network request.
 
 After detail opens, a second Enter on a compatible release candidate starts the

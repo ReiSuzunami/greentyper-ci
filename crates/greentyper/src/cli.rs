@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::env;
 use std::error::Error;
 use std::fmt;
@@ -7,13 +8,17 @@ use std::path::{Path, PathBuf};
 
 use greentyper_core::agent_team::TeamOperationRecord;
 use greentyper_core::config::{
-    CONFIG_FILE_SCHEMA_VERSION, ConfigDocument, ConfigPaths, ConfigRuntime, ConfigRuntimeError,
-    ConfigScope, config_schema,
+    CONFIG_FILE_SCHEMA_VERSION, ConfigDocument, ConfigDraft, ConfigPaths, ConfigRuntime,
+    ConfigRuntimeError, ConfigScope, config_schema,
 };
 use greentyper_core::model::{DeliveryId, TurnId};
 use greentyper_core::pricing::PriceScheduleBook;
 use greentyper_core::provider::{ProviderDialect, ProviderError};
-use greentyper_core::provider_catalog::ProviderCatalog;
+use greentyper_core::provider_catalog::{ProviderCatalog, ProviderCatalogMode};
+use greentyper_core::provider_discovery::{
+    DiscoveredProviderModel, PROVIDER_DISCOVERY_SCHEMA_VERSION, ProviderDiscoveryError,
+    ProviderDiscoveryProfile, ProviderDiscoveryState,
+};
 use greentyper_core::runtime::{
     AcknowledgeOutcome, CancelTurnOutcome, PreparedOutput, ProviderToolApproval, RecoveryStatus,
     RuntimeKernel,
@@ -24,6 +29,7 @@ use greentyper_core::tool_runtime::{
 use greentyper_core::usage::{
     RuntimeUsageQuery, RuntimeUsageSnapshot, UsageCursor, UsageError, UsageTimestamp, UsageWindow,
 };
+use serde::Serialize;
 
 use crate::credential_vault::{
     CredentialVault, CredentialVaultError, MAX_SECRET_BYTES, PlatformCredentialVault,
@@ -325,6 +331,47 @@ fn run_config(command: ConfigCommand) -> Result<(), CliError> {
             "entries": config_schema(),
         })),
         ConfigCommand::Catalog => write_json(ProviderCatalog::release()),
+        ConfigCommand::DiscoveryStatus { state } => {
+            write_json(&ProviderDiscoveryState::inspect(&state)?)
+        }
+        ConfigCommand::DiscoveryRefresh {
+            paths,
+            state,
+            profile,
+        } => {
+            let runtime = open_config_runtime(paths)?;
+            let vault = PlatformCredentialVault;
+            let mut tester = ModelsHttpConnectionTester::new(&vault);
+            let observed_at = UsageTimestamp::now()?.unix_millis();
+            let status =
+                refresh_provider_discovery(&runtime, &profile, &state, observed_at, &mut tester)?;
+            write_json(&status)
+        }
+        ConfigCommand::DiscoveryCatalog {
+            paths,
+            state,
+            profile,
+        } => {
+            let runtime = open_config_runtime(paths)?;
+            write_json(&provider_discovery_catalog(&runtime, &profile, &state)?)
+        }
+        ConfigCommand::DiscoveryAccept {
+            paths,
+            state,
+            scope,
+            preset,
+            profile,
+            model,
+            dialect,
+            dry_run,
+        } => {
+            let mut runtime = open_config_runtime(paths)?;
+            let draft = begin_discovered_model_preset(
+                &runtime, &state, scope, &preset, &profile, &model, dialect,
+            )?;
+            let commit = runtime.commit(draft, dry_run)?;
+            write_json(&commit)
+        }
         ConfigCommand::AcceptStarter {
             paths,
             scope,
@@ -390,6 +437,255 @@ fn run_config(command: ConfigCommand) -> Result<(), CliError> {
             write_json(&tester.test(&profile))
         }
     }
+}
+
+fn refresh_provider_discovery<T: ProviderConnectionTester + ?Sized>(
+    runtime: &ConfigRuntime,
+    profile_id: &str,
+    state_path: &Path,
+    observed_at_unix_ms: i64,
+    tester: &mut T,
+) -> Result<crate::provider_connection::ProviderConnectionTestStatus, CliError> {
+    if !runtime
+        .provider_catalog_mode(profile_id)?
+        .includes_discovery()
+    {
+        return Err(ProviderError::InvalidConfiguration(
+            "Provider Profile catalog mode does not allow discovery",
+        )
+        .into());
+    }
+    let profile =
+        runtime
+            .provider_profile(profile_id)?
+            .ok_or(ProviderError::InvalidConfiguration(
+                "simulator profile has no Provider discovery endpoint",
+            ))?;
+    let status = tester.test(&profile);
+    if let crate::provider_connection::ProviderConnectionTestStatus::Succeeded {
+        profile: observed_profile,
+        fingerprint,
+        models,
+    } = &status
+    {
+        if observed_profile != profile.profile() || *fingerprint != profile.fingerprint() {
+            return Err(ProviderDiscoveryError::ObservationMismatch.into());
+        }
+        let models = models
+            .iter()
+            .map(|model| {
+                DiscoveredProviderModel::new(model.id.clone(), model.release_catalog_key.clone())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let snapshot = ProviderDiscoveryProfile::new(
+            profile.profile(),
+            profile.template(),
+            profile.fingerprint(),
+            observed_at_unix_ms,
+            models,
+        )?;
+        ProviderDiscoveryState::replace_profile(state_path, snapshot)?;
+    }
+    Ok(status)
+}
+
+#[derive(Serialize)]
+struct ProviderDiscoveryCatalogView {
+    schema_version: u16,
+    profile: String,
+    template: String,
+    mode: ProviderCatalogMode,
+    freshness: &'static str,
+    observed_at_unix_ms: Option<i64>,
+    models: Vec<ProviderDiscoveryCatalogModel>,
+}
+
+#[derive(Serialize)]
+struct ProviderDiscoveryCatalogModel {
+    id: String,
+    release_catalog_key: Option<String>,
+    sources: Vec<&'static str>,
+    availability: &'static str,
+    primary_dialect: Option<ProviderDialect>,
+    profile_compatible: bool,
+    configured_presets: Vec<String>,
+    executable: bool,
+    suggestion: &'static str,
+}
+
+#[derive(Default)]
+struct ProviderDiscoveryCatalogModelBuilder {
+    release_catalog_key: Option<String>,
+    primary_dialect: Option<ProviderDialect>,
+    profile_compatible: bool,
+    release: bool,
+    discovery: bool,
+}
+
+fn provider_discovery_catalog(
+    runtime: &ConfigRuntime,
+    profile_id: &str,
+    state_path: &Path,
+) -> Result<ProviderDiscoveryCatalogView, CliError> {
+    let profile =
+        runtime
+            .provider_profile(profile_id)?
+            .ok_or(ProviderError::InvalidConfiguration(
+                "simulator profile has no Provider discovery catalog",
+            ))?;
+    let mode = runtime.provider_catalog_mode(profile_id)?;
+    let state = ProviderDiscoveryState::inspect(state_path)?;
+    let observation = state
+        .profiles()
+        .iter()
+        .find(|candidate| candidate.profile() == profile.profile());
+    let freshness = if !mode.includes_discovery() {
+        "disabled"
+    } else {
+        match observation {
+            None => "missing",
+            Some(observation)
+                if observation.template() == profile.template()
+                    && observation.fingerprint() == profile.fingerprint() =>
+            {
+                "current"
+            }
+            Some(_) => "stale",
+        }
+    };
+
+    let mut builders = BTreeMap::<String, ProviderDiscoveryCatalogModelBuilder>::new();
+    if mode.includes_release_seed() {
+        for record in ProviderCatalog::release()
+            .models()
+            .iter()
+            .filter(|record| record.provider_template() == profile.template())
+        {
+            let builder = builders
+                .entry(record.model_id().value().to_string())
+                .or_default();
+            builder.release_catalog_key = Some(record.key().to_owned());
+            builder.primary_dialect = Some(record.primary_dialect().value());
+            builder.profile_compatible = profile.supports(record.primary_dialect().value());
+            builder.release = true;
+        }
+    }
+    if mode.includes_discovery()
+        && let Some(observation) = observation
+    {
+        for model in observation.models() {
+            builders.entry(model.id().to_owned()).or_default().discovery = true;
+        }
+    }
+
+    let mut configured = BTreeMap::<String, Vec<String>>::new();
+    for preset in runtime
+        .model_presets()?
+        .into_iter()
+        .filter(|preset| preset.provider == profile.profile())
+    {
+        configured.entry(preset.model).or_default().push(preset.id);
+    }
+    let models = builders
+        .into_iter()
+        .map(|(id, builder)| {
+            let configured_presets = configured.remove(&id).unwrap_or_default();
+            let executable = !configured_presets.is_empty();
+            let availability = if builder.discovery && freshness == "current" {
+                "available"
+            } else if builder.discovery && freshness == "stale" {
+                "stale"
+            } else {
+                "unverified"
+            };
+            let suggestion = if executable {
+                "none"
+            } else if builder.release && builder.profile_compatible {
+                "accept_release_starter"
+            } else if builder.discovery && freshness == "current" {
+                "accept_discovered_with_dialect"
+            } else if builder.discovery {
+                "refresh_required"
+            } else {
+                "incompatible"
+            };
+            let mut sources = Vec::with_capacity(2);
+            if builder.release {
+                sources.push("release_seed");
+            }
+            if builder.discovery {
+                sources.push("discovery");
+            }
+            ProviderDiscoveryCatalogModel {
+                id,
+                release_catalog_key: builder.release_catalog_key,
+                sources,
+                availability,
+                primary_dialect: builder.primary_dialect,
+                profile_compatible: builder.profile_compatible,
+                configured_presets,
+                executable,
+                suggestion,
+            }
+        })
+        .collect();
+
+    Ok(ProviderDiscoveryCatalogView {
+        schema_version: PROVIDER_DISCOVERY_SCHEMA_VERSION,
+        profile: profile.profile().to_owned(),
+        template: profile.template().to_owned(),
+        mode,
+        freshness,
+        observed_at_unix_ms: observation.map(ProviderDiscoveryProfile::observed_at_unix_ms),
+        models,
+    })
+}
+
+fn begin_discovered_model_preset(
+    runtime: &ConfigRuntime,
+    state_path: &Path,
+    scope: ConfigScope,
+    preset_id: &str,
+    profile_id: &str,
+    model_id: &str,
+    dialect: ProviderDialect,
+) -> Result<ConfigDraft, CliError> {
+    if !runtime
+        .provider_catalog_mode(profile_id)?
+        .includes_discovery()
+    {
+        return Err(ProviderError::InvalidConfiguration(
+            "Provider Profile catalog mode does not allow discovery",
+        )
+        .into());
+    }
+    let profile =
+        runtime
+            .provider_profile(profile_id)?
+            .ok_or(ProviderError::InvalidConfiguration(
+                "simulator profile cannot accept Provider discovery",
+            ))?;
+    let state = ProviderDiscoveryState::inspect(state_path)?;
+    let observation = state
+        .profiles()
+        .iter()
+        .find(|candidate| candidate.profile() == profile.profile())
+        .ok_or(ProviderDiscoveryError::MissingObservation)?;
+    if observation.template() != profile.template()
+        || observation.fingerprint() != profile.fingerprint()
+    {
+        return Err(ProviderDiscoveryError::StaleObservation.into());
+    }
+    if !observation
+        .models()
+        .iter()
+        .any(|model| model.id() == model_id)
+    {
+        return Err(ProviderDiscoveryError::UnknownModel.into());
+    }
+    runtime
+        .begin_model_preset(scope, preset_id, profile_id, model_id, dialect)
+        .map_err(Into::into)
 }
 
 fn open_config_runtime(paths: ConfigPaths) -> Result<ConfigRuntime, CliError> {
@@ -720,6 +1016,29 @@ enum ToolCommand {
 enum ConfigCommand {
     Schema,
     Catalog,
+    DiscoveryStatus {
+        state: PathBuf,
+    },
+    DiscoveryRefresh {
+        paths: ConfigPaths,
+        state: PathBuf,
+        profile: String,
+    },
+    DiscoveryCatalog {
+        paths: ConfigPaths,
+        state: PathBuf,
+        profile: String,
+    },
+    DiscoveryAccept {
+        paths: ConfigPaths,
+        state: PathBuf,
+        scope: ConfigScope,
+        preset: String,
+        profile: String,
+        model: String,
+        dialect: ProviderDialect,
+        dry_run: bool,
+    },
     AcceptStarter {
         paths: ConfigPaths,
         scope: ConfigScope,
@@ -1498,6 +1817,8 @@ fn parse_config(mut arguments: impl Iterator<Item = String>) -> Result<ConfigCom
     let mut dry_run = false;
     let mut user_config = None;
     let mut project_config = None;
+    let mut discovery_state = None;
+    let mut discovery_dialect = None;
     let mut positional_only = false;
     while let Some(argument) = arguments.next() {
         if positional_only {
@@ -1539,6 +1860,24 @@ fn parse_config(mut arguments: impl Iterator<Item = String>) -> Result<ConfigCom
                     "--project-config",
                 )?)?);
             }
+            "--discovery-state" => {
+                if discovery_state.is_some() {
+                    return Err(CliError::Usage("duplicate --discovery-state"));
+                }
+                discovery_state = Some(parse_absolute_config_path(next_option_value(
+                    &mut arguments,
+                    "--discovery-state",
+                )?)?);
+            }
+            "--dialect" => {
+                if discovery_dialect.is_some() {
+                    return Err(CliError::Usage("duplicate --dialect"));
+                }
+                discovery_dialect = Some(parse_provider_dialect(&next_option_value(
+                    &mut arguments,
+                    "--dialect",
+                )?)?);
+            }
             _ if argument.starts_with('-') => {
                 return Err(CliError::Usage("unknown config option"));
             }
@@ -1547,7 +1886,81 @@ fn parse_config(mut arguments: impl Iterator<Item = String>) -> Result<ConfigCom
     }
 
     let paths = config_paths_with_overrides(user_config, project_config)?;
+    if action != "discovery" && (discovery_state.is_some() || discovery_dialect.is_some()) {
+        return Err(CliError::Usage(
+            "--discovery-state and --dialect are only valid for config discovery",
+        ));
+    }
     match action.as_str() {
+        "discovery" => {
+            let state = discovery_state.unwrap_or(default_discovery_state_path()?);
+            match positionals.as_slice() {
+                [subcommand] if subcommand == "status" => {
+                    reject_config_scope(scope, "--scope is not valid for discovery status")?;
+                    reject_dry_run(dry_run, "--dry-run is not valid for discovery status")?;
+                    if discovery_dialect.is_some() {
+                        return Err(CliError::Usage(
+                            "--dialect is not valid for discovery status",
+                        ));
+                    }
+                    Ok(ConfigCommand::DiscoveryStatus { state })
+                }
+                [subcommand, profile] if subcommand == "refresh" => {
+                    reject_config_scope(scope, "--scope is not valid for discovery refresh")?;
+                    reject_dry_run(dry_run, "--dry-run is not valid for discovery refresh")?;
+                    if discovery_dialect.is_some() {
+                        return Err(CliError::Usage(
+                            "--dialect is not valid for discovery refresh",
+                        ));
+                    }
+                    Ok(ConfigCommand::DiscoveryRefresh {
+                        paths,
+                        state,
+                        profile: profile.clone(),
+                    })
+                }
+                [subcommand, profile] if subcommand == "catalog" => {
+                    reject_config_scope(scope, "--scope is not valid for discovery catalog")?;
+                    reject_dry_run(dry_run, "--dry-run is not valid for discovery catalog")?;
+                    if discovery_dialect.is_some() {
+                        return Err(CliError::Usage(
+                            "--dialect is not valid for discovery catalog",
+                        ));
+                    }
+                    Ok(ConfigCommand::DiscoveryCatalog {
+                        paths,
+                        state,
+                        profile: profile.clone(),
+                    })
+                }
+                [subcommand, preset, profile, model] if subcommand == "accept" => {
+                    let scope =
+                        scope.ok_or(CliError::Usage("config discovery accept requires --scope"))?;
+                    let dialect = discovery_dialect.ok_or(CliError::Usage(
+                        "config discovery accept requires --dialect",
+                    ))?;
+                    Ok(ConfigCommand::DiscoveryAccept {
+                        paths,
+                        state,
+                        scope,
+                        preset: preset.clone(),
+                        profile: profile.clone(),
+                        model: model.clone(),
+                        dialect,
+                        dry_run,
+                    })
+                }
+                [subcommand, ..]
+                    if subcommand != "status"
+                        && subcommand != "refresh"
+                        && subcommand != "catalog"
+                        && subcommand != "accept" =>
+                {
+                    Err(CliError::Usage("unknown config discovery subcommand"))
+                }
+                _ => Err(CliError::Usage("invalid config discovery arguments")),
+            }
+        }
         "accept-starter" => {
             let scope = scope.ok_or(CliError::Usage("config accept-starter requires --scope"))?;
             let [preset, provider, catalog_key]: [String; 3] =
@@ -1566,7 +1979,7 @@ fn parse_config(mut arguments: impl Iterator<Item = String>) -> Result<ConfigCom
             })
         }
         "get" => {
-            reject_config_scope(scope)?;
+            reject_config_scope(scope, "--scope is not valid for config get")?;
             reject_dry_run(dry_run, "--dry-run is not valid for config get")?;
             let [path]: [String; 1] = positionals
                 .try_into()
@@ -1636,6 +2049,8 @@ fn next_option_value(
             "--scope" => "--scope is missing its value",
             "--user-config" => "--user-config is missing its value",
             "--project-config" => "--project-config is missing its value",
+            "--discovery-state" => "--discovery-state is missing its value",
+            "--dialect" => "--dialect is missing its value",
             _ => "config option is missing its value",
         }));
     }
@@ -1659,9 +2074,9 @@ fn parse_absolute_config_path(value: String) -> Result<PathBuf, CliError> {
     }
 }
 
-fn reject_config_scope(scope: Option<ConfigScope>) -> Result<(), CliError> {
+fn reject_config_scope(scope: Option<ConfigScope>, message: &'static str) -> Result<(), CliError> {
     if scope.is_some() {
-        Err(CliError::Usage("--scope is not valid for config get"))
+        Err(CliError::Usage(message))
     } else {
         Ok(())
     }
@@ -1781,6 +2196,10 @@ fn default_ledger_path() -> Result<PathBuf, CliError> {
     }
 }
 
+fn default_discovery_state_path() -> Result<PathBuf, CliError> {
+    Ok(default_ledger_path()?.with_file_name("provider-discovery.json"))
+}
+
 fn required_absolute_env_path(name: &'static str) -> Result<PathBuf, CliError> {
     optional_absolute_env_path(name)?.ok_or(CliError::Usage(
         "no absolute platform state directory is configured",
@@ -1817,6 +2236,8 @@ Usage:\n\
   greentyper tool reconcile [--ledger PATH] --call ID (--failed | --succeeded-digest SHA256)\n\
   greentyper config schema\n\
   greentyper config catalog\n\
+  greentyper config discovery status|refresh|catalog [PROFILE] [--discovery-state PATH]\n\
+  greentyper config discovery accept PRESET_ID PROFILE MODEL --dialect DIALECT --scope user|project [--dry-run]\n\
   greentyper config accept-starter PRESET_ID PROVIDER CATALOG_KEY --scope user|project [--dry-run]\n\
   greentyper config get PATH [--user-config PATH] [--project-config PATH]\n\
   greentyper config set PATH VALUE --scope user|project [--dry-run]\n\
@@ -1840,6 +2261,7 @@ pub enum CliError {
     LocalProcess(LocalProcessError),
     ProviderHttp(ProviderHttpError),
     Provider(ProviderError),
+    ProviderDiscovery(ProviderDiscoveryError),
     Credential(CredentialVaultError),
     ProductDriver(ProductDriverError),
     Presentation(PresentationSmokeError),
@@ -1867,6 +2289,7 @@ impl fmt::Display for CliError {
             Self::LocalProcess(source) => write!(formatter, "{source}"),
             Self::ProviderHttp(source) => write!(formatter, "{source}"),
             Self::Provider(source) => write!(formatter, "{source}"),
+            Self::ProviderDiscovery(source) => write!(formatter, "{source}"),
             Self::Credential(source) => write!(formatter, "{source}"),
             Self::ProductDriver(source) => write!(formatter, "{source}"),
             Self::Presentation(source) => write!(formatter, "{source}"),
@@ -1886,6 +2309,7 @@ impl Error for CliError {
             Self::LocalProcess(source) => Some(source),
             Self::ProviderHttp(source) => Some(source),
             Self::Provider(source) => Some(source),
+            Self::ProviderDiscovery(source) => Some(source),
             Self::Credential(source) => Some(source),
             Self::ProductDriver(source) => Some(source),
             Self::Presentation(source) => Some(source),
@@ -1944,6 +2368,12 @@ impl From<ProviderError> for CliError {
     }
 }
 
+impl From<ProviderDiscoveryError> for CliError {
+    fn from(source: ProviderDiscoveryError) -> Self {
+        Self::ProviderDiscovery(source)
+    }
+}
+
 impl From<ProductDriverError> for CliError {
     fn from(source: ProductDriverError) -> Self {
         Self::ProductDriver(source)
@@ -1976,8 +2406,15 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use greentyper_core::agent_team::TeamOperationRecord;
-    use greentyper_core::config::{ConfigLayers, ConfigScope};
-    use greentyper_core::provider::DeterministicProvider;
+    use greentyper_core::config::{
+        ConfigDocument, ConfigLayers, ConfigPaths, ConfigRuntime, ConfigScope,
+    };
+    use greentyper_core::provider::{
+        DeterministicProvider, ProviderDialect, ProviderProfileSnapshot,
+    };
+    use greentyper_core::provider_discovery::{
+        DiscoveredProviderModel, ProviderDiscoveryProfile, ProviderDiscoveryState,
+    };
     use greentyper_core::runtime::{ProviderToolApproval, RecoveryStatus, RuntimeKernel};
     use greentyper_core::tool_runtime::{
         AuthorizedToolCall, ToolEffectExecutor, ToolExecution, ToolReconciliationDecision,
@@ -1985,10 +2422,14 @@ mod tests {
 
     use crate::credential_vault::InMemoryCredentialVault;
     use crate::product_driver::{ProductDriver, ProductInteraction, ProductToolDecision};
+    use crate::provider_connection::{
+        ObservedProviderModel, ProviderConnectionTestStatus, ProviderConnectionTester,
+    };
 
     use super::{
         Command, ConfigCommand, CredentialCommand, CredentialOutcome, ToolCommand,
-        deliver_and_ack_to, deliver_product_and_ack_to, execute_credential_command, parse,
+        begin_discovered_model_preset, deliver_and_ack_to, deliver_product_and_ack_to,
+        execute_credential_command, parse, provider_discovery_catalog, refresh_provider_discovery,
     };
 
     static NEXT_TEMP: AtomicU64 = AtomicU64::new(1);
@@ -2434,6 +2875,286 @@ mod tests {
             Command::Config(ConfigCommand::TestProvider { paths })
                 if paths.user() == user && paths.project() == project
         ));
+    }
+
+    struct SuccessfulDiscoveryTester;
+
+    impl ProviderConnectionTester for SuccessfulDiscoveryTester {
+        fn test(&mut self, profile: &ProviderProfileSnapshot) -> ProviderConnectionTestStatus {
+            ProviderConnectionTestStatus::Succeeded {
+                profile: profile.profile().to_owned(),
+                fingerprint: profile.fingerprint(),
+                models: vec![
+                    ObservedProviderModel {
+                        id: "gpt-5.6-discovered".to_owned(),
+                        release_catalog_key: None,
+                    },
+                    ObservedProviderModel {
+                        id: "gpt-5.6-sol".to_owned(),
+                        release_catalog_key: Some("openai/gpt-5.6-sol".to_owned()),
+                    },
+                ],
+            }
+        }
+    }
+
+    #[test]
+    fn successful_provider_discovery_refresh_persists_and_reopens_atomically() {
+        let root = temp_path();
+        std::fs::create_dir_all(&root).expect("create Provider discovery test directory");
+        let user = root.join("user.toml");
+        let project = root.join("project.toml");
+        std::fs::write(
+            &project,
+            r#"schema_version = 1
+
+[providers.edge]
+template = "openai"
+credential = "synthetic-edge-reference"
+base_url = "https://provider.invalid/v1"
+dialects = ["responses"]
+
+[providers.edge.routes]
+responses = "/responses"
+models = "/models"
+
+[providers.edge.pricing]
+source = "unknown"
+"#,
+        )
+        .expect("write Provider discovery Config");
+        let runtime = ConfigRuntime::open(ConfigPaths::new(user, project), ConfigDocument::empty())
+            .expect("open Provider discovery Config");
+        let state_path = root.join("provider-discovery.json");
+        let mut tester = SuccessfulDiscoveryTester;
+
+        let status = refresh_provider_discovery(
+            &runtime,
+            "edge",
+            &state_path,
+            1_786_406_400_000,
+            &mut tester,
+        )
+        .expect("refresh Provider discovery");
+        assert!(matches!(
+            status,
+            ProviderConnectionTestStatus::Succeeded { .. }
+        ));
+        let bytes = std::fs::read(&state_path).expect("read Provider discovery state");
+        let reopened =
+            ProviderDiscoveryState::inspect(&state_path).expect("reopen Provider discovery state");
+        assert_eq!(
+            serde_json::to_value(&reopened).expect("serialize reopened state"),
+            serde_json::json!({
+                "schema_version": 1,
+                "profiles": [{
+                    "profile": "edge",
+                    "template": "openai",
+                    "fingerprint": runtime
+                        .provider_profile("edge")
+                        .expect("Provider Profile")
+                        .expect("external Provider Profile")
+                        .fingerprint(),
+                    "observed_at_unix_ms": 1_786_406_400_000_i64,
+                    "models": [
+                        {"id": "gpt-5.6-discovered", "release_catalog_key": null},
+                        {"id": "gpt-5.6-sol", "release_catalog_key": "openai/gpt-5.6-sol"}
+                    ]
+                }]
+            })
+        );
+        assert_eq!(
+            std::fs::read(&state_path).expect("reread Provider discovery state"),
+            bytes
+        );
+        assert!(sidecar(&state_path, "lock").exists());
+        std::fs::remove_dir_all(root).expect("remove Provider discovery test directory");
+    }
+
+    #[test]
+    fn provider_discovery_catalog_merges_release_and_current_observations_read_only() {
+        let root = temp_path();
+        std::fs::create_dir_all(&root).expect("create discovery catalog test directory");
+        let user = root.join("user.toml");
+        let project = root.join("project.toml");
+        let config = br#"schema_version = 1
+
+[providers.edge]
+template = "openai"
+credential = "synthetic-edge-reference"
+base_url = "https://provider.invalid/v1"
+dialects = ["responses"]
+
+[providers.edge.routes]
+responses = "/responses"
+models = "/models"
+
+[providers.edge.pricing]
+source = "unknown"
+
+[model_presets.configured]
+provider = "edge"
+model = "configured-custom"
+dialect = "responses"
+"#;
+        std::fs::write(&project, config).expect("write discovery catalog Config");
+        let runtime =
+            ConfigRuntime::open(ConfigPaths::new(&user, &project), ConfigDocument::empty())
+                .expect("open discovery catalog Config");
+        let profile = runtime
+            .provider_profile("edge")
+            .expect("read Provider Profile")
+            .expect("external Provider Profile");
+        let state_path = root.join("provider-discovery.json");
+        let snapshot = ProviderDiscoveryProfile::new(
+            profile.profile(),
+            profile.template(),
+            profile.fingerprint(),
+            1_786_406_400_000,
+            vec![
+                DiscoveredProviderModel::new("configured-custom", None)
+                    .expect("configured discovered model"),
+                DiscoveredProviderModel::new("gpt-5.6-discovered", None)
+                    .expect("unknown discovered model"),
+                DiscoveredProviderModel::new("gpt-5.6-sol", Some("openai/gpt-5.6-sol".to_owned()))
+                    .expect("release discovered model"),
+            ],
+        )
+        .expect("build current discovery snapshot");
+        ProviderDiscoveryState::replace_profile(&state_path, snapshot)
+            .expect("persist current discovery snapshot");
+        let state_before = std::fs::read(&state_path).expect("read discovery state before view");
+        let config_before = std::fs::read(&project).expect("read Config before view");
+
+        let catalog = serde_json::to_value(
+            provider_discovery_catalog(&runtime, "edge", &state_path)
+                .expect("build merged discovery catalog"),
+        )
+        .expect("serialize merged discovery catalog");
+        assert_eq!(catalog["freshness"], "current");
+        let models = catalog["models"].as_array().expect("catalog models");
+        let model = |id: &str| {
+            models
+                .iter()
+                .find(|model| model["id"] == id)
+                .unwrap_or_else(|| panic!("missing catalog model {id}"))
+        };
+        assert_eq!(model("gpt-5.6-discovered")["availability"], "available");
+        assert_eq!(
+            model("gpt-5.6-discovered")["suggestion"],
+            "accept_discovered_with_dialect"
+        );
+        assert_eq!(
+            model("gpt-5.6-sol")["sources"],
+            serde_json::json!(["release_seed", "discovery"])
+        );
+        assert_eq!(model("gpt-5.6-sol")["suggestion"], "accept_release_starter");
+        assert_eq!(
+            model("configured-custom")["configured_presets"],
+            serde_json::json!(["configured"])
+        );
+        assert_eq!(model("configured-custom")["executable"], true);
+        assert_eq!(model("configured-custom")["suggestion"], "none");
+        assert_eq!(
+            std::fs::read(&state_path).expect("read state after view"),
+            state_before
+        );
+        assert_eq!(
+            std::fs::read(&project).expect("read Config after view"),
+            config_before
+        );
+        std::fs::remove_dir_all(root).expect("remove discovery catalog test directory");
+    }
+
+    #[test]
+    fn discovered_model_acceptance_commits_an_ordinary_preset_and_rejects_unknown_models() {
+        let root = temp_path();
+        std::fs::create_dir_all(&root).expect("create discovery acceptance test directory");
+        let user = root.join("user.toml");
+        let project = root.join("project.toml");
+        let config = br#"schema_version = 1
+
+[providers.edge]
+template = "openai"
+credential = "synthetic-edge-reference"
+base_url = "https://provider.invalid/v1"
+dialects = ["responses"]
+
+[providers.edge.routes]
+responses = "/responses"
+models = "/models"
+
+[providers.edge.pricing]
+source = "unknown"
+"#;
+        std::fs::write(&project, config).expect("write discovery acceptance Config");
+        let paths = ConfigPaths::new(&user, &project);
+        let mut runtime =
+            ConfigRuntime::open(paths.clone(), ConfigDocument::empty()).expect("open Config");
+        let profile = runtime
+            .provider_profile("edge")
+            .expect("read Provider Profile")
+            .expect("external Provider Profile");
+        let state_path = root.join("provider-discovery.json");
+        let snapshot = ProviderDiscoveryProfile::new(
+            profile.profile(),
+            profile.template(),
+            profile.fingerprint(),
+            1_786_406_400_000,
+            vec![
+                DiscoveredProviderModel::new("private-edge-model", None).expect("discovered model"),
+            ],
+        )
+        .expect("current discovery snapshot");
+        ProviderDiscoveryState::replace_profile(&state_path, snapshot)
+            .expect("persist discovery snapshot");
+        let state_before = std::fs::read(&state_path).expect("read state before acceptance");
+        let config_before = std::fs::read(&project).expect("read Config before acceptance");
+
+        assert!(
+            begin_discovered_model_preset(
+                &runtime,
+                &state_path,
+                ConfigScope::Project,
+                "missing",
+                "edge",
+                "missing-model",
+                ProviderDialect::Responses,
+            )
+            .is_err()
+        );
+        assert_eq!(
+            std::fs::read(&project).expect("read Config after rejected acceptance"),
+            config_before
+        );
+
+        let draft = begin_discovered_model_preset(
+            &runtime,
+            &state_path,
+            ConfigScope::Project,
+            "private-edge",
+            "edge",
+            "private-edge-model",
+            ProviderDialect::Responses,
+        )
+        .expect("stage discovered model Preset");
+        let commit = runtime
+            .commit(draft, false)
+            .expect("commit discovered model Preset");
+        assert!(commit.written);
+        assert_eq!(
+            std::fs::read(&state_path).expect("read state after acceptance"),
+            state_before
+        );
+        let reopened =
+            ConfigRuntime::open(paths, ConfigDocument::empty()).expect("reopen accepted Preset");
+        let preset = reopened
+            .model_preset("private-edge")
+            .expect("accepted ordinary Preset");
+        assert_eq!(preset.provider, "edge");
+        assert_eq!(preset.model, "private-edge-model");
+        assert_eq!(preset.dialect, ProviderDialect::Responses);
+        std::fs::remove_dir_all(root).expect("remove discovery acceptance test directory");
     }
 
     #[test]

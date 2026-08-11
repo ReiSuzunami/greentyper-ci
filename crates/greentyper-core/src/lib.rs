@@ -10,6 +10,7 @@ pub mod model;
 pub mod pricing;
 pub mod provider;
 pub mod provider_catalog;
+pub mod provider_discovery;
 pub mod runtime;
 pub mod schema;
 pub mod tool_runtime;

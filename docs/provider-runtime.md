@@ -414,12 +414,16 @@ response must use JSON, fit within 256 KiB, and contain at most 1,024 unique
 model IDs of at most 256 bytes each. The port ignores every remote field except
 `id`, sorts accepted IDs, and adds an optional release-catalog key only after an
 exact template/model match. Unknown IDs carry no dialect, capability, adapter,
-endpoint, pricing, or credential authority. The result is an ephemeral
-observation bound to the frozen Profile fingerprint: it does not mutate Config,
-merge the catalog, update a Provider Epoch, retry, or expose the response body,
-endpoint, or credential. The terminal-neutral Provider Profile wizard can test
-an uncommitted validated candidate; `config test-provider` tests the currently
-selected committed Profile.
+endpoint, pricing, or credential authority. The terminal-neutral Provider
+Profile wizard and `config test-provider` keep this result ephemeral. The
+explicit CLI `config discovery refresh PROFILE` path may instead persist only
+the sorted IDs, locally derived release keys, observation time, template, and
+opaque Profile fingerprint in an independent schema-1 state file after success.
+Failure preserves the prior snapshot. Read-only `catalog PROFILE` labels
+fingerprint drift stale; explicit acceptance requires a current exact ID plus a
+Profile-supported dialect and creates an ordinary Config Preset. None of these
+paths updates a Provider Epoch, retries, exposes response bodies, endpoints, or
+credentials, or grants remote metadata execution authority.
 
 A two-request test for each dialect verifies its exact function definition,
 initial Tool-call stream, canonical `local.echo` mapping, approved output
@@ -446,8 +450,8 @@ plus the [OpenCode Go endpoint matrix](https://opencode.ai/docs/go/).
 
 ## Still Pending
 
-- Live inference conformance, persistent catalog discovery/refresh, automatic
-  Provider Profile starter offers and updates, configurable proxy policy,
+- Live inference conformance, TUI/lazy catalog discovery and selector merge,
+  automatic Provider Profile starter offers and updates, configurable proxy policy,
   broader TLS platform evidence, automatic retry policy, and partial-stream
   reconnect. Release Provider
   Template defaults and seed catalog facts are bundled, but the current adapters

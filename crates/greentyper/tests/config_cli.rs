@@ -50,6 +50,10 @@ impl TempTree {
         self.root.join(".greentyper").join("config.toml")
     }
 
+    fn discovery_state(&self) -> PathBuf {
+        self.root.join("state").join("provider-discovery.json")
+    }
+
     fn command(&self) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_greentyper"));
         command
@@ -225,6 +229,227 @@ fn config_catalog_emits_the_versioned_public_release_seed_only() {
     assert!(!stdout.contains(temp.root.to_string_lossy().as_ref()));
     assert!(!stdout.contains("credential"));
     assert!(output.stderr.is_empty(), "{output:?}");
+}
+
+#[test]
+fn config_discovery_status_is_read_only_and_fails_closed_on_corruption() {
+    let temp = TempTree::new();
+    let state = temp.discovery_state();
+
+    let missing = temp
+        .config_command("discovery")
+        .arg("status")
+        .arg("--discovery-state")
+        .arg(&state)
+        .output()
+        .expect("inspect missing Provider discovery state");
+    assert_success(&missing);
+    assert_eq!(
+        json(&missing.stdout),
+        serde_json::json!({"schema_version": 1, "profiles": []})
+    );
+    assert!(missing.stderr.is_empty());
+    assert!(!state.exists());
+    assert!(!lock_path(&state).exists());
+
+    fs::create_dir_all(state.parent().expect("discovery state parent"))
+        .expect("create discovery state parent");
+    let corrupt = b"not Provider discovery JSON\n";
+    fs::write(&state, corrupt).expect("write corrupt discovery state");
+    let rejected = temp
+        .config_command("discovery")
+        .arg("status")
+        .arg("--discovery-state")
+        .arg(&state)
+        .output()
+        .expect("inspect corrupt Provider discovery state");
+    assert!(!rejected.status.success());
+    assert!(rejected.stdout.is_empty());
+    assert!(
+        String::from_utf8_lossy(&rejected.stderr).contains("Provider discovery state is corrupt")
+    );
+    assert_eq!(
+        fs::read(&state).expect("read unchanged discovery state"),
+        corrupt
+    );
+    assert!(!lock_path(&state).exists());
+}
+
+#[test]
+fn config_discovery_refresh_failure_preserves_the_last_successful_snapshot() {
+    let temp = TempTree::new();
+    let state = temp.discovery_state();
+    fs::create_dir_all(state.parent().expect("discovery state parent"))
+        .expect("create discovery state parent");
+    let before = br#"{"schema_version":1,"profiles":[{"profile":"edge","template":"openai","fingerprint":1,"observed_at_unix_ms":1,"models":[{"id":"last-known-model","release_catalog_key":null}]}]}"#;
+    fs::write(&state, before).expect("write last successful discovery snapshot");
+
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time after epoch")
+        .as_nanos();
+    let reference = format!("synthetic-never-bound-{}-{nonce}", std::process::id());
+    fs::create_dir_all(
+        temp.project_config()
+            .parent()
+            .expect("project config parent"),
+    )
+    .expect("create project config parent");
+    fs::write(
+        temp.project_config(),
+        format!(
+            r#"schema_version = 1
+
+[providers.edge]
+template = "openai"
+credential = "{reference}"
+base_url = "https://provider.invalid/v1"
+dialects = ["responses"]
+
+[providers.edge.routes]
+responses = "/responses"
+models = "/models"
+
+[providers.edge.pricing]
+source = "unknown"
+"#
+        ),
+    )
+    .expect("write discovery Provider Profile");
+
+    let output = temp
+        .config_command("discovery")
+        .args(["refresh", "edge"])
+        .arg("--discovery-state")
+        .arg(&state)
+        .output()
+        .expect("refresh Provider discovery state");
+    assert_success(&output);
+    let status = json(&output.stdout);
+    assert_eq!(status["state"], "failed");
+    assert!(matches!(
+        status["category"].as_str(),
+        Some("credential_missing" | "credential_unavailable")
+    ));
+    assert_eq!(fs::read(&state).expect("read preserved snapshot"), before);
+    assert!(!lock_path(&state).exists());
+    let rendered = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!rendered.contains(&reference));
+    assert!(!rendered.contains("provider.invalid"));
+    assert!(output.stderr.is_empty(), "{output:?}");
+}
+
+#[test]
+fn config_discovery_catalog_exposes_stale_observations_without_writing_state() {
+    let temp = TempTree::new();
+    let state = temp.discovery_state();
+    fs::create_dir_all(state.parent().expect("discovery state parent"))
+        .expect("create discovery state parent");
+    let discovery = br#"{"schema_version":1,"profiles":[{"profile":"edge","template":"openai","fingerprint":1,"observed_at_unix_ms":1,"models":[{"id":"stale-model","release_catalog_key":null}]}]}"#;
+    fs::write(&state, discovery).expect("write stale discovery state");
+    fs::create_dir_all(
+        temp.project_config()
+            .parent()
+            .expect("project config parent"),
+    )
+    .expect("create project config parent");
+    let config = br#"schema_version = 1
+
+[providers.edge]
+template = "openai"
+credential = "synthetic-edge-reference"
+base_url = "https://provider.invalid/v1"
+dialects = ["responses"]
+
+[providers.edge.routes]
+responses = "/responses"
+models = "/models"
+
+[providers.edge.pricing]
+source = "unknown"
+"#;
+    fs::write(temp.project_config(), config).expect("write discovery catalog Config");
+
+    let output = temp
+        .config_command("discovery")
+        .args(["catalog", "edge"])
+        .arg("--discovery-state")
+        .arg(&state)
+        .output()
+        .expect("read merged Provider discovery catalog");
+    assert_success(&output);
+    let catalog = json(&output.stdout);
+    assert_eq!(catalog["profile"], "edge");
+    assert_eq!(catalog["freshness"], "stale");
+    let stale = catalog["models"]
+        .as_array()
+        .and_then(|models| models.iter().find(|model| model["id"] == "stale-model"))
+        .expect("stale discovered model remains visible");
+    assert_eq!(stale["availability"], "stale");
+    assert_eq!(stale["suggestion"], "refresh_required");
+    assert_eq!(fs::read(&state).expect("read unchanged state"), discovery);
+    assert_eq!(
+        fs::read(temp.project_config()).expect("read unchanged Config"),
+        config
+    );
+    assert!(!lock_path(&state).exists());
+    assert!(output.stderr.is_empty(), "{output:?}");
+}
+
+#[test]
+fn config_discovery_accept_rejects_stale_observations_without_writing_config() {
+    let temp = TempTree::new();
+    let state = temp.discovery_state();
+    fs::create_dir_all(state.parent().expect("discovery state parent"))
+        .expect("create discovery state parent");
+    let discovery = br#"{"schema_version":1,"profiles":[{"profile":"edge","template":"openai","fingerprint":1,"observed_at_unix_ms":1,"models":[{"id":"stale-model","release_catalog_key":null}]}]}"#;
+    fs::write(&state, discovery).expect("write stale discovery state");
+    fs::create_dir_all(
+        temp.project_config()
+            .parent()
+            .expect("project config parent"),
+    )
+    .expect("create project config parent");
+    let config = br#"schema_version = 1
+
+[providers.edge]
+template = "openai"
+credential = "synthetic-edge-reference"
+base_url = "https://provider.invalid/v1"
+dialects = ["responses"]
+
+[providers.edge.routes]
+responses = "/responses"
+models = "/models"
+
+[providers.edge.pricing]
+source = "unknown"
+"#;
+    fs::write(temp.project_config(), config).expect("write discovery acceptance Config");
+
+    let output = temp
+        .config_command("discovery")
+        .args(["accept", "edge-stale", "edge", "stale-model"])
+        .args(["--dialect", "responses", "--scope", "project"])
+        .arg("--discovery-state")
+        .arg(&state)
+        .output()
+        .expect("reject stale discovered model");
+    assert!(!output.status.success(), "{output:?}");
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("stale"));
+    assert_eq!(fs::read(&state).expect("read unchanged state"), discovery);
+    assert_eq!(
+        fs::read(temp.project_config()).expect("read unchanged Config"),
+        config
+    );
+    assert!(!lock_path(&state).exists());
+    assert!(!lock_path(&temp.project_config()).exists());
+    assert!(!temp.user_config().exists());
 }
 
 #[test]

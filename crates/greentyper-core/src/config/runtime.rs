@@ -1727,6 +1727,57 @@ impl ConfigRuntime {
         Ok(draft)
     }
 
+    pub fn begin_model_preset(
+        &self,
+        scope: ConfigScope,
+        preset_id: &str,
+        provider: &str,
+        model: &str,
+        dialect: ProviderDialect,
+    ) -> Result<ConfigDraft, ConfigRuntimeError> {
+        let mut draft = self.begin_draft(scope)?;
+        validate_id("model_presets.<id>", preset_id)?;
+        validate_id("model_presets.<id>.provider", provider)?;
+        validate_string("model_presets.<id>.model", model)?;
+        if self
+            .model_presets()?
+            .iter()
+            .any(|preset| preset.id == preset_id)
+        {
+            return Err(invalid(
+                format!("model_presets.{preset_id}"),
+                "model preset cannot replace an existing model preset",
+            ));
+        }
+        let profile = self.provider_profile(provider)?.ok_or_else(|| {
+            invalid(
+                format!("model_presets.{preset_id}.provider"),
+                "simulator profile cannot accept Provider discovery",
+            )
+        })?;
+        if !profile.supports(dialect) {
+            return Err(invalid(
+                format!("model_presets.{preset_id}.dialect"),
+                "dialect is not supported by the selected provider profile",
+            ));
+        }
+        let prefix = format!("model_presets.{preset_id}");
+        draft.set(
+            &format!("{prefix}.provider"),
+            ConfigValue::String(provider.to_owned()),
+        )?;
+        draft.set(
+            &format!("{prefix}.model"),
+            ConfigValue::String(model.to_owned()),
+        )?;
+        draft.set(
+            &format!("{prefix}.dialect"),
+            ConfigValue::String(dialect.as_str().to_owned()),
+        )?;
+        self.validate_draft(&draft)?;
+        Ok(draft)
+    }
+
     pub fn inspect_field(
         &self,
         target_scope: ConfigScope,
@@ -1889,6 +1940,37 @@ impl ConfigRuntime {
             .as_ref()
             .ok_or_else(|| ConfigRuntimeError::RepairRequired(self.status().issues))?;
         provider_profile_snapshot(&resolved.document, profile).map(Some)
+    }
+
+    pub fn provider_catalog_mode(
+        &self,
+        profile: &str,
+    ) -> Result<ProviderCatalogMode, ConfigRuntimeError> {
+        validate_id("provider profile", profile)?;
+        let resolved = self.resolved_state()?;
+        let definition = resolved
+            .document
+            .providers
+            .get(profile)
+            .ok_or_else(|| ConfigRuntimeError::UnknownObject(format!("providers.{profile}")))?;
+        if let Some(mode) = definition.catalog.mode {
+            return Ok(mode);
+        }
+        let template_id = definition.template.as_deref().ok_or_else(|| {
+            invalid(
+                format!("providers.{profile}.template"),
+                "provider template is required",
+            )
+        })?;
+        let template = ProviderCatalog::release()
+            .template(template_id)
+            .ok_or_else(|| {
+                invalid(
+                    format!("providers.{profile}.template"),
+                    "unknown provider template",
+                )
+            })?;
+        Ok(template.catalog_mode().value())
     }
 
     pub fn provider_profile_for_draft(

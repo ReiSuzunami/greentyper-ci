@@ -415,7 +415,7 @@ Provider call or Ledger write, then exact admission consumes one selection and
 freezes the expected Provider Epoch. Headless integration proves automatic
 pending-ID resolution plus credential-preflight and explicit-ID-conflict
 failure preserve all three Ledger byte streams. These tests do not prove
-Provider-backed catalog discovery, automatic starter updates, project/new-Agent
+TUI/lazy Provider discovery, automatic starter updates, project/new-Agent
 defaults, context-mode execution, or fallback execution.
 A real-key loop now carries `/config stats-window add` through its bounded ID
 prompt and start/end/days/time-zone fields, previews, commits, and reopens the
@@ -484,7 +484,7 @@ byte streams match the external writer exactly. Input tests pin F6 and Ctrl-R,
 read-only-view scoping, the fixed failure notice, candidate Config isolation,
 and selection clamping after a refreshed dataset shrinks. Ledger reads are
 independent; these tests do not prove a cross-Ledger transactional snapshot,
-background polling, Provider catalog discovery, Agent mutation, or real ConPTY.
+background polling, TUI Provider catalog discovery, Agent mutation, or real ConPTY.
 A real-key loop now carries `/config pricing add` through its bounded ID prompt,
 all 17 schema fields, manual provenance choice, preview, commit, and Config
 reopen. Schema tests pin the 64-byte Provider Profile input, 512-byte text and
@@ -650,9 +650,15 @@ before credential lookup or network I/O. Rejection tests cover wrong content
 type, malformed JSON, a body over 256 KiB, more than 1,024 models, duplicate IDs,
 whitespace in IDs, and IDs over 256 bytes. A truncated 2xx response body is
 classified as retryable unavailability rather than a provider-format error.
-This is a configuration check plus ephemeral model-list observation, not a
-persistent catalog-discovery merge, selector refresh, or live inference
-conformance test.
+That connection-test surface remains an ephemeral configuration check. Separate
+Provider-discovery tests now prove missing status creates nothing; corruption,
+oversize, non-regular paths, symlinks, and lock contention fail closed without
+repair; atomic successful replacement reopens with private file modes; and a
+failed credential/network probe preserves the prior bytes. Product tests merge
+current and stale observations with release records, preserve Config/state bytes
+on read, reject stale or absent models before Config write, and reopen one
+explicitly accepted unknown model as an ordinary Preset. They do not prove TUI
+selector refresh or live inference conformance.
 
 The official OpenAI template identity is also exercised with an explicit
 loopback origin override through the Responses adapter and models probe. The
@@ -675,9 +681,9 @@ slice; a declared route or dialect is not treated as proof of wire compatibility
 
 Live provider inference tests are not implemented yet. Planned opt-in,
 credential-gated tests will verify OpenAI, DeepSeek, and OpenCode Go without
-running on untrusted pull requests or gating local performance. Future
-model-catalog refresh and persistent discovery work records the source URL and
-observation date; the current release seed already freezes both.
+running on untrusted pull requests or gating local performance. Future TUI/lazy
+model-catalog integration will consume the bounded local discovery projection;
+the current release seed already freezes its source URL and observation date.
 
 ## Performance Testing
 
