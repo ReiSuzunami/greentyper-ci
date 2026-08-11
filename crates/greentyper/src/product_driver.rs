@@ -821,6 +821,7 @@ source = "unknown"
             &selection
         );
 
+        let before_mismatch = fs::read(&ledger).expect("read Runtime Ledger before mismatch");
         let mut interaction = RecordingInteraction::approve();
         let mut recovered = ProductDriver::open_with_executor(
             &ledger,
@@ -828,7 +829,6 @@ source = "unknown"
             &mut interaction,
         )
         .expect("reopen current Agent");
-        let before_mismatch = fs::read(&ledger).expect("read Runtime Ledger before mismatch");
         let mut changed_layers = layers.clone();
         changed_layers.cli.provider_model = Some("gpt-5.6-changed".into());
         let mut rejected_provider = SnapshotTextProvider {
@@ -848,10 +848,6 @@ source = "unknown"
         ));
         assert_eq!(rejected_provider.runs, 0);
         assert_eq!(
-            fs::read(&ledger).expect("reread Runtime Ledger after mismatch"),
-            before_mismatch
-        );
-        assert_eq!(
             recovered
                 .snapshot()
                 .pending_model_selection
@@ -860,6 +856,10 @@ source = "unknown"
             &selection
         );
         drop(recovered);
+        assert_eq!(
+            fs::read(&ledger).expect("reread Runtime Ledger after mismatch"),
+            before_mismatch
+        );
 
         let mut recovered = ProductDriver::open_with_executor(
             &ledger,
