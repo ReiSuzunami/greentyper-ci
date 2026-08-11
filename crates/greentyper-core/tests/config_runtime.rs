@@ -1654,6 +1654,20 @@ fn invalid_external_edit_retains_last_valid_state_and_can_be_repaired() {
         paths.user(),
         "schema_version = 1\n[model_presets.broken]\nprovider = \"simulator\"\n",
     );
+    let candidate = runtime
+        .reload_candidate()
+        .expect("read invalid external edit into candidate");
+    assert!(!candidate.status().ready);
+    assert!(runtime.status().ready);
+    assert_eq!(
+        runtime
+            .get_effective("provider.model")
+            .expect("unchanged active model")
+            .expect("model exists")
+            .value,
+        value_string("last-valid-model")
+    );
+
     let status = runtime.reload().expect("reload invalid external edit");
     assert!(!status.ready);
     assert_eq!(status.issues.len(), 1);

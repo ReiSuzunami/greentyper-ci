@@ -143,7 +143,7 @@ parses and stages it atomically. Enter on the final text field previews the
 complete window and a second Enter commits it. Invalid local times, empty or
 malformed day lists, invalid IANA time zones, and stale revisions retain the
 Draft for correction or explicit discard. A successful commit affects the next
-Config Epoch; it does not rebuild the running TUI's frozen usage projection.
+Config Epoch; it does not automatically rebuild the running TUI projection.
 `/config pricing add` prompts for a bounded Price Schedule ID and then exposes
 all 17 schema fields through the same Tab/Shift-Tab Draft. Thirteen values are
 required; dialect, service tier, maximum context, and effective-until remain
@@ -172,13 +172,14 @@ leave the confirmation live without deleting the object.
 Validation and revision-conflict failures stay visible without consuming the
 Draft; Escape and quit keys cannot discard a dirty Draft, and a no-change commit
 does not create a Config file. The committed value is verified by reopening the
-Config Runtime. The running TUI still uses its frozen startup snapshot, so live
-statusline reconstruction is not claimed by this slice. Object deletion remains
+Config Runtime. The running TUI keeps its last successful snapshot until the
+user leaves the editor and requests a manual refresh. Object deletion remains
 target-layer explicit and fails when the resulting effective configuration has
 dangling references. The snapshot-based `tui` tracer renders controller screens
 reachable from the Slash Panel, including the top-level Config Center. Every
-schema field has a rendered interaction, but commits do not rebuild the frozen
-startup projection. Secret-entry/bind UI and the App Server surface described
+schema field has a rendered interaction, but commits do not automatically
+rebuild the active projection. Secret-entry/bind UI and the App Server surface
+described
 below remain pending. The current
 terminal-neutral Provider Profile wizard resolves release template defaults into
 user-configured Profile Drafts and supports the explicit bounded connection and
@@ -211,11 +212,13 @@ search all nested and recent actions without adding them to the root Slash
 Panel.
 
 `/config stats-window` edits named Usage Windows. The separate root command
-`/stats` browses a frozen Usage report and never mutates configuration.
+`/stats` browses the latest successful Usage report and never mutates
+configuration.
 Likewise, `/model` browses configured Presets and release candidates while
 `/config model` edits preset definitions. Applying a browsed Preset to an Agent
 remains a separate target behavior.
-`/agent` browses the frozen Team sidecar projection. It is an inspection surface,
+`/agent` browses the latest successful Team sidecar projection. It is an
+inspection surface,
 not a route for lifecycle commands or Agent Session authority.
 
 Slash commands navigate and select scope; mutation occurs in a validated
@@ -230,12 +233,13 @@ user path and `.greentyper/config.toml` in the current project.
 
 The current headless `stats` command reads the immutable Runtime usage
 projection and accepts an optional Unix-millisecond `--at` instant for
-deterministic rolling-window queries. TUI `/stats` now reads the same frozen
-startup projection. Tab and Shift-Tab move across Attempts, current Thread,
+deterministic rolling-window queries. TUI `/stats` reads the same immutable
+projection at startup and after an explicit snapshot refresh. Tab and Shift-Tab
+move across Attempts, current Thread,
 Agent, Team, Named Window, and Token & Cache groups; Up/Down selects a row and
 Enter opens bounded detail. The browser renders 1-hour, 1-day, and 7-day
-summaries without writing the Runtime, Team, or Tool Ledger. Live refresh,
-dedicated Turn aggregates, and richer cache distributions remain Phase 3 work.
+summaries without writing the Runtime, Team, or Tool Ledger. Dedicated Turn
+aggregates and richer cache distributions remain Phase 3 work.
 Existing `/config stats-window` field routes use the rendered schema editor
 described above.
 
@@ -248,9 +252,21 @@ process-local Agent Sessions are excluded from the presentation model. Missing
 Product sidecars produce an unavailable empty view without file creation. A
 complete Team prefix followed by an incomplete final frame remains visible with
 an explicit recovery-required byte count and is never repaired by the browser;
-checksum, schema, state, path, lock, or incomplete-sidecar failures stop before
-the terminal enters raw mode. The snapshot stays frozen for the TUI session and
-offers no dispatch, acknowledgement, approval, messaging, or lifecycle action.
+checksum, schema, state, path, lock, or incomplete-sidecar failures stop initial
+terminal entry or fail a later refresh. The prior complete snapshot stays active
+after a failed refresh. The browser offers no dispatch, acknowledgement,
+approval, messaging, or lifecycle action.
+
+F6 or Ctrl-R requests one local snapshot refresh from the Slash Panel,
+`/model`, `/stats`, or `/agent`. Runtime, Usage, Team, Config, statusline, and
+Model projections replace the active view only after every read and projection
+succeeds. Failure renders a fixed notice and keeps the prior Config runtime and
+view interactive; another refresh can recover after the underlying state is
+repaired. Runtime, Team, and Tool Ledgers are inspected independently rather
+than as one cross-Ledger transaction. Refresh is
+disabled inside mutable Config dialogs, performs no background polling or
+Provider discovery, and never writes Config, Runtime, Team, or Tool Ledger
+state.
 
 The product CLI also exposes `credential bind`, `replace`, `test`, and `forget`
 for one lowercase secure-store reference, Provider Profile, and Provider Origin.
@@ -373,7 +389,8 @@ product adapters currently installed for that template/dialect pair; live
 availability and Recent remain unknown. User/discovery precedence, lazy refresh,
 and starter-preset acceptance remain target behavior. Pricing still resolves
 through a Price Schedule rather than becoming an unversioned catalog number.
-The Direct VT `/model` browser uses this frozen projection. Character input
+The Direct VT `/model` browser uses the latest successful local projection.
+Character input
 filters it, Tab and Shift-Tab move across Favorites, Recent, Compatible, and
 All, Up/Down move the selected row, and Enter opens source-tagged detail for a
 configured Preset or release candidate. Unknown Recent, availability, context,
@@ -461,8 +478,9 @@ and project/default selection remain target behavior.
 The rendered model browser now provides Favorites, Recent, Compatible, and All
 views with fuzzy search and bounded provider, dialect, context, capability,
 price-reference, provenance, and availability detail. Incompatible entries
-remain visible; richer reasons and manual or selector-triggered catalog refresh
-remain target behavior.
+remain visible; richer reasons and Provider-backed catalog discovery/freshness
+refresh remain target behavior. Manual TUI snapshot refresh only reloads local
+Config plus the bundled release projection and performs no network request.
 
 Target selection applies to the current Agent on its next Turn by default. The
 user may instead set the default for new Agents or the project. That application
@@ -482,9 +500,9 @@ a deterministic priority and Unicode-safe truncation at 40, 80, and 160 columns,
 and adds a detail row from 120 columns. This is a terminal-neutral layout
 contract. The first product `tui` tracer now renders it through a Direct VT diff,
 reacts to blocking key and resize events, and can persist every user-scope
-statusline field through the schema-driven dialogs described above. It does not
-rebuild the frozen underlying snapshot after a commit or establish
-ConPTY/resource evidence. The target has four
+statusline field through the schema-driven dialogs described above. A commit
+does not rebuild the active snapshot automatically; F6 or Ctrl-R reloads it from
+a read-only view. This does not establish ConPTY/resource evidence. The target has four
 presets:
 
 - `minimal`: model, Context Pressure, blocker/approval
@@ -539,13 +557,15 @@ Usage Windows are half-open intervals: the example includes 10:00 and excludes 2
 `timezone` accepts an IANA time-zone ID or `local`. At Config Epoch creation, `local` resolves to a concrete IANA ID using the Windows time-zone mapping; failure to resolve invalidates the draft rather than falling back to UTC. The resolved ID and time-zone rule-set version are projection provenance. Membership converts the attempt's UTC start instant into that zone: both occurrences of a repeated clock hour are eligible, while a skipped clock hour contains no instants. Overlapping named windows are independent, so one Usage Record may appear once in each matching window but never twice in one window.
 
 The statusline may show a compact selected window such as `work 87.2K/$1.43`.
-The current frozen `/stats` browser presents rolling summaries and durable
+The current `/stats` browser presents the latest successful rolling summaries
+and durable
 attempt detail with Provider Profile, requested and observed model, reasoning
 effort, service tier, tokens, cost, outcome, and timestamps. It also presents
 current Thread, Agent, Team, and named-window rollups plus rolling token-class,
 cache-read, and cache-write quantities. Aggregate labels preserve exact,
-estimated, unknown-record, and overflow states. Dedicated Turn aggregates,
-richer cache distributions, and live refresh remain target behavior.
+estimated, unknown-record, and overflow states. Dedicated Turn aggregates and
+richer cache distributions remain target behavior; automatic/background refresh
+is not implemented.
 
 The current Runtime implements durable Usage Attempts, cached rollups, the
 headless JSON projection, schema-owned Price Schedule objects, and immutable

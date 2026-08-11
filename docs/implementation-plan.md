@@ -343,8 +343,8 @@ against the current revision-bound candidate and renders its ephemeral status.
 The action does not commit Config; staged edits invalidate the result, and a
 stale revision fails before the tester runs. Secret bind/replace remains outside
 the TUI. This slice adds no Runtime, Tool, secret-store, catalog, Provider Epoch,
-or approval authority and does not rebuild the frozen status projection after
-commit.
+or approval authority and does not automatically rebuild the active status
+projection after commit.
 Typed `/config provider|model|pricing|stats-window remove` routes now carry the
 pending command into a section-filtered selector and render an exact object
 confirmation. Enter dry-runs and CAS-commits the target-layer deletion; Escape
@@ -365,7 +365,7 @@ Tab or Enter can parse and stage the complete TOML array; dirty local input,
 validation failure, and stale revisions all remain recoverable. The final text
 field previews and CAS-commits on two explicit Enter actions, and a real-key
 test reopens Config to prove the resolved window persists. This slice does not
-rebuild the frozen usage projection.
+automatically rebuild the active usage projection.
 `/config pricing add` now supplies the fourth rendered object-name workflow and
 completes the Config Object creation set. It traverses all 17 Price Schedule
 schema fields, keeps optional selectors skippable, offers only valid manual
@@ -377,36 +377,48 @@ explicit discard without overwriting the winner. This slice does not rebuild
 the frozen pricing book, ingest provider-reported charges, or add rich cost
 presentation.
 The root `/model` route now supplies a read-only Direct VT browser over the
-frozen configured-Preset and release-catalog projection. It supports bounded
+latest successful configured-Preset and release-catalog projection. It supports
+bounded
 fuzzy query input, Favorites/Recent/Compatible/All groups, selected-row
 navigation, and source-tagged detail while preserving explicit unknown Recent
 and availability facts. It performs no Provider request, credential lookup,
 Config or Ledger write, or current-Agent application.
-The root `/stats` route now supplies a read-only browser over the frozen startup
-Usage projection. It renders rolling 1-hour, 1-day, and 7-day summaries and
+The root `/stats` route now supplies a read-only browser over the latest
+successful Usage projection. It renders rolling 1-hour, 1-day, and 7-day
+summaries and
 groups for durable Attempts, current Thread, Agents, Team, Named Windows, and
 rolling Token & Cache quantities. Up/Down selects rows and Enter opens bounded
 detail. Real-key tests prove Runtime, Team, and Tool Ledger bytes remain
-unchanged. Live refresh, dedicated Turn aggregates, and richer cache
-distributions remain outside this slice.
+unchanged. Dedicated Turn aggregates and richer cache distributions remain
+outside this slice.
 The root `/agent` route now supplies a read-only browser over a shared-lock Team
 sidecar inspection. It navigates canonical Agent rows and bounded detail without
 exposing message bodies, capability/scope labels, Completion Capsules, or Agent
 Session authority. Missing state creates nothing; incomplete final-frame bytes
 are reported without repair; corruption and incomplete Product sidecars fail
 closed. Real-key tests prove Runtime, Team, Tool, and Config bytes remain
-unchanged. Live refresh, lifecycle actions, Team-operation acknowledgement, and
-Workspace presentation remain outside this slice.
+unchanged. Lifecycle actions, Team-operation acknowledgement, and Workspace
+presentation remain outside this slice.
+F6 or Ctrl-R now refreshes the local Config/statusline, Model, Usage, and Team
+snapshot from the Slash Panel or any read-only browser. Replacement is
+all-or-old at the TUI boundary: inspection or projection failure keeps the prior
+Config runtime and complete view and permits another refresh. Runtime, Team,
+and Tool Ledgers are inspected independently rather than under one shared
+transaction. Real-key tests add a Config Preset, complete a Usage Turn, add Agents,
+inject an incomplete Product-sidecar pair, recover, and prove Config plus all
+three Ledgers remain byte-identical to the external writer's state. The refresh
+performs no Provider discovery, credential lookup, mutation, or background
+polling.
 
 This does not complete Phase 3. Audited Windows ConPTY behavior, approval
-interaction, live snapshot refresh, rendered secret binding,
+interaction, automatic/background snapshot refresh, rendered secret binding,
 custom-template/starter-preset workflow, live catalog
 discovery and Recent
 evidence, automatic Context View/token-source
 projection, provider-reported
 charge and subscription-quota accounting, richer observed Provider metadata,
 current-Agent Preset application, dedicated Turn Usage navigation, richer cache
-distributions, live Agent refresh and lifecycle actions, and the P0/P1/P2/P6
+distributions, Agent lifecycle actions, and the P0/P1/P2/P6
 performance evidence remain pending.
 
 Exit criteria:

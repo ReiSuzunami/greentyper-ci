@@ -1507,6 +1507,11 @@ impl ConfigRuntime {
         Ok(self.status())
     }
 
+    /// Reads the current files into an independent candidate runtime.
+    pub fn reload_candidate(&self) -> Result<Self, ConfigRuntimeError> {
+        Self::open(self.paths.clone(), self.cli.clone())
+    }
+
     pub fn effective_entries(&self) -> Result<&[EffectiveConfigEntry], ConfigRuntimeError> {
         Ok(self.resolved_state()?.entries.as_slice())
     }

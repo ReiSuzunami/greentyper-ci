@@ -363,7 +363,8 @@ Favorites group, opens the selected detail, redraws after resize, and proves
 Config bytes and the absent Ledger remain unchanged. Projection tests separately
 freeze explicit unknown Recent and live availability, release compatibility and
 provenance detail, and credential-reference redaction. These tests prove the
-read-only browser, not current-Agent next-Turn application or catalog refresh.
+read-only browser, not current-Agent next-Turn application or Provider-backed
+catalog discovery.
 A real-key loop now carries `/config stats-window add` through its bounded ID
 prompt and start/end/days/time-zone fields, previews, commits, and reopens the
 resolved window. Focused tests prove all four schema fields expose 512-byte text
@@ -372,15 +373,15 @@ incomplete, invalid arrays cannot move focus, and dirty quit requires explicit
 discard. Further tests repair an invalid equal-time window, then prove a stale
 revision cannot overwrite the winner and leaves the Draft live. Existing-object
 tests carry a Usage Window field command through the section selector, commit,
-and reopen. These tests do not prove live usage refresh.
+and reopen. These tests do not exercise the separate manual snapshot refresh.
 A real-key loop now opens `/stats` over two Agent-scoped Turns with pinned named
 Usage Windows and complete token/cache records. It selects the second durable
 attempt, opens provider/model/outcome detail, then cycles through current
 Thread, Agent, Team, Named Window, and Token & Cache groups and opens each
 detail across deterministic resizes. Exact layout assertions pin cache-read,
 cache-write, and reasoning-token quantities. Runtime, Team, and Tool Ledger
-bytes remain unchanged. This does not prove live refresh, a dedicated Turn
-aggregate, or richer cache distributions.
+bytes remain unchanged. This does not prove a dedicated Turn aggregate or richer
+cache distributions.
 A real-key loop now opens `/agent` over a valid Runtime plus Team and Tool
 sidecars, selects a Dormant child Agent, opens bounded detail, redraws after
 resize, and closes detail before returning to the Slash Panel. The fixture adds
@@ -390,9 +391,22 @@ capability labels, and scope labels are absent from VT output. Core tests
 separately prove shared-lock
 Team inspection never creates missing state, never repairs a torn final frame,
 and does not rewrite checksum corruption; Product tests prove missing and
-incomplete sidecar handling. These tests do not prove live Agent refresh,
-lifecycle mutation, Team-operation acknowledgement, Workspace coordination, or
+incomplete sidecar handling. These tests do not prove lifecycle mutation,
+Team-operation acknowledgement, Workspace coordination, or
 real ConPTY behavior.
+A second set of real-key loops proves manual snapshot refresh. One loop adds a
+configured Preset and selected model externally, then verifies `/model` and the
+statusline update without credential disclosure or Config/Ledger writes. Another
+completes an external Agent-scoped Turn and verifies `/stats` receives its
+Attempt and token/cache detail while Runtime, Team, and Tool Ledger bytes remain
+unchanged. The Agent loop adds a child, temporarily removes one Product sidecar
+to force a failed refresh, opens the old child detail, restores state, adds a
+second child, and refreshes successfully. The final Config and all three Ledger
+byte streams match the external writer exactly. Input tests pin F6 and Ctrl-R,
+read-only-view scoping, the fixed failure notice, candidate Config isolation,
+and selection clamping after a refreshed dataset shrinks. Ledger reads are
+independent; these tests do not prove a cross-Ledger transactional snapshot,
+background polling, Provider catalog discovery, Agent mutation, or real ConPTY.
 A real-key loop now carries `/config pricing add` through its bounded ID prompt,
 all 17 schema fields, manual provenance choice, preview, commit, and Config
 reopen. Schema tests pin the 64-byte Provider Profile input, 512-byte text and
@@ -409,7 +423,7 @@ their object selectors before commit and reopen. A real-key Provider test edits
 all non-secret Profile fields and reopens the normalized snapshot; a recovery
 test proves insecure-loopback permission is rejected for a remote HTTPS origin
 without consuming the Draft. They do not constitute real ConPTY, panic-abort
-cleanup, secret-store UI, approval, live-refresh, or resource evidence.
+cleanup, secret-store UI, approval, background refresh, or resource evidence.
 Context Pressure tests freeze exact 65%/90% threshold transitions, estimated and
 missing-fact propagation, invalid policy/limit and arithmetic failure, and the
 no-side-effect hard admission gate. Product presentation tests assert estimated
@@ -434,7 +448,7 @@ local path or credential reference.
 
 Remaining terminal-backend evidence covers real terminal/ConPTY resize and input,
 current-Agent Preset application, dedicated Turn Usage navigation, richer cache
-distributions, Agent Center lifecycle actions and live refresh, approval/blocker
+distributions, Agent Center lifecycle actions, background refresh, approval/blocker
 actions, panic-abort cleanup, final host cell
 geometry, and input-ready/idle resource budgets.
 

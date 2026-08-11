@@ -348,7 +348,7 @@ charges still require a future dedicated authority path.
   start, end, weekday-list, and IANA-time-zone inputs. Structured weekday text
   stays in a visible dirty buffer until it parses; preview, CAS conflict,
   explicit discard, and Config reopen use the same editor contract. The action
-  does not rebuild the running TUI's frozen usage projection.
+  does not automatically rebuild the running TUI usage projection.
   `/config pricing add` can also commit one manual Price Schedule through all 17
   schema fields. Bounded text and deferred integer input, domain validation,
   CAS conflict, explicit discard, and Config reopen use the same editor
@@ -359,8 +359,8 @@ charges still require a future dedicated authority path.
   never creates or repairs Ledger state, exposes Agent Session authority,
   renders message/capsule contents, or acknowledges an operation. Incomplete
   final-frame bytes remain visible as recovery required; corruption and partial
-  Product sidecars fail closed before terminal entry. Live refresh and all Agent
-  lifecycle actions remain pending.
+  Product sidecars fail closed before terminal entry. Manual read-only snapshot
+  refresh is available; all Agent lifecycle actions remain pending.
 - Complete Config Schema default/constraint/normalization/migration metadata,
   the App Server Config surface, live catalog discovery, and the rendered
   template-picker/starter-preset workflow. Release Provider Template defaults
@@ -369,24 +369,28 @@ charges still require a future dedicated authority path.
   dry-run validation, atomic commit path, interaction controller, Provider
   Profile candidate/connection-test flow, and deterministic viewport-row
   projection are present.
-- Live terminal-backed Usage refresh, dedicated Turn aggregates, and richer
-  cache distributions,
+- Automatic/background terminal Usage refresh, dedicated Turn aggregates, and
+  richer cache distributions,
   automatic Context View construction/compaction, provider-reported charge
   and subscription-quota values, richer observed model/effort/tier
   metadata, and FMDev P6 measurements. The durable attempts, cached rollups,
   pinned Usage Windows, revision-bound summary/page `stats` projections, and
   terminal-neutral width-degradation and Context Pressure projection contracts
-  are present. The Direct VT tracer now browses the frozen rolling Usage
+  are present. The Direct VT tracer now browses the latest successful rolling
+  Usage
   summaries, durable attempt details, current Thread, Agent-usage, Team-usage,
-  named-window, and rolling token/cache aggregate screens. It does not refresh
-  them or expose a dedicated Turn aggregate screen.
-  The separate `/agent` browser exposes frozen Team orchestration state, not a
+  named-window, and rolling token/cache aggregate screens. F6 or Ctrl-R performs
+  one all-or-old TUI replacement after independent local Ledger and Config
+  reads; it is not a cross-Ledger transactional snapshot. No background polling
+  or dedicated Turn aggregate screen exists.
+  The separate `/agent` browser exposes read-only Team orchestration state, not a
   Usage aggregate or mutation surface. It can also
   persist every user-scope Config Schema field, can create a complete Provider
   Profile or Model Preset, a named Usage Window, and a manual Price Schedule,
   and can confirm typed
-  target-layer Config Object deletion, but it does not
-  rebuild the frozen row projection in-process.
+  target-layer Config Object deletion. Config commits do not automatically
+  rebuild the active row projection; manual refresh is available after leaving
+  the editor.
 - Live inference conformance, non-Windows credential backends, configurable proxy
   policy, broader TLS platform evidence, reconnect policy, multiple or parallel
   Tool calls, resumable result references, broader canonical Items, and the

@@ -836,6 +836,10 @@ impl PresentationController {
         matches!(self.state, PresentationState::AgentCenter { .. })
     }
 
+    pub(crate) fn slash_query(&self) -> &str {
+        &self.slash_query
+    }
+
     pub(crate) const fn is_config_object_selector(&self) -> bool {
         matches!(
             self.state,
@@ -1077,6 +1081,69 @@ impl PresentationController {
             Availability::Known(agents) if agents.agents.get(*selected).is_some()
         ) {
             *detail = !*detail;
+        }
+    }
+
+    pub(crate) fn reconcile_snapshot(&mut self, view: &TuiViewModel) {
+        let model_query = self.model_query.clone();
+        match &mut self.state {
+            PresentationState::ModelSelector {
+                group,
+                selected,
+                detail,
+            } => {
+                let filtered = view.models.filtered(&model_query);
+                let Some(entries) = filtered.group_entries(*group) else {
+                    *selected = 0;
+                    *detail = false;
+                    return;
+                };
+                if entries.is_empty() {
+                    *selected = 0;
+                    *detail = false;
+                } else if *selected >= entries.len() {
+                    *selected = entries.len() - 1;
+                    *detail = false;
+                }
+            }
+            PresentationState::Stats {
+                group,
+                selected,
+                detail,
+            } => {
+                let Availability::Known(stats) = &view.stats else {
+                    *selected = 0;
+                    *detail = false;
+                    return;
+                };
+                let entry_count = group.entry_count(stats);
+                if entry_count == 0 {
+                    *selected = 0;
+                    *detail = false;
+                } else if *selected >= entry_count {
+                    *selected = entry_count - 1;
+                    *detail = false;
+                }
+            }
+            PresentationState::AgentCenter { selected, detail } => {
+                let Availability::Known(agents) = &view.agents else {
+                    *selected = 0;
+                    *detail = false;
+                    return;
+                };
+                if agents.agents.is_empty() {
+                    *selected = 0;
+                    *detail = false;
+                } else if *selected >= agents.agents.len() {
+                    *selected = agents.agents.len() - 1;
+                    *detail = false;
+                }
+            }
+            PresentationState::SlashPanel
+            | PresentationState::ConfigObjectCreate
+            | PresentationState::ConfigCenter { .. }
+            | PresentationState::ConfigEditor
+            | PresentationState::ProviderWizard => {}
         }
     }
 
@@ -3473,9 +3540,9 @@ mod tests {
     use super::{
         Availability, BlockerView, CostQuantityView, ModelSelectorGroup, ModelSelectorView,
         PresentationController, PresentationControllerError, PresentationScreenView,
-        PresentationSources, RecoveryBadge, SlashPanelView, StatusSegmentKind, TuiViewModel,
-        UsageQuantityView, UsageSummaryView, Viewport, cost_label, display_width, fit_text,
-        model_detail_rows, model_selector_rows, status_segments,
+        PresentationSources, PresentationState, RecoveryBadge, SlashPanelView, StatsGroup,
+        StatusSegmentKind, TuiViewModel, UsageQuantityView, UsageSummaryView, Viewport, cost_label,
+        display_width, fit_text, model_detail_rows, model_selector_rows, status_segments,
     };
 
     static NEXT_TEMP: AtomicU64 = AtomicU64::new(1);
@@ -4118,6 +4185,92 @@ source = "unknown"
                 "query ".to_owned(),
                 "Recent unknown".to_owned(),
             ]
+        );
+    }
+
+    #[test]
+    fn refreshed_snapshot_clamps_stale_browser_selection_and_closes_detail() {
+        let presets = vec![ModelPresetView {
+            id: "fast".into(),
+            provider: "edge".into(),
+            model: "fixture-model".into(),
+            dialect: ProviderDialect::Responses,
+            reasoning_effort: None,
+            service_tier: None,
+            max_output_tokens: None,
+            context_mode: None,
+            favorite: false,
+            fallback: Vec::new(),
+        }];
+        let runtime = runtime(RecoveryStatus::Ready);
+        let config = ConfigRuntimeStatus {
+            ready: true,
+            issues: Vec::new(),
+        };
+        let view = TuiViewModel::build(
+            "/model",
+            "",
+            0,
+            PresentationSources {
+                runtime: &runtime,
+                usage: None,
+                team: None,
+                tools: None,
+                config: &config,
+                provider_profile: None,
+                model: None,
+                context_pressure: None,
+                model_presets: &presets,
+                catalog_models: &[],
+            },
+        )
+        .expect("refreshed model view");
+        let mut controller = PresentationController::new();
+        controller.model_query = "fast".to_owned();
+        controller.state = PresentationState::ModelSelector {
+            group: ModelSelectorGroup::All,
+            selected: 7,
+            detail: true,
+        };
+
+        controller.reconcile_snapshot(&view);
+
+        assert_eq!(
+            controller.screen(None).expect("reconciled model screen"),
+            PresentationScreenView::ModelSelector {
+                query: "fast".to_owned(),
+                group: ModelSelectorGroup::All,
+                selected: 0,
+                detail: false,
+            }
+        );
+
+        controller.state = PresentationState::Stats {
+            group: StatsGroup::Attempts,
+            selected: 7,
+            detail: true,
+        };
+        controller.reconcile_snapshot(&view);
+        assert_eq!(
+            controller.screen(None).expect("reconciled Stats screen"),
+            PresentationScreenView::Stats {
+                group: StatsGroup::Attempts,
+                selected: 0,
+                detail: false,
+            }
+        );
+
+        controller.state = PresentationState::AgentCenter {
+            selected: 7,
+            detail: true,
+        };
+        controller.reconcile_snapshot(&view);
+        assert_eq!(
+            controller.screen(None).expect("reconciled Agent screen"),
+            PresentationScreenView::AgentCenter {
+                selected: 0,
+                detail: false,
+            }
         );
     }
 

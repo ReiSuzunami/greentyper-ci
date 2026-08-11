@@ -65,16 +65,20 @@ The fourth creates manual Price Schedules across all 17 schema fields while
 keeping partial non-negative-integer input local until it can be parsed
 atomically.
 The same private terminal composition now owns read-only `/model`, `/stats`, and
-`/agent` browsers over frozen Config Catalog, Usage, and strict Team-sidecar
+`/agent` browsers over local Config Catalog, Usage, and strict Team-sidecar
 projections. They provide bounded query/group/row/detail navigation without
 Config, Ledger, Provider, credential, or Agent mutation. Team inspection uses a
 shared lock, never creates or repairs state, exposes no Agent Session authority,
-and fails closed on corruption or incomplete Product sidecars. Live refresh,
-current-Agent Preset application, dedicated Turn Usage aggregates, richer cache
+and fails closed on corruption or incomplete Product sidecars. F6 or Ctrl-R
+replaces the local snapshot only after all independent reads succeed and
+preserves the prior Config runtime and view on failure; it does not claim a
+cross-Ledger transactional instant, and there is no background polling.
+Current-Agent Preset application,
+dedicated Turn Usage aggregates, richer cache
 distributions, and Agent lifecycle actions remain outside that browser boundary.
 Section-filtered typed remove
 routes render exact Config Object deletion confirmations; secret storage stays
-behind the credential adapter. Approval interaction, live refresh, the App
+behind the credential adapter. Approval interaction, the App
 Server, and an audited Windows ConPTY wrapper remain pending. Platform wrappers for process,
 credential, transport, and eventually terminal facilities remain private to
 this package unless a second real caller proves a smaller shared package is

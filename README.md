@@ -309,8 +309,8 @@ string array; incomplete structured text remains visible and dirty until Tab or
 Enter parses it atomically. Enter on the final text field previews, a second
 Enter CAS-commits, and tests reopen the file to prove the resolved window
 survives. Invalid arrays, invalid window rules, and revision conflicts keep the
-Draft live for correction or explicit discard. This does not rebuild the
-running TUI's frozen usage projection.
+Draft live for correction or explicit discard. This does not automatically
+rebuild the running TUI usage projection.
 `/config pricing add` now completes the rendered Config Object creation set. It
 prompts for a bounded Price Schedule ID and moves through all 17 schema fields:
 13 required values plus optional dialect, service tier, maximum context, and
@@ -323,22 +323,23 @@ previews, a second Enter CAS-commits, and tests reopen the resolved schedule.
 Invalid selector ranges, effective intervals, provenance, and stale revisions
 retain the Draft for repair or explicit discard. This does not rebuild the
 running TUI's frozen Price Schedule book or add rich cost presentation.
-`/model` now opens a read-only browser over the frozen configured Presets and
-release-catalog candidates. Character input filters the snapshot, Tab and
+`/model` now opens a read-only browser over the latest successful local snapshot
+of configured Presets and release-catalog candidates. Character input filters
+the snapshot, Tab and
 Shift-Tab move across Favorites, Recent, Compatible, and All, Up/Down move the
 selection, and Enter opens bounded source and capability detail. Recent and
 live availability stay explicitly unknown when no trusted fact exists. The
 browser never reads credentials, probes a Provider, writes Config or Ledger
 state, or applies a Preset to an Agent; current-Agent next-Turn application
 remains pending.
-`/stats` now browses the frozen startup Usage snapshot. It shows 1-hour, 1-day,
+`/stats` now browses the latest successful Usage snapshot. It shows 1-hour, 1-day,
 and 7-day summaries. Tab and Shift-Tab move across Attempts, current Thread,
 Agent, Team, Named Window, and Token & Cache groups; Up/Down selects a row and
 Enter opens bounded detail. Attempt detail includes provider, model, policy,
 token, cost, outcome, and timing facts. Aggregate detail preserves exact,
-estimated, unknown, and overflow token/cost states. It does not refresh live,
-mutate Config, or append to the Ledger.
-`/agent` now browses a frozen, read-only Team sidecar projection. Up/Down selects
+estimated, unknown, and overflow token/cost states.
+`/agent` now browses the latest successful read-only Team sidecar projection.
+Up/Down selects
 canonical Agents and Enter shows status, Task identity and state, budgets,
 reservations, and bounded metadata counts. It never renders Task titles,
 message bodies, Completion Capsules, capability or scope labels, or
@@ -348,15 +349,22 @@ incomplete final frame is reported as recovery required without truncation or
 repair, while corruption and incomplete Product sidecars fail closed. Browsing
 does not acknowledge Team operations or mutate Runtime, Team, Tool, or Config
 state.
-Config commits do not rebuild the running TUI's frozen status, usage, pricing,
-or Provider projection. The tracer is not an approval surface, live refresh
-loop, audited ConPTY integration, secret-entry/bind surface, starter-preset
+Config commits do not automatically rebuild the running TUI projection. From the
+Slash Panel, `/model`, `/stats`, or `/agent`, F6 or Ctrl-R reads a new local
+Config/statusline, Model, Usage, and Team snapshot, then replaces the prior view
+only after every read succeeds. A failed refresh keeps the previous complete
+view and remains retryable; refresh never performs a
+Provider request, credential lookup, Config/Ledger write, or Team action. There
+is no background polling or automatic refresh. Runtime, Team, and Tool Ledgers
+are inspected independently, so one refresh is not a cross-Ledger transactional
+snapshot. The tracer is not an approval
+surface, audited ConPTY integration, secret-entry/bind surface, starter-preset
 workflow, or persistent live catalog discovery. Live inference conformance,
 reconnect/retry, OpenCode Go Messages execution,
 Messages reasoning blocks, Preset context/fallback execution, richer approval
 presentation, broader Provider and Tool adapters,
 Workspace, current-Agent Preset application, dedicated Turn Usage navigation,
-richer cache distributions, live Agent refresh and lifecycle actions, and App
+richer cache distributions, Agent lifecycle actions, and App
 Server work remain. The loopback Provider tracer remains
 an internal harness; `local.echo` is intentionally a fixed opt-in command rather
 than a general process runner. The file Ledger remains

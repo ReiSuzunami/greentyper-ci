@@ -15,8 +15,8 @@ use greentyper_core::config::{
     ConfigRuntimeError, ConfigScope, ConfigValue, ConfigValueKind, MAX_COMMAND_QUERY_BYTES,
     MAX_CONFIG_ID_BYTES,
 };
-use greentyper_core::runtime::{RuntimeError, RuntimeKernel};
-use greentyper_core::usage::{UsageError, UsageTimestamp};
+use greentyper_core::runtime::{KernelTeamSnapshot, RuntimeError, RuntimeKernel, RuntimeSnapshot};
+use greentyper_core::usage::{RuntimeUsageSnapshot, UsageError, UsageTimestamp};
 
 use crate::credential_vault::PlatformCredentialVault;
 use crate::presentation::{
@@ -36,14 +36,15 @@ pub(crate) fn require_interactive() -> Result<(), TerminalError> {
 pub(crate) fn run(ledger: &Path, config: &mut ConfigRuntime) -> Result<(), TerminalError> {
     let view = build_terminal_view(ledger, config, "/")?;
     let (width, height) = crossterm_terminal::size()?;
+    let viewport = Viewport::new(width, height)?;
     let stdout = io::stdout();
-    let _writer = run_terminal_loop(
+    let _writer = run_terminal_loop_with_snapshot_refresh(
         stdout.lock(),
         CrosstermTerminalMode,
         config,
         &view,
-        width,
-        height,
+        ledger,
+        viewport,
         event::read,
     )?;
     Ok(())
@@ -57,6 +58,34 @@ fn build_terminal_view(
     let runtime = RuntimeKernel::inspect(ledger)?;
     let usage = RuntimeKernel::inspect_usage(ledger, UsageTimestamp::now()?)?;
     let team = inspect_product_team(ledger)?;
+    build_terminal_view_from_sources(config, query, &runtime, &usage, team.as_ref())
+}
+
+fn refresh_terminal_view(
+    ledger: &Path,
+    config: &ConfigRuntime,
+    query: &str,
+) -> Result<RefreshedTerminalSnapshot, TerminalError> {
+    let runtime = RuntimeKernel::inspect(ledger)?;
+    let usage = RuntimeKernel::inspect_usage(ledger, UsageTimestamp::now()?)?;
+    let team = inspect_product_team(ledger)?;
+    let config = config.reload_candidate()?;
+    let view = build_terminal_view_from_sources(&config, query, &runtime, &usage, team.as_ref())?;
+    Ok(RefreshedTerminalSnapshot { config, view })
+}
+
+struct RefreshedTerminalSnapshot {
+    config: ConfigRuntime,
+    view: TuiViewModel,
+}
+
+fn build_terminal_view_from_sources(
+    config: &ConfigRuntime,
+    query: &str,
+    runtime: &RuntimeSnapshot,
+    usage: &RuntimeUsageSnapshot,
+    team: Option<&KernelTeamSnapshot>,
+) -> Result<TuiViewModel, TerminalError> {
     let status = config.status();
     let resolved = config.config_layers()?.resolve()?;
     let model_presets = config.model_presets()?;
@@ -66,9 +95,9 @@ fn build_terminal_view(
         "",
         0,
         PresentationSources {
-            runtime: &runtime,
-            usage: Some(&usage),
-            team: team.as_ref(),
+            runtime,
+            usage: Some(usage),
+            team,
             tools: None,
             config: &status,
             provider_profile: Some(resolved.provider_profile().value()),
@@ -419,6 +448,7 @@ enum TerminalInputEvent {
     Enter,
     Escape,
     TestProviderConnection,
+    RefreshSnapshot,
     Resize(u16, u16),
     Quit,
     Ignore,
@@ -433,6 +463,9 @@ fn map_crossterm_event(event: Event) -> TerminalInputEvent {
                     && matches!(character, 'c' | 'q') =>
             {
                 TerminalInputEvent::Quit
+            }
+            KeyCode::Char('r') if key.modifiers == KeyModifiers::CONTROL => {
+                TerminalInputEvent::RefreshSnapshot
             }
             KeyCode::Char(character)
                 if !key
@@ -453,6 +486,7 @@ fn map_crossterm_event(event: Event) -> TerminalInputEvent {
             KeyCode::Enter => TerminalInputEvent::Enter,
             KeyCode::Esc => TerminalInputEvent::Escape,
             KeyCode::F(5) if key.modifiers.is_empty() => TerminalInputEvent::TestProviderConnection,
+            KeyCode::F(6) if key.modifiers.is_empty() => TerminalInputEvent::RefreshSnapshot,
             _ => TerminalInputEvent::Ignore,
         },
         _ => TerminalInputEvent::Ignore,
@@ -475,6 +509,7 @@ enum TerminalIntent {
     ToggleStatsDetail,
     MoveAgentSelection(isize),
     ToggleAgentDetail,
+    RefreshSnapshot,
     EditConfigObjectId(char),
     BackspaceConfigObjectId,
     ClearConfigObjectId,
@@ -538,6 +573,17 @@ impl TerminalInputState {
         context: TerminalInputContext,
     ) -> TerminalIntent {
         match event {
+            TerminalInputEvent::RefreshSnapshot
+                if matches!(
+                    context,
+                    TerminalInputContext::SlashPanel
+                        | TerminalInputContext::ModelSelector
+                        | TerminalInputContext::Stats
+                        | TerminalInputContext::AgentCenter
+                ) =>
+            {
+                TerminalIntent::RefreshSnapshot
+            }
             TerminalInputEvent::TestProviderConnection => TerminalIntent::TestProviderConnection,
             TerminalInputEvent::Character(character)
                 if context == TerminalInputContext::SlashPanel
@@ -741,6 +787,7 @@ impl TerminalInputState {
             | TerminalInputEvent::Up
             | TerminalInputEvent::Down
             | TerminalInputEvent::Enter
+            | TerminalInputEvent::RefreshSnapshot
             | TerminalInputEvent::Ignore => TerminalIntent::None,
         }
     }
@@ -750,6 +797,7 @@ impl TerminalInputState {
 enum TerminalLoopOutcome {
     Redraw,
     Resize(u16, u16),
+    RefreshSnapshot,
     Quit,
     Noop,
 }
@@ -903,6 +951,10 @@ impl TerminalSession {
                 self.controller.toggle_agent_detail(&view.agents);
                 self.notice = None;
                 Ok(TerminalLoopOutcome::Redraw)
+            }
+            TerminalIntent::RefreshSnapshot => {
+                self.notice = None;
+                Ok(TerminalLoopOutcome::RefreshSnapshot)
             }
             TerminalIntent::EditConfigObjectId(character) => {
                 self.edit_config_object_id(Some(character));
@@ -1540,6 +1592,7 @@ fn config_runtime_notice(source: &ConfigRuntimeError) -> String {
     }
 }
 
+#[cfg(test)]
 fn run_terminal_loop<W, M, F>(
     writer: W,
     mode: M,
@@ -1557,22 +1610,90 @@ where
     let vault = PlatformCredentialVault;
     let mut tester = ModelsHttpConnectionTester::new(&vault);
     let viewport = Viewport::new(width, height)?;
-    run_terminal_loop_with_connection_tester(
+    run_terminal_loop_core(
         writer,
         mode,
         config,
-        view,
+        TerminalSnapshotSource {
+            initial: view,
+            refresh_ledger: None,
+        },
         viewport,
         &mut tester,
         read_event,
     )
 }
 
+fn run_terminal_loop_with_snapshot_refresh<W, M, F>(
+    writer: W,
+    mode: M,
+    config: &mut ConfigRuntime,
+    view: &TuiViewModel,
+    ledger: &Path,
+    viewport: Viewport,
+    read_event: F,
+) -> Result<W, TerminalError>
+where
+    W: Write,
+    M: TerminalMode,
+    F: FnMut() -> io::Result<Event>,
+{
+    let vault = PlatformCredentialVault;
+    let mut tester = ModelsHttpConnectionTester::new(&vault);
+    run_terminal_loop_core(
+        writer,
+        mode,
+        config,
+        TerminalSnapshotSource {
+            initial: view,
+            refresh_ledger: Some(ledger),
+        },
+        viewport,
+        &mut tester,
+        read_event,
+    )
+}
+
+#[cfg(test)]
 fn run_terminal_loop_with_connection_tester<W, M, T, F>(
     writer: W,
     mode: M,
     config: &mut ConfigRuntime,
     view: &TuiViewModel,
+    viewport: Viewport,
+    tester: &mut T,
+    read_event: F,
+) -> Result<W, TerminalError>
+where
+    W: Write,
+    M: TerminalMode,
+    T: ProviderConnectionTester,
+    F: FnMut() -> io::Result<Event>,
+{
+    run_terminal_loop_core(
+        writer,
+        mode,
+        config,
+        TerminalSnapshotSource {
+            initial: view,
+            refresh_ledger: None,
+        },
+        viewport,
+        tester,
+        read_event,
+    )
+}
+
+struct TerminalSnapshotSource<'a> {
+    initial: &'a TuiViewModel,
+    refresh_ledger: Option<&'a Path>,
+}
+
+fn run_terminal_loop_core<W, M, T, F>(
+    writer: W,
+    mode: M,
+    config: &mut ConfigRuntime,
+    snapshot: TerminalSnapshotSource<'_>,
     viewport: Viewport,
     tester: &mut T,
     mut read_event: F,
@@ -1588,25 +1709,47 @@ where
     let mut surface = TerminalSurface::enter(writer, mode)?;
     let mut renderer = DirectVtRenderer::new(width, height)?;
     let mut session = TerminalSession::new("/", width, height)?;
+    let mut view = snapshot.initial.clone();
 
-    let frame = session.frame(Some(config), view)?;
+    let frame = session.frame(Some(config), &view)?;
     surface.write_frame(&renderer.draw(&frame)?)?;
 
     loop {
         match session.handle_with_view_and_connection_tester(
             map_crossterm_event(read_event()?),
             Some(config),
-            Some(view),
+            Some(&view),
             Some(tester),
         )? {
             TerminalLoopOutcome::Quit => break,
             TerminalLoopOutcome::Resize(width, height) => {
                 surface.write_frame(&renderer.resize(width, height)?)?;
-                let frame = session.frame(Some(config), view)?;
+                let frame = session.frame(Some(config), &view)?;
+                surface.write_frame(&renderer.draw(&frame)?)?;
+            }
+            TerminalLoopOutcome::RefreshSnapshot => {
+                if let Some(ledger) = snapshot.refresh_ledger {
+                    match refresh_terminal_view(ledger, config, session.controller.slash_query()) {
+                        Ok(refreshed) => {
+                            session.controller.reconcile_snapshot(&refreshed.view);
+                            *config = refreshed.config;
+                            view = refreshed.view;
+                            session.notice = Some("Snapshot refreshed".to_owned());
+                        }
+                        Err(_) => {
+                            session.notice = Some(
+                                "Snapshot refresh failed; showing previous snapshot".to_owned(),
+                            );
+                        }
+                    }
+                } else {
+                    session.notice = Some("Snapshot refresh unavailable".to_owned());
+                }
+                let frame = session.frame(Some(config), &view)?;
                 surface.write_frame(&renderer.draw(&frame)?)?;
             }
             TerminalLoopOutcome::Redraw => {
-                let frame = session.frame(Some(config), view)?;
+                let frame = session.frame(Some(config), &view)?;
                 surface.write_frame(&renderer.draw(&frame)?)?;
             }
             TerminalLoopOutcome::Noop => {}
@@ -1740,7 +1883,7 @@ impl From<ProductDriverError> for TerminalError {
 
 #[cfg(test)]
 mod tests {
-    use std::cell::Cell;
+    use std::cell::{Cell, RefCell};
     use std::collections::VecDeque;
     use std::ffi::OsString;
     use std::fs::OpenOptions;
@@ -1776,7 +1919,8 @@ mod tests {
         DirectVtRenderer, ENTER_TERMINAL, LEAVE_TERMINAL, TerminalFrame, TerminalInputContext,
         TerminalInputEvent, TerminalInputState, TerminalIntent, TerminalLoopOutcome, TerminalMode,
         TerminalSession, TerminalSurface, Viewport, build_terminal_view, map_crossterm_event,
-        run_terminal_loop, run_terminal_loop_with_connection_tester,
+        refresh_terminal_view, run_terminal_loop, run_terminal_loop_with_connection_tester,
+        run_terminal_loop_with_snapshot_refresh,
     };
 
     struct CompleteStatsUsageProvider;
@@ -1905,6 +2049,24 @@ mod tests {
         assert_eq!(
             input.apply(TerminalInputEvent::Enter, TerminalInputContext::AgentCenter,),
             TerminalIntent::ToggleAgentDetail
+        );
+        for context in [
+            TerminalInputContext::SlashPanel,
+            TerminalInputContext::ModelSelector,
+            TerminalInputContext::Stats,
+            TerminalInputContext::AgentCenter,
+        ] {
+            assert_eq!(
+                input.apply(TerminalInputEvent::RefreshSnapshot, context),
+                TerminalIntent::RefreshSnapshot
+            );
+        }
+        assert_eq!(
+            input.apply(
+                TerminalInputEvent::RefreshSnapshot,
+                TerminalInputContext::ConfigText,
+            ),
+            TerminalIntent::None
         );
         assert_eq!(
             input.apply(TerminalInputEvent::Down, TerminalInputContext::ConfigObject),
@@ -2206,6 +2368,113 @@ dialect = "responses"
     }
 
     #[test]
+    fn terminal_loop_refreshes_models_and_statusline_from_external_config() {
+        let root = terminal_test_root("model-refresh");
+        let ledger = root.join("runtime.ledger");
+        let paths = ConfigPaths::new(root.join("user.toml"), root.join("project.toml"));
+        std::fs::create_dir_all(&root).expect("create model refresh fixture directory");
+        std::fs::write(
+            paths.user(),
+            r#"schema_version = 1
+
+[providers.edge]
+template = "openai"
+credential = "synthetic-model-refresh-credential-reference"
+
+[model_presets.fast]
+provider = "edge"
+model = "gpt-5.4-mini"
+dialect = "responses"
+"#,
+        )
+        .expect("write initial model refresh config");
+        let refreshed = r#"schema_version = 1
+
+[provider]
+profile = "edge"
+model = "gpt-5.6-refreshed"
+
+[providers.edge]
+template = "openai"
+credential = "synthetic-model-refresh-credential-reference"
+
+[model_presets.fast]
+provider = "edge"
+model = "gpt-5.4-mini"
+dialect = "responses"
+
+[model_presets.refreshed]
+provider = "edge"
+model = "gpt-5.6-refreshed"
+dialect = "responses"
+favorite = true
+"#
+        .as_bytes()
+        .to_vec();
+        let mut config =
+            ConfigRuntime::open(paths.clone(), ConfigDocument::empty()).expect("config runtime");
+        let view = build_terminal_view(&ledger, &config, "/").expect("initial model view");
+        let mut events = "model"
+            .chars()
+            .chain("refreshed".chars())
+            .map(|character| {
+                Event::Key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
+            })
+            .collect::<VecDeque<_>>();
+        events.insert(
+            "model".len(),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        );
+        events.extend([
+            Event::Key(KeyEvent::new(KeyCode::F(6), KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL)),
+        ]);
+        let user_path = paths.user().to_path_buf();
+        let refreshed_for_event = refreshed.clone();
+
+        let output = run_terminal_loop_with_snapshot_refresh(
+            Vec::new(),
+            FakeTerminalMode::default(),
+            &mut config,
+            &view,
+            &ledger,
+            Viewport::new(160, 24).expect("model refresh viewport"),
+            move || {
+                let event = events.pop_front().expect("bounded model refresh events");
+                if matches!(&event, Event::Key(key) if key.code == KeyCode::F(6)) {
+                    std::fs::write(&user_path, &refreshed_for_event)
+                        .expect("write refreshed model config");
+                }
+                Ok(event)
+            },
+        )
+        .expect("model refresh loop");
+        let output = String::from_utf8(output).expect("model refresh VT output");
+
+        assert!(output.contains("Snapshot refreshed"));
+        assert!(output.contains("[configured] refreshed / edge / gpt-5.6-refreshed"));
+        assert!(!output.contains("synthetic-model-refresh-credential-reference"));
+        let refreshed_view =
+            build_terminal_view(&ledger, &config, "/").expect("refreshed statusline view");
+        let statusline = TerminalSession::new("/", 160, 24)
+            .expect("refreshed statusline session")
+            .layout(Some(&config), &refreshed_view)
+            .expect("refreshed statusline layout");
+        assert!(
+            statusline
+                .statusline_rows()
+                .iter()
+                .any(|row| row.text().contains("model gpt-5.6-refreshed"))
+        );
+        assert_eq!(
+            std::fs::read(paths.user()).expect("reread refreshed model config"),
+            refreshed
+        );
+        assert!(!ledger.exists());
+        std::fs::remove_dir_all(root).expect("remove model refresh fixture");
+    }
+
+    #[test]
     fn terminal_loop_browses_frozen_stats_without_mutating_the_ledger() {
         let root = terminal_test_root("stats-browser");
         let ledger = root.join("runtime.ledger");
@@ -2385,6 +2654,130 @@ dialect = "responses"
     }
 
     #[test]
+    fn terminal_loop_refreshes_stats_after_an_external_turn() {
+        let root = terminal_test_root("stats-refresh");
+        let ledger = root.join("runtime.ledger");
+        let team_ledger = terminal_sidecar_path(&ledger, "team");
+        let tool_ledger = terminal_sidecar_path(&ledger, "tool");
+        let paths = ConfigPaths::new(root.join("user.toml"), root.join("project.toml"));
+        std::fs::create_dir_all(&root).expect("create stats refresh fixture directory");
+        let mut config =
+            ConfigRuntime::open(paths.clone(), ConfigDocument::empty()).expect("config runtime");
+        let view = build_terminal_view(&ledger, &config, "/").expect("initial stats view");
+        let mut events = "stats"
+            .chars()
+            .map(|character| {
+                Event::Key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
+            })
+            .collect::<VecDeque<_>>();
+        events.extend([
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::F(6), KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL)),
+        ]);
+        let runtime_path = ledger.clone();
+        let team_path = team_ledger.clone();
+        let tool_path = tool_ledger.clone();
+        let external_bytes = Rc::new(RefCell::new(None));
+        let observed_bytes = Rc::clone(&external_bytes);
+
+        let output = run_terminal_loop_with_snapshot_refresh(
+            Vec::new(),
+            FakeTerminalMode::default(),
+            &mut config,
+            &view,
+            &ledger,
+            Viewport::new(80, 24).expect("stats refresh viewport"),
+            move || {
+                let event = events.pop_front().expect("bounded stats refresh events");
+                if matches!(&event, Event::Key(key) if key.code == KeyCode::F(6)) {
+                    let (mut runtime, _) = RuntimeKernel::open_with_team_and_tools(
+                        &runtime_path,
+                        &team_path,
+                        &tool_path,
+                        1,
+                    )
+                    .expect("open external stats runtime");
+                    let root = runtime
+                        .dispatch_team(TeamCommand::AdmitRoot {
+                            task: TaskSpec::new("record refreshed usage", TaskScope::default()),
+                            budget: ResourceBudget::new(1_000, 2),
+                            capabilities: CapabilitySnapshot::default(),
+                        })
+                        .expect("admit external stats root");
+                    let session = match root.commit.outcome {
+                        CommandOutcome::RootAdmitted { session, .. } => session,
+                        other => panic!("unexpected root outcome: {other:?}"),
+                    };
+                    runtime
+                        .acknowledge_team_operation(root.operation)
+                        .expect("acknowledge external root admission");
+                    let mut provider = CompleteStatsUsageProvider;
+                    let output = match runtime
+                        .execute_provider_turn(
+                            session,
+                            &ConfigLayers::default(),
+                            "refreshed usage attempt",
+                            &mut provider,
+                            |_| unreachable!("refresh provider does not request a Tool"),
+                        )
+                        .expect("execute external stats turn")
+                    {
+                        ProviderTurnOutcome::Prepared(output) => output,
+                        ProviderTurnOutcome::ApprovalRequired(_) => {
+                            panic!("refresh provider unexpectedly requested approval")
+                        }
+                    };
+                    runtime
+                        .acknowledge(output.delivery())
+                        .expect("acknowledge external stats turn");
+                    drop(runtime);
+                    *observed_bytes.borrow_mut() = Some((
+                        std::fs::read(&runtime_path).expect("read external Runtime Ledger"),
+                        std::fs::read(&team_path).expect("read external Team Ledger"),
+                        std::fs::read(&tool_path).expect("read external Tool Ledger"),
+                    ));
+                }
+                Ok(event)
+            },
+        )
+        .expect("stats refresh loop");
+        let output = String::from_utf8(output).expect("stats refresh VT output");
+
+        assert!(output.contains("Snapshot refreshed"));
+        assert!(output.contains("attempt 1"));
+        assert!(output.contains("input 100"));
+        assert!(output.contains("cached input 10"));
+        let external_bytes = external_bytes
+            .borrow()
+            .clone()
+            .expect("captured external Ledger bytes");
+        assert_eq!(
+            std::fs::read(&ledger).expect("reread refreshed Runtime Ledger"),
+            external_bytes.0
+        );
+        assert_eq!(
+            std::fs::read(&team_ledger).expect("reread refreshed Team Ledger"),
+            external_bytes.1
+        );
+        assert_eq!(
+            std::fs::read(&tool_ledger).expect("reread refreshed Tool Ledger"),
+            external_bytes.2
+        );
+        assert!(!paths.user().exists());
+        assert!(!paths.project().exists());
+        std::fs::remove_dir_all(root).expect("remove stats refresh fixture");
+    }
+
+    #[test]
     fn terminal_loop_browses_agents_without_repairing_or_mutating_ledgers() {
         let root = terminal_test_root("agent-browser");
         let ledger = root.join("runtime.ledger");
@@ -2494,6 +2887,196 @@ dialect = "responses"
         assert!(!paths.user().exists());
         assert!(!paths.project().exists());
         std::fs::remove_dir_all(root).expect("remove agent browser fixture");
+    }
+
+    #[test]
+    fn terminal_loop_refreshes_agents_and_recovers_from_a_failed_refresh() {
+        let root = terminal_test_root("agent-refresh");
+        let ledger = root.join("runtime.ledger");
+        let team_ledger = terminal_sidecar_path(&ledger, "team");
+        let tool_ledger = terminal_sidecar_path(&ledger, "tool");
+        let held_team_ledger = root.join("runtime.ledger.team.held");
+        let paths = ConfigPaths::new(root.join("user.toml"), root.join("project.toml"));
+        std::fs::create_dir_all(&root).expect("create agent refresh fixture directory");
+        let (mut runtime, _) =
+            RuntimeKernel::open_with_team_and_tools(&ledger, &team_ledger, &tool_ledger, 1)
+                .expect("open initial agent refresh runtime");
+        let admitted = runtime
+            .dispatch_team(TeamCommand::AdmitRoot {
+                task: TaskSpec::new("private-agent-refresh-root", TaskScope::default()),
+                budget: ResourceBudget::new(1_000, 8),
+                capabilities: CapabilitySnapshot::default(),
+            })
+            .expect("admit initial refresh root");
+        runtime
+            .acknowledge_team_operation(admitted.operation)
+            .expect("acknowledge initial refresh root");
+        drop(runtime);
+
+        let mut config =
+            ConfigRuntime::open(paths.clone(), ConfigDocument::empty()).expect("config runtime");
+        let view = build_terminal_view(&ledger, &config, "/").expect("initial agent view");
+        let mut events = "agent"
+            .chars()
+            .map(|character| {
+                Event::Key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
+            })
+            .collect::<VecDeque<_>>();
+        events.extend([
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::F(6), KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::F(6), KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::F(6), KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL)),
+        ]);
+        let runtime_path = ledger.clone();
+        let team_path = team_ledger.clone();
+        let tool_path = tool_ledger.clone();
+        let held_path = held_team_ledger.clone();
+        let external_bytes = Rc::new(RefCell::new(None));
+        let observed_bytes = Rc::clone(&external_bytes);
+        let mut refresh_step = 0_u8;
+
+        let output = run_terminal_loop_with_snapshot_refresh(
+            Vec::new(),
+            FakeTerminalMode::default(),
+            &mut config,
+            &view,
+            &ledger,
+            Viewport::new(80, 24).expect("Agent refresh viewport"),
+            move || {
+                let event = events.pop_front().expect("bounded agent refresh events");
+                if matches!(&event, Event::Key(key) if key.code == KeyCode::F(6)) {
+                    refresh_step += 1;
+                    match refresh_step {
+                        1 => {
+                            let (mut runtime, recovery) = RuntimeKernel::open_with_team_and_tools(
+                                &runtime_path,
+                                &team_path,
+                                &tool_path,
+                                1,
+                            )
+                            .expect("reopen agent refresh runtime");
+                            let root_session = recovery
+                                .into_sessions()
+                                .into_iter()
+                                .next()
+                                .expect("rebind refresh root");
+                            let child = runtime
+                                .dispatch_team(TeamCommand::Delegate {
+                                    parent: root_session,
+                                    task: TaskSpec::new(
+                                        "private-agent-refresh-child-one",
+                                        TaskScope::default(),
+                                    ),
+                                    budget: ResourceBudget::new(200, 1),
+                                    capabilities: CapabilitySnapshot::default(),
+                                })
+                                .expect("delegate first refreshed Agent");
+                            runtime
+                                .acknowledge_team_operation(child.operation)
+                                .expect("acknowledge first refreshed Agent");
+                        }
+                        2 => {
+                            std::fs::rename(&team_path, &held_path)
+                                .expect("hold Team Ledger during failed refresh");
+                        }
+                        3 => {
+                            std::fs::rename(&held_path, &team_path)
+                                .expect("restore Team Ledger after failed refresh");
+                            let (mut runtime, recovery) = RuntimeKernel::open_with_team_and_tools(
+                                &runtime_path,
+                                &team_path,
+                                &tool_path,
+                                1,
+                            )
+                            .expect("reopen restored agent refresh runtime");
+                            let root_session = recovery
+                                .into_sessions()
+                                .into_iter()
+                                .next()
+                                .expect("rebind restored refresh root");
+                            let child = runtime
+                                .dispatch_team(TeamCommand::Delegate {
+                                    parent: root_session,
+                                    task: TaskSpec::new(
+                                        "private-agent-refresh-child-two",
+                                        TaskScope::default(),
+                                    ),
+                                    budget: ResourceBudget::new(100, 1),
+                                    capabilities: CapabilitySnapshot::default(),
+                                })
+                                .expect("delegate second refreshed Agent");
+                            runtime
+                                .acknowledge_team_operation(child.operation)
+                                .expect("acknowledge second refreshed Agent");
+                            drop(runtime);
+                            *observed_bytes.borrow_mut() = Some((
+                                std::fs::read(&runtime_path)
+                                    .expect("read final external Runtime Ledger"),
+                                std::fs::read(&team_path).expect("read final external Team Ledger"),
+                                std::fs::read(&tool_path).expect("read final external Tool Ledger"),
+                            ));
+                        }
+                        _ => unreachable!("bounded refresh steps"),
+                    }
+                }
+                Ok(event)
+            },
+        )
+        .expect("agent refresh loop");
+        let output = String::from_utf8(output).expect("agent refresh VT output");
+
+        assert!(output.contains("agent 2"));
+        assert!(output.contains("Snapshot refresh failed; showing previous snapshot"));
+        assert!(output.contains("parent 1"));
+        assert!(!output.contains("private-agent-refresh"));
+        let refreshed =
+            refresh_terminal_view(&ledger, &config, "/").expect("refresh final Agent snapshot");
+        config = refreshed.config;
+        let final_view = refreshed.view;
+        let mut final_session =
+            TerminalSession::new("/agent", 80, 24).expect("final Agent session");
+        final_session
+            .handle_with_view_and_connection_tester(
+                TerminalInputEvent::Enter,
+                Some(&mut config),
+                Some(&final_view),
+                None,
+            )
+            .expect("open final Agent view");
+        let final_layout = final_session
+            .layout(Some(&config), &final_view)
+            .expect("final Agent layout");
+        assert!(
+            final_layout
+                .body()
+                .iter()
+                .any(|row| row.text().contains("agent 3"))
+        );
+        let external_bytes = external_bytes
+            .borrow()
+            .clone()
+            .expect("captured final external Ledger bytes");
+        assert_eq!(
+            std::fs::read(&ledger).expect("reread final Runtime Ledger"),
+            external_bytes.0
+        );
+        assert_eq!(
+            std::fs::read(&team_ledger).expect("reread final Team Ledger"),
+            external_bytes.1
+        );
+        assert_eq!(
+            std::fs::read(&tool_ledger).expect("reread final Tool Ledger"),
+            external_bytes.2
+        );
+        assert!(!held_team_ledger.exists());
+        assert!(!paths.user().exists());
+        assert!(!paths.project().exists());
+        std::fs::remove_dir_all(root).expect("remove agent refresh fixture");
     }
 
     fn terminal_sidecar_path(runtime: &Path, kind: &str) -> PathBuf {
@@ -2819,6 +3402,19 @@ dialect = "responses"
                 KeyModifiers::CONTROL,
             ))),
             TerminalInputEvent::Ignore
+        );
+        assert_eq!(
+            map_crossterm_event(Event::Key(
+                KeyEvent::new(KeyCode::F(6), KeyModifiers::NONE,)
+            )),
+            TerminalInputEvent::RefreshSnapshot
+        );
+        assert_eq!(
+            map_crossterm_event(Event::Key(KeyEvent::new(
+                KeyCode::Char('r'),
+                KeyModifiers::CONTROL,
+            ))),
+            TerminalInputEvent::RefreshSnapshot
         );
         assert_eq!(
             map_crossterm_event(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE,))),
@@ -4962,6 +5558,94 @@ timezone = "local"
         assert!(!ledger.exists());
         assert!(!terminal_sidecar_path(&ledger, "team").exists());
         assert!(!terminal_sidecar_path(&ledger, "tool").exists());
+    }
+
+    #[test]
+    fn terminal_loop_refreshes_an_unchanged_snapshot_without_writing_state() {
+        let root = terminal_test_root("snapshot-refresh");
+        let ledger = root.join("runtime.ledger");
+        let paths = ConfigPaths::new(root.join("user.toml"), root.join("project.toml"));
+        let mut config =
+            ConfigRuntime::open(paths.clone(), ConfigDocument::empty()).expect("config runtime");
+        let view = build_terminal_view(&ledger, &config, "/").expect("initial view");
+        let mut events = VecDeque::from([
+            Event::Key(KeyEvent::new(KeyCode::F(6), KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL)),
+        ]);
+
+        let output = run_terminal_loop_with_snapshot_refresh(
+            Vec::new(),
+            FakeTerminalMode::default(),
+            &mut config,
+            &view,
+            &ledger,
+            Viewport::new(80, 24).expect("snapshot refresh viewport"),
+            move || Ok(events.pop_front().expect("bounded refresh events")),
+        )
+        .expect("refresh loop");
+
+        assert!(String::from_utf8_lossy(&output).contains("Snapshot refreshed"));
+        assert!(!ledger.exists());
+        assert!(!paths.user().exists());
+        assert!(!paths.project().exists());
+    }
+
+    #[test]
+    fn terminal_loop_failed_refresh_keeps_the_active_config_candidate() {
+        let root = terminal_test_root("snapshot-refresh-config-failure");
+        let ledger = root.join("runtime.ledger");
+        let paths = ConfigPaths::new(root.join("user.toml"), root.join("project.toml"));
+        std::fs::create_dir_all(&root).expect("create refresh failure fixture");
+        std::fs::write(
+            paths.user(),
+            "schema_version = 1\n[provider]\nmodel = \"before-refresh\"\n",
+        )
+        .expect("write initial refresh config");
+        let invalid = b"schema_version = 1\n[model_presets.broken]\nprovider = \"simulator\"\n";
+        let mut config =
+            ConfigRuntime::open(paths.clone(), ConfigDocument::empty()).expect("config runtime");
+        let view = build_terminal_view(&ledger, &config, "/").expect("initial view");
+        let user_path = paths.user().to_path_buf();
+        let mut events = VecDeque::from([
+            Event::Key(KeyEvent::new(KeyCode::F(6), KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL)),
+        ]);
+
+        let output = run_terminal_loop_with_snapshot_refresh(
+            Vec::new(),
+            FakeTerminalMode::default(),
+            &mut config,
+            &view,
+            &ledger,
+            Viewport::new(80, 24).expect("refresh failure viewport"),
+            move || {
+                let event = events.pop_front().expect("bounded refresh failure events");
+                if matches!(&event, Event::Key(key) if key.code == KeyCode::F(6)) {
+                    std::fs::write(&user_path, invalid).expect("write invalid refresh config");
+                }
+                Ok(event)
+            },
+        )
+        .expect("failed refresh loop");
+        let output = String::from_utf8(output).expect("refresh failure VT output");
+
+        assert!(output.contains("Snapshot refresh failed; showing previous snapshot"));
+        assert!(output.contains("model before-refresh"));
+        assert!(config.status().ready);
+        assert_eq!(
+            config
+                .get_effective("provider.model")
+                .expect("active model")
+                .expect("model exists")
+                .value,
+            ConfigValue::String("before-refresh".to_owned())
+        );
+        assert_eq!(
+            std::fs::read(paths.user()).expect("read invalid external config"),
+            invalid
+        );
+        assert!(!ledger.exists());
+        std::fs::remove_dir_all(root).expect("remove refresh failure fixture");
     }
 
     #[test]
