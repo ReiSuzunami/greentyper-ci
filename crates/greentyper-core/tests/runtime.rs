@@ -720,8 +720,8 @@ fn retryable_provider_failure_is_durably_rearmed_and_records_a_new_attempt() {
         .clone();
     let blocked_head = runtime.snapshot().head;
     runtime
-        .request_blocked_turn_retry(turn)
-        .expect("durably request retry");
+        .request_blocked_turn_recovery(turn)
+        .expect("durably request recovery");
     assert_ne!(runtime.snapshot().head, blocked_head);
     assert_eq!(
         runtime.snapshot().status,
@@ -729,7 +729,7 @@ fn retryable_provider_failure_is_durably_rearmed_and_records_a_new_attempt() {
     );
     let retry_head = runtime.snapshot().head;
     assert!(matches!(
-        runtime.request_blocked_turn_retry(turn),
+        runtime.request_blocked_turn_recovery(turn),
         Err(RuntimeError::TurnRetryNotAllowed(actual)) if actual == turn
     ));
     assert_eq!(runtime.snapshot().head, retry_head);
@@ -848,6 +848,76 @@ fn provider_fallback_never_switches_after_the_first_provider_event() {
         1
     );
     drop(runtime);
+    fs::remove_file(path).expect("cleanup Runtime ledger");
+}
+
+#[test]
+fn provider_fallback_recovery_resumes_backup_without_replaying_primary() {
+    let path = temp_path("provider-fallback-recovery");
+    let price_schedules = fallback_price_book();
+    let candidates = [
+        fallback_candidate("primary", "model-primary", &price_schedules),
+        fallback_candidate("backup", "model-backup", &price_schedules),
+    ];
+    let mut providers = [
+        FallbackFixtureProvider::unavailable("model-primary"),
+        FallbackFixtureProvider::panic("model-backup"),
+    ];
+    let mut runtime = RuntimeKernel::open(&path).expect("open Runtime");
+
+    let crashed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = runtime.execute_with_provider_fallbacks(
+            &candidates,
+            Vec::new(),
+            price_schedules,
+            "fallback crash input",
+            &mut providers,
+        );
+    }));
+    assert!(crashed.is_err());
+    assert_eq!(providers[0].runs(), 1);
+    assert_eq!(providers[1].runs(), 1);
+    drop(runtime);
+
+    let mut recovered = RuntimeKernel::open(&path).expect("reopen fallback Runtime");
+    let turn = match recovered.snapshot().status {
+        RecoveryStatus::ResumeRequired { turn } => turn,
+        ref status => panic!("unexpected recovered status: {status:?}"),
+    };
+    assert_eq!(recovered.pending_provider_candidate_index(), Some(1));
+    assert_eq!(
+        recovered
+            .pending_provider_epoch()
+            .expect("backup Provider Epoch")
+            .model(),
+        "model-backup"
+    );
+    let mut backup = FallbackFixtureProvider::complete("model-backup");
+    let output = recovered
+        .resume(&mut backup)
+        .expect("resume backup Provider");
+    assert_eq!(output.turn(), turn);
+    assert_eq!(output.text(), "backup response");
+    assert_eq!(backup.runs(), 1);
+    let usage = recovered.usage_snapshot(UsageTimestamp::now().expect("Usage timestamp"));
+    assert_eq!(usage.attempts().len(), 3);
+    assert_eq!(usage.attempts()[0].requested_model(), "model-primary");
+    assert_eq!(usage.attempts()[0].outcome(), UsageAttemptOutcome::Failed);
+    assert_eq!(usage.attempts()[1].requested_model(), "model-backup");
+    assert_eq!(
+        usage.attempts()[1].outcome(),
+        UsageAttemptOutcome::Interrupted
+    );
+    assert_eq!(usage.attempts()[2].requested_model(), "model-backup");
+    assert_eq!(
+        usage.attempts()[2].outcome(),
+        UsageAttemptOutcome::Succeeded
+    );
+    recovered
+        .acknowledge(output.delivery())
+        .expect("acknowledge recovered output");
+    assert_eq!(recovered.snapshot().status, RecoveryStatus::Ready);
+    drop(recovered);
     fs::remove_file(path).expect("cleanup Runtime ledger");
 }
 
@@ -1366,6 +1436,7 @@ fn fallback_price_book() -> PriceScheduleBook {
 enum FallbackFixtureOutcome {
     Unavailable(ProviderUnavailableStage),
     Complete,
+    Panic,
 }
 
 struct FallbackFixtureProvider {
@@ -1401,6 +1472,14 @@ impl FallbackFixtureProvider {
         }
     }
 
+    const fn panic(model: &'static str) -> Self {
+        Self {
+            model,
+            outcome: FallbackFixtureOutcome::Panic,
+            runs: 0,
+        }
+    }
+
     const fn runs(&self) -> usize {
         self.runs
     }
@@ -1427,6 +1506,9 @@ impl ProviderRuntime for FallbackFixtureProvider {
                     None,
                 )?),
             ]),
+            FallbackFixtureOutcome::Panic => {
+                panic!("injected process death after fallback selection")
+            }
         }
     }
 }

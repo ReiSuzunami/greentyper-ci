@@ -497,7 +497,7 @@ pub(crate) fn cancel_product_provider_turn(
         .map_err(ProductDriverError::Runtime)
 }
 
-pub(crate) fn request_product_provider_turn_retry(
+pub(crate) fn request_product_provider_turn_recovery(
     runtime_path: &Path,
     turn: TurnId,
 ) -> Result<DurabilityReceipt, ProductDriverError> {
@@ -521,7 +521,7 @@ pub(crate) fn request_product_provider_turn_retry(
         _ => return Err(ProductDriverError::UnexpectedRecovery),
     };
     kernel
-        .request_blocked_provider_turn_retry(session, turn)
+        .request_blocked_provider_turn_recovery(session, turn)
         .map_err(ProductDriverError::Runtime)
 }
 

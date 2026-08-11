@@ -33,7 +33,7 @@ use crate::product_driver::{
     ProductDriver, ProductDriverError, ProductInteraction, ProductToolDecision,
     ProductToolDecisionOutcome, cancel_product_provider_turn, has_product_driver_state,
     inspect_product_team, inspect_product_tools, reconcile_product_tool,
-    request_product_provider_turn_retry,
+    request_product_provider_turn_recovery,
 };
 use crate::provider_http::ConfiguredProvider;
 
@@ -258,12 +258,12 @@ where
                                 Ok(runtime) => runtime,
                                 Err(_) => return runtime_control_error(request.id),
                             };
-                        if let Err(error) = runtime.request_blocked_turn_retry(turn) {
+                        if let Err(error) = runtime.request_blocked_turn_recovery(turn) {
                             return runtime_retry_error(request.id, error);
                         }
                     }
                     RuntimeControlTarget::Product => {
-                        match request_product_provider_turn_retry(&self.runtime_path, turn) {
+                        match request_product_provider_turn_recovery(&self.runtime_path, turn) {
                             Ok(_) => {}
                             Err(ProductDriverError::Runtime(error)) => {
                                 return runtime_retry_error(request.id, error);

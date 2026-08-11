@@ -1259,6 +1259,21 @@ impl RuntimeKernel {
         self.request_provider_retry(None, turn)
     }
 
+    /// Recovers a blocked Provider Turn without replaying a failed primary.
+    ///
+    /// A frozen fallback is selected first when one remains. Otherwise this
+    /// requests an explicit retry of the active Provider candidate.
+    pub fn request_blocked_turn_recovery(
+        &mut self,
+        turn: TurnId,
+    ) -> Result<DurabilityReceipt, RuntimeError> {
+        self.require_no_tool_reconciliation()?;
+        match self.advance_provider_fallback(None, turn)? {
+            Some(receipt) => Ok(receipt),
+            None => self.request_provider_retry(None, turn),
+        }
+    }
+
     pub fn cancel_blocked_provider_turn(
         &mut self,
         session: AgentSession,
@@ -1275,6 +1290,18 @@ impl RuntimeKernel {
     ) -> Result<DurabilityReceipt, RuntimeError> {
         self.require_provider_session(session)?;
         self.request_provider_retry(Some(session.agent()), turn)
+    }
+
+    pub fn request_blocked_provider_turn_recovery(
+        &mut self,
+        session: AgentSession,
+        turn: TurnId,
+    ) -> Result<DurabilityReceipt, RuntimeError> {
+        self.require_provider_session(session)?;
+        match self.advance_provider_fallback(Some(session.agent()), turn)? {
+            Some(receipt) => Ok(receipt),
+            None => self.request_provider_retry(Some(session.agent()), turn),
+        }
     }
 
     pub fn resolve_provider_tool_call(
@@ -5206,6 +5233,38 @@ impl Error for RuntimeError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEST_LEDGER_NONCE: AtomicU64 = AtomicU64::new(1);
+
+    fn test_ledger_path(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "greentyper-runtime-{label}-{}-{}.ledger",
+            std::process::id(),
+            TEST_LEDGER_NONCE.fetch_add(1, Ordering::Relaxed)
+        ))
+    }
+
+    fn fallback_candidate_for_recovery(preset: &str, model: &str) -> ProviderFallbackCandidate {
+        let mut layers = ConfigLayers::default();
+        layers.cli.provider_model = Some(model.to_owned());
+        let config = ConfigEpoch::freeze_with_observability(
+            ConfigEpochId::new(1).expect("Config Epoch ID"),
+            &layers,
+            Vec::new(),
+            PriceScheduleBook::default(),
+        )
+        .expect("freeze candidate Config");
+        let selection = ModelSelection::new(
+            preset,
+            config.fingerprint(),
+            "simulator",
+            model,
+            ProviderDialect::Responses,
+        )
+        .expect("candidate selection");
+        ProviderFallbackCandidate::new(selection, layers, None, None).expect("fallback candidate")
+    }
 
     fn stored_runtime_event(data: EventData) -> StoredEvent {
         StoredEvent {
@@ -5356,6 +5415,71 @@ mod tests {
                 .expect("decode Provider fallback request"),
             fallback
         );
+    }
+
+    #[test]
+    fn blocked_primary_recovery_durably_selects_the_frozen_fallback() {
+        let path = test_ledger_path("fallback-recovery");
+        let candidates = [
+            fallback_candidate_for_recovery("primary", "model-primary"),
+            fallback_candidate_for_recovery("backup", "model-backup"),
+        ];
+        let providers = [
+            crate::provider::DeterministicProvider::default(),
+            crate::provider::DeterministicProvider::default(),
+        ];
+        let mut runtime = RuntimeKernel::open(&path).expect("open Runtime");
+        runtime
+            .admit_provider_fallback_turn(
+                &candidates,
+                Vec::new(),
+                PriceScheduleBook::default(),
+                "fallback recovery".to_owned(),
+                &providers,
+                None,
+            )
+            .expect("admit fallback Turn");
+        let turn = runtime.state.pending.as_ref().expect("pending Turn").turn;
+        let attempt = runtime.begin_usage_attempt(turn).expect("begin attempt");
+        runtime
+            .finish_usage_attempt_and_block_for_provider_error(
+                turn,
+                attempt,
+                &ProviderError::unavailable_during(
+                    ProviderUnavailableStage::BeforeFirstEvent,
+                    "private primary failure",
+                ),
+            )
+            .expect("persist blocked primary");
+
+        runtime
+            .request_blocked_turn_recovery(turn)
+            .expect("select frozen fallback");
+        assert_eq!(runtime.pending_provider_candidate_index(), Some(1));
+        assert_eq!(
+            runtime
+                .pending_provider_epoch()
+                .expect("fallback Provider Epoch")
+                .model(),
+            "model-backup"
+        );
+        assert_eq!(
+            runtime.snapshot().status,
+            RecoveryStatus::ResumeRequired { turn }
+        );
+        drop(runtime);
+
+        let recovered = RuntimeKernel::open(&path).expect("replay fallback recovery");
+        assert_eq!(recovered.pending_provider_candidate_index(), Some(1));
+        assert_eq!(
+            recovered
+                .pending_provider_epoch()
+                .expect("replayed fallback Provider Epoch")
+                .model(),
+            "model-backup"
+        );
+        drop(recovered);
+        std::fs::remove_file(path).expect("cleanup Runtime Ledger");
     }
 
     #[test]

@@ -18,7 +18,7 @@ use crate::product_driver::{
     ProductDriver, ProductDriverError, ProductInteraction, ProductToolDecision,
     apply_model_preset_to_next_turn, cancel_product_provider_turn, freeze_model_selection,
     has_product_driver_state, inspect_product_tools, open_product_context_runtime,
-    reconcile_product_tool, request_product_provider_turn_retry,
+    reconcile_product_tool, request_product_provider_turn_recovery,
 };
 use crate::provider_connection::{ModelsHttpConnectionTester, ProviderConnectionTester};
 use crate::provider_discovery_catalog::{
@@ -345,7 +345,7 @@ pub fn run(arguments: impl Iterator<Item = String>) -> Result<(), CliError> {
                 return retry_product_turn(&ledger, turn);
             }
             let mut runtime = RuntimeKernel::open_existing_strict(&ledger)?;
-            runtime.request_blocked_turn_retry(turn)?;
+            runtime.request_blocked_turn_recovery(turn)?;
             let epoch = runtime.pending_provider_epoch().ok_or(
                 greentyper_core::runtime::RuntimeError::CorruptState(
                     "blocked Turn is missing its frozen Provider Epoch",
@@ -808,7 +808,7 @@ fn resume_product_turn(ledger: &Path) -> Result<(), CliError> {
 }
 
 fn retry_product_turn(ledger: &Path, turn: TurnId) -> Result<(), CliError> {
-    request_product_provider_turn_retry(ledger, turn)?;
+    request_product_provider_turn_recovery(ledger, turn)?;
     let stdin = io::stdin();
     let stderr = io::stderr();
     let mut interaction = CliProductInteraction {
