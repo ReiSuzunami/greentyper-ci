@@ -119,8 +119,10 @@ non-secret Config Schema, effective reads with redacted repair errors and status
 process-local typed Drafts,
 validation, and atomic CAS commit path over bounded newline-delimited JSON.
 Credential fields expose only opaque references and generic reads reject them;
-secure App Server credential operations remain pending. The product CLI can
-bind, replace, test, and forget origin-bound credential references without
+the same local stdio stream can bind, replace, status-test, and forget
+origin-bound credentials without returning their values. Bind and replace
+accept the secret only in the bounded request frame and scrub the product-owned
+frame after dispatch. The product CLI exposes the same operations without
 putting secret material in arguments, Config, or Ledgers. Windows stores values
 in the current user's Credential Manager; other platforms currently fail
 closed. Tool call identity, argument hashing, approval binding, independent
@@ -375,8 +377,8 @@ reconnect/retry, OpenCode Go Messages execution,
 Messages reasoning blocks, Preset context/fallback execution, richer approval
 presentation, broader Provider and Tool adapters,
 Workspace, project/new-Agent Preset defaults, dedicated Turn Usage navigation,
-richer cache distributions, Agent lifecycle actions, and App Server credential,
-Runtime, and approval surfaces remain. The loopback Provider tracer remains
+richer cache distributions, Agent lifecycle actions, and App Server Runtime and
+approval surfaces remain. The loopback Provider tracer remains
 an internal harness; `local.echo` is intentionally a fixed opt-in command rather
 than a general process runner. The file Ledger remains
 provisional. The acceptance runner can emit bound raw evidence,

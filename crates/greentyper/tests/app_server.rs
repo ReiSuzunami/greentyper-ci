@@ -9,6 +9,11 @@ use serde_json::Value;
 
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(1);
 
+const CREDENTIAL_PROFILE: &str = "app-server";
+const CREDENTIAL_ORIGIN: &str = "https://app-server-credential.invalid/v1";
+const FIRST_CREDENTIAL: &str = "private-app-server-platform-first";
+const SECOND_CREDENTIAL: &str = "private-app-server-platform-second";
+
 struct TempTree {
     root: PathBuf,
 }
@@ -178,6 +183,14 @@ fn responses(output: &std::process::Output) -> Vec<Value> {
         .collect()
 }
 
+fn credential_reference() -> String {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time after epoch")
+        .as_nanos();
+    format!("app-server-{}-{nonce}", std::process::id())
+}
+
 #[test]
 fn app_server_schema_get_and_bounded_errors_are_streamed_without_writes() {
     let temp = TempTree::new();
@@ -232,6 +245,107 @@ fn app_server_schema_get_and_bounded_errors_are_streamed_without_writes() {
     assert_eq!(responses[6]["result"]["schema_version"], 1);
     assert!(!temp.user_config().exists());
     assert!(!temp.project_config().exists());
+}
+
+#[cfg(not(windows))]
+#[test]
+fn app_server_credential_platform_operations_fail_closed_without_readback() {
+    let temp = TempTree::new();
+    let reference = credential_reference();
+    let requests = format!(
+        concat!(
+            "{{\"id\":1,\"operation\":\"credential.bind\",\"params\":{{\"reference\":\"{reference}\",\"profile\":\"{profile}\",\"origin\":\"{origin}\",\"secret\":\"{first}\"}}}}\n",
+            "{{\"id\":2,\"operation\":\"credential.replace\",\"params\":{{\"reference\":\"{reference}\",\"profile\":\"{profile}\",\"origin\":\"{origin}\",\"secret\":\"{second}\"}}}}\n",
+            "{{\"id\":3,\"operation\":\"credential.test\",\"params\":{{\"reference\":\"{reference}\",\"profile\":\"{profile}\",\"origin\":\"{origin}\"}}}}\n",
+            "{{\"id\":4,\"operation\":\"credential.forget\",\"params\":{{\"reference\":\"{reference}\",\"profile\":\"{profile}\",\"origin\":\"{origin}\"}}}}\n",
+        ),
+        reference = reference,
+        profile = CREDENTIAL_PROFILE,
+        origin = CREDENTIAL_ORIGIN,
+        first = FIRST_CREDENTIAL,
+        second = SECOND_CREDENTIAL,
+    );
+
+    let output = temp.run(requests.as_bytes());
+    let results = responses(&output);
+    assert_eq!(results.len(), 4);
+    for result in results {
+        assert_eq!(result["error"]["category"], "credential_unavailable");
+    }
+    for secret in [FIRST_CREDENTIAL, SECOND_CREDENTIAL] {
+        assert!(!String::from_utf8_lossy(&output.stdout).contains(secret));
+        assert!(!String::from_utf8_lossy(&output.stderr).contains(secret));
+    }
+    assert!(!temp.user_config().exists());
+    assert!(!temp.project_config().exists());
+}
+
+#[cfg(windows)]
+#[test]
+fn app_server_credential_platform_round_trips_without_readback() {
+    let temp = TempTree::new();
+    let reference = credential_reference();
+    let _cleanup = WindowsCredentialCleanup(reference.clone());
+    let requests = format!(
+        concat!(
+            "{{\"id\":1,\"operation\":\"credential.forget\",\"params\":{{\"reference\":\"{reference}\",\"profile\":\"{profile}\",\"origin\":\"{origin}\"}}}}\n",
+            "{{\"id\":2,\"operation\":\"credential.bind\",\"params\":{{\"reference\":\"{reference}\",\"profile\":\"{profile}\",\"origin\":\"{origin}\",\"secret\":\"{first}\"}}}}\n",
+            "{{\"id\":3,\"operation\":\"credential.test\",\"params\":{{\"reference\":\"{reference}\",\"profile\":\"{profile}\",\"origin\":\"{origin}\"}}}}\n",
+            "{{\"id\":4,\"operation\":\"credential.bind\",\"params\":{{\"reference\":\"{reference}\",\"profile\":\"{profile}\",\"origin\":\"{origin}\",\"secret\":\"{second}\"}}}}\n",
+            "{{\"id\":5,\"operation\":\"credential.replace\",\"params\":{{\"reference\":\"{reference}\",\"profile\":\"{profile}\",\"origin\":\"{origin}\",\"secret\":\"{second}\"}}}}\n",
+            "{{\"id\":6,\"operation\":\"credential.test\",\"params\":{{\"reference\":\"{reference}\",\"profile\":\"{profile}\",\"origin\":\"{origin}\"}}}}\n",
+            "{{\"id\":7,\"operation\":\"credential.forget\",\"params\":{{\"reference\":\"{reference}\",\"profile\":\"{profile}\",\"origin\":\"{origin}\"}}}}\n",
+            "{{\"id\":8,\"operation\":\"credential.test\",\"params\":{{\"reference\":\"{reference}\",\"profile\":\"{profile}\",\"origin\":\"{origin}\"}}}}\n",
+        ),
+        reference = reference,
+        profile = CREDENTIAL_PROFILE,
+        origin = CREDENTIAL_ORIGIN,
+        first = FIRST_CREDENTIAL,
+        second = SECOND_CREDENTIAL,
+    );
+
+    let output = temp.run(requests.as_bytes());
+    let results = responses(&output);
+    assert!(matches!(
+        results[0]["result"]["status"].as_str(),
+        Some("forgotten" | "not_found")
+    ));
+    assert_eq!(results[1]["result"]["status"], "bound");
+    assert_eq!(results[2]["result"]["status"], "available");
+    assert_eq!(results[3]["error"]["category"], "credential_already_bound");
+    assert_eq!(results[4]["result"]["status"], "replaced");
+    assert_eq!(results[5]["result"]["status"], "available");
+    assert_eq!(results[6]["result"]["status"], "forgotten");
+    assert_eq!(results[7]["result"]["status"], "not_found");
+    for secret in [FIRST_CREDENTIAL, SECOND_CREDENTIAL] {
+        assert!(!String::from_utf8_lossy(&output.stdout).contains(secret));
+        assert!(!String::from_utf8_lossy(&output.stderr).contains(secret));
+    }
+    assert!(!temp.user_config().exists());
+    assert!(!temp.project_config().exists());
+}
+
+#[cfg(windows)]
+struct WindowsCredentialCleanup(String);
+
+#[cfg(windows)]
+impl Drop for WindowsCredentialCleanup {
+    fn drop(&mut self) {
+        let _ = Command::new(env!("CARGO_BIN_EXE_greentyper"))
+            .args([
+                "credential",
+                "forget",
+                &self.0,
+                "--profile",
+                CREDENTIAL_PROFILE,
+                "--origin",
+                CREDENTIAL_ORIGIN,
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
 }
 
 #[test]

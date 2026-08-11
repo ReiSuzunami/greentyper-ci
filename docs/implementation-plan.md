@@ -428,13 +428,16 @@ overwriting the winner. Conflict refreshes the connection to the winning
 revision so a new Draft can begin while the stale handle remains live. This
 slice preserves a last-valid effective value when one exists, reports repair
 state without filesystem paths, and lets a startup repair proceed through the
-same begin/reset/validate/commit flow. It adds no credential, Provider, Runtime,
-Team, Tool, or approval operation.
+same begin/reset/validate/commit flow. A second contiguous slice exposes
+origin-bound credential `bind`, `replace`, `test`, and `forget` through the same
+bounded stdio stream. Secrets are moved into the zeroing vault value, the owned
+request frame is scrubbed, responses are status-only, and non-Windows platform
+vaults fail closed. Credential operations add no Provider request or Runtime,
+Team, Tool, Agent, or approval authority.
 
 This does not complete Phase 3. Audited Windows ConPTY behavior, approval
 interaction, automatic/background snapshot refresh, rendered secret binding,
-secure App Server credential operations, custom-template/starter-preset workflow, live catalog
-discovery and Recent
+custom-template/starter-preset workflow, live catalog discovery and Recent
 evidence, automatic Context View/token-source
 projection, provider-reported
 charge and subscription-quota accounting, richer observed Provider metadata,

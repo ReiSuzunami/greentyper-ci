@@ -450,9 +450,17 @@ rewriting Config. A malformed startup Config keeps its exact bytes and makes
 `config.get` return `repair_required`; the same stream can then begin a Draft,
 reset the invalid field, validate, commit, and read the repaired ready value.
 The 65th active Draft is rejected and capacity returns after one handle is
-consumed. These tests do not prove App Server credential, Runtime, Tool
-approval, network transport, multi-client authentication, or long-lived
-resource behavior.
+consumed. Cross-platform in-memory tests drive App Server credential
+bind/duplicate-bind/replace, origin-isolated availability, idempotent forget,
+duplicate-secret-key rejection, explicit loopback permission, invalid
+scope/secret recovery, and fixed no-readback responses. The product
+stdio test proves macOS and Linux return `credential_unavailable` for all four
+operations without writing Config; its Windows branch performs the same flow
+against the current user's Credential Manager, including duplicate bind,
+replace, forget, and final not-found status. Tests assert secret bytes never
+appear in stdout or stderr. They do not prove App Server Runtime or Tool
+approval, remote network transport, multi-client authentication, non-Windows
+credential backends, OS-level memory locking, or long-lived resource behavior.
 Context Pressure tests freeze exact 65%/90% threshold transitions, estimated and
 missing-fact propagation, invalid policy/limit and arithmetic failure, and the
 no-side-effect hard admission gate. Product presentation tests assert estimated

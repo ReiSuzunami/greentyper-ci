@@ -179,9 +179,8 @@ target-layer explicit and fails when the resulting effective configuration has
 dangling references. The snapshot-based `tui` tracer renders controller screens
 reachable from the Slash Panel, including the top-level Config Center. Every
 schema field has a rendered interaction, but commits do not automatically
-rebuild the active projection. Secret-entry/bind UI and secure App Server
-credential operations remain pending. The non-secret Config App Server
-described below is implemented. The current
+rebuild the active projection. Secret-entry/bind UI remains pending. The Config
+and secure-store App Server described below is implemented. The current
 terminal-neutral Provider Profile wizard resolves release template defaults into
 user-configured Profile Drafts and supports the explicit bounded connection and
 model-list observation described below; it does not merge discovered records,
@@ -278,13 +277,14 @@ bounded value on standard input. Existing values are never returned.
 Generic effective-value reads also reject credential-reference fields; editor
 views expose only whether the target and effective layers are bound.
 
-`greentyper app-server --stdio` exposes the non-secret Config Runtime through a
-bounded newline-delimited JSON stream. Each request carries an unsigned `id`, an
-`operation`, and optional object `params`; each flushed response carries the
-same `id` and exactly one `result` or `error`. A request frame is limited to 64
-KiB. Malformed or oversized frames receive a fixed error and do not stop the
-stream. Draft handles are process-local to that stream, at most 64 may be active,
-and EOF discards every uncommitted Draft without writing Config.
+`greentyper app-server --stdio` exposes the Config Runtime and local credential
+vault through a bounded newline-delimited JSON stream. Each request carries an
+unsigned `id`, an `operation`, and optional object `params`; each flushed
+response carries the same `id` and exactly one `result` or `error`. A request
+frame is limited to 64 KiB. Malformed or oversized frames receive a fixed error
+and do not stop the stream. Draft handles are process-local to that stream, at
+most 64 may be active, and EOF discards every uncommitted Draft without writing
+Config.
 
 ```json
 {"id":1,"operation":"config.get","params":{"path":"provider.model"}}
@@ -301,7 +301,26 @@ The current operations are:
 | `config.draft.set` / `config.draft.reset` | Stage a typed change without affecting the current Config Epoch |
 | `config.draft.validate` | Return the normalized diff and field-addressed validation errors |
 | `config.draft.commit` | Compare the base revision, write atomically, and return the new revision and application timing |
-| `credential.bind` / `replace` / `test` / `forget` | Pending: operate on secure-store references without returning credential material |
+| `credential.bind` / `replace` | Store a new or replacement origin-bound secret and return only `bound` or `replaced` status |
+| `credential.test` / `credential.forget` | Return only `available`, `forgotten`, or `not_found`; `test` checks vault presence and performs no Provider request |
+
+Credential operations require `reference`, `profile`, and `origin` params.
+`bind` and `replace` additionally require a JSON string `secret`; its UTF-8
+bytes must be non-empty, at most 2560 bytes, and contain no ASCII control byte.
+An optional `allow_insecure_loopback` Boolean defaults to `false` and must be
+`true` for a plain-HTTP loopback origin; it is invalid for a remote origin.
+The request parser moves that value into the zeroing `SecretValue` owner before
+validating the remaining scope fields, and the product-owned raw frame is
+overwritten after dispatch. Responses and public errors never echo the secret,
+scope identifiers, or origin. A second bind returns
+`credential_already_bound`; replacing a missing binding returns
+`credential_not_found`; an unavailable platform vault returns
+`credential_unavailable`. Scope remains the exact Provider Profile, opaque
+reference, and canonical Provider Origin. Remote origins require HTTPS; plain
+HTTP is accepted only for loopback. These operations neither write Config or a
+Ledger nor grant Provider, Agent, Tool, or workspace authority. The stdio loop
+serializes one process's requests, but platform-vault mutations are not a
+cross-process CAS or transaction.
 
 `config.draft.set` accepts the schema-owned tagged value forms `string`,
 `positive_integer`, `non_negative_integer`, `boolean`, and `string_list`.
@@ -326,9 +345,11 @@ All Config surfaces share stable policy error categories: `unknown_object`,
 `secret_read_forbidden`. The stream additionally reports bounded lifecycle and
 transport categories including `invalid_request`, `request_too_large`,
 `unknown_operation`, `unknown_draft`, `repair_required`, `resource_busy`, and
-`io`. A running process retains its last valid Config Epoch after an invalid
-external edit; startup with no valid epoch enters a configuration-repair surface
-instead of silently dropping a layer.
+`io`. Credential operations add `credential_already_bound`,
+`credential_not_found`, and `credential_unavailable`. A running process retains
+its last valid Config Epoch after an invalid external edit; startup with no
+valid epoch enters a configuration-repair surface instead of silently dropping
+a layer.
 
 ## Provider Profiles
 
@@ -680,6 +701,6 @@ labeled as cash paid. Rich terminal-backed cost presentation remains pending.
 
 ## Credentials
 
-Credential values live in Windows Credential Manager or DPAPI-protected storage, never TOML, the Event Ledger, checkpoints, diagnostics, command history, or exported configuration. The current product backend uses the logged-in user's Windows Credential Manager set with local-machine persistence across that user's logon sessions. Product CLI operations can bind, replace, test, and forget a credential but cannot reveal its existing value. Other platforms currently fail closed.
+Credential values live in Windows Credential Manager, never TOML, the Event Ledger, checkpoints, diagnostics, command history, or exported configuration. The current product backend uses the logged-in user's Windows Credential Manager set with local-machine persistence across that user's logon sessions. Product CLI and local stdio App Server operations can bind, replace, test, and forget a credential but cannot reveal its existing value. App Server bind/replace requests necessarily carry the new value in their bounded local pipe frame; GreenTyper does not log it, returns status only, and overwrites its owned frame after dispatch. Other platforms currently fail closed.
 
 Credential scope includes Provider Profile or MCP identity and Provider Origin. Delegation does not propagate credentials implicitly.

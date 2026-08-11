@@ -101,11 +101,12 @@ pub(crate) struct SecretValue {
 }
 
 impl SecretValue {
-    pub(crate) fn new(bytes: Vec<u8>) -> Result<Self, CredentialVaultError> {
+    pub(crate) fn new(mut bytes: Vec<u8>) -> Result<Self, CredentialVaultError> {
         if bytes.is_empty()
             || bytes.len() > MAX_SECRET_BYTES
             || bytes.iter().any(u8::is_ascii_control)
         {
+            bytes.fill(0);
             return Err(CredentialVaultError::InvalidSecret);
         }
         Ok(Self { bytes })

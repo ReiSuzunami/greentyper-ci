@@ -80,15 +80,17 @@ The private App Server module owns a bounded newline-delimited JSON stdio loop
 over the existing Config Runtime. It keeps at most 64 connection-local Drafts,
 maps typed values and fixed public errors, rejects secret reads, and delegates
 validation, revision CAS, backup, and atomic commit policy to core instead of
-reimplementing it.
+reimplementing it. Its write-only credential operations delegate origin-bound
+bind/replace/test/forget policy to the credential adapter, scrub the owned input
+frame, return status only, and never acquire Provider or Agent authority.
 Project/new-Agent Preset defaults,
 dedicated Turn Usage aggregates, richer cache
 distributions, and Agent lifecycle actions remain outside that browser boundary.
 Section-filtered typed remove
 routes render exact Config Object deletion confirmations; secret storage stays
 behind the credential adapter. Approval interaction, the App
-Server credential and Runtime-control surfaces, and an audited Windows ConPTY
-wrapper remain pending. Platform wrappers for process, credential, transport,
+Server Runtime-control surface, and an audited Windows ConPTY wrapper remain
+pending. Platform wrappers for process, credential, transport,
 and eventually terminal facilities remain private to
 this package unless a second real caller proves a smaller shared package is
 needed.
