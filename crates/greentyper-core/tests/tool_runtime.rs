@@ -90,14 +90,20 @@ fn context_checkpoint_rejects_an_unresolved_tool_approval_without_writes() {
         )
         .expect("request Tool call");
     assert!(matches!(request, ToolRequestOutcome::ApprovalRequired(_)));
+    drop(kernel);
     let runtime_before = fs::read(&runtime_path).expect("read Runtime Ledger");
     let team_before = fs::read(&team_path).expect("read Team Ledger");
     let tool_before = fs::read(&tool_path).expect("read Tool Ledger");
+    let (kernel, recovery) =
+        RuntimeKernel::open_with_team_and_tools(&runtime_path, &team_path, &tool_path, 1)
+            .expect("reopen Tool Runtime Kernel");
+    assert_eq!(recovery.into_sessions().len(), 1);
 
     assert!(matches!(
         kernel.prepare_context_checkpoint(ContextReductionPolicy::default()),
         Err(RuntimeError::ContextCheckpointNotAtSafeBarrier)
     ));
+    drop(kernel);
     assert_eq!(
         fs::read(&runtime_path).expect("reread Runtime Ledger"),
         runtime_before
@@ -111,7 +117,6 @@ fn context_checkpoint_rejects_an_unresolved_tool_approval_without_writes() {
         tool_before
     );
 
-    drop(kernel);
     fs::remove_file(runtime_path).expect("cleanup Runtime Ledger");
     fs::remove_file(team_path).expect("cleanup Team Ledger");
     fs::remove_file(tool_path).expect("cleanup Tool Ledger");
