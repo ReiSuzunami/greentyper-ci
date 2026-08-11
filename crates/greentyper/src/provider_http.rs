@@ -125,11 +125,25 @@ fn chat_completions_adapter(template: &str) -> Option<ChatCompletionsAdapter> {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MessagesAdapter {
+    DeepSeek,
+    OpenCodeGo,
+}
+
+fn messages_adapter(template: &str) -> Option<MessagesAdapter> {
+    match template {
+        DEEPSEEK_TEMPLATE => Some(MessagesAdapter::DeepSeek),
+        OPENCODE_GO_TEMPLATE => Some(MessagesAdapter::OpenCodeGo),
+        _ => None,
+    }
+}
+
 pub(crate) fn has_provider_adapter(template: &str, dialect: ProviderDialect) -> bool {
     match dialect {
         ProviderDialect::Responses => responses_adapter(template).is_some(),
         ProviderDialect::ChatCompletions => chat_completions_adapter(template).is_some(),
-        ProviderDialect::Messages => template == DEEPSEEK_TEMPLATE,
+        ProviderDialect::Messages => messages_adapter(template).is_some(),
     }
 }
 
@@ -2645,6 +2659,44 @@ source = "unknown"
             .expect("external OpenCode Go Responses Profile")
     }
 
+    fn opencode_go_messages_fixture_profile(
+        base_url: &str,
+        name: &str,
+        model: &str,
+    ) -> ProviderProfileSnapshot {
+        let encoded_base_url = serde_json::to_string(base_url).expect("encode OpenCode Go origin");
+        let encoded_model = serde_json::to_string(model).expect("encode OpenCode Go model");
+        let document = ConfigDocument::parse(&format!(
+            r#"
+schema_version = 1
+
+[provider]
+profile = "opencode-go-messages-loopback"
+model = {encoded_model}
+
+[providers.opencode-go-messages-loopback]
+template = "opencode-go"
+credential = "opencode-go-messages-loopback-synthetic"
+base_url = {encoded_base_url}
+dialects = ["messages"]
+allow_insecure_loopback = true
+
+[providers.opencode-go-messages-loopback.routes]
+messages = "/messages"
+models = "/models"
+
+[providers.opencode-go-messages-loopback.pricing]
+source = "unknown"
+"#,
+        ))
+        .expect("parse OpenCode Go Messages fixture Config");
+        ConfigRuntime::open(test_config_paths(name), document)
+            .expect("resolve OpenCode Go Messages fixture Config")
+            .selected_provider_profile()
+            .expect("resolve OpenCode Go Messages Profile")
+            .expect("external OpenCode Go Messages Profile")
+    }
+
     fn deepseek_dual_fixture_profile(base_url: &str, name: &str) -> ProviderProfileSnapshot {
         let encoded_base_url = serde_json::to_string(base_url).expect("encode DeepSeek origin");
         let document = ConfigDocument::parse(&format!(
@@ -4864,8 +4916,8 @@ source = "unknown"
             DEEPSEEK_TEMPLATE,
             ProviderDialect::Messages
         ));
-        assert!(!has_provider_adapter(
-            "opencode-go",
+        assert!(has_provider_adapter(
+            OPENCODE_GO_TEMPLATE,
             ProviderDialect::Messages
         ));
         assert!(!has_provider_adapter(
@@ -4918,34 +4970,35 @@ source = "unknown"
             ))
         ));
 
-        let encoded_base_url = serde_json::to_string(&base_url).expect("encode OpenCode origin");
-        let opencode = ConfigDocument::parse(&format!(
+        let encoded_base_url = serde_json::to_string(&base_url).expect("encode OpenAI origin");
+        let unsupported = ConfigDocument::parse(&format!(
             r#"
 schema_version = 1
 [provider]
-profile = "opencode-messages"
+profile = "openai-messages"
 model = "fixture-model"
-[providers.opencode-messages]
-template = "opencode-go"
-credential = "opencode-messages-synthetic"
+[providers.openai-messages]
+template = "{OPENAI_TEMPLATE}"
+credential = "openai-messages-synthetic"
 base_url = {encoded_base_url}
 dialects = ["messages"]
 allow_insecure_loopback = true
-[providers.opencode-messages.routes]
+[providers.openai-messages.routes]
 messages = "/messages"
-[providers.opencode-messages.pricing]
+[providers.openai-messages.pricing]
 source = "unknown"
 "#,
         ))
-        .expect("parse OpenCode Messages fixture");
-        let opencode = ConfigRuntime::open(test_config_paths("opencode-messages-guard"), opencode)
-            .expect("resolve OpenCode Messages fixture")
-            .selected_provider_profile()
-            .expect("resolve OpenCode Messages Profile")
-            .expect("external OpenCode Messages Profile");
+        .expect("parse unsupported Messages fixture");
+        let unsupported =
+            ConfigRuntime::open(test_config_paths("unsupported-messages-guard"), unsupported)
+                .expect("resolve unsupported Messages fixture")
+                .selected_provider_profile()
+                .expect("resolve unsupported Messages Profile")
+                .expect("external unsupported Messages Profile");
         assert!(matches!(
             MessagesHttpProvider::with_timeout(
-                opencode,
+                unsupported,
                 InMemoryCredentialVault::default(),
                 HTTP_TIMEOUT,
             ),
@@ -4953,6 +5006,53 @@ source = "unknown"
                 "Provider Profile template has no configured runtime adapter"
             ))
         ));
+        assert!(
+            matches!(listener.accept(), Err(error) if error.kind() == io::ErrorKind::WouldBlock)
+        );
+    }
+
+    #[test]
+    fn opencode_go_messages_preflight_accepts_only_release_verified_models() {
+        let listener =
+            TcpListener::bind(("127.0.0.1", 0)).expect("OpenCode Go Messages preflight listener");
+        listener
+            .set_nonblocking(true)
+            .expect("nonblocking OpenCode Go Messages preflight listener");
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let profile = opencode_go_messages_fixture_profile(
+            &base_url,
+            "opencode-go-messages-preflight",
+            "minimax-m2.7",
+        );
+
+        assert!(has_provider_adapter(
+            OPENCODE_GO_TEMPLATE,
+            ProviderDialect::Messages
+        ));
+        let provider = ConfiguredProvider::for_new_turn_with_dialect(
+            profile.clone(),
+            "minimax-m2.7",
+            ProviderDialect::Messages,
+            bound_messages_vault(&profile),
+        )
+        .expect("release-verified OpenCode Go Messages provider");
+        assert_eq!(provider.dialect(), Some(ProviderDialect::Messages));
+
+        let error = match ConfiguredProvider::for_new_turn_with_dialect(
+            profile,
+            "shadow-model",
+            ProviderDialect::Messages,
+            InMemoryCredentialVault::default(),
+        ) {
+            Ok(_) => panic!("unverified OpenCode Go Messages model must fail closed"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error,
+            ProviderError::InvalidConfiguration(
+                "OpenCode Go model and dialect are not verified by the release catalog"
+            )
+        );
         assert!(
             matches!(listener.accept(), Err(error) if error.kind() == io::ErrorKind::WouldBlock)
         );
