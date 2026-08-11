@@ -7,7 +7,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use greentyper_core::config::ConfigLayers;
 use greentyper_core::ledger::FileLedger;
-use greentyper_core::provider::DeterministicProvider;
+use greentyper_core::provider::{
+    DeterministicProvider, ProviderError, ProviderEvent, ProviderRequest, ProviderRuntime,
+};
 use greentyper_core::runtime::RuntimeKernel;
 use serde_json::Value;
 
@@ -52,6 +54,20 @@ fn json_stdout(output: &std::process::Output) -> Value {
     assert!(output.status.success(), "{output:?}");
     assert!(output.stderr.is_empty(), "{output:?}");
     serde_json::from_slice(&output.stdout).expect("JSON output")
+}
+
+struct ContextInspectThenPanicProvider;
+
+impl ProviderRuntime for ContextInspectThenPanicProvider {
+    fn run(&mut self, request: &ProviderRequest) -> Result<Vec<ProviderEvent>, ProviderError> {
+        let context = request.context.as_ref().expect("request Context");
+        assert_eq!(context.archived_items(), 0);
+        assert_eq!(context.items().len(), 2);
+        assert_eq!(context.items()[0].text(), "first Context Turn");
+        assert_eq!(context.items()[1].text(), "simulated: first Context Turn");
+        assert_eq!(request.input, "recover this Context Turn");
+        panic!("injected crash after Context request projection")
+    }
 }
 
 #[test]
@@ -121,6 +137,61 @@ fn context_reduce_publishes_a_bounded_checkpoint_and_status_is_read_only() {
         fs::read(&ledger).expect("reread reduced Runtime Ledger"),
         after_reduce
     );
+
+    fs::remove_file(ledger).expect("cleanup Runtime Ledger");
+}
+
+#[test]
+fn context_reduce_drives_the_next_provider_request_and_survives_explicit_resume() {
+    let ledger = temp_path("provider-recovery");
+    let mut runtime = RuntimeKernel::open(&ledger).expect("open Runtime");
+    let mut provider = DeterministicProvider::default();
+    let first = runtime
+        .execute(
+            &ConfigLayers::default(),
+            "first Context Turn",
+            &mut provider,
+        )
+        .expect("prepare first Context Turn");
+    runtime
+        .acknowledge(first.delivery())
+        .expect("complete first Context Turn");
+    drop(runtime);
+
+    let reduced = context_command("reduce", &ledger)
+        .args(["--max-raw-bytes", "128", "--max-raw-items", "2"])
+        .output()
+        .expect("reduce Context state");
+    let reduced_json = json_stdout(&reduced);
+    assert_eq!(reduced_json["checkpoint"]["artifact_count"], 0);
+    assert_eq!(reduced_json["checkpoint"]["recent_item_count"], 2);
+
+    let mut runtime = RuntimeKernel::open(&ledger).expect("reopen reduced Runtime");
+    let crashed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut provider = ContextInspectThenPanicProvider;
+        let _ = runtime.execute(
+            &ConfigLayers::default(),
+            "recover this Context Turn",
+            &mut provider,
+        );
+    }));
+    assert!(crashed.is_err());
+    drop(runtime);
+
+    let resumed = binary()
+        .args(["resume", "--ledger"])
+        .arg(&ledger)
+        .output()
+        .expect("resume Context Turn");
+    assert!(resumed.status.success(), "{resumed:?}");
+    assert_eq!(resumed.stdout, b"simulated: recover this Context Turn\n");
+    assert!(resumed.stderr.is_empty(), "{resumed:?}");
+
+    let status = context_command("status", &ledger)
+        .output()
+        .expect("inspect resumed Context state");
+    let status_json = json_stdout(&status);
+    assert_eq!(status_json["checkpoint"], reduced_json["checkpoint"]);
 
     fs::remove_file(ledger).expect("cleanup Runtime Ledger");
 }
