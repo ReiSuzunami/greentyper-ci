@@ -207,6 +207,21 @@ pub fn run(arguments: impl Iterator<Item = String>) -> Result<(), CliError> {
             }
             Ok(())
         }
+        Command::Retry { ledger, turn } => {
+            if has_product_driver_state(&ledger)? {
+                return retry_product_turn(&ledger, turn);
+            }
+            let mut runtime = RuntimeKernel::open_existing_strict(&ledger)?;
+            runtime.request_blocked_turn_retry(turn)?;
+            let epoch = runtime.pending_provider_epoch().ok_or(
+                greentyper_core::runtime::RuntimeError::CorruptState(
+                    "blocked Turn is missing its frozen Provider Epoch",
+                ),
+            )?;
+            let mut provider = ConfiguredProvider::from_epoch(epoch, PlatformCredentialVault)?;
+            let output = runtime.resume(&mut provider)?;
+            deliver_and_ack(&mut runtime, output)
+        }
         Command::Reconcile { ledger, delivery } => {
             let mut runtime = open_runtime(&ledger)?;
             match runtime.acknowledge(delivery)? {
@@ -496,6 +511,27 @@ fn resume_product_turn(ledger: &Path) -> Result<(), CliError> {
     deliver_product_and_ack(&mut driver, output)
 }
 
+fn retry_product_turn(ledger: &Path, turn: TurnId) -> Result<(), CliError> {
+    let stdin = io::stdin();
+    let stderr = io::stderr();
+    let mut interaction = CliProductInteraction {
+        input: stdin.lock(),
+        output: stderr.lock(),
+    };
+    let executor = LocalProcessExecutor::current()?;
+    let mut driver = ProductDriver::open_existing_for_provider_recovery(ledger, turn, executor)?;
+    driver.request_blocked_provider_turn_retry(turn)?;
+    let epoch = driver.pending_provider_epoch().ok_or(
+        greentyper_core::runtime::RuntimeError::CorruptState(
+            "blocked Turn is missing its frozen Provider Epoch",
+        ),
+    )?;
+    let mut provider = ConfiguredProvider::from_epoch(epoch, PlatformCredentialVault)?;
+    provider.enable_local_echo();
+    let output = driver.resume(&mut provider, &mut interaction)?;
+    deliver_product_and_ack(&mut driver, output)
+}
+
 fn deliver_product_and_ack<E: ToolEffectExecutor>(
     driver: &mut ProductDriver<E>,
     output: PreparedOutput,
@@ -634,6 +670,10 @@ enum Command {
         query: Option<RuntimeUsageQuery>,
     },
     Cancel {
+        ledger: PathBuf,
+        turn: TurnId,
+    },
+    Retry {
         ledger: PathBuf,
         turn: TurnId,
     },
@@ -792,7 +832,12 @@ fn parse(mut arguments: impl Iterator<Item = String>) -> Result<Command, CliErro
         return parse_app_server(arguments);
     }
     if command == "cancel" {
-        return parse_cancel(arguments);
+        let (ledger, turn) = parse_turn_target(arguments, "cancel")?;
+        return Ok(Command::Cancel { ledger, turn });
+    }
+    if command == "retry" {
+        let (ledger, turn) = parse_turn_target(arguments, "retry")?;
+        return Ok(Command::Retry { ledger, turn });
     }
     if command == "__local-process-child" {
         let mode = LocalProcessChildMode::parse(arguments.next().as_deref())
@@ -975,7 +1020,10 @@ fn parse(mut arguments: impl Iterator<Item = String>) -> Result<Command, CliErro
     }
 }
 
-fn parse_cancel(mut arguments: impl Iterator<Item = String>) -> Result<Command, CliError> {
+fn parse_turn_target(
+    mut arguments: impl Iterator<Item = String>,
+    command: &'static str,
+) -> Result<(PathBuf, TurnId), CliError> {
     let mut ledger = None;
     let mut turn = None;
     while let Some(argument) = arguments.next() {
@@ -1003,11 +1051,15 @@ fn parse_cancel(mut arguments: impl Iterator<Item = String>) -> Result<Command, 
         None => default_ledger_path()?,
     };
     let turn = turn
-        .ok_or(CliError::Usage("cancel requires --turn"))?
+        .ok_or(CliError::Usage(match command {
+            "cancel" => "cancel requires --turn",
+            "retry" => "retry requires --turn",
+            _ => "command requires --turn",
+        }))?
         .parse::<u64>()
         .map_err(|_| CliError::Usage("Turn must be a positive integer"))?;
     let turn = TurnId::new(turn).map_err(|_| CliError::Usage("Turn must be a positive integer"))?;
-    Ok(Command::Cancel { ledger, turn })
+    Ok((ledger, turn))
 }
 
 fn parse_app_server(mut arguments: impl Iterator<Item = String>) -> Result<Command, CliError> {
@@ -1758,6 +1810,7 @@ Usage:\n\
   greentyper status [--ledger PATH]\n\
   greentyper stats [--ledger PATH] [--at UNIX_MS] [--summary-only | --limit N [--cursor CURSOR]]\n\
   greentyper cancel [--ledger PATH] --turn ID\n\
+  greentyper retry [--ledger PATH] --turn ID\n\
   greentyper reconcile [--ledger PATH] --delivery ID\n\
   greentyper tool status [--ledger PATH]\n\
   greentyper tool reconcile [--ledger PATH] --call ID (--failed | --succeeded-digest SHA256)\n\
@@ -2124,6 +2177,20 @@ mod tests {
             Ok(Command::Cancel { ledger, turn })
                 if ledger == Path::new("runtime.ledger") && turn.get() == 7
         ));
+        assert!(matches!(
+            parse(
+                [
+                    "retry".to_owned(),
+                    "--ledger".to_owned(),
+                    "runtime.ledger".to_owned(),
+                    "--turn".to_owned(),
+                    "7".to_owned(),
+                ]
+                .into_iter()
+            ),
+            Ok(Command::Retry { ledger, turn })
+                if ledger == Path::new("runtime.ledger") && turn.get() == 7
+        ));
         for arguments in [
             vec!["cancel"],
             vec!["cancel", "--turn", "0"],
@@ -2134,6 +2201,18 @@ mod tests {
             assert!(
                 parse(arguments.into_iter().map(str::to_owned)).is_err(),
                 "accepted invalid cancellation command"
+            );
+        }
+        for arguments in [
+            vec!["retry"],
+            vec!["retry", "--turn", "0"],
+            vec!["retry", "--turn", "later"],
+            vec!["retry", "--turn", "1", "--turn", "2"],
+            vec!["retry", "--turn", "1", "--delivery", "2"],
+        ] {
+            assert!(
+                parse(arguments.into_iter().map(str::to_owned)).is_err(),
+                "accepted invalid retry command"
             );
         }
     }

@@ -321,7 +321,7 @@ The current operations are:
 | `config.draft.commit` | Compare the base revision, write atomically, and return the new revision and application timing |
 | `credential.bind` / `replace` | Store a new or replacement origin-bound secret and return only `bound` or `replaced` status |
 | `credential.test` / `credential.forget` | Return only `available`, `forgotten`, or `not_found`; `test` checks vault presence and performs no Provider request |
-| `runtime.status` | Inspect the Runtime Ledger and return its head, recovery status, numeric Turn/delivery/thread facts, item count, pending-selection presence, and incomplete-tail byte count without returning item text, block reasons, or selection contents |
+| `runtime.status` | Inspect the Runtime Ledger and return its head, recovery status, blocked-Turn retryability, numeric Turn/delivery/thread facts, item count, pending-selection presence, and incomplete-tail byte count without returning item text, block reasons, or selection contents |
 | `runtime.delivery` | Return the exact canonical text for the requested delivery only while that output is prepared and awaiting acknowledgement; never mutate a Ledger |
 | `runtime.acknowledge` | Durably acknowledge the exact prepared delivery; repeated acknowledgement is idempotent and a wrong delivery does not write |
 | `runtime.stats` | Return the revision-bound Usage summary; optional `limit` and `cursor` expose a bounded Attempt page, and optional `as_of_unix_ms` pins the reporting instant |
@@ -770,7 +770,7 @@ reasoning_output_micros_per_million = 3000000
 ```
 
 The resolved schedule book rejects duplicate or overlapping selectors. Config
-Epoch creation freezes the book and its fingerprints. Runtime Event schema 10
+Epoch creation freezes the book and its fingerprints. Runtime Event schema 11
 appends normalized Usage first and its cost evaluation second in one transaction;
 replay recomputes the result from that frozen evidence. Missing token classes,
 missing selectors, inconsistent accounting, and arithmetic overflow remain

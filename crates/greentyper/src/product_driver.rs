@@ -131,6 +131,48 @@ impl<E: ToolEffectExecutor> ProductDriver<E> {
         Self::from_recovery(kernel, recovery, executor, interaction, false)
     }
 
+    pub(crate) fn open_existing_for_provider_recovery(
+        runtime_path: &Path,
+        turn: TurnId,
+        executor: E,
+    ) -> Result<Self, ProductDriverError> {
+        if !runtime_path.exists() || !has_product_driver_state(runtime_path)? {
+            return Err(ProductDriverError::ProviderTurnStateUnavailable);
+        }
+        let team_path = sidecar_path(runtime_path, "team");
+        let tool_path = sidecar_path(runtime_path, "tool");
+        let (kernel, recovery) = RuntimeKernel::open_with_team_and_tools_existing_strict(
+            runtime_path,
+            team_path,
+            tool_path,
+            1,
+        )?;
+        if let Some(record) =
+            recovery.snapshot().operations.iter().find(|record| {
+                record.status == TeamOperationStatus::CommittedAwaitingAcknowledgement
+            })
+        {
+            return Err(ProductDriverError::Runtime(
+                RuntimeError::TeamOperationReconciliationRequired(record.operation),
+            ));
+        }
+        let mut sessions = recovery.into_sessions();
+        let session = match sessions.len() {
+            1 => sessions
+                .pop()
+                .ok_or(ProductDriverError::UnexpectedRecovery)?,
+            0 => {
+                return Err(ProductDriverError::ProviderTurnOwnerUnavailable(turn.get()));
+            }
+            _ => return Err(ProductDriverError::UnexpectedRecovery),
+        };
+        Ok(Self {
+            kernel,
+            session,
+            executor,
+        })
+    }
+
     fn from_recovery(
         mut kernel: RuntimeKernel,
         recovery: greentyper_core::runtime::KernelTeamRecovery,
@@ -217,6 +259,15 @@ impl<E: ToolEffectExecutor> ProductDriver<E> {
             self.kernel
                 .resume_provider_turn(self.session, provider, local_echo_resources)?;
         self.finish(outcome, provider, interaction)
+    }
+
+    pub(crate) fn request_blocked_provider_turn_retry(
+        &mut self,
+        turn: TurnId,
+    ) -> Result<DurabilityReceipt, ProductDriverError> {
+        self.kernel
+            .request_blocked_provider_turn_retry(self.session, turn)
+            .map_err(ProductDriverError::Runtime)
     }
 
     pub(crate) fn recover_pending_tool_approval(

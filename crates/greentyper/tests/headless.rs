@@ -22,7 +22,7 @@ use greentyper_core::provider::{
 };
 use greentyper_core::runtime::{ModelSelection, RecoveryStatus, RuntimeError, RuntimeKernel};
 use greentyper_core::tool_runtime::ToolResources;
-use greentyper_core::usage::UsageTimestamp;
+use greentyper_core::usage::{UsageAttemptOutcome, UsageTimestamp};
 
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(1);
 
@@ -490,6 +490,114 @@ fn cancel_command_abandons_one_provider_block_without_replaying_or_mutating_side
 }
 
 #[test]
+fn retry_command_recovers_the_product_agent_without_mutating_team_or_tool_ledgers() {
+    let ledger = temp_path("provider-product-retry");
+    let team_path = sidecar(&ledger, "team");
+    let tool_path = sidecar(&ledger, "tool");
+    let (mut runtime, recovery) =
+        RuntimeKernel::open_with_team_and_tools(&ledger, &team_path, &tool_path, 1)
+            .expect("open Product Runtime");
+    assert!(recovery.into_sessions().is_empty());
+    let admission = runtime
+        .dispatch_team(TeamCommand::AdmitRoot {
+            task: TaskSpec::new(
+                "retry Provider interruption",
+                TaskScope::from_labels(["runtime"]),
+            ),
+            budget: ResourceBudget::new(1_000, 8),
+            capabilities: CapabilitySnapshot::from_capabilities([Capability::Process]),
+        })
+        .expect("admit Product Agent");
+    let session = match admission.commit.outcome {
+        CommandOutcome::RootAdmitted { session, .. } => session,
+        other => panic!("unexpected Team outcome: {other:?}"),
+    };
+    runtime
+        .acknowledge_team_operation(admission.operation)
+        .expect("acknowledge Team admission");
+    assert!(matches!(
+        runtime.execute_provider_turn(
+            session,
+            &ConfigLayers::default(),
+            "product retry",
+            &mut UnavailableProvider,
+            |_| Ok(ToolResources::default()),
+        ),
+        Err(RuntimeError::Provider(ProviderError::Unavailable { .. }))
+    ));
+    let RecoveryStatus::Blocked {
+        turn,
+        retryable: true,
+        ..
+    } = runtime.snapshot().status
+    else {
+        panic!("Product Provider failure was not retryable")
+    };
+    drop(runtime);
+
+    let team_before = fs::read(&team_path).expect("read Team Ledger");
+    let tool_before = fs::read(&tool_path).expect("read Tool Ledger");
+    let retried = binary()
+        .args(["retry", "--ledger"])
+        .arg(&ledger)
+        .args(["--turn", &turn.get().to_string()])
+        .output()
+        .expect("retry Product Provider Turn");
+    assert!(retried.status.success(), "{retried:?}");
+    assert_eq!(retried.stdout, b"simulated: product retry\n");
+    assert!(retried.stderr.is_empty(), "{retried:?}");
+    assert_eq!(
+        fs::read(&team_path).expect("reread Team Ledger"),
+        team_before
+    );
+    assert_eq!(
+        fs::read(&tool_path).expect("reread Tool Ledger"),
+        tool_before
+    );
+
+    let recovered = RuntimeKernel::open(&ledger).expect("reopen retried Product Runtime");
+    assert_eq!(recovered.snapshot().status, RecoveryStatus::Ready);
+    let usage = recovered.usage_snapshot(UsageTimestamp::now().unwrap());
+    assert_eq!(usage.attempts().len(), 2);
+    assert_eq!(usage.attempts()[0].outcome(), UsageAttemptOutcome::Failed);
+    assert_eq!(
+        usage.attempts()[1].outcome(),
+        UsageAttemptOutcome::Succeeded
+    );
+    drop(recovered);
+
+    let runtime_after = fs::read(&ledger).expect("read retried Runtime Ledger");
+    let repeated = binary()
+        .args(["retry", "--ledger"])
+        .arg(&ledger)
+        .args(["--turn", &turn.get().to_string()])
+        .output()
+        .expect("reject repeated Product retry");
+    assert!(!repeated.status.success(), "{repeated:?}");
+    assert!(repeated.stdout.is_empty());
+    assert!(
+        String::from_utf8_lossy(&repeated.stderr).contains("cannot be retried"),
+        "{repeated:?}"
+    );
+    assert_eq!(
+        fs::read(&ledger).expect("reread Runtime Ledger after rejected retry"),
+        runtime_after
+    );
+    assert_eq!(
+        fs::read(&team_path).expect("reread Team Ledger after rejected retry"),
+        team_before
+    );
+    assert_eq!(
+        fs::read(&tool_path).expect("reread Tool Ledger after rejected retry"),
+        tool_before
+    );
+
+    fs::remove_file(ledger).expect("cleanup Runtime ledger");
+    fs::remove_file(team_path).expect("cleanup Team ledger");
+    fs::remove_file(tool_path).expect("cleanup Tool ledger");
+}
+
+#[test]
 fn headless_refuses_to_repeat_prepared_unacknowledged_output() {
     let path = temp_path("reconcile");
     let mut runtime = RuntimeKernel::open(&path).expect("open Runtime");
@@ -561,6 +669,80 @@ fn resume_command_continues_a_durably_admitted_turn() {
         .expect("run resume command");
     assert!(resumed.status.success(), "{resumed:?}");
     assert_eq!(resumed.stdout, b"simulated: continue\n");
+    fs::remove_file(path).expect("cleanup Runtime ledger");
+}
+
+#[test]
+fn retry_command_reuses_the_frozen_provider_and_never_repeats_without_a_new_request() {
+    let path = temp_path("retry");
+    let mut runtime = RuntimeKernel::open(&path).expect("open Runtime");
+    assert!(matches!(
+        runtime.execute(
+            &ConfigLayers::default(),
+            "retry through CLI",
+            &mut UnavailableProvider,
+        ),
+        Err(RuntimeError::Provider(ProviderError::Unavailable { .. }))
+    ));
+    let RecoveryStatus::Blocked {
+        turn,
+        retryable: true,
+        ..
+    } = runtime.snapshot().status
+    else {
+        panic!("early Provider failure was not retryable")
+    };
+    drop(runtime);
+
+    let status = binary()
+        .args(["status", "--ledger"])
+        .arg(&path)
+        .output()
+        .expect("inspect retryable Provider Turn");
+    assert!(status.status.success(), "{status:?}");
+    assert!(
+        String::from_utf8_lossy(&status.stdout).contains("retryable=true"),
+        "{status:?}"
+    );
+
+    let retried = binary()
+        .args(["retry", "--ledger"])
+        .arg(&path)
+        .args(["--turn", &turn.get().to_string()])
+        .output()
+        .expect("retry blocked Provider Turn");
+    assert!(retried.status.success(), "{retried:?}");
+    assert_eq!(retried.stdout, b"simulated: retry through CLI\n");
+    assert!(retried.stderr.is_empty(), "{retried:?}");
+
+    let recovered = RuntimeKernel::open(&path).expect("reopen retried Runtime");
+    assert_eq!(recovered.snapshot().status, RecoveryStatus::Ready);
+    let usage = recovered.usage_snapshot(UsageTimestamp::now().unwrap());
+    assert_eq!(usage.attempts().len(), 2);
+    assert_eq!(usage.attempts()[0].outcome(), UsageAttemptOutcome::Failed);
+    assert_eq!(
+        usage.attempts()[1].outcome(),
+        UsageAttemptOutcome::Succeeded
+    );
+    drop(recovered);
+
+    let before_repeat = fs::read(&path).expect("read retried Runtime Ledger");
+    let repeated = binary()
+        .args(["retry", "--ledger"])
+        .arg(&path)
+        .args(["--turn", &turn.get().to_string()])
+        .output()
+        .expect("reject repeated retry request");
+    assert!(!repeated.status.success(), "{repeated:?}");
+    assert!(repeated.stdout.is_empty());
+    assert!(
+        String::from_utf8_lossy(&repeated.stderr).contains("cannot be retried"),
+        "{repeated:?}"
+    );
+    assert_eq!(
+        fs::read(&path).expect("reread Runtime Ledger after rejected retry"),
+        before_repeat
+    );
     fs::remove_file(path).expect("cleanup Runtime ledger");
 }
 

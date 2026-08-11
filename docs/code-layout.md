@@ -48,10 +48,12 @@ Manager access, the fixed
 `local.echo` process executor, a terminal-neutral presentation projection, Config
 Object lifecycle/Provider-wizard controller, deterministic viewport-row layout, and a
 ProductDriver that composes the Kernel-owned Team, Tool, Provider, approval, and
-delivery seams. The public `cancel --turn ID` path uses strict existing-state
-open, recovered Active Agent authority for Product Ledgers, and the Kernel's
-schema-10 Provider-block cancellation; it cannot repair or create state, retry a
-Provider, or mutate Team/Tool Ledgers. Its first product terminal tracer privately owns a
+delivery seams. The public `retry --turn ID` and `cancel --turn ID` paths use
+strict existing-state open, recovered Active Agent authority for Product
+Ledgers, and schema-11 Provider-block recovery. Retry is limited to an initial
+Provider request blocked before its first event and reuses the frozen Turn and
+Epochs; cancellation calls no Provider. Neither path repairs or creates state or
+mutates Team/Tool Ledgers. Its first product terminal tracer privately owns a
 Direct VT cell-diff renderer, blocking Crossterm event adapter, alternate-screen
 and raw-mode lifecycle, the public `tui` command, and metadata-driven rendered
 interactions for every user-scope Config Schema field over the existing Config

@@ -165,9 +165,11 @@ effort, service tier, and distinct template-mirror pricing provenance while
 rejecting fingerprint, outcome, timestamp, and transition tampering. A schema-5
 Config Epoch without the optional token field, a schema-6 Config Epoch without
 request-policy fields, and a schema-7 Config Epoch without template-mirror tags
-remain replayable under current Runtime Event schema 10; schema 8 Ledgers remain
+remain replayable under current Runtime Event schema 11; schema 8 Ledgers remain
 compatible before the schema-9 Model-selection event, and schema-9 Ledgers
 replay with legacy untyped block origin before schema-10 cancellation events.
+Schema-10 blocks replay without a retry stage and therefore remain
+non-retryable; schema-11 round trips the stage and retry-request event.
 
 Product integration tests also run the configured Responses, Chat Completions,
 and Messages adapters against concrete loopback HTTP tracers. They resolve and
@@ -232,9 +234,18 @@ Team/Tool byte identity, restart recovery, and a successful next headless Turn.
 Negative tests preserve bytes while rejecting missing state, prepared output,
 Tool denial or reconciliation, and the corresponding delivery/tool recovery
 still succeeds afterward.
+Provider retry tests persist failed Usage/cost evidence, expose retryability only
+for `BeforeResponse` and `BeforeFirstEvent`, append one explicit schema-11 retry
+request, recover it as `resume-required`, reuse the frozen Provider Epoch, and
+record a new Attempt. Core tests reject partial-stream, malformed, post-Tool
+continuation, duplicate, and stale-session requests without changing the
+relevant Ledger bytes. Product and public CLI tests prove recovered Agent
+authority, successful replay, a second early failure requiring a second request,
+strict missing/incomplete-state handling, and Team/Tool byte identity. These
+tests do not claim that retry is free of remote work, usage, or billing.
 Windows-only tests exercise Credential Manager bind, replace, resolve, and
 forget. This does not cover live credentials, proxy authentication,
-automatic retry or resumable reconnect, live Providers, or broader Tool presentation.
+automatic retry policy or partial-stream reconnect, live Providers, or broader Tool presentation.
 
 The first Usage projection suite durably records Provider request and
 continuation attempts, closes interrupted attempts only on explicit resume,
@@ -598,7 +609,7 @@ usage, incomplete/error terminals, bounds, redaction, and Tool continuation.
 Fixture Providers pass normalized events through the Kernel and Tool Runtime
 for one approved call and continuation. HTTP interruption fixtures now classify
 zero-event and post-event EOF separately without reconnecting or retrying. The
-remaining scenarios land with resumable reconnect, automatic retry, multiple
+remaining scenarios land with partial-stream reconnect, automatic retry policy, multiple
 tools, broader delta kinds, Messages reasoning blocks, and broader usage
 normalization.
 

@@ -10,7 +10,7 @@ use greentyper_core::context::{
 use greentyper_core::ledger::{EventData, FileLedger, LedgerHead};
 use greentyper_core::provider::{
     DeterministicProvider, ProviderError, ProviderEvent, ProviderProfileSnapshot, ProviderRequest,
-    ProviderRuntime, UsageAccuracy, UsageRecord,
+    ProviderRuntime, ProviderUnavailableStage, UsageAccuracy, UsageRecord,
 };
 use greentyper_core::runtime::{
     AcknowledgeOutcome, CancelTurnOutcome, RecoveryStatus, RuntimeError, RuntimeKernel,
@@ -341,10 +341,20 @@ fn malformed_provider_output_is_durably_blocked() {
         runtime.execute(&ConfigLayers::default(), "input", &mut provider),
         Err(RuntimeError::InvalidProviderOutput(_))
     ));
+    let RecoveryStatus::Blocked {
+        turn,
+        retryable: false,
+        ..
+    } = runtime.snapshot().status
+    else {
+        panic!("malformed Provider output was incorrectly retryable")
+    };
+    let blocked_head = runtime.snapshot().head;
     assert!(matches!(
-        runtime.snapshot().status,
-        RecoveryStatus::Blocked { .. }
+        runtime.request_blocked_turn_retry(turn),
+        Err(RuntimeError::TurnRetryNotAllowed(actual)) if actual == turn
     ));
+    assert_eq!(runtime.snapshot().head, blocked_head);
     drop(runtime);
 
     let mut recovered = RuntimeKernel::open(&path).expect("recover Runtime");
@@ -371,10 +381,14 @@ fn provider_error_details_never_enter_the_runtime_ledger() {
         runtime.execute(&ConfigLayers::default(), "input", &mut UnavailableProvider,),
         Err(RuntimeError::Provider(ProviderError::Unavailable { .. }))
     ));
-    let RecoveryStatus::Blocked { reason, .. } = runtime.snapshot().status else {
+    let RecoveryStatus::Blocked {
+        reason, retryable, ..
+    } = runtime.snapshot().status
+    else {
         panic!("Provider error did not block the Turn");
     };
     assert_eq!(reason, "Provider became unavailable before a response");
+    assert!(retryable);
     drop(runtime);
 
     let bytes = fs::read(&path).expect("read Runtime Ledger");
@@ -389,6 +403,189 @@ fn provider_error_details_never_enter_the_runtime_ledger() {
         RecoveryStatus::Blocked { ref reason, .. }
             if reason == "Provider became unavailable before a response"
     ));
+    drop(recovered);
+    fs::remove_file(path).expect("cleanup Runtime ledger");
+}
+
+#[test]
+fn retryable_provider_failure_is_durably_rearmed_and_records_a_new_attempt() {
+    let path = temp_path("provider-retry");
+    let mut runtime = RuntimeKernel::open(&path).expect("open Runtime");
+    let mut unavailable = UnavailableAtStageProvider {
+        stage: ProviderUnavailableStage::BeforeFirstEvent,
+    };
+    assert!(matches!(
+        runtime.execute(&ConfigLayers::default(), "retry input", &mut unavailable),
+        Err(RuntimeError::Provider(ProviderError::Unavailable { .. }))
+    ));
+    let RecoveryStatus::Blocked {
+        turn,
+        retryable: true,
+        ..
+    } = runtime.snapshot().status
+    else {
+        panic!("early Provider failure was not marked retryable")
+    };
+    let frozen_provider = runtime
+        .pending_provider_epoch()
+        .expect("pending Provider Epoch")
+        .clone();
+    let blocked_head = runtime.snapshot().head;
+    runtime
+        .request_blocked_turn_retry(turn)
+        .expect("durably request retry");
+    assert_ne!(runtime.snapshot().head, blocked_head);
+    assert_eq!(
+        runtime.snapshot().status,
+        RecoveryStatus::ResumeRequired { turn }
+    );
+    let retry_head = runtime.snapshot().head;
+    assert!(matches!(
+        runtime.request_blocked_turn_retry(turn),
+        Err(RuntimeError::TurnRetryNotAllowed(actual)) if actual == turn
+    ));
+    assert_eq!(runtime.snapshot().head, retry_head);
+    drop(runtime);
+
+    let mut recovered = RuntimeKernel::open(&path).expect("recover requested retry");
+    assert_eq!(recovered.pending_provider_epoch(), Some(&frozen_provider));
+    assert_eq!(
+        recovered.snapshot().status,
+        RecoveryStatus::ResumeRequired { turn }
+    );
+    let mut provider = DeterministicProvider::default();
+    let output = recovered.resume(&mut provider).expect("run explicit retry");
+    assert_eq!(output.text(), "simulated: retry input");
+    let usage = recovered.usage_snapshot(UsageTimestamp::now().unwrap());
+    assert_eq!(usage.attempts().len(), 2);
+    assert_eq!(usage.attempts()[0].outcome(), UsageAttemptOutcome::Failed);
+    assert_eq!(
+        usage.attempts()[1].outcome(),
+        UsageAttemptOutcome::Succeeded
+    );
+    recovered
+        .acknowledge(output.delivery())
+        .expect("acknowledge retried output");
+    assert_eq!(recovered.snapshot().status, RecoveryStatus::Ready);
+    drop(recovered);
+    fs::remove_file(path).expect("cleanup Runtime ledger");
+}
+
+#[test]
+fn partial_provider_failure_is_not_retryable_and_does_not_mutate_on_rejection() {
+    let path = temp_path("provider-retry-partial");
+    let mut runtime = RuntimeKernel::open(&path).expect("open Runtime");
+    let mut unavailable = UnavailableAtStageProvider {
+        stage: ProviderUnavailableStage::AfterFirstEvent,
+    };
+    assert!(matches!(
+        runtime.execute(&ConfigLayers::default(), "partial input", &mut unavailable),
+        Err(RuntimeError::Provider(ProviderError::Unavailable { .. }))
+    ));
+    let RecoveryStatus::Blocked {
+        turn,
+        retryable: false,
+        ..
+    } = runtime.snapshot().status
+    else {
+        panic!("partial Provider failure was incorrectly retryable")
+    };
+    let blocked_head = runtime.snapshot().head;
+    assert!(matches!(
+        runtime.request_blocked_turn_retry(turn),
+        Err(RuntimeError::TurnRetryNotAllowed(actual)) if actual == turn
+    ));
+    assert_eq!(runtime.snapshot().head, blocked_head);
+    assert_eq!(
+        runtime
+            .usage_snapshot(UsageTimestamp::now().unwrap())
+            .attempts()
+            .len(),
+        1
+    );
+    drop(runtime);
+
+    let recovered = RuntimeKernel::open(&path).expect("recover partial Provider failure");
+    assert!(matches!(
+        recovered.snapshot().status,
+        RecoveryStatus::Blocked {
+            retryable: false,
+            ..
+        }
+    ));
+    drop(recovered);
+    fs::remove_file(path).expect("cleanup Runtime ledger");
+}
+
+#[test]
+fn a_retry_that_fails_early_requires_another_explicit_retry_request() {
+    let path = temp_path("provider-retry-again");
+    let mut runtime = RuntimeKernel::open(&path).expect("open Runtime");
+    let mut first_failure = UnavailableAtStageProvider {
+        stage: ProviderUnavailableStage::BeforeResponse,
+    };
+    assert!(matches!(
+        runtime.execute(&ConfigLayers::default(), "retry twice", &mut first_failure,),
+        Err(RuntimeError::Provider(ProviderError::Unavailable { .. }))
+    ));
+    let RecoveryStatus::Blocked {
+        turn,
+        retryable: true,
+        ..
+    } = runtime.snapshot().status
+    else {
+        panic!("first early failure was not retryable")
+    };
+    runtime
+        .request_blocked_turn_retry(turn)
+        .expect("request first retry");
+    let mut second_failure = UnavailableAtStageProvider {
+        stage: ProviderUnavailableStage::BeforeFirstEvent,
+    };
+    assert!(matches!(
+        runtime.resume(&mut second_failure),
+        Err(RuntimeError::Provider(ProviderError::Unavailable { .. }))
+    ));
+    let RecoveryStatus::Blocked {
+        turn: blocked_turn,
+        retryable: true,
+        ..
+    } = runtime.snapshot().status
+    else {
+        panic!("second early failure was not blocked for explicit retry")
+    };
+    assert_eq!(blocked_turn, turn);
+    let usage = runtime.usage_snapshot(UsageTimestamp::now().unwrap());
+    assert_eq!(usage.attempts().len(), 2);
+    assert!(
+        usage
+            .attempts()
+            .iter()
+            .all(|attempt| attempt.outcome() == UsageAttemptOutcome::Failed)
+    );
+    let blocked_head = runtime.snapshot().head;
+    runtime
+        .request_blocked_turn_retry(turn)
+        .expect("request second retry explicitly");
+    assert_ne!(runtime.snapshot().head, blocked_head);
+    assert_eq!(
+        runtime.snapshot().status,
+        RecoveryStatus::ResumeRequired { turn }
+    );
+    assert_eq!(
+        runtime
+            .usage_snapshot(UsageTimestamp::now().unwrap())
+            .attempts()
+            .len(),
+        2
+    );
+    drop(runtime);
+
+    let recovered = RuntimeKernel::open(&path).expect("recover second retry request");
+    assert_eq!(
+        recovered.snapshot().status,
+        RecoveryStatus::ResumeRequired { turn }
+    );
     drop(recovered);
     fs::remove_file(path).expect("cleanup Runtime ledger");
 }
@@ -463,7 +660,7 @@ fn unsupported_runtime_event_schema_fails_closed() {
         .append(
             LedgerHead::default(),
             &[EventData {
-                schema: 11,
+                schema: 12,
                 kind: 1,
                 payload: 1_u64.to_le_bytes().to_vec(),
             }],
@@ -473,8 +670,8 @@ fn unsupported_runtime_event_schema_fails_closed() {
     assert!(matches!(
         RuntimeKernel::open(&path),
         Err(RuntimeError::UnsupportedRuntimeEventSchema {
-            supported: 10,
-            actual: 11
+            supported: 11,
+            actual: 12
         })
     ));
     fs::remove_file(path).expect("cleanup Runtime ledger");
@@ -723,6 +920,19 @@ impl ProviderRuntime for UnavailableProvider {
     fn run(&mut self, _request: &ProviderRequest) -> Result<Vec<ProviderEvent>, ProviderError> {
         Err(ProviderError::unavailable(
             "https://provider.test/?token=private-token",
+        ))
+    }
+}
+
+struct UnavailableAtStageProvider {
+    stage: ProviderUnavailableStage,
+}
+
+impl ProviderRuntime for UnavailableAtStageProvider {
+    fn run(&mut self, _request: &ProviderRequest) -> Result<Vec<ProviderEvent>, ProviderError> {
+        Err(ProviderError::unavailable_during(
+            self.stage,
+            "private Provider diagnostic",
         ))
     }
 }

@@ -70,7 +70,7 @@ distinct `template_mirror` source. An explicit `unknown`, `manual`, or
 rate card still require an explicit pricing decision. Mirroring a rate card
 never mirrors credentials, origin authority, or Provider identity.
 
-## Transport Interruption and Explicit Cancellation
+## Transport Interruption and Explicit Recovery
 
 `ProviderUnavailableStage` gives every adapter the same redacted transport
 boundary: `BeforeResponse`, `BeforeFirstEvent`, or `AfterFirstEvent`. Responses,
@@ -89,19 +89,30 @@ work or incurred no usage. Each attempted request is already closed as one
 durable failed Usage Attempt with its cost evaluation before the Turn becomes
 blocked.
 
-`greentyper cancel --ledger PATH --turn ID` is the explicit terminal recovery
-for a current-schema Provider-origin block. Runtime Event schema 10 records the
-block origin and appends `TurnCancelled` as a validated transaction. The event
+Runtime Event schema 11 records the redacted unavailability stage. Only an
+initial Provider request blocked at `BeforeResponse` or `BeforeFirstEvent` is
+marked retryable. `greentyper retry --ledger PATH --turn ID` appends a validated
+`TurnRetryRequested`, preserving the exact Turn, input, Config Epoch, Provider
+Epoch, and prior Usage/cost evidence, then starts one new durable Usage Attempt.
+The request may repeat remote work, usage, or billing. If adapter construction
+fails after the retry request, the durable state is `resume-required`; if the new
+attempt fails early, the Turn blocks again and needs another explicit request.
+`AfterFirstEvent`, malformed output, Tool-derived blocks, every post-Tool
+continuation failure, and schema-10-or-earlier blocks without the stage reject
+retry without mutation.
+
+`greentyper cancel --ledger PATH --turn ID` remains the explicit terminal
+recovery for a typed Provider-origin block. Schema 10 introduced the block origin
+and validated `TurnCancelled`; schema 11 preserves that contract. The event
 clears only the pending Turn; it retains its user item, immutable Usage/cost
 history, and frozen Config and Provider Epochs. Repeating the exact cancellation
-is a no-op. Product cancellation strictly opens existing Runtime, Team, and Tool
-Ledgers, authenticates the recovered Active Agent Session that owns the Turn,
-and leaves Team and Tool bytes unchanged. Missing or incomplete state is never
-created or repaired. Prepared delivery, admission awaiting resume, incomplete
-streaming state, Tool approval or reconciliation, Tool-derived blocks, and
-schema-9-or-earlier untyped blocks remain fail-closed on their existing recovery
-paths. Cancellation itself never calls a Provider or Tool and creates no Usage
-Attempt.
+is a no-op. Product retry and cancellation strictly open existing Runtime, Team,
+and Tool Ledgers, authenticate the recovered Active Agent Session that owns the
+Turn, and leave Team and Tool bytes unchanged. Missing or incomplete state is
+never created or repaired. Prepared delivery, admission awaiting resume,
+incomplete streaming state, Tool approval or reconciliation, and Tool-derived
+blocks remain fail-closed on their existing recovery paths. Cancellation itself
+never calls a Provider or Tool and creates no Usage Attempt.
 
 ## Interface
 
@@ -437,7 +448,7 @@ plus the [OpenCode Go endpoint matrix](https://opencode.ai/docs/go/).
 
 - Live inference conformance, persistent catalog discovery/refresh, automatic
   Provider Profile starter offers and updates, configurable proxy policy,
-  broader TLS platform evidence, automatic retry policy, and resumable
+  broader TLS platform evidence, automatic retry policy, and partial-stream
   reconnect. Release Provider
   Template defaults and seed catalog facts are bundled, but the current adapters
   do not reconnect or retry partial streams.

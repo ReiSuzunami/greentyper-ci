@@ -495,6 +495,7 @@ fn app_server_runtime_status_inspects_missing_state_without_creating_it() {
     assert_eq!(results[0]["result"]["recovered_tail_bytes"], 0);
     assert_eq!(results[0]["result"]["thread"], Value::Null);
     assert_eq!(results[0]["result"]["item_count"], 0);
+    assert_eq!(results[0]["result"]["retryable"], false);
     assert_eq!(results[0]["result"]["pending_model_selection"], false);
     assert_eq!(results[1]["error"]["category"], "invalid_request");
     assert_eq!(results[2]["result"]["schema_version"], 1);

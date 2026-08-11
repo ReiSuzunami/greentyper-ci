@@ -11,6 +11,7 @@ use greentyper_core::config::ConfigLayers;
 use greentyper_core::provider::responses::{ResponsesSseDecoder, normalize_responses_events};
 use greentyper_core::provider::{
     ProviderError, ProviderEvent, ProviderRequest, ProviderRuntime, ProviderToolOutput,
+    ProviderUnavailableStage,
 };
 use greentyper_core::runtime::{ProviderTurnOutcome, RecoveryStatus, RuntimeError, RuntimeKernel};
 use greentyper_core::tool_runtime::{
@@ -86,6 +87,29 @@ impl ProviderRuntime for PanicAfterToolProvider {
         _output: &ProviderToolOutput,
     ) -> Result<Vec<ProviderEvent>, ProviderError> {
         panic!("injected process death after durable Tool success")
+    }
+}
+
+#[derive(Default)]
+struct UnavailableContinuationProvider {
+    continuations: usize,
+}
+
+impl ProviderRuntime for UnavailableContinuationProvider {
+    fn run(&mut self, _request: &ProviderRequest) -> Result<Vec<ProviderEvent>, ProviderError> {
+        decode(INITIAL_RESPONSE)
+    }
+
+    fn continue_after_tool(
+        &mut self,
+        _request: &ProviderRequest,
+        _output: &ProviderToolOutput,
+    ) -> Result<Vec<ProviderEvent>, ProviderError> {
+        self.continuations += 1;
+        Err(ProviderError::unavailable_during(
+            ProviderUnavailableStage::BeforeResponse,
+            "injected continuation outage",
+        ))
     }
 }
 
@@ -344,6 +368,80 @@ fn recovered_provider_turn_never_repeats_a_succeeded_tool_without_its_raw_result
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0].status, ToolCallStatus::Succeeded);
     drop(recovered);
+
+    fs::remove_file(runtime_path).expect("cleanup Runtime Ledger");
+    fs::remove_file(team_path).expect("cleanup Team Ledger");
+    fs::remove_file(tool_path).expect("cleanup Tool Ledger");
+}
+
+#[test]
+fn provider_continuation_failure_after_tool_success_is_not_retryable() {
+    let runtime_path = temp_path("continuation-unavailable", "runtime");
+    let team_path = temp_path("continuation-unavailable", "team");
+    let tool_path = temp_path("continuation-unavailable", "tool");
+    let (mut kernel, recovery) =
+        RuntimeKernel::open_with_team_and_tools(&runtime_path, &team_path, &tool_path, 1)
+            .expect("open Provider Tool Kernel");
+    assert!(recovery.into_sessions().is_empty());
+    let root = admit_root(&mut kernel);
+    let mut provider = UnavailableContinuationProvider::default();
+    let approval = match kernel
+        .execute_provider_turn(
+            root,
+            &ConfigLayers::default(),
+            "What is the weather in Hong Kong?",
+            &mut provider,
+            |_| Ok(ToolResources::default().with_process("weather")),
+        )
+        .expect("prepare Provider Tool call")
+    {
+        ProviderTurnOutcome::ApprovalRequired(approval) => approval,
+        other => panic!("unexpected Provider Turn outcome: {other:?}"),
+    };
+    assert!(matches!(
+        kernel.resolve_provider_tool_call(
+            approval,
+            ApprovalDecision::Grant {
+                expires_at_unix_ms: u64::MAX,
+            },
+            &mut WeatherExecutor,
+            &mut provider,
+        ),
+        Err(RuntimeError::Provider(ProviderError::Unavailable { .. }))
+    ));
+    assert_eq!(provider.continuations, 1);
+    let RecoveryStatus::Blocked {
+        turn,
+        retryable: false,
+        ..
+    } = kernel.snapshot().status
+    else {
+        panic!("Provider continuation failure was incorrectly retryable")
+    };
+    assert_eq!(
+        kernel.tool_snapshot().expect("Tool snapshot").calls[0].status,
+        ToolCallStatus::Succeeded
+    );
+    let runtime_before = fs::read(&runtime_path).expect("read Runtime Ledger before rejection");
+    let team_before = fs::read(&team_path).expect("read Team Ledger before rejection");
+    let tool_before = fs::read(&tool_path).expect("read Tool Ledger before rejection");
+    assert!(matches!(
+        kernel.request_blocked_provider_turn_retry(root, turn),
+        Err(RuntimeError::TurnRetryNotAllowed(actual)) if actual == turn
+    ));
+    assert_eq!(
+        fs::read(&runtime_path).expect("read Runtime Ledger after rejection"),
+        runtime_before
+    );
+    assert_eq!(
+        fs::read(&team_path).expect("read Team Ledger after rejection"),
+        team_before
+    );
+    assert_eq!(
+        fs::read(&tool_path).expect("read Tool Ledger after rejection"),
+        tool_before
+    );
+    drop(kernel);
 
     fs::remove_file(runtime_path).expect("cleanup Runtime Ledger");
     fs::remove_file(team_path).expect("cleanup Team Ledger");

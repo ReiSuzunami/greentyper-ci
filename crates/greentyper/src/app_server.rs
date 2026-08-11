@@ -852,15 +852,20 @@ impl ProductInteraction for AppServerProductInteraction {
 }
 
 fn runtime_status(snapshot: greentyper_core::runtime::RuntimeSnapshot) -> Value {
-    let (status, turn, delivery) = match snapshot.status {
-        RecoveryStatus::Ready => ("ready", None, None),
-        RecoveryStatus::ResumeRequired { turn } => ("resume_required", Some(turn.get()), None),
+    let (status, turn, delivery, retryable) = match snapshot.status {
+        RecoveryStatus::Ready => ("ready", None, None, false),
+        RecoveryStatus::ResumeRequired { turn } => {
+            ("resume_required", Some(turn.get()), None, false)
+        }
         RecoveryStatus::ReconciliationRequired { turn, delivery } => (
             "reconciliation_required",
             Some(turn.get()),
             Some(delivery.get()),
+            false,
         ),
-        RecoveryStatus::Blocked { turn, .. } => ("blocked", Some(turn.get()), None),
+        RecoveryStatus::Blocked {
+            turn, retryable, ..
+        } => ("blocked", Some(turn.get()), None, retryable),
     };
     json!({
         "ledger": {
@@ -871,6 +876,7 @@ fn runtime_status(snapshot: greentyper_core::runtime::RuntimeSnapshot) -> Value 
         "status": status,
         "turn": turn,
         "delivery": delivery,
+        "retryable": retryable,
         "thread": snapshot.thread.map(|thread| thread.get()),
         "item_count": snapshot.items.len(),
         "pending_model_selection": snapshot.pending_model_selection.is_some(),
@@ -1624,12 +1630,16 @@ mod tests {
 
     use greentyper_core::agent_team::TeamOperationRecord;
     use greentyper_core::config::{ConfigDocument, ConfigPaths, ConfigRuntime};
+    use greentyper_core::ledger::LedgerHead;
+    use greentyper_core::model::TurnId;
     use greentyper_core::provider::ProviderDialect;
-    use greentyper_core::runtime::{ProviderToolApproval, RuntimeKernel};
+    use greentyper_core::runtime::{
+        ProviderToolApproval, RecoveryStatus, RuntimeKernel, RuntimeSnapshot,
+    };
     use greentyper_core::tool_runtime::{AuthorizedToolCall, ToolEffectExecutor, ToolExecution};
     use serde_json::{Value, json};
 
-    use super::{AppServer, BoxedToolExecutor, run_stdio_with_vault};
+    use super::{AppServer, BoxedToolExecutor, run_stdio_with_vault, runtime_status};
     use crate::credential_vault::{
         CredentialVault, InMemoryCredentialVault, ProviderCredentialScope, SecretValue,
     };
@@ -1641,6 +1651,26 @@ mod tests {
         include_bytes!("../../../tests/fixtures/provider/responses/v1/http-tool-call.sse");
     const TOOL_CONTINUATION_SSE: &[u8] =
         include_bytes!("../../../tests/fixtures/provider/responses/v1/http-tool-continuation.sse");
+
+    #[test]
+    fn runtime_status_exposes_provider_retry_eligibility() {
+        let turn = TurnId::new(7).expect("Turn ID");
+        let status = runtime_status(RuntimeSnapshot {
+            head: LedgerHead::default(),
+            thread: None,
+            items: Vec::new(),
+            status: RecoveryStatus::Blocked {
+                turn,
+                reason: "Provider stream failed before its first event".into(),
+                retryable: true,
+            },
+            pending_model_selection: None,
+            recovered_tail_bytes: 0,
+        });
+        assert_eq!(status["status"], "blocked");
+        assert_eq!(status["turn"], turn.get());
+        assert_eq!(status["retryable"], true);
+    }
 
     struct InterruptingInteraction;
 

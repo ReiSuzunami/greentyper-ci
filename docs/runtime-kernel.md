@@ -111,7 +111,8 @@ as durability-ambiguous; callers must close and recover instead of retrying.
 | No pending Turn | `ready` | Admit a new Turn |
 | Admission durable, Provider not completed | `resume-required` | Explicit `resume`; never automatic |
 | Output prepared, acknowledgement absent | `reconciliation-required` | Explicit `reconcile`; never print or rerun automatically |
-| Provider failed or emitted malformed canonical events | `blocked` | Inspect, or explicitly `cancel --turn ID` when schema 10 records a Provider-origin block; never retry automatically |
+| Initial Provider request failed before its first event | `blocked`, `retryable=true` under schema 11 | Explicit `retry --turn ID` or `cancel --turn ID`; never automatic |
+| Provider failed after an event, emitted malformed events, or failed after a Tool | `blocked`, `retryable=false` | Inspect, or `cancel --turn ID` only for a typed Provider-origin block |
 | Output acknowledged and Turn completed | `ready` | Duplicate acknowledgement is a no-op |
 
 The headless CLI exposes these states through `status`. `headless` refuses every
@@ -123,18 +124,28 @@ before the first decoded event, or after the first event. Responses, Chat
 Completions, and Messages never retry or reconnect automatically at any of
 those boundaries. Because inference requests have no idempotency key, a missing
 response does not establish that the remote service did no work or incurred no
-usage.
+usage. Schema 11 exposes `retryable=true` only for an initial Provider request
+blocked at `BeforeResponse` or `BeforeFirstEvent`. An explicit retry durably
+rearms the same Turn, input, Config Epoch, and Provider Epoch before one new
+Usage Attempt, and may repeat remote work or billing. Failure after the first
+event, malformed output, Tool-derived state, post-Tool continuation failure, and
+historical stage-untyped blocks reject retry without mutation.
 
-Runtime Event schema 10 types each new `TurnBlocked` origin and permits one
-`TurnCancelled` transaction only for the exact Provider-origin blocked Turn.
-The transaction clears pending recovery while retaining the Turn, its completed
+Runtime Event schema 11 preserves schema 10's typed `TurnBlocked` origin and
+`TurnCancelled`, adds the unavailability stage, and permits one
+`TurnRetryRequested` only for the exact retryable Provider-origin blocked Turn.
+The retry transaction moves that Turn to `resume-required`; a process exit or
+adapter preflight failure after the transaction is recoverable by the existing
+explicit `resume`. A second early failure blocks again and requires another
+explicit request. The cancellation transaction remains limited to the exact
+Provider-origin blocked Turn and clears pending recovery while retaining the Turn, its completed
 Usage/cost evidence, and immutable Config and Provider Epochs. A repeated exact
 cancel is idempotent. Missing state is not created. Prepared output,
 resume-required admission, incomplete streaming state, Tool-derived blocks,
 Tool approval or reconciliation, and historical schema-9-or-earlier blocks
-remain on their original fail-closed recovery path. A Product cancellation also
-requires the recovered Active Agent Session that owns the Turn and does not
-modify Team or Tool state. Cancellation does not call a Provider or Tool.
+remain on their original fail-closed recovery path. Product retry and
+cancellation require the recovered Active Agent Session that owns the Turn and
+do not modify Team or Tool state. Cancellation does not call a Provider or Tool.
 
 Agent Team recovery is separate from Turn output recovery. `open_with_team`
 holds both dedicated writers, validates the Team replay, and returns one
@@ -175,7 +186,7 @@ descriptors while Tool Runtime remains the authority gate. Approval and
 `EffectPrepared` are durable before the injected executor runs. A successful
 UTF-8 result may then enter one Provider continuation. The final
 `OutputPrepared` transaction stores the combined canonical text and one or two
-bounded Usage Records. Runtime Event schema 10 preserves the schema-6 contract
+bounded Usage Records. Runtime Event schema 11 preserves the schema-6 contract
 that durably brackets every Provider request or continuation with Usage Attempt start/finish Events and
 carries the Agent scope, Provider dialect, frozen Usage Windows, UTC times,
 outcome, exact/estimated marker, optional token/cache classes, service tier, and
@@ -186,7 +197,7 @@ kept distinct from observed Provider metadata. Schema 9 added a bounded
 `ModelSelectionStaged` Event bound to the authenticated current Agent. The next
 matching `TurnAdmitted` consumes it in the same transaction as Config and
 Provider freeze; pre-admission failure leaves it pending. Historical schema-1
-through schema-9 Runtime transactions replay and can be followed by schema-10
+through schema-10 Runtime transactions replay and can be followed by schema-11
 transactions; schema-1 token counts become explicitly estimated legacy attempts.
 
 This tracer bullet intentionally stores only the Tool result digest. If the
@@ -330,7 +341,7 @@ checkpoints, and stale-result CAS handling.
 
 Prompt/provider text and credential material are not part of the Usage domain.
 Requested or observed metadata not supplied by the current Provider remains
-unknown. Runtime Event schema 10 preserves the rule that records
+unknown. Runtime Event schema 11 preserves the rule that records
 `UsageAttemptFinished` before `UsageAttemptCostEvaluated` in the same transaction. The Config Epoch freezes
 the resolved Price Schedule book; replay recomputes the cost claim from that
 book and the normalized Usage Record, rejecting a changed schedule fingerprint,
@@ -455,7 +466,7 @@ charges still require a future dedicated authority path.
   rebuild the active row projection; manual refresh is available after leaving
   the editor.
 - Live inference conformance, non-Windows credential backends, configurable proxy
-  policy, broader TLS platform evidence, automatic retry and resumable reconnect
+  policy, broader TLS platform evidence, automatic retry and partial-stream reconnect
   policy, multiple or parallel
   Tool calls, resumable result references, broader canonical Items, and the
   unimplemented Provider event kinds. The bounded SSE, OpenAI Responses and

@@ -127,14 +127,14 @@ existing durable Tool approval/effect state machine, feeds one successful UTF-8
 result into a Provider continuation, and durably prepares combined canonical
 output. Recovery tests prove stale Sessions cannot invoke the Provider,
 ambiguous effects cannot continue, and process death after a durable Tool
-success blocks rather than repeating the effect. Runtime Event schema 10 stores
+success blocks rather than repeating the effect. Runtime Event schema 11 stores
 durable Usage Attempt boundaries, frozen Usage Windows, Provider dialect, the
 expanded optional Usage Records, frozen Provider Profile snapshot, and the
 subsequent frozen Price Schedule cost evaluation plus an optional selected-Preset
 output-token limit, typed reasoning/service-tier policy, distinct template-mirror
 pricing provenance, pending current-Agent Model selection, typed Provider-block
-origin, and durable cancellation while replaying historical schema 1 through
-schema 9.
+origin and unavailability stage, durable cancellation, and explicit early
+Provider retry while replaying historical schema 1 through schema 10.
 
 A product-private `local.echo` tracer now exercises the concrete process seam.
 It launches a fixed same-binary child without a shell, clears inherited
@@ -192,8 +192,14 @@ dialects. Each adapter classifies unavailability before a response, before the
 first decoded event, or after the first event; early EOF uses the same decoder
 progress while semantic format failures remain invalid responses. Loopback
 fixtures assert one connection and therefore no automatic retry. Runtime Event
-schema 10 records a typed Provider block and an exact idempotent
-`TurnCancelled`; the CLI can cancel only that blocked Turn. Cancellation keeps
+schema 11 preserves the typed Provider block and exact idempotent
+`TurnCancelled`, adds the unavailability stage, and records
+`TurnRetryRequested`. The CLI can explicitly retry only an initial request that
+failed before its first event, using the same Turn/input/frozen Epochs and a new
+Usage Attempt; partial streams, malformed output, Tool-derived state,
+continuation failure, and old stage-untyped blocks reject without mutation. A
+retry may repeat remote work or billing, and another early failure requires
+another explicit request. Cancellation keeps
 its immutable Usage/cost and Config/Provider Epoch evidence, invokes neither
 Provider nor Tool, requires recovered Active Agent authority for Product state,
 and leaves Team/Tool Ledgers byte-identical. Missing, incomplete, prepared,
@@ -208,7 +214,7 @@ context/fallback execution, broader canonical Items, multiple
 Tool calls,
 durable resumable Tool result references, richer TUI/App Server
 approval/delivery, caller-selected process policy, complete Windows Job
-lifetime/resource evidence, automatic retry/resumable reconnect behavior, and cross-process crash
+lifetime/resource evidence, automatic retry policy/partial-stream reconnect behavior, and cross-process crash
 matrices for the remaining Runtime, Provider, Tool, delivery, and product
 acknowledgement boundaries remain pending.
 
@@ -224,7 +230,7 @@ Exit criteria:
 
 Add VT/ConPTY TUI, hierarchical Command Paths, global command palette, Config Schema-driven editors, Provider wizard, model selector, adaptive statusline, Context Pressure, Usage Records/Rollups, `/stats`, and named Usage Windows.
 
-The first observability slice is implemented. Runtime Event schema 10 preserves
+The first observability slice is implemented. Runtime Event schema 11 preserves
 the schema-6 contract that durably brackets each Provider request and continuation with an immutable Usage Attempt,
 including UTC start/completion, outcome, Agent scope when present, frozen
 Provider Profile/model/dialect, exact or estimated Usage Records, and explicit
@@ -472,7 +478,8 @@ vaults fail closed. Credential operations add no Provider request or Runtime,
 Team, Tool, Agent, or approval authority.
 A third contiguous App Server slice adds local read-only operational inspection.
 `runtime.status` projects bounded recovery facts without item text or block
-reasons. `runtime.stats` reuses revision/as-of-bound summary and Attempt paging.
+reasons and reports whether a blocked Turn is explicitly retryable.
+`runtime.stats` reuses revision/as-of-bound summary and Attempt paging.
 `agent.list` reuses the redacted Agent Center projection, while `tool.status`
 returns only call and Agent numbers, Tool/status, expiry, and result digest.
 Missing state creates nothing; incomplete product sidecars fail closed and the

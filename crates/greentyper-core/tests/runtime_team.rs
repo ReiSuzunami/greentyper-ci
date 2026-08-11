@@ -8,9 +8,13 @@ use greentyper_core::agent_team::{
     DurableTeamError, MessageRecipient, ResourceBudget, TaskScope, TaskSpec, TeamCommand,
     TeamError, TeamOperationAcknowledgeOutcome, TeamOperationStatus,
 };
+use greentyper_core::config::ConfigLayers;
 use greentyper_core::ledger::LedgerError;
-use greentyper_core::provider::ProviderDialect;
+use greentyper_core::provider::{
+    ProviderDialect, ProviderError, ProviderEvent, ProviderRequest, ProviderRuntime,
+};
 use greentyper_core::runtime::{ModelSelection, RecoveryStatus, RuntimeError, RuntimeKernel};
+use greentyper_core::tool_runtime::ToolResources;
 
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(1);
 
@@ -163,6 +167,108 @@ fn current_agent_model_selection_is_durable_replaceable_and_session_bound() {
             .expect("replacement selection")
             .selection(),
         &replacement
+    );
+
+    fs::remove_file(runtime_path).expect("cleanup Runtime Ledger");
+    fs::remove_file(team_path).expect("cleanup Team Ledger");
+    fs::remove_file(tool_path).expect("cleanup Tool Ledger");
+}
+
+#[test]
+fn provider_retry_requires_the_recovered_active_agent_session() {
+    let runtime_path = temp_path("provider-retry", "runtime");
+    let team_path = temp_path("provider-retry", "team");
+    let tool_path = temp_path("provider-retry", "tool");
+    let (mut kernel, recovery) =
+        RuntimeKernel::open_with_team_and_tools(&runtime_path, &team_path, &tool_path, 1)
+            .expect("open Product Kernel");
+    assert!(recovery.into_sessions().is_empty());
+    let root = root_session(
+        dispatch_and_acknowledge(
+            &mut kernel,
+            TeamCommand::AdmitRoot {
+                task: root_spec(),
+                budget: root_budget(),
+                capabilities: root_capabilities(),
+            },
+        )
+        .expect("admit current Agent"),
+    );
+    assert!(matches!(
+        kernel.execute_provider_turn(
+            root,
+            &ConfigLayers::default(),
+            "retry with recovered authority",
+            &mut UnavailableProvider,
+            |_| Ok(ToolResources::default()),
+        ),
+        Err(RuntimeError::Provider(ProviderError::Unavailable { .. }))
+    ));
+    let RecoveryStatus::Blocked {
+        turn,
+        retryable: true,
+        ..
+    } = kernel.snapshot().status
+    else {
+        panic!("early Provider failure was not retryable")
+    };
+    drop(kernel);
+
+    let runtime_before = fs::read(&runtime_path).expect("read Runtime Ledger");
+    let team_before = fs::read(&team_path).expect("read Team Ledger");
+    let tool_before = fs::read(&tool_path).expect("read Tool Ledger");
+    let (mut recovered, recovery) = RuntimeKernel::open_with_team_and_tools_existing_strict(
+        &runtime_path,
+        &team_path,
+        &tool_path,
+        1,
+    )
+    .expect("strictly reopen Product Kernel");
+    let sessions = recovery.into_sessions();
+    session_for_test(&sessions, root);
+    assert!(matches!(
+        recovered.request_blocked_provider_turn_retry(root, turn),
+        Err(RuntimeError::Team(DurableTeamError::Team(
+            TeamError::InvalidAgentSession { agent }
+        ))) if agent == root.agent()
+    ));
+    drop(recovered);
+    assert_eq!(
+        fs::read(&runtime_path).expect("reread Runtime Ledger after stale session"),
+        runtime_before
+    );
+    assert_eq!(
+        fs::read(&team_path).expect("reread Team Ledger after stale session"),
+        team_before
+    );
+    assert_eq!(
+        fs::read(&tool_path).expect("reread Tool Ledger after stale session"),
+        tool_before
+    );
+
+    let (mut recovered, recovery) = RuntimeKernel::open_with_team_and_tools_existing_strict(
+        &runtime_path,
+        &team_path,
+        &tool_path,
+        1,
+    )
+    .expect("reopen Product Kernel for valid retry");
+    let fresh_root = session_for_test(&recovery.into_sessions(), root);
+    recovered
+        .request_blocked_provider_turn_retry(fresh_root, turn)
+        .expect("request retry with recovered Agent Session");
+    assert_eq!(
+        recovered.snapshot().status,
+        RecoveryStatus::ResumeRequired { turn }
+    );
+    drop(recovered);
+    assert_eq!(
+        fs::read(&team_path).expect("reread Team Ledger after valid retry"),
+        team_before
+    );
+    assert_eq!(
+        fs::read(&tool_path).expect("reread Tool Ledger after valid retry"),
+        tool_before
     );
 
     fs::remove_file(runtime_path).expect("cleanup Runtime Ledger");
@@ -566,4 +672,12 @@ fn disabled_or_invalid_team_configuration_fails_before_team_use() {
     ));
     assert!(!invalid_runtime_path.exists());
     assert!(!invalid_team_path.exists());
+}
+
+struct UnavailableProvider;
+
+impl ProviderRuntime for UnavailableProvider {
+    fn run(&mut self, _request: &ProviderRequest) -> Result<Vec<ProviderEvent>, ProviderError> {
+        Err(ProviderError::unavailable("private Provider interruption"))
+    }
 }

@@ -97,7 +97,7 @@ impl From<&RecoveryStatus> for RecoveryBadge {
                     delivery: delivery.get(),
                 }
             }
-            RecoveryStatus::Blocked { turn, reason } => Self::Blocked {
+            RecoveryStatus::Blocked { turn, reason, .. } => Self::Blocked {
                 turn: turn.get(),
                 reason: reason.clone(),
             },
@@ -4269,7 +4269,7 @@ fn build_blockers(sources: &PresentationSources<'_>) -> Vec<BlockerView> {
                 delivery: delivery.get(),
             });
         }
-        RecoveryStatus::Blocked { turn, reason } => {
+        RecoveryStatus::Blocked { turn, reason, .. } => {
             blockers.push(BlockerView::RuntimeBlocked {
                 turn: turn.get(),
                 reason: reason.clone(),
@@ -4969,6 +4969,7 @@ source = "unknown"
         let runtime = runtime(RecoveryStatus::Blocked {
             turn: TurnId::new(9).expect("turn"),
             reason: "fixture blocker".into(),
+            retryable: false,
         });
         let config = ConfigRuntimeStatus {
             ready: true,

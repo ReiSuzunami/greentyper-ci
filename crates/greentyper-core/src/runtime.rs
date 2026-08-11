@@ -56,9 +56,18 @@ const MAX_USAGE_RECORDS_PER_TURN: usize = 64;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RecoveryStatus {
     Ready,
-    ResumeRequired { turn: TurnId },
-    ReconciliationRequired { turn: TurnId, delivery: DeliveryId },
-    Blocked { turn: TurnId, reason: String },
+    ResumeRequired {
+        turn: TurnId,
+    },
+    ReconciliationRequired {
+        turn: TurnId,
+        delivery: DeliveryId,
+    },
+    Blocked {
+        turn: TurnId,
+        reason: String,
+        retryable: bool,
+    },
 }
 
 impl fmt::Display for RecoveryStatus {
@@ -74,8 +83,16 @@ impl fmt::Display for RecoveryStatus {
                 turn.get(),
                 delivery.get()
             ),
-            Self::Blocked { turn, reason } => {
-                write!(formatter, "blocked turn={} reason={reason}", turn.get())
+            Self::Blocked {
+                turn,
+                reason,
+                retryable,
+            } => {
+                write!(
+                    formatter,
+                    "blocked turn={} retryable={retryable} reason={reason}",
+                    turn.get()
+                )
             }
         }
     }
@@ -989,6 +1006,14 @@ impl RuntimeKernel {
         self.cancel_provider_blocked_turn(None, turn)
     }
 
+    pub fn request_blocked_turn_retry(
+        &mut self,
+        turn: TurnId,
+    ) -> Result<DurabilityReceipt, RuntimeError> {
+        self.require_no_tool_reconciliation()?;
+        self.request_provider_retry(None, turn)
+    }
+
     pub fn cancel_blocked_provider_turn(
         &mut self,
         session: AgentSession,
@@ -996,6 +1021,15 @@ impl RuntimeKernel {
     ) -> Result<CancelTurnOutcome, RuntimeError> {
         self.require_provider_session(session)?;
         self.cancel_provider_blocked_turn(Some(session.agent()), turn)
+    }
+
+    pub fn request_blocked_provider_turn_retry(
+        &mut self,
+        session: AgentSession,
+        turn: TurnId,
+    ) -> Result<DurabilityReceipt, RuntimeError> {
+        self.require_provider_session(session)?;
+        self.request_provider_retry(Some(session.agent()), turn)
     }
 
     pub fn resolve_provider_tool_call(
@@ -1205,6 +1239,34 @@ impl RuntimeKernel {
         Ok(CancelTurnOutcome::Durable(receipt))
     }
 
+    fn request_provider_retry(
+        &mut self,
+        agent: Option<AgentId>,
+        turn: TurnId,
+    ) -> Result<DurabilityReceipt, RuntimeError> {
+        let record = self
+            .state
+            .turns
+            .get(&turn)
+            .ok_or(RuntimeError::UnknownTurn(turn))?;
+        if record.agent != agent || record.completed || record.cancelled {
+            return Err(RuntimeError::TurnRetryNotAllowed(turn));
+        }
+        let pending = self
+            .state
+            .pending
+            .as_ref()
+            .filter(|pending| pending.turn == turn)
+            .ok_or(RuntimeError::TurnRetryNotAllowed(turn))?;
+        if pending.phase != PendingPhase::Blocked
+            || pending.block_origin != Some(TurnBlockOrigin::Provider)
+            || !provider_stage_is_retryable(pending.provider_unavailable_stage)
+        {
+            return Err(RuntimeError::TurnRetryNotAllowed(turn));
+        }
+        self.commit(&[RuntimeEvent::TurnRetryRequested { turn }])
+    }
+
     fn admit_turn(
         &mut self,
         layers: &ConfigLayers,
@@ -1318,12 +1380,10 @@ impl RuntimeKernel {
         let provider_events = match provider.run(&request) {
             Ok(events) => events,
             Err(source) => {
-                self.finish_usage_attempt_and_block(
+                self.finish_usage_attempt_and_block_for_provider_error(
                     pending.turn,
                     attempt,
-                    UsageAttemptOutcome::Failed,
-                    None,
-                    provider_block_reason(&source),
+                    &source,
                 )?;
                 return Err(RuntimeError::Provider(source));
             }
@@ -1382,12 +1442,10 @@ impl RuntimeKernel {
         let provider_events = match provider.run(&request) {
             Ok(events) => events,
             Err(source) => {
-                self.finish_usage_attempt_and_block(
+                self.finish_usage_attempt_and_block_for_provider_error(
                     pending.turn,
                     attempt,
-                    UsageAttemptOutcome::Failed,
-                    None,
-                    provider_block_reason(&source),
+                    &source,
                 )?;
                 return Err(RuntimeError::Provider(source));
             }
@@ -1702,6 +1760,34 @@ impl RuntimeKernel {
         usage: Option<UsageRecord>,
         reason: &str,
     ) -> Result<(), RuntimeError> {
+        self.finish_usage_attempt_and_block_with_stage(turn, attempt, outcome, usage, reason, None)
+    }
+
+    fn finish_usage_attempt_and_block_for_provider_error(
+        &mut self,
+        turn: TurnId,
+        attempt: u32,
+        source: &ProviderError,
+    ) -> Result<(), RuntimeError> {
+        self.finish_usage_attempt_and_block_with_stage(
+            turn,
+            attempt,
+            UsageAttemptOutcome::Failed,
+            None,
+            provider_block_reason(source),
+            source.unavailable_stage(),
+        )
+    }
+
+    fn finish_usage_attempt_and_block_with_stage(
+        &mut self,
+        turn: TurnId,
+        attempt: u32,
+        outcome: UsageAttemptOutcome,
+        usage: Option<UsageRecord>,
+        reason: &str,
+        provider_unavailable_stage: Option<ProviderUnavailableStage>,
+    ) -> Result<(), RuntimeError> {
         let completed_at = UsageTimestamp::now().map_err(RuntimeError::Usage)?;
         let mut events =
             self.usage_attempt_finish_events(turn, attempt, completed_at, outcome, usage)?;
@@ -1709,6 +1795,7 @@ impl RuntimeKernel {
             turn,
             reason: bounded_reason(reason),
             origin: TurnBlockOrigin::Provider,
+            provider_unavailable_stage,
         });
         self.commit(&events)?;
         Ok(())
@@ -1786,6 +1873,7 @@ impl RuntimeKernel {
             turn,
             reason,
             origin: TurnBlockOrigin::Other,
+            provider_unavailable_stage: None,
         }])?;
         Ok(())
     }
@@ -2064,8 +2152,12 @@ enum RuntimeEvent {
         turn: TurnId,
         reason: String,
         origin: TurnBlockOrigin,
+        provider_unavailable_stage: Option<ProviderUnavailableStage>,
     },
     TurnCancelled {
+        turn: TurnId,
+    },
+    TurnRetryRequested {
         turn: TurnId,
     },
     UsageAttemptStarted {
@@ -2177,15 +2269,24 @@ impl RuntimeEvent {
                 turn,
                 reason,
                 origin,
+                provider_unavailable_stage,
             } => {
                 payload.u64(turn.get());
                 payload.string(reason)?;
                 payload.u8(turn_block_origin_tag(*origin)?);
+                encode_optional_provider_unavailable_stage(
+                    &mut payload,
+                    *provider_unavailable_stage,
+                );
                 10
             }
             Self::TurnCancelled { turn } => {
                 payload.u64(turn.get());
                 15
+            }
+            Self::TurnRetryRequested { turn } => {
+                payload.u64(turn.get());
+                16
             }
             Self::UsageAttemptStarted {
                 turn,
@@ -2347,8 +2448,16 @@ impl RuntimeEvent {
                 } else {
                     TurnBlockOrigin::Legacy
                 },
+                provider_unavailable_stage: if event.data.schema >= 11 {
+                    decode_optional_provider_unavailable_stage(&mut payload)?
+                } else {
+                    None
+                },
             },
             15 if event.data.schema >= 10 => Self::TurnCancelled {
+                turn: TurnId::new(payload.u64()?).map_err(RuntimeError::Model)?,
+            },
+            16 if event.data.schema >= 11 => Self::TurnRetryRequested {
                 turn: TurnId::new(payload.u64()?).map_err(RuntimeError::Model)?,
             },
             11 if event.data.schema >= 4 => Self::UsageAttemptStarted {
@@ -2484,6 +2593,7 @@ struct PendingTurn {
     acknowledged: bool,
     blocked_reason: Option<String>,
     block_origin: Option<TurnBlockOrigin>,
+    provider_unavailable_stage: Option<ProviderUnavailableStage>,
     next_usage_attempt: u32,
     open_usage_attempt: Option<OpenUsageAttempt>,
 }
@@ -2548,10 +2658,12 @@ impl RuntimeState {
                     .blocked_reason
                     .clone()
                     .expect("blocked phase has reason"),
+                retryable: provider_stage_is_retryable(pending.provider_unavailable_stage),
             },
             PendingPhase::Streaming => RecoveryStatus::Blocked {
                 turn: pending.turn,
                 reason: "incomplete output transaction".to_owned(),
+                retryable: false,
             },
         }
     }
@@ -2675,6 +2787,7 @@ impl RuntimeState {
                     acknowledged: false,
                     blocked_reason: None,
                     block_origin: None,
+                    provider_unavailable_stage: None,
                     next_usage_attempt: 1,
                     open_usage_attempt: None,
                 });
@@ -2863,10 +2976,12 @@ impl RuntimeState {
                 turn,
                 reason,
                 origin,
+                provider_unavailable_stage,
             } => {
                 if reason.trim().is_empty()
                     || reason.len() > MAX_BLOCK_REASON_BYTES
                     || reason.chars().any(char::is_control)
+                    || (provider_unavailable_stage.is_some() && origin != TurnBlockOrigin::Provider)
                 {
                     return Err(RuntimeError::CorruptState("invalid blocked reason"));
                 }
@@ -2877,6 +2992,7 @@ impl RuntimeState {
                 pending.phase = PendingPhase::Blocked;
                 pending.blocked_reason = Some(reason);
                 pending.block_origin = Some(origin);
+                pending.provider_unavailable_stage = provider_unavailable_stage;
             }
             RuntimeEvent::TurnCancelled { turn } => {
                 let pending = self.pending_for(turn)?;
@@ -2899,6 +3015,24 @@ impl RuntimeState {
                 }
                 record.cancelled = true;
                 self.pending = None;
+            }
+            RuntimeEvent::TurnRetryRequested { turn } => {
+                let pending = self.pending_for(turn)?;
+                if pending.phase != PendingPhase::Blocked
+                    || pending.block_origin != Some(TurnBlockOrigin::Provider)
+                    || !provider_stage_is_retryable(pending.provider_unavailable_stage)
+                    || pending.open_usage_attempt.is_some()
+                    || pending.prepared.is_some()
+                    || pending.assistant_item.is_some()
+                    || !pending.streamed_text.is_empty()
+                    || pending.acknowledged
+                {
+                    return Err(RuntimeError::CorruptState("invalid Turn retry"));
+                }
+                pending.phase = PendingPhase::Admitted;
+                pending.blocked_reason = None;
+                pending.block_origin = None;
+                pending.provider_unavailable_stage = None;
             }
             RuntimeEvent::UsageAttemptStarted {
                 turn,
@@ -3568,6 +3702,39 @@ fn decode_turn_block_origin(tag: u8) -> Result<TurnBlockOrigin, RuntimeError> {
     }
 }
 
+const fn provider_stage_is_retryable(stage: Option<ProviderUnavailableStage>) -> bool {
+    matches!(
+        stage,
+        Some(ProviderUnavailableStage::BeforeResponse | ProviderUnavailableStage::BeforeFirstEvent)
+    )
+}
+
+fn encode_optional_provider_unavailable_stage(
+    encoder: &mut Encoder,
+    stage: Option<ProviderUnavailableStage>,
+) {
+    encoder.u8(match stage {
+        None => 0,
+        Some(ProviderUnavailableStage::BeforeResponse) => 1,
+        Some(ProviderUnavailableStage::BeforeFirstEvent) => 2,
+        Some(ProviderUnavailableStage::AfterFirstEvent) => 3,
+    });
+}
+
+fn decode_optional_provider_unavailable_stage(
+    decoder: &mut Decoder<'_>,
+) -> Result<Option<ProviderUnavailableStage>, RuntimeError> {
+    match decoder.u8()? {
+        0 => Ok(None),
+        1 => Ok(Some(ProviderUnavailableStage::BeforeResponse)),
+        2 => Ok(Some(ProviderUnavailableStage::BeforeFirstEvent)),
+        3 => Ok(Some(ProviderUnavailableStage::AfterFirstEvent)),
+        _ => Err(RuntimeError::CorruptEvent(
+            "invalid optional Provider unavailable stage tag",
+        )),
+    }
+}
+
 const fn price_schedule_source_tag(source: PriceScheduleSource) -> u8 {
     match source {
         PriceScheduleSource::Template => 1,
@@ -4126,6 +4293,7 @@ pub enum RuntimeError {
     Busy(RecoveryStatus),
     UnknownTurn(TurnId),
     TurnCancellationNotAllowed(TurnId),
+    TurnRetryNotAllowed(TurnId),
     UnknownDelivery(DeliveryId),
     InvalidInput(&'static str),
     InvalidProviderOutput(&'static str),
@@ -4171,6 +4339,9 @@ impl fmt::Display for RuntimeError {
             Self::UnknownTurn(turn) => write!(formatter, "unknown Turn {}", turn.get()),
             Self::TurnCancellationNotAllowed(turn) => {
                 write!(formatter, "Turn {} cannot be cancelled", turn.get())
+            }
+            Self::TurnRetryNotAllowed(turn) => {
+                write!(formatter, "Turn {} cannot be retried", turn.get())
             }
             Self::UnknownDelivery(delivery) => {
                 write!(formatter, "unknown output delivery {}", delivery.get())
@@ -4270,15 +4441,16 @@ mod tests {
     }
 
     #[test]
-    fn schema_ten_records_provider_block_origin_and_turn_cancellation() {
+    fn schema_eleven_records_provider_retry_stage_and_preserves_legacy_blocks() {
         let turn = TurnId::new(1).expect("Turn ID");
         let blocked = RuntimeEvent::TurnBlocked {
             turn,
             reason: "Provider stream failed before its first event".to_owned(),
             origin: TurnBlockOrigin::Provider,
+            provider_unavailable_stage: Some(ProviderUnavailableStage::BeforeFirstEvent),
         };
         let encoded = blocked.encode().expect("encode provider block");
-        assert_eq!(encoded.schema, 10);
+        assert_eq!(encoded.schema, 11);
         assert_eq!(encoded.kind, 10);
         assert_eq!(
             RuntimeEvent::decode(&stored_runtime_event(encoded.clone()))
@@ -4286,25 +4458,49 @@ mod tests {
             blocked
         );
 
-        let mut legacy = encoded;
-        legacy.schema = 9;
-        assert_eq!(legacy.payload.pop(), Some(1));
+        let mut schema_ten = encoded;
+        schema_ten.schema = 10;
+        assert_eq!(schema_ten.payload.pop(), Some(2));
         assert_eq!(
-            RuntimeEvent::decode(&stored_runtime_event(legacy)).expect("decode legacy block"),
+            RuntimeEvent::decode(&stored_runtime_event(schema_ten.clone()))
+                .expect("decode schema-ten block"),
+            RuntimeEvent::TurnBlocked {
+                turn,
+                reason: "Provider stream failed before its first event".to_owned(),
+                origin: TurnBlockOrigin::Provider,
+                provider_unavailable_stage: None,
+            }
+        );
+
+        schema_ten.schema = 9;
+        assert_eq!(schema_ten.payload.pop(), Some(1));
+        assert_eq!(
+            RuntimeEvent::decode(&stored_runtime_event(schema_ten)).expect("decode legacy block"),
             RuntimeEvent::TurnBlocked {
                 turn,
                 reason: "Provider stream failed before its first event".to_owned(),
                 origin: TurnBlockOrigin::Legacy,
+                provider_unavailable_stage: None,
             }
         );
 
         let cancelled = RuntimeEvent::TurnCancelled { turn };
         let encoded = cancelled.encode().expect("encode Turn cancellation");
-        assert_eq!(encoded.schema, 10);
+        assert_eq!(encoded.schema, 11);
         assert_eq!(encoded.kind, 15);
         assert_eq!(
             RuntimeEvent::decode(&stored_runtime_event(encoded)).expect("decode Turn cancellation"),
             cancelled
+        );
+
+        let retry = RuntimeEvent::TurnRetryRequested { turn };
+        let encoded = retry.encode().expect("encode Turn retry request");
+        assert_eq!(encoded.schema, 11);
+        assert_eq!(encoded.kind, 16);
+        assert_eq!(
+            RuntimeEvent::decode(&stored_runtime_event(encoded))
+                .expect("decode Turn retry request"),
+            retry
         );
     }
 
