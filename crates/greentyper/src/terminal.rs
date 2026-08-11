@@ -462,6 +462,14 @@ enum TerminalIntent {
     SetSlashQuery(String),
     MoveSelection(isize),
     Activate,
+    EditModelQuery(char),
+    BackspaceModelQuery,
+    ClearModelQuery,
+    MoveModelGroup(isize),
+    MoveModelSelection(isize),
+    ToggleModelDetail,
+    MoveStatsSelection(isize),
+    ToggleStatsDetail,
     EditConfigObjectId(char),
     BackspaceConfigObjectId,
     ClearConfigObjectId,
@@ -489,6 +497,8 @@ enum TerminalIntent {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum TerminalInputContext {
     SlashPanel,
+    ModelSelector,
+    Stats,
     ConfigObjectId,
     ConfigObject,
     ConfigChoice,
@@ -550,6 +560,41 @@ impl TerminalInputState {
             }
             TerminalInputEvent::Enter if context == TerminalInputContext::SlashPanel => {
                 TerminalIntent::Activate
+            }
+            TerminalInputEvent::Character(character)
+                if context == TerminalInputContext::ModelSelector && !character.is_control() =>
+            {
+                TerminalIntent::EditModelQuery(character)
+            }
+            TerminalInputEvent::Backspace if context == TerminalInputContext::ModelSelector => {
+                TerminalIntent::BackspaceModelQuery
+            }
+            TerminalInputEvent::Delete if context == TerminalInputContext::ModelSelector => {
+                TerminalIntent::ClearModelQuery
+            }
+            TerminalInputEvent::Tab if context == TerminalInputContext::ModelSelector => {
+                TerminalIntent::MoveModelGroup(1)
+            }
+            TerminalInputEvent::BackTab if context == TerminalInputContext::ModelSelector => {
+                TerminalIntent::MoveModelGroup(-1)
+            }
+            TerminalInputEvent::Up if context == TerminalInputContext::ModelSelector => {
+                TerminalIntent::MoveModelSelection(-1)
+            }
+            TerminalInputEvent::Down if context == TerminalInputContext::ModelSelector => {
+                TerminalIntent::MoveModelSelection(1)
+            }
+            TerminalInputEvent::Enter if context == TerminalInputContext::ModelSelector => {
+                TerminalIntent::ToggleModelDetail
+            }
+            TerminalInputEvent::Up if context == TerminalInputContext::Stats => {
+                TerminalIntent::MoveStatsSelection(-1)
+            }
+            TerminalInputEvent::Down if context == TerminalInputContext::Stats => {
+                TerminalIntent::MoveStatsSelection(1)
+            }
+            TerminalInputEvent::Enter if context == TerminalInputContext::Stats => {
+                TerminalIntent::ToggleStatsDetail
             }
             TerminalInputEvent::Character(character)
                 if context == TerminalInputContext::ConfigObjectId && !character.is_control() =>
@@ -730,10 +775,21 @@ impl TerminalSession {
         self.handle_with_connection_tester(event, runtime, None)
     }
 
+    #[cfg(test)]
     fn handle_with_connection_tester(
         &mut self,
         event: TerminalInputEvent,
         runtime: Option<&mut ConfigRuntime>,
+        tester: Option<&mut dyn ProviderConnectionTester>,
+    ) -> Result<TerminalLoopOutcome, TerminalError> {
+        self.handle_with_view_and_connection_tester(event, runtime, None, tester)
+    }
+
+    fn handle_with_view_and_connection_tester(
+        &mut self,
+        event: TerminalInputEvent,
+        runtime: Option<&mut ConfigRuntime>,
+        view: Option<&TuiViewModel>,
         tester: Option<&mut dyn ProviderConnectionTester>,
     ) -> Result<TerminalLoopOutcome, TerminalError> {
         let intent = self.input.apply(event, self.input_context());
@@ -758,6 +814,56 @@ impl TerminalSession {
                     }
                     Err(source) => self.notice = Some(presentation_notice(&source)),
                 }
+                Ok(TerminalLoopOutcome::Redraw)
+            }
+            TerminalIntent::EditModelQuery(character) => {
+                match self.controller.edit_model_query(Some(character)) {
+                    Ok(()) => self.notice = None,
+                    Err(_) => self.notice = Some("Model query exceeds its input limit".to_owned()),
+                }
+                Ok(TerminalLoopOutcome::Redraw)
+            }
+            TerminalIntent::BackspaceModelQuery => {
+                self.controller
+                    .edit_model_query(None)
+                    .map_err(TerminalError::PresentationModel)?;
+                self.notice = None;
+                Ok(TerminalLoopOutcome::Redraw)
+            }
+            TerminalIntent::ClearModelQuery => {
+                self.controller
+                    .clear_model_query()
+                    .map_err(TerminalError::PresentationModel)?;
+                self.notice = None;
+                Ok(TerminalLoopOutcome::Redraw)
+            }
+            TerminalIntent::MoveModelGroup(offset) => {
+                self.controller.move_model_group(offset);
+                self.notice = None;
+                Ok(TerminalLoopOutcome::Redraw)
+            }
+            TerminalIntent::MoveModelSelection(offset) => {
+                let view = view.ok_or(TerminalError::ViewModelRequired)?;
+                self.controller.move_model_selection(&view.models, offset);
+                self.notice = None;
+                Ok(TerminalLoopOutcome::Redraw)
+            }
+            TerminalIntent::ToggleModelDetail => {
+                let view = view.ok_or(TerminalError::ViewModelRequired)?;
+                self.controller.toggle_model_detail(&view.models);
+                self.notice = None;
+                Ok(TerminalLoopOutcome::Redraw)
+            }
+            TerminalIntent::MoveStatsSelection(offset) => {
+                let view = view.ok_or(TerminalError::ViewModelRequired)?;
+                self.controller.move_stats_selection(&view.stats, offset);
+                self.notice = None;
+                Ok(TerminalLoopOutcome::Redraw)
+            }
+            TerminalIntent::ToggleStatsDetail => {
+                let view = view.ok_or(TerminalError::ViewModelRequired)?;
+                self.controller.toggle_stats_detail(&view.stats);
+                self.notice = None;
                 Ok(TerminalLoopOutcome::Redraw)
             }
             TerminalIntent::EditConfigObjectId(character) => {
@@ -977,6 +1083,10 @@ impl TerminalSession {
             TerminalInputContext::DiscardConfirmation
         } else if self.controller.is_slash_panel() {
             TerminalInputContext::SlashPanel
+        } else if self.controller.is_model_selector() {
+            TerminalInputContext::ModelSelector
+        } else if self.controller.is_stats() {
+            TerminalInputContext::Stats
         } else if self.controller.is_config_object_create() {
             TerminalInputContext::ConfigObjectId
         } else if self.controller.is_config_object_selector() {
@@ -1443,9 +1553,10 @@ where
     surface.write_frame(&renderer.draw(&frame)?)?;
 
     loop {
-        match session.handle_with_connection_tester(
+        match session.handle_with_view_and_connection_tester(
             map_crossterm_event(read_event()?),
             Some(config),
+            Some(view),
             Some(tester),
         )? {
             TerminalLoopOutcome::Quit => break,
@@ -1473,6 +1584,7 @@ pub(crate) enum TerminalError {
     UnsupportedCellWidth,
     InvalidQuery,
     ConfigRuntimeRequired,
+    ViewModelRequired,
     Presentation(PresentationControllerError),
     PresentationModel(PresentationError),
     Viewport(ViewportError),
@@ -1497,6 +1609,9 @@ impl fmt::Display for TerminalError {
             Self::InvalidQuery => formatter.write_str("terminal slash query is invalid"),
             Self::ConfigRuntimeRequired => {
                 formatter.write_str("terminal action requires Config Runtime")
+            }
+            Self::ViewModelRequired => {
+                formatter.write_str("terminal action requires its frozen snapshot")
             }
             Self::Presentation(source) => write!(formatter, "{source}"),
             Self::PresentationModel(source) => write!(formatter, "{source}"),
@@ -1526,6 +1641,7 @@ impl Error for TerminalError {
             | Self::UnsupportedCellWidth
             | Self::InvalidQuery
             | Self::ConfigRuntimeRequired
+            | Self::ViewModelRequired
             | Self::NonInteractive => None,
         }
     }
@@ -1582,14 +1698,15 @@ mod tests {
 
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
     use greentyper_core::config::{
-        ConfigDocument, ConfigEditorSession, ConfigFieldContents, ConfigObjectKind,
+        ConfigDocument, ConfigEditorSession, ConfigFieldContents, ConfigLayers, ConfigObjectKind,
         ConfigObjectRef, ConfigPaths, ConfigRuntime, ConfigScope, ConfigValue,
         MAX_CONFIG_STRING_BYTES, ReasoningEffort, ServiceTier,
     };
     use greentyper_core::pricing::PriceScheduleSource;
     use greentyper_core::provider::{
-        ProviderDialect, ProviderPricingSource, ProviderProfileSnapshot,
+        DeterministicProvider, ProviderDialect, ProviderPricingSource, ProviderProfileSnapshot,
     };
+    use greentyper_core::runtime::RuntimeKernel;
     use greentyper_core::usage::UsageWeekday;
 
     use crate::presentation::{PresentationScreenView, build_smoke_view};
@@ -1670,6 +1787,39 @@ mod tests {
         assert_eq!(
             input.apply(TerminalInputEvent::Escape, TerminalInputContext::Other),
             TerminalIntent::Back
+        );
+        assert_eq!(
+            input.apply(
+                TerminalInputEvent::Character('m'),
+                TerminalInputContext::ModelSelector,
+            ),
+            TerminalIntent::EditModelQuery('m')
+        );
+        assert_eq!(
+            input.apply(TerminalInputEvent::Tab, TerminalInputContext::ModelSelector),
+            TerminalIntent::MoveModelGroup(1)
+        );
+        assert_eq!(
+            input.apply(
+                TerminalInputEvent::Down,
+                TerminalInputContext::ModelSelector
+            ),
+            TerminalIntent::MoveModelSelection(1)
+        );
+        assert_eq!(
+            input.apply(
+                TerminalInputEvent::Enter,
+                TerminalInputContext::ModelSelector,
+            ),
+            TerminalIntent::ToggleModelDetail
+        );
+        assert_eq!(
+            input.apply(TerminalInputEvent::Down, TerminalInputContext::Stats),
+            TerminalIntent::MoveStatsSelection(1)
+        );
+        assert_eq!(
+            input.apply(TerminalInputEvent::Enter, TerminalInputContext::Stats),
+            TerminalIntent::ToggleStatsDetail
         );
         assert_eq!(
             input.apply(TerminalInputEvent::Down, TerminalInputContext::ConfigObject),
@@ -1897,6 +2047,130 @@ mod tests {
                 .expect("quit"),
             TerminalLoopOutcome::Quit
         );
+    }
+
+    #[test]
+    fn terminal_loop_browses_models_from_real_key_events_without_mutating_state() {
+        let root = terminal_test_root("model-browser");
+        let ledger = root.join("runtime.ledger");
+        let paths = ConfigPaths::new(root.join("user.toml"), root.join("project.toml"));
+        std::fs::create_dir_all(&root).expect("create model browser fixture directory");
+        std::fs::write(
+            paths.user(),
+            r#"schema_version = 1
+
+[providers.edge]
+template = "openai"
+credential = "synthetic-model-browser-credential-reference"
+
+[model_presets.fast]
+provider = "edge"
+model = "gpt-5.4-mini"
+dialect = "responses"
+favorite = true
+
+[model_presets.careful]
+provider = "edge"
+model = "gpt-5.4"
+dialect = "responses"
+"#,
+        )
+        .expect("write model browser config");
+        let mut config =
+            ConfigRuntime::open(paths.clone(), ConfigDocument::empty()).expect("config runtime");
+        let before = std::fs::read(paths.user()).expect("read model browser config");
+        let view = build_terminal_view(&ledger, &config, "/").expect("model browser view");
+        let mode = FakeTerminalMode::default();
+        let mut events = "model"
+            .chars()
+            .map(|character| {
+                Event::Key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
+            })
+            .collect::<VecDeque<_>>();
+        events.extend([
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Resize(80, 24),
+            Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL)),
+        ]);
+
+        let output = run_terminal_loop(Vec::new(), mode, &mut config, &view, 80, 24, move || {
+            Ok(events.pop_front().expect("bounded model browser events"))
+        })
+        .expect("model browser loop");
+        let output = String::from_utf8(output).expect("model browser VT output");
+
+        assert!(output.contains("Models / Favorites"));
+        assert!(output.contains("query"));
+        assert!(output.contains("fast"));
+        assert!(output.contains("source"));
+        assert!(output.contains("configured"));
+        assert!(output.contains("gpt-5.4-mini"));
+        assert!(!output.contains("synthetic-model-browser-credential-reference"));
+        assert_eq!(
+            std::fs::read(paths.user()).expect("reread model browser config"),
+            before
+        );
+        assert!(!ledger.exists());
+        std::fs::remove_dir_all(root).expect("remove model browser fixture");
+    }
+
+    #[test]
+    fn terminal_loop_browses_frozen_stats_without_mutating_the_ledger() {
+        let root = terminal_test_root("stats-browser");
+        let ledger = root.join("runtime.ledger");
+        let paths = ConfigPaths::new(root.join("user.toml"), root.join("project.toml"));
+        std::fs::create_dir_all(&root).expect("create stats browser fixture directory");
+        let mut runtime = RuntimeKernel::open(&ledger).expect("open stats runtime");
+        let mut provider = DeterministicProvider::default();
+        for input in ["first usage attempt", "second usage attempt"] {
+            let output = runtime
+                .execute(&ConfigLayers::default(), input, &mut provider)
+                .expect("execute stats fixture turn");
+            runtime
+                .acknowledge(output.delivery())
+                .expect("acknowledge stats fixture turn");
+        }
+        drop(runtime);
+        let before = std::fs::read(&ledger).expect("read stats ledger");
+        let mut config =
+            ConfigRuntime::open(paths.clone(), ConfigDocument::empty()).expect("config runtime");
+        let view = build_terminal_view(&ledger, &config, "/").expect("stats browser view");
+        let mode = FakeTerminalMode::default();
+        let mut events = "stats"
+            .chars()
+            .map(|character| {
+                Event::Key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
+            })
+            .collect::<VecDeque<_>>();
+        events.extend([
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Resize(80, 24),
+            Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL)),
+        ]);
+
+        let output = run_terminal_loop(Vec::new(), mode, &mut config, &view, 80, 24, move || {
+            Ok(events.pop_front().expect("bounded stats browser events"))
+        })
+        .expect("stats browser loop");
+        let output = String::from_utf8(output).expect("stats browser VT output");
+
+        assert!(output.contains("Stats / Attempt"));
+        assert!(output.contains("attempt 1"));
+        assert!(output.contains("turn 2"));
+        assert!(output.contains("outcome succeeded"));
+        assert!(output.contains("deterministic-v1"));
+        assert_eq!(std::fs::read(&ledger).expect("reread stats ledger"), before);
+        assert!(!paths.user().exists());
+        assert!(!paths.project().exists());
+        std::fs::remove_dir_all(root).expect("remove stats browser fixture");
     }
 
     #[test]

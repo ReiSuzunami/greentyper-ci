@@ -365,7 +365,7 @@ Tab or Enter can parse and stage the complete TOML array; dirty local input,
 validation failure, and stale revisions all remain recoverable. The final text
 field previews and CAS-commits on two explicit Enter actions, and a real-key
 test reopens Config to prove the resolved window persists. This slice does not
-rebuild the frozen usage projection or add interactive `/stats` behavior.
+rebuild the frozen usage projection.
 `/config pricing add` now supplies the fourth rendered object-name workflow and
 completes the Config Object creation set. It traverses all 17 Price Schedule
 schema fields, keeps optional selectors skippable, offers only valid manual
@@ -376,6 +376,17 @@ domain-validation repair, stale-revision retention, dirty-quit blocking, and
 explicit discard without overwriting the winner. This slice does not rebuild
 the frozen pricing book, ingest provider-reported charges, or add rich cost
 presentation.
+The root `/model` route now supplies a read-only Direct VT browser over the
+frozen configured-Preset and release-catalog projection. It supports bounded
+fuzzy query input, Favorites/Recent/Compatible/All groups, selected-row
+navigation, and source-tagged detail while preserving explicit unknown Recent
+and availability facts. It performs no Provider request, credential lookup,
+Config or Ledger write, or current-Agent application.
+The root `/stats` route now supplies a read-only browser over the frozen startup
+Usage projection. It renders rolling 1-hour, 1-day, and 7-day summaries plus
+selected durable-attempt detail. Real-key tests prove the Ledger bytes remain
+unchanged. Live refresh and richer aggregate navigation remain outside this
+slice.
 
 This does not complete Phase 3. Audited Windows ConPTY behavior, approval
 interaction, live snapshot refresh, rendered secret binding,
@@ -384,7 +395,8 @@ discovery and Recent
 evidence, automatic Context View/token-source
 projection, provider-reported
 charge and subscription-quota accounting, richer observed Provider metadata,
-and the P0/P1/P2/P6
+current-Agent Preset application, Agent Center data, richer Usage aggregate
+navigation, and the P0/P1/P2/P6
 performance evidence remain pending.
 
 Exit criteria:
@@ -415,8 +427,9 @@ OpenAI Responses and Chat map the supported request fields. DeepSeek Responses
 maps its supported reasoning effort and rejects service tier, while DeepSeek
 Chat/Messages reject both unsupported policy fields before network I/O. Flash
 keeps a preferred Responses dialect and Pro resolves that preference to Chat
-before admission. Rendered selection, context mode, and general fallback
-execution are still pending.
+before admission. Current-Agent Preset application, context mode, and general
+fallback execution are still pending; the rendered `/model` surface is
+currently a read-only browser.
 
 Exit criteria:
 

@@ -64,6 +64,11 @@ until it can be parsed atomically.
 The fourth creates manual Price Schedules across all 17 schema fields while
 keeping partial non-negative-integer input local until it can be parsed
 atomically.
+The same private terminal composition now owns read-only `/model` and `/stats`
+browsers over frozen Config Catalog and Usage projections. They provide bounded
+query/group/row/detail navigation without Config, Ledger, Provider, credential,
+or Agent mutation. Live refresh, current-Agent Preset application, richer Usage
+aggregate screens, and Agent Center data remain outside that browser boundary.
 Section-filtered typed remove
 routes render exact Config Object deletion confirmations; secret storage stays
 behind the credential adapter. Approval interaction, live refresh, the App

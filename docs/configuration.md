@@ -210,7 +210,11 @@ on `/config` opens the searchable Config Center. A global command palette can
 search all nested and recent actions without adding them to the root Slash
 Panel.
 
-`/config stats-window` edits named Usage Windows. The separate root command `/stats` displays usage reports and never mutates configuration. Likewise, `/model` selects a runnable Model Preset while `/config model` edits preset definitions.
+`/config stats-window` edits named Usage Windows. The separate root command
+`/stats` browses a frozen Usage report and never mutates configuration.
+Likewise, `/model` browses configured Presets and release candidates while
+`/config model` edits preset definitions. Applying a browsed Preset to an Agent
+remains a separate target behavior.
 
 Slash commands navigate and select scope; mutation occurs in a validated
 dialog. The current headless CLI provides `config schema`, `config get`,
@@ -224,9 +228,12 @@ user path and `.greentyper/config.toml` in the current project.
 
 The current headless `stats` command reads the immutable Runtime usage
 projection and accepts an optional Unix-millisecond `--at` instant for
-deterministic rolling-window queries. TUI `/stats` and interactive
-editing of existing `/config stats-window` objects remain Phase 3 work; the
-rendered creation and deletion paths described above are implemented.
+deterministic rolling-window queries. TUI `/stats` now reads the same frozen
+startup projection, renders 1-hour, 1-day, and 7-day summaries, and browses
+bounded per-attempt detail without writing the Ledger. Live refresh and richer
+Thread, Agent, Team, and named-window navigation remain Phase 3 work. Existing
+`/config stats-window` field routes use the rendered schema editor described
+above.
 
 The product CLI also exposes `credential bind`, `replace`, `test`, and `forget`
 for one lowercase secure-store reference, Provider Profile, and Provider Origin.
@@ -349,6 +356,12 @@ product adapters currently installed for that template/dialect pair; live
 availability and Recent remain unknown. User/discovery precedence, lazy refresh,
 and starter-preset acceptance remain target behavior. Pricing still resolves
 through a Price Schedule rather than becoming an unversioned catalog number.
+The Direct VT `/model` browser uses this frozen projection. Character input
+filters it, Tab and Shift-Tab move across Favorites, Recent, Compatible, and
+All, Up/Down move the selected row, and Enter opens source-tagged detail for a
+configured Preset or release candidate. Unknown Recent, availability, context,
+capability, and pricing facts remain visibly unknown. Browsing performs no
+network request, credential lookup, Config or Ledger write, or Agent mutation.
 The installed execution matrix is deliberately closed: adapters accept
 `openai` and explicit `openai-compatible` Profiles for Responses and Chat
 Completions, and official `deepseek` Profiles for Responses, Chat Completions,
@@ -428,12 +441,18 @@ tokens as a cost and latency guard; a Provider or model may enforce a lower
 limit. Context mode, fallback execution, current-Agent interactive selection,
 and project/default selection remain target behavior.
 
-The target model selector provides Favorites, Recent, Compatible, and All views
-with fuzzy search. Each entry shows provider, dialect, known context limit,
-capabilities, price freshness, and observed availability. Incompatible entries
-remain visible with a reason. Catalog refresh is manual or selector-triggered.
+The rendered model browser now provides Favorites, Recent, Compatible, and All
+views with fuzzy search and bounded provider, dialect, context, capability,
+price-reference, provenance, and availability detail. Incompatible entries
+remain visible; richer reasons and manual or selector-triggered catalog refresh
+remain target behavior.
 
-A selection applies to the current Agent on its next Turn by default. The user may instead set the default for new Agents or the project. Running child Agents are not silently changed. Any provider/model/dialect change starts a Provider Epoch. Automatic price- or latency-based routing is outside v1; fallback is explicit and must preserve the required capability contract.
+Target selection applies to the current Agent on its next Turn by default. The
+user may instead set the default for new Agents or the project. That application
+flow is not implemented by the read-only browser. Running child Agents are not
+silently changed. Any provider/model/dialect change starts a Provider Epoch.
+Automatic price- or latency-based routing is outside v1; fallback is explicit
+and must preserve the required capability contract.
 
 ## Statusline
 
@@ -502,7 +521,12 @@ Usage Windows are half-open intervals: the example includes 10:00 and excludes 2
 
 `timezone` accepts an IANA time-zone ID or `local`. At Config Epoch creation, `local` resolves to a concrete IANA ID using the Windows time-zone mapping; failure to resolve invalidates the draft rather than falling back to UTC. The resolved ID and time-zone rule-set version are projection provenance. Membership converts the attempt's UTC start instant into that zone: both occurrences of a repeated clock hour are eligible, while a skipped clock hour contains no instants. Overlapping named windows are independent, so one Usage Record may appear once in each matching window but never twice in one window.
 
-The statusline may show a compact selected window such as `work 87.2K/$1.43`. `/stats` presents Turn, Thread, Agent, Team, rolling, and named-window views with model, Provider Profile, reasoning effort, service tier, token class, and cache distributions.
+The statusline may show a compact selected window such as `work 87.2K/$1.43`.
+The current frozen `/stats` browser presents rolling summaries and durable
+attempt detail with Provider Profile, requested and observed model, reasoning
+effort, service tier, tokens, cost, outcome, and timestamps. Dedicated Turn,
+Thread, Agent, Team, named-window, token-class, and cache-distribution views
+remain target behavior.
 
 The current Runtime implements durable Usage Attempts, cached rollups, the
 headless JSON projection, schema-owned Price Schedule objects, and immutable

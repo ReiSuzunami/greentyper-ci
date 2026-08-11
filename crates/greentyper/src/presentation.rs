@@ -15,10 +15,13 @@ use greentyper_core::config::{
 };
 use greentyper_core::context::{ContextPressureAccuracy, ContextPressureSnapshot};
 use greentyper_core::ledger::LedgerHead;
-use greentyper_core::provider_catalog::CatalogAvailability;
+use greentyper_core::provider_catalog::{CatalogAvailability, ModelCapability};
 use greentyper_core::runtime::{KernelTeamSnapshot, RecoveryStatus, RuntimeSnapshot};
 use greentyper_core::tool_runtime::{ToolCallStatus, ToolSnapshot};
-use greentyper_core::usage::{CostQuantity, RuntimeUsageSnapshot, UsageQuantity, UsageRollup};
+use greentyper_core::usage::{
+    CostQuantity, RuntimeUsageSnapshot, UsageAttempt, UsageAttemptOutcome, UsageQuantity,
+    UsageRollup,
+};
 use serde::Serialize;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
@@ -242,6 +245,42 @@ pub(crate) struct ModelSelectorEntryView {
     availability: Availability<bool>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ModelSelectorGroup {
+    Favorites,
+    Recent,
+    Compatible,
+    All,
+}
+
+impl ModelSelectorGroup {
+    const ALL: [Self; 4] = [Self::Favorites, Self::Recent, Self::Compatible, Self::All];
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Favorites => "Favorites",
+            Self::Recent => "Recent",
+            Self::Compatible => "Compatible",
+            Self::All => "All",
+        }
+    }
+
+    fn moved(self, offset: isize) -> Self {
+        let index = Self::ALL
+            .iter()
+            .position(|group| *group == self)
+            .expect("Model selector group is registered");
+        let len = isize::try_from(Self::ALL.len()).expect("Model selector group count fits isize");
+        let next = usize::try_from(
+            (isize::try_from(index).expect("Model selector group index fits isize") + offset)
+                .rem_euclid(len),
+        )
+        .expect("wrapped Model selector group index is non-negative");
+        Self::ALL[next]
+    }
+}
+
 impl ModelSelectorEntryView {
     fn configured_preset(preset: ModelPresetView) -> Self {
         Self {
@@ -362,6 +401,58 @@ impl ModelSelectorView {
             all,
         })
     }
+
+    fn filtered(&self, query: &str) -> Self {
+        debug_assert!(
+            query.len() <= MAX_MODEL_QUERY_BYTES
+                && !query.chars().any(|character| character.is_control())
+        );
+        let tokens = query
+            .split_whitespace()
+            .map(str::to_ascii_lowercase)
+            .collect::<Vec<_>>();
+        let all = self
+            .all
+            .iter()
+            .filter(|entry| model_matches(entry, &tokens))
+            .cloned()
+            .collect::<Vec<_>>();
+        let favorites = all
+            .iter()
+            .filter(|entry| entry.favorite())
+            .cloned()
+            .collect();
+        let compatible = match self.compatible {
+            Availability::Known(_) => Availability::Known(
+                all.iter()
+                    .filter(|entry| entry.compatibility == Availability::Known(true))
+                    .cloned()
+                    .collect(),
+            ),
+            Availability::Unknown => Availability::Unknown,
+        };
+        Self {
+            favorites,
+            recent: Availability::Unknown,
+            compatible,
+            all,
+        }
+    }
+
+    fn group_entries(&self, group: ModelSelectorGroup) -> Option<&[ModelSelectorEntryView]> {
+        match group {
+            ModelSelectorGroup::Favorites => Some(&self.favorites),
+            ModelSelectorGroup::Recent => match &self.recent {
+                Availability::Known(entries) => Some(entries),
+                Availability::Unknown => None,
+            },
+            ModelSelectorGroup::Compatible => match &self.compatible {
+                Availability::Known(entries) => Some(entries),
+                Availability::Unknown => None,
+            },
+            ModelSelectorGroup::All => Some(&self.all),
+        }
+    }
 }
 
 fn model_matches(entry: &ModelSelectorEntryView, tokens: &[String]) -> bool {
@@ -433,6 +524,7 @@ pub(crate) struct TuiViewModel {
     pub(crate) statusline: StatuslineView,
     pub(crate) blockers: Vec<BlockerView>,
     pub(crate) models: ModelSelectorView,
+    pub(crate) stats: Availability<RuntimeUsageSnapshot>,
 }
 
 impl TuiViewModel {
@@ -445,6 +537,10 @@ impl TuiViewModel {
         let slash = SlashPanelView::build(slash_query, selected)?;
         let models =
             ModelSelectorView::build(sources.model_presets, sources.catalog_models, model_query)?;
+        let stats = sources
+            .usage
+            .cloned()
+            .map_or(Availability::Unknown, Availability::Known);
         let blockers = build_blockers(&sources);
         let blocker_count = if sources.team.is_some() && sources.tools.is_some() {
             Availability::Known(blockers.len())
@@ -480,6 +576,7 @@ impl TuiViewModel {
             statusline,
             blockers,
             models,
+            stats,
         })
     }
 }
@@ -538,8 +635,15 @@ enum PresentationState {
     },
     ConfigEditor,
     ProviderWizard,
-    ModelSelector,
-    Stats,
+    ModelSelector {
+        group: ModelSelectorGroup,
+        selected: usize,
+        detail: bool,
+    },
+    Stats {
+        selected: usize,
+        detail: bool,
+    },
     AgentCenter,
 }
 
@@ -592,6 +696,14 @@ impl PresentationController {
 
     pub(crate) const fn is_provider_wizard(&self) -> bool {
         matches!(self.state, PresentationState::ProviderWizard)
+    }
+
+    pub(crate) const fn is_model_selector(&self) -> bool {
+        matches!(self.state, PresentationState::ModelSelector { .. })
+    }
+
+    pub(crate) const fn is_stats(&self) -> bool {
+        matches!(self.state, PresentationState::Stats { .. })
     }
 
     pub(crate) const fn is_config_object_selector(&self) -> bool {
@@ -664,7 +776,124 @@ impl PresentationController {
     pub(crate) fn set_model_query(&mut self, query: &str) -> Result<(), PresentationError> {
         ModelSelectorView::build(&[], &[], query)?;
         self.model_query = query.to_owned();
+        if let PresentationState::ModelSelector {
+            selected, detail, ..
+        } = &mut self.state
+        {
+            *selected = 0;
+            *detail = false;
+        }
         Ok(())
+    }
+
+    pub(crate) fn edit_model_query(
+        &mut self,
+        character: Option<char>,
+    ) -> Result<(), PresentationError> {
+        let mut query = self.model_query.clone();
+        if let Some(character) = character {
+            query.push(character);
+        } else if let Some((index, _)) =
+            UnicodeSegmentation::grapheme_indices(query.as_str(), true).next_back()
+        {
+            query.truncate(index);
+        }
+        self.set_model_query(&query)
+    }
+
+    pub(crate) fn clear_model_query(&mut self) -> Result<(), PresentationError> {
+        self.set_model_query("")
+    }
+
+    pub(crate) fn move_model_group(&mut self, offset: isize) {
+        if let PresentationState::ModelSelector {
+            group,
+            selected,
+            detail,
+        } = &mut self.state
+        {
+            *group = group.moved(offset);
+            *selected = 0;
+            *detail = false;
+        }
+    }
+
+    pub(crate) fn move_model_selection(&mut self, models: &ModelSelectorView, offset: isize) {
+        let PresentationState::ModelSelector {
+            group,
+            selected,
+            detail,
+        } = &mut self.state
+        else {
+            return;
+        };
+        let filtered = models.filtered(&self.model_query);
+        let Some(entries) = filtered.group_entries(*group) else {
+            *selected = 0;
+            *detail = false;
+            return;
+        };
+        if entries.is_empty() {
+            *selected = 0;
+        } else {
+            *selected = selected
+                .saturating_add_signed(offset)
+                .min(entries.len() - 1);
+        }
+        *detail = false;
+    }
+
+    pub(crate) fn toggle_model_detail(&mut self, models: &ModelSelectorView) {
+        let PresentationState::ModelSelector {
+            group,
+            selected,
+            detail,
+        } = &mut self.state
+        else {
+            return;
+        };
+        let filtered = models.filtered(&self.model_query);
+        if filtered
+            .group_entries(*group)
+            .is_some_and(|entries| entries.get(*selected).is_some())
+        {
+            *detail = !*detail;
+        }
+    }
+
+    pub(crate) fn move_stats_selection(
+        &mut self,
+        stats: &Availability<RuntimeUsageSnapshot>,
+        offset: isize,
+    ) {
+        let PresentationState::Stats { selected, detail } = &mut self.state else {
+            return;
+        };
+        let Availability::Known(stats) = stats else {
+            *selected = 0;
+            *detail = false;
+            return;
+        };
+        if stats.attempts().is_empty() {
+            *selected = 0;
+        } else {
+            *selected = selected
+                .saturating_add_signed(offset)
+                .min(stats.attempts().len() - 1);
+        }
+        *detail = false;
+    }
+
+    pub(crate) fn toggle_stats_detail(&mut self, stats: &Availability<RuntimeUsageSnapshot>) {
+        let PresentationState::Stats { selected, detail } = &mut self.state else {
+            return;
+        };
+        if matches!(
+            stats,
+            Availability::Known(stats) if stats.attempts().get(*selected).is_some()
+        ) {
+            *detail = !*detail;
+        }
     }
 
     pub(crate) fn activate(
@@ -796,10 +1025,18 @@ impl PresentationController {
                 };
             }
             CommandTarget::ModelSelector => {
-                self.state = PresentationState::ModelSelector;
+                self.model_query.clear();
+                self.state = PresentationState::ModelSelector {
+                    group: ModelSelectorGroup::All,
+                    selected: 0,
+                    detail: false,
+                };
             }
             CommandTarget::Stats => {
-                self.state = PresentationState::Stats;
+                self.state = PresentationState::Stats {
+                    selected: 0,
+                    detail: false,
+                };
             }
             CommandTarget::AgentCenter => {
                 self.state = PresentationState::AgentCenter;
@@ -898,6 +1135,13 @@ impl PresentationController {
     }
 
     pub(crate) fn back(&mut self) -> Result<(), PresentationControllerError> {
+        if let PresentationState::ModelSelector { detail, .. }
+        | PresentationState::Stats { detail, .. } = &mut self.state
+            && *detail
+        {
+            *detail = false;
+            return Ok(());
+        }
         self.require_discardable_editor()?;
         self.object_create = None;
         self.editor = None;
@@ -1105,10 +1349,19 @@ impl PresentationController {
                     connection: editor.connection.clone(),
                 })
             }
-            PresentationState::ModelSelector => Ok(PresentationScreenView::ModelSelector {
+            PresentationState::ModelSelector {
+                group,
+                selected,
+                detail,
+            } => Ok(PresentationScreenView::ModelSelector {
                 query: self.model_query.clone(),
+                group,
+                selected,
+                detail,
             }),
-            PresentationState::Stats => Ok(PresentationScreenView::Stats),
+            PresentationState::Stats { selected, detail } => {
+                Ok(PresentationScreenView::Stats { selected, detail })
+            }
             PresentationState::AgentCenter => Ok(PresentationScreenView::AgentCenter),
         }
     }
@@ -1124,7 +1377,12 @@ impl PresentationController {
             StatuslineLayoutView::build(&view.statusline, viewport.width, viewport.height);
         let body_capacity = usize::from(viewport.height).saturating_sub(statusline.rows.len());
         let mut body = screen_rows(&screen, view);
-        if matches!(screen, PresentationScreenView::ConfigCenter { .. }) {
+        if matches!(
+            screen,
+            PresentationScreenView::ConfigCenter { .. }
+                | PresentationScreenView::ModelSelector { detail: false, .. }
+                | PresentationScreenView::Stats { detail: false, .. }
+        ) {
             truncate_rows_keeping_selection(&mut body, body_capacity);
         } else {
             body.truncate(body_capacity);
@@ -1205,8 +1463,14 @@ pub(crate) enum PresentationScreenView {
     },
     ModelSelector {
         query: String,
+        group: ModelSelectorGroup,
+        selected: usize,
+        detail: bool,
     },
-    Stats,
+    Stats {
+        selected: usize,
+        detail: bool,
+    },
     AgentCenter,
 }
 
@@ -1618,24 +1882,382 @@ fn screen_rows(screen: &PresentationScreenView, view: &TuiViewModel) -> Vec<Layo
             *validated,
             Some(connection),
         ),
-        PresentationScreenView::ModelSelector { .. } => {
-            let mut rows = vec![LayoutRowView::new("Models", false)];
-            rows.extend(view.models.all.iter().enumerate().map(|(index, entry)| {
+        PresentationScreenView::ModelSelector {
+            query,
+            group,
+            selected,
+            detail,
+        } => model_selector_rows(&view.models, query, *group, *selected, *detail),
+        PresentationScreenView::Stats { selected, detail } => {
+            stats_rows(&view.stats, *selected, *detail)
+        }
+        PresentationScreenView::AgentCenter => vec![LayoutRowView::new("Agents", false)],
+    }
+}
+
+fn model_selector_rows(
+    models: &ModelSelectorView,
+    query: &str,
+    group: ModelSelectorGroup,
+    selected: usize,
+    detail: bool,
+) -> Vec<LayoutRowView> {
+    let filtered = models.filtered(query);
+    let mut rows = vec![
+        LayoutRowView::new(format!("Models / {}", group.label()), false),
+        LayoutRowView::new(format!("query {query}"), false),
+    ];
+    let Some(entries) = filtered.group_entries(group) else {
+        rows.push(LayoutRowView::new(
+            format!("{} unknown", group.label()),
+            false,
+        ));
+        return rows;
+    };
+    if entries.is_empty() {
+        rows.push(LayoutRowView::new("No models", false));
+        return rows;
+    }
+    let selected = selected.min(entries.len() - 1);
+    if detail {
+        rows.extend(model_detail_rows(&entries[selected]));
+        return rows;
+    }
+    rows.push(LayoutRowView::new(
+        format!(
+            "Favorites {} | Recent ? | Compatible {} | All {}",
+            filtered.favorites.len(),
+            filtered
+                .group_entries(ModelSelectorGroup::Compatible)
+                .map_or_else(|| "?".to_owned(), |entries| entries.len().to_string()),
+            filtered.all.len()
+        ),
+        false,
+    ));
+    rows.extend(entries.iter().enumerate().map(|(index, entry)| {
+        let source = match &entry.choice {
+            ModelSelectorChoiceView::ConfiguredPreset { .. } => "configured",
+            ModelSelectorChoiceView::ReleaseCatalog { .. } => "release",
+        };
+        LayoutRowView::new(
+            format!(
+                "{} [{}] {} / {} / {}",
+                if index == selected { '>' } else { ' ' },
+                source,
+                entry.id(),
+                entry.provider(),
+                entry.model()
+            ),
+            index == selected,
+        )
+    }));
+    rows
+}
+
+fn model_detail_rows(entry: &ModelSelectorEntryView) -> Vec<LayoutRowView> {
+    let mut rows = vec![LayoutRowView::new(format!("model {}", entry.id()), false)];
+    match &entry.choice {
+        ModelSelectorChoiceView::ConfiguredPreset { preset } => {
+            rows.extend([
+                LayoutRowView::new("source configured", false),
+                LayoutRowView::new(format!("provider {}", preset.provider), false),
+                LayoutRowView::new(format!("model {}", preset.model), false),
+                LayoutRowView::new(format!("dialect {}", preset.dialect.as_str()), false),
                 LayoutRowView::new(
                     format!(
-                        "{} {} / {} / {}",
-                        if index == 0 { '>' } else { ' ' },
-                        entry.id(),
-                        entry.provider(),
-                        entry.model()
+                        "reasoning {}",
+                        preset.reasoning_effort.map_or("?", |value| value.as_str())
                     ),
-                    index == 0,
-                )
-            }));
-            rows
+                    false,
+                ),
+                LayoutRowView::new(
+                    format!(
+                        "service tier {}",
+                        preset.service_tier.map_or("?", |value| value.as_str())
+                    ),
+                    false,
+                ),
+                LayoutRowView::new(
+                    format!(
+                        "max output tokens {}",
+                        preset
+                            .max_output_tokens
+                            .map_or_else(|| "?".to_owned(), |value| value.to_string())
+                    ),
+                    false,
+                ),
+                LayoutRowView::new(
+                    format!("context {}", preset.context_mode.as_deref().unwrap_or("?")),
+                    false,
+                ),
+                LayoutRowView::new(format!("favorite {}", preset.favorite), false),
+                LayoutRowView::new(
+                    format!(
+                        "fallback {}",
+                        if preset.fallback.is_empty() {
+                            "none".to_owned()
+                        } else {
+                            preset.fallback.join(", ")
+                        }
+                    ),
+                    false,
+                ),
+            ]);
         }
-        PresentationScreenView::Stats => vec![LayoutRowView::new("Stats", false)],
-        PresentationScreenView::AgentCenter => vec![LayoutRowView::new("Agents", false)],
+        ModelSelectorChoiceView::ReleaseCatalog { model } => {
+            let record = model.record();
+            let capabilities = record.capabilities().value().map_or_else(
+                || "?".to_owned(),
+                |capabilities| {
+                    capabilities
+                        .iter()
+                        .map(|capability| match capability {
+                            ModelCapability::ImageInput => "image_input",
+                            ModelCapability::Reasoning => "reasoning",
+                            ModelCapability::ToolCalling => "tool_calling",
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                },
+            );
+            rows.extend([
+                LayoutRowView::new("source release", false),
+                LayoutRowView::new(format!("display {}", record.display_name().value()), false),
+                LayoutRowView::new(format!("provider {}", model.provider()), false),
+                LayoutRowView::new(format!("model {}", record.model_id().value()), false),
+                LayoutRowView::new(format!("template {}", record.provider_template()), false),
+                LayoutRowView::new(
+                    format!("dialect {}", record.primary_dialect().value().as_str()),
+                    false,
+                ),
+                LayoutRowView::new(
+                    format!(
+                        "compatibility {}",
+                        availability_bool_label(&entry.compatibility)
+                    ),
+                    false,
+                ),
+                LayoutRowView::new(
+                    format!(
+                        "availability {}",
+                        availability_bool_label(&entry.availability)
+                    ),
+                    false,
+                ),
+                LayoutRowView::new(
+                    format!(
+                        "context tokens {}",
+                        record
+                            .context_window_tokens()
+                            .value()
+                            .map_or_else(|| "?".to_owned(), |value| value.to_string())
+                    ),
+                    false,
+                ),
+                LayoutRowView::new(format!("capabilities {capabilities}"), false),
+                LayoutRowView::new(
+                    format!(
+                        "price schedule {}",
+                        record.price_schedule_ref().value().unwrap_or("?")
+                    ),
+                    false,
+                ),
+                LayoutRowView::new(format!("seed {}", record.seed_revision()), false),
+                LayoutRowView::new(format!("observed {}", record.observed_at()), false),
+            ]);
+        }
+    }
+    rows
+}
+
+fn availability_bool_label(value: &Availability<bool>) -> &'static str {
+    match value {
+        Availability::Known(true) => "yes",
+        Availability::Known(false) => "no",
+        Availability::Unknown => "?",
+    }
+}
+
+fn stats_rows(
+    stats: &Availability<RuntimeUsageSnapshot>,
+    selected: usize,
+    detail: bool,
+) -> Vec<LayoutRowView> {
+    let Availability::Known(stats) = stats else {
+        return vec![
+            LayoutRowView::new("Stats", false),
+            LayoutRowView::new("Usage unavailable", false),
+        ];
+    };
+    let attempts = stats.attempts();
+    if detail && !attempts.is_empty() {
+        return stats_attempt_detail_rows(&attempts[selected.min(attempts.len() - 1)]);
+    }
+
+    let mut rows = vec![
+        LayoutRowView::new("Stats", false),
+        LayoutRowView::new(format!("as of {} ms", stats.as_of().unix_millis()), false),
+        LayoutRowView::new(stats_rollup_label("1h", stats.rolling().one_hour()), false),
+        LayoutRowView::new(stats_rollup_label("1d", stats.rolling().one_day()), false),
+        LayoutRowView::new(
+            stats_rollup_label("7d", stats.rolling().seven_days()),
+            false,
+        ),
+        LayoutRowView::new(format!("Attempts {}", attempts.len()), false),
+    ];
+    if attempts.is_empty() {
+        rows.push(LayoutRowView::new("No attempts", false));
+        return rows;
+    }
+
+    let selected = selected.min(attempts.len() - 1);
+    rows.extend(attempts.iter().enumerate().map(|(index, attempt)| {
+        LayoutRowView::new(
+            format!(
+                "{} attempt {} | turn {} | {} | {}/{}",
+                if index == selected { '>' } else { ' ' },
+                attempt.attempt(),
+                attempt.turn(),
+                usage_attempt_outcome_label(attempt.outcome()),
+                attempt.provider_profile(),
+                attempt.requested_model()
+            ),
+            index == selected,
+        )
+    }));
+    rows
+}
+
+fn stats_rollup_label(label: &str, rollup: &UsageRollup) -> String {
+    let summary = UsageSummaryView::from(rollup);
+    let cost = cost_label(&Availability::Known(summary.clone()));
+    format!(
+        "{label} {} attempts | {} tokens | {}",
+        summary.attempts,
+        usage_quantity_label(&summary.total_tokens),
+        cost
+    )
+}
+
+fn usage_quantity_label(quantity: &UsageQuantityView) -> String {
+    if quantity.overflowed {
+        return "overflow".to_owned();
+    }
+    let amount = match (quantity.exact, quantity.estimated) {
+        (Some(exact), Some(estimated)) if estimated > 0 => format!("{exact}+~{estimated}"),
+        (Some(exact), _) => exact.to_string(),
+        (None, Some(estimated)) => format!("~{estimated}"),
+        (None, None) if quantity.unknown_records == 0 => "0".to_owned(),
+        (None, None) => "?".to_owned(),
+    };
+    if quantity.unknown_records == 0 || amount == "?" {
+        amount
+    } else {
+        format!("{amount}+?")
+    }
+}
+
+fn stats_attempt_detail_rows(attempt: &UsageAttempt) -> Vec<LayoutRowView> {
+    let usage = attempt.usage();
+    let cost = attempt.cost_estimate();
+    vec![
+        LayoutRowView::new("Stats / Attempt", false),
+        LayoutRowView::new(format!("attempt {}", attempt.attempt()), false),
+        LayoutRowView::new(
+            format!(
+                "thread {} | turn {} | agent {}",
+                attempt.thread(),
+                attempt.turn(),
+                attempt
+                    .agent()
+                    .map_or_else(|| "?".to_owned(), |value| value.to_string())
+            ),
+            false,
+        ),
+        LayoutRowView::new(
+            format!("outcome {}", usage_attempt_outcome_label(attempt.outcome())),
+            false,
+        ),
+        LayoutRowView::new(format!("provider {}", attempt.provider_profile()), false),
+        LayoutRowView::new(
+            format!("requested model {}", attempt.requested_model()),
+            false,
+        ),
+        LayoutRowView::new(
+            format!("observed model {}", attempt.observed_model().unwrap_or("?")),
+            false,
+        ),
+        LayoutRowView::new(
+            format!(
+                "dialect {}",
+                attempt.dialect().map_or("?", |value| value.as_str())
+            ),
+            false,
+        ),
+        LayoutRowView::new(
+            format!(
+                "reasoning requested {} | observed {}",
+                attempt.requested_reasoning_effort().unwrap_or("?"),
+                attempt.observed_reasoning_effort().unwrap_or("?")
+            ),
+            false,
+        ),
+        LayoutRowView::new(
+            format!(
+                "service tier requested {} | observed {}",
+                attempt.requested_service_tier().unwrap_or("?"),
+                attempt.observed_service_tier().unwrap_or("?")
+            ),
+            false,
+        ),
+        LayoutRowView::new(
+            format!(
+                "tokens input {} | output {} | total {}",
+                usage
+                    .and_then(|record| record.input_tokens())
+                    .map_or_else(|| "?".to_owned(), |value| value.to_string()),
+                usage
+                    .and_then(|record| record.output_tokens())
+                    .map_or_else(|| "?".to_owned(), |value| value.to_string()),
+                usage
+                    .and_then(|record| record.total_tokens())
+                    .map_or_else(|| "?".to_owned(), |value| value.to_string())
+            ),
+            false,
+        ),
+        LayoutRowView::new(
+            cost.map_or_else(
+                || "cost ?".to_owned(),
+                |cost| {
+                    format!(
+                        "cost {} {}",
+                        cost.currency(),
+                        format_cost(cost.amount_pico_units(), cost.scale_decimal_places())
+                    )
+                },
+            ),
+            false,
+        ),
+        LayoutRowView::new(
+            format!(
+                "started {} | completed {}",
+                attempt
+                    .started_at()
+                    .map_or_else(|| "?".to_owned(), |value| value.unix_millis().to_string()),
+                attempt
+                    .completed_at()
+                    .map_or_else(|| "?".to_owned(), |value| value.unix_millis().to_string())
+            ),
+            false,
+        ),
+    ]
+}
+
+const fn usage_attempt_outcome_label(outcome: UsageAttemptOutcome) -> &'static str {
+    match outcome {
+        UsageAttemptOutcome::Succeeded => "succeeded",
+        UsageAttemptOutcome::Failed => "failed",
+        UsageAttemptOutcome::Interrupted => "interrupted",
     }
 }
 
@@ -2231,10 +2853,11 @@ mod tests {
     use crate::provider_connection::{ProviderConnectionTestStatus, ProviderConnectionTester};
 
     use super::{
-        Availability, BlockerView, CostQuantityView, ModelSelectorView, PresentationController,
-        PresentationControllerError, PresentationScreenView, PresentationSources, RecoveryBadge,
-        SlashPanelView, StatusSegmentKind, TuiViewModel, UsageQuantityView, UsageSummaryView,
-        Viewport, cost_label, display_width, fit_text, status_segments,
+        Availability, BlockerView, CostQuantityView, ModelSelectorGroup, ModelSelectorView,
+        PresentationController, PresentationControllerError, PresentationScreenView,
+        PresentationSources, RecoveryBadge, SlashPanelView, StatusSegmentKind, TuiViewModel,
+        UsageQuantityView, UsageSummaryView, Viewport, cost_label, display_width, fit_text,
+        model_detail_rows, model_selector_rows, status_segments,
     };
 
     static NEXT_TEMP: AtomicU64 = AtomicU64::new(1);
@@ -2867,6 +3490,17 @@ source = "unknown"
         assert_eq!(selector.recent, Availability::Unknown);
         assert_eq!(selector.compatible, Availability::Unknown);
         assert_eq!(selector.all[0].compatibility, Availability::Unknown);
+        assert_eq!(
+            model_selector_rows(&selector, "", ModelSelectorGroup::Recent, 0, false)
+                .into_iter()
+                .map(|row| row.text)
+                .collect::<Vec<_>>(),
+            vec![
+                "Models / Recent".to_owned(),
+                "query ".to_owned(),
+                "Recent unknown".to_owned(),
+            ]
+        );
     }
 
     #[test]
@@ -2910,6 +3544,15 @@ credential = "synthetic-deepseek-credential-reference"
         assert!(encoded.contains("release_catalog"));
         assert!(encoded.contains("2026-08-10.2"));
         assert!(!encoded.contains("synthetic-openai-credential-reference"));
+        let detail = model_detail_rows(entry)
+            .into_iter()
+            .map(|row| row.text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(detail.contains("source release"));
+        assert!(detail.contains("availability ?"));
+        assert!(detail.contains("seed 2026-08-10.2"));
+        assert!(!detail.contains("synthetic-openai-credential-reference"));
 
         let deepseek = ModelSelectorView::build(&[], &catalog_models, "deepseek-v4-pro")
             .expect("catalog model with DeepSeek Chat adapter");

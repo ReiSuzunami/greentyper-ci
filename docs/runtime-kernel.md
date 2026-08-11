@@ -362,13 +362,15 @@ charges still require a future dedicated authority path.
   dry-run validation, atomic commit path, interaction controller, Provider
   Profile candidate/connection-test flow, and deterministic viewport-row
   projection are present.
-- Live terminal-backed Usage refresh and interaction, automatic Context View
-  construction/compaction, provider-reported charge
+- Live terminal-backed Usage refresh and richer aggregate navigation,
+  automatic Context View construction/compaction, provider-reported charge
   and subscription-quota values, richer observed model/effort/tier
   metadata, and FMDev P6 measurements. The durable attempts, cached rollups,
   pinned Usage Windows, revision-bound summary/page `stats` projections, and
   terminal-neutral width-degradation and Context Pressure projection contracts
-  are present. The first Direct VT tracer renders those frozen rows and can
+  are present. The first Direct VT tracer now browses the frozen rolling Usage
+  summaries and durable attempt details, but it does not refresh them or expose
+  dedicated Thread, Agent, Team, or named-window aggregate screens. It can also
   persist every user-scope Config Schema field, can create a complete Provider
   Profile or Model Preset, a named Usage Window, and a manual Price Schedule,
   and can confirm typed

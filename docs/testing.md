@@ -358,6 +358,12 @@ missing, repairs it, then proves a competing revision cannot be overwritten,
 dirty quit is blocked, and explicit discard preserves the winner. Schema tests
 pin every Model Preset interaction and parseable choice. These tests do not prove
 interactive `/model` application, starter acceptance, or live catalog refresh.
+A real-key loop now opens `/model`, filters configured Presets, moves to the
+Favorites group, opens the selected detail, redraws after resize, and proves
+Config bytes and the absent Ledger remain unchanged. Projection tests separately
+freeze explicit unknown Recent and live availability, release compatibility and
+provenance detail, and credential-reference redaction. These tests prove the
+read-only browser, not current-Agent next-Turn application or catalog refresh.
 A real-key loop now carries `/config stats-window add` through its bounded ID
 prompt and start/end/days/time-zone fields, previews, commits, and reopens the
 resolved window. Focused tests prove all four schema fields expose 512-byte text
@@ -366,7 +372,12 @@ incomplete, invalid arrays cannot move focus, and dirty quit requires explicit
 discard. Further tests repair an invalid equal-time window, then prove a stale
 revision cannot overwrite the winner and leaves the Draft live. Existing-object
 tests carry a Usage Window field command through the section selector, commit,
-and reopen. These tests do not prove live usage refresh or interactive `/stats`.
+and reopen. These tests do not prove live usage refresh.
+A real-key loop now opens `/stats` over a two-Turn frozen Runtime snapshot,
+selects the second Turn's durable attempt, opens provider/model/outcome detail,
+redraws after resize, and proves the Ledger bytes remain unchanged. It does not
+prove live refresh or dedicated Thread, Agent, Team, named-window, token-class,
+or cache-distribution screens.
 A real-key loop now carries `/config pricing add` through its bounded ID prompt,
 all 17 schema fields, manual provenance choice, preview, commit, and Config
 reopen. Schema tests pin the 64-byte Provider Profile input, 512-byte text and
@@ -407,8 +418,9 @@ read-only `config catalog` integration test proves the snapshot contains no
 local path or credential reference.
 
 Remaining terminal-backend evidence covers real terminal/ConPTY resize and input,
-interactive model selector states, approval/blocker actions, panic-abort cleanup,
-final host cell geometry, and input-ready/idle resource budgets.
+current-Agent Preset application, richer Usage aggregate navigation, Agent
+Center data, approval/blocker actions, panic-abort cleanup, final host cell
+geometry, and input-ready/idle resource budgets.
 
 Tests assert that `/config pro url` resolves through Provider selection to the
 focused rendered editor without registering a flat root command. Every Config

@@ -323,6 +323,18 @@ previews, a second Enter CAS-commits, and tests reopen the resolved schedule.
 Invalid selector ranges, effective intervals, provenance, and stale revisions
 retain the Draft for repair or explicit discard. This does not rebuild the
 running TUI's frozen Price Schedule book or add rich cost presentation.
+`/model` now opens a read-only browser over the frozen configured Presets and
+release-catalog candidates. Character input filters the snapshot, Tab and
+Shift-Tab move across Favorites, Recent, Compatible, and All, Up/Down move the
+selection, and Enter opens bounded source and capability detail. Recent and
+live availability stay explicitly unknown when no trusted fact exists. The
+browser never reads credentials, probes a Provider, writes Config or Ledger
+state, or applies a Preset to an Agent; current-Agent next-Turn application
+remains pending.
+`/stats` now browses the frozen startup Usage snapshot. It shows 1-hour, 1-day,
+and 7-day summaries, selects durable attempts with Up/Down, and opens bounded
+per-attempt provider, model, policy, token, cost, outcome, and timing detail
+with Enter. It does not refresh live, mutate Config, or append to the Ledger.
 Config commits do not rebuild the running TUI's frozen status, usage, pricing,
 or Provider projection. The tracer is not an approval surface, live refresh
 loop, audited ConPTY integration, secret-entry/bind surface, starter-preset
@@ -330,7 +342,8 @@ workflow, or persistent live catalog discovery. Live inference conformance,
 reconnect/retry, OpenCode Go Messages execution,
 Messages reasoning blocks, Preset context/fallback execution, richer approval
 presentation, broader Provider and Tool adapters,
-Workspace, interactive selectors, and App Server work remain. The loopback Provider tracer remains
+Workspace, current-Agent Preset application, richer Usage aggregate browsing,
+Agent Center data, and App Server work remain. The loopback Provider tracer remains
 an internal harness; `local.echo` is intentionally a fixed opt-in command rather
 than a general process runner. The file Ledger remains
 provisional. The acceptance runner can emit bound raw evidence,
