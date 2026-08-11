@@ -66,7 +66,11 @@ core discovery store, release catalog, and Config Draft/CAS into explicit
 `discovery status`, `refresh`, `catalog`, and `accept` flows. Failed probes do
 not enter the writer path; merge is read-only; acceptance requires a current
 Profile fingerprint and explicit supported dialect. The Direct VT model browser
-does not yet consume this projection or trigger discovery. It also owns a bounded Provider Profile ID prompt,
+uses the same shared release/discovery projection, derives Recent from durable
+Usage, and exposes only an explicit F5 discovery probe. Success swaps the local
+observation/view; failure preserves both. Discovery acceptance revalidates the
+exact observation before it opens an ordinary Config Draft. It also owns a
+bounded Provider Profile ID prompt,
 complete non-secret Profile field flow, status-only opaque-reference editor, an
 F5 control that invokes the bounded Provider candidate connection tester, and
 an F7 flow that delegates hidden bind/replace, status-only test, and confirmed

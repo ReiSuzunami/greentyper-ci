@@ -208,7 +208,7 @@ untyped states fail closed.
 
 The remaining slices are still policy, protocol, and fault-adapter work:
 live inference conformance, non-Windows credential backends, configurable proxy
-policy, TUI/lazy catalog discovery and selector merge, OpenCode Go Messages execution, DeepSeek
+policy, automatic/on-open catalog discovery, OpenCode Go Messages execution, DeepSeek
 Chat/Messages reasoning blocks, general Preset
 context/fallback execution, broader canonical Items, multiple
 Tool calls,
@@ -301,10 +301,11 @@ template defaults before explicit Profile overrides, defaults custom origins to
 the distinct `template_mirror` source only when the template has a reviewed
 bundled rate card, preserves explicit pricing overrides, and binds release
 models only to Profiles whose
-catalog mode includes template data. The selector searches configured presets
-and release candidates, reports compatibility from frozen dialect support plus
-the installed product-adapter boundary, and keeps live availability and Recent
-unknown. `greentyper config catalog` emits the static snapshot without Config,
+catalog mode includes template data. The selector searches configured Presets,
+release candidates, and saved discovery observations, reports compatibility
+from frozen dialect support plus the installed product-adapter boundary, and
+derives Recent from durable Usage. Observed availability is explicit but is not
+a live health claim. `greentyper config catalog` emits the static snapshot without Config,
 credential, or network access. The current Responses and Chat Completions
 adapters accept the official OpenAI template through the same frozen capability,
 dialect, and endpoint checks as compatible gateways. The current Messages
@@ -398,16 +399,19 @@ explicit discard without overwriting the winner. This slice does not rebuild
 the frozen pricing book, ingest provider-reported charges, or add rich cost
 presentation.
 The root `/model` route now supplies a Direct VT browser over the latest
-successful configured-Preset and release-catalog projection. It supports
+successful configured-Preset, release-catalog, and local-discovery projection. It supports
 bounded
 fuzzy query input, Favorites/Recent/Compatible/All groups, selected-row
-navigation, and source-tagged detail while preserving explicit unknown Recent
-and availability facts. A second Enter on configured detail stages a bounded,
+navigation, Usage-derived Recent, and source/freshness/availability detail. A
+second Enter on configured detail stages a bounded,
 Session-authenticated Runtime Event for the current Agent's next Turn; the
 pending ID is visible and replaceable. On compatible release detail, a second
 Enter creates a prefilled ordinary user-scope Preset Draft and uses the existing
 preview/CAS-commit path; incompatible or duplicate candidates remain
-recoverable without Config overwrite. The next
+recoverable without Config overwrite. Current unknown discovered models use a
+separate bounded ID plus explicit trusted-dialect path into the same Draft, with
+final observation revalidation before creation. F5 is explicit foreground
+discovery; failure preserves the prior state/view. The next
 headless admission rechecks the exact Preset and Config fingerprint, consumes the
 selection atomically with Config/Provider freeze, and leaves it pending on
 preflight failure. Selection performs no Config write, credential lookup,
@@ -536,8 +540,8 @@ This does not complete Phase 3. Audited Windows ConPTY behavior, broader
 multi-Tool/App Server policy, general App Server Runtime control beyond the
 exact cancel/retry/resume recovery flow, remote App Server transport,
 automatic/background snapshot refresh,
-custom-template and automatic starter-offer/update workflow, TUI/lazy catalog
-discovery and Recent evidence, automatic Context View/token-source
+custom-template and automatic starter-offer/update workflow,
+automatic/on-open catalog discovery, automatic Context View/token-source
 projection, provider-reported
 charge and subscription-quota accounting, richer observed Provider metadata,
 project/new-Agent Preset defaults, Agent lifecycle
@@ -555,7 +559,7 @@ Exit criteria:
 ## Phase 4: Provider Portability
 
 Continue the release templates and seed catalog with OpenCode Go adapter
-execution, TUI-triggered lazy discovery,
+execution, automatic/on-open discovery,
 automatic starter updates, provider capability probes, explicit fallback
 chains, observed availability, and provider/model epoch switching. The
 OpenAI/openai-compatible Responses and Chat Completions adapters, official
@@ -570,8 +574,13 @@ discovery merge with Profile-fingerprint freshness, and explicit current-model
 acceptance into an ordinary Config Preset. Failed probes preserve prior state;
 stale or absent models and unsupported dialects fail before Config write.
 Unknown remote fields never gain capability, endpoint, pricing, credential,
-instruction, or execution authority. The Direct VT selector still consumes
-only its local release projection.
+instruction, or execution authority. The Direct VT selector now consumes the
+same shared release/discovery projection, derives Recent from durable Usage,
+and exposes one explicit F5 probe for the selected Profile. Failed probes keep
+the prior observation/view. A current unknown model requires a bounded Preset
+ID plus an explicit trusted Profile dialect; the exact observation is checked
+again before an ordinary Config Draft is created, and CAS conflict remains
+recoverable through discard/reopen.
 Their Profile/model/dialect, optional output-token limit, typed reasoning effort,
 and typed service tier resolve through the frozen Config/Provider Epoch boundary.
 OpenAI Responses and Chat map the supported request fields. DeepSeek Responses
@@ -581,7 +590,7 @@ keeps a preferred Responses dialect and Pro resolves that preference to Chat
 before admission. Configured Presets can now be staged from `/model` for the
 existing current Agent's next Turn and are consumed at durable admission.
 Project/new-Agent defaults, context mode, general fallback execution, automatic
-starter updates, and TUI/lazy discovery remain pending.
+starter updates, and automatic/on-open/background discovery remain pending.
 
 Exit criteria:
 

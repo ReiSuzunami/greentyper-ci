@@ -393,16 +393,26 @@ Invalid selector ranges, effective intervals, provenance, and stale revisions
 retain the Draft for repair or explicit discard. This does not rebuild the
 running TUI's frozen Price Schedule book or add rich cost presentation.
 `/model` now opens a browser over the latest successful local snapshot of
-configured Presets and release-catalog candidates. Character input filters the
-snapshot, Tab and
+configured Presets, release-catalog candidates, and bounded Provider-discovery
+observations. Character input filters the snapshot, Tab and
 Shift-Tab move across Favorites, Recent, Compatible, and All, Up/Down move the
-selection, and Enter opens bounded source and capability detail. On compatible
-release detail, a second Enter requests a bounded Preset ID, opens a prefilled
-user-scope Draft for the exact Profile/model/dialect, and uses the normal
-preview/CAS-commit flow. The accepted result is an ordinary user-owned Preset;
+selection, and Enter opens bounded source, freshness, availability, and
+capability detail. Recent is derived only from durable Usage Attempts and is
+known-empty when no attempts exist. On compatible release detail, a second
+Enter requests a bounded Preset ID, opens a prefilled user-scope Draft for the
+exact Profile/model/dialect, and uses the normal preview/CAS-commit flow. On a
+current discovered-model detail, a second Enter requests the ID and then an
+explicit trusted dialect from the current Profile before entering that same
+ordinary Draft/CAS flow. The Profile fingerprint, observation timestamp, and
+exact model are revalidated immediately before Draft creation; drift returns to
+the browser without writing Config. F5 is the only Provider-discovery action:
+it synchronously probes the selected Profile, atomically replaces its separate
+discovery observation only after success, and preserves the previous file and
+browser on failure. F6 or Ctrl-R remains a local-only snapshot reload and never
+contacts a Provider. The accepted result is an ordinary user-owned Preset;
 duplicate IDs, incompatible Profiles, validation failures, and stale revisions
-never overwrite Config. F6 or Ctrl-R then reloads it into the browser. A second
-Enter on configured detail durably selects that Preset for the existing current
+never overwrite Config. A second Enter on configured detail durably selects
+that Preset for the existing current
 Agent's next Turn; the pending ID is visible and another configured Preset
 replaces it. Nothing is installed or executed implicitly. Selection
 authenticates the recovered Active Agent Session,
@@ -464,8 +474,8 @@ is no background polling or automatic refresh. Runtime, Team, and Tool Ledgers
 are inspected independently, so one refresh is not a cross-Ledger transactional
 snapshot. The terminal and App Server approval surfaces are limited to the exact
 pending `local.echo` call; neither is a general Tool policy editor, audited
-ConPTY integration, automatic starter-update
-workflow, or TUI/lazy catalog discovery. Live inference conformance,
+ConPTY integration, automatic starter-update workflow, or automatic/on-open
+Provider discovery. Live inference conformance,
 automatic retry policy or partial-stream reconnect, OpenCode Go Messages execution,
 Messages reasoning blocks, Preset context/fallback execution, broader multi-Tool approval
 presentation, broader Provider and Tool adapters,

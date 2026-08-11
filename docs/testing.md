@@ -397,14 +397,25 @@ tests do not prove live catalog refresh.
 A real-key loop now opens `/model`, filters configured Presets, moves to the
 Favorites group, opens the selected detail, redraws after resize, and proves
 Config bytes and the absent Ledger remain unchanged. Projection tests separately
-freeze explicit unknown Recent and live availability, release compatibility and
-provenance detail, and credential-reference redaction. A second real-key flow
+freeze Usage-derived Recent ordering/deduplication, including a discovery-only
+model, release/discovery precedence, freshness and availability, and
+credential-reference redaction. A second real-key flow
 opens configured detail, stages `fast`, replaces it with `careful`, renders the
 pending next-Turn ID, and proves Config plus Team and Tool Ledgers are unchanged
 while the Runtime Ledger gains the selection Event. A third real-key flow opens
 a compatible release detail, enters a bounded Preset ID, previews and commits
 the prefilled user-scope Draft, manually refreshes, reopens the configured
-Preset, and stages it for the current Agent. Core, CLI, and App Server tests pin
+Preset, and stages it for the current Agent. Further real-key flows merge a
+current local discovery observation without writes, keep release choices usable
+when that state is corrupt, and drive three explicit F5 attempts through
+success, failure with byte-identical prior state, and successful retry. Another
+opens a current discovery-only model, enters a bounded Preset ID, chooses one
+trusted Profile dialect, commits the ordinary Draft, and proves discovery state
+plus Runtime Ledger remain unchanged. A stale-window regression replaces the
+observation after the dialect screen opens; the final recheck returns to
+`/model`, writes no Config, and exposes the F5 retry path. Config Draft tests
+also prove revision conflict retains this accepted-model Draft for discard and
+reopen. Core, CLI, and App Server tests pin
 dry-run/no-write, commit/reopen, incompatible Profile, duplicate ID, unknown
 catalog key, read-only scope, revision conflict, capacity recovery, credential
 redaction, and zero Runtime/Team/Tool Ledger creation. Missing current-Agent
@@ -415,7 +426,7 @@ Provider call or Ledger write, then exact admission consumes one selection and
 freezes the expected Provider Epoch. Headless integration proves automatic
 pending-ID resolution plus credential-preflight and explicit-ID-conflict
 failure preserve all three Ledger byte streams. These tests do not prove
-TUI/lazy Provider discovery, automatic starter updates, project/new-Agent
+automatic/on-open/background Provider discovery, automatic starter updates, project/new-Agent
 defaults, context-mode execution, or fallback execution.
 A real-key loop now carries `/config stats-window add` through its bounded ID
 prompt and start/end/days/time-zone fields, previews, commits, and reopens the
@@ -484,7 +495,7 @@ byte streams match the external writer exactly. Input tests pin F6 and Ctrl-R,
 read-only-view scoping, the fixed failure notice, candidate Config isolation,
 and selection clamping after a refreshed dataset shrinks. Ledger reads are
 independent; these tests do not prove a cross-Ledger transactional snapshot,
-background polling, TUI Provider catalog discovery, Agent mutation, or real ConPTY.
+background polling, automatic Provider catalog discovery, Agent mutation, or real ConPTY.
 A real-key loop now carries `/config pricing add` through its bounded ID prompt,
 all 17 schema fields, manual provenance choice, preview, commit, and Config
 reopen. Schema tests pin the 64-byte Provider Profile input, 512-byte text and
@@ -657,8 +668,11 @@ repair; atomic successful replacement reopens with private file modes; and a
 failed credential/network probe preserves the prior bytes. Product tests merge
 current and stale observations with release records, preserve Config/state bytes
 on read, reject stale or absent models before Config write, and reopen one
-explicitly accepted unknown model as an ordinary Preset. They do not prove TUI
-selector refresh or live inference conformance.
+explicitly accepted unknown model as an ordinary Preset. Direct VT tests add the
+shared selector merge, durable Recent, explicit F5 refresh/retry, corrupt-state
+fallback, explicit trusted-dialect acceptance, final stale revalidation, and
+Config/discovery/Ledger no-write assertions described above. They do not prove
+automatic discovery or live inference conformance.
 
 The official OpenAI template identity is also exercised with an explicit
 loopback origin override through the Responses adapter and models probe. The
@@ -681,9 +695,10 @@ slice; a declared route or dialect is not treated as proof of wire compatibility
 
 Live provider inference tests are not implemented yet. Planned opt-in,
 credential-gated tests will verify OpenAI, DeepSeek, and OpenCode Go without
-running on untrusted pull requests or gating local performance. Future TUI/lazy
-model-catalog integration will consume the bounded local discovery projection;
-the current release seed already freezes its source URL and observation date.
+running on untrusted pull requests or gating local performance. Direct VT now
+consumes the bounded local discovery projection only through read-only startup
+inspection or explicit F5 refresh; automatic/on-open discovery remains future
+work. The current release seed already freezes its source URL and observation date.
 
 ## Performance Testing
 

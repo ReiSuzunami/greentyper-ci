@@ -441,9 +441,10 @@ charges still require a future dedicated authority path.
   Product sidecars fail closed before terminal entry. Manual read-only snapshot
   refresh is available; all Agent lifecycle actions remain pending.
 - Complete Config Schema default/constraint/normalization/migration metadata,
-  TUI/lazy catalog discovery, and automatic Provider Profile starter offers and
-  update suggestions. Release Provider Template defaults, seed catalog facts,
-  explicit CLI discovery persistence/merge, and exact discovered-model or
+  automatic/on-open Provider discovery, and automatic Provider Profile starter
+  offers and update suggestions. Release Provider Template defaults, seed
+  catalog facts, explicit CLI and Direct VT discovery refresh/merge, durable
+  Usage-derived Recent choices, and exact discovered-model or
   compatible-release-to-user-Preset acceptance are present. The
   terminal-neutral schema route, field view, revision-bound editor session,
   dry-run validation, atomic commit path, interaction controller, Provider

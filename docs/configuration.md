@@ -72,8 +72,9 @@ user overrides a field. A custom origin under a template with a bundled,
 versioned release rate card defaults to `template_mirror`; other custom origins
 still require an explicit pricing decision.
 Default/constraint/normalization/migration metadata in Config Schema,
-TUI-triggered lazy discovery, and automatic starter-update workflows remain
-later work. The CLI now owns an explicit bounded Provider-discovery flow; the App
+automatic/on-open discovery, and automatic starter-update workflows remain
+later work. The CLI and Direct VT model browser now own explicit bounded
+Provider-discovery flows; the App
 Server Config surface is implemented. The product now provides origin-bound
 credential bind, replace, test, and forget operations backed by Windows
 Credential Manager; non-Windows
@@ -553,18 +554,23 @@ unknown.
 
 Config Runtime binds release records only to effective Profiles whose catalog
 mode includes template data. The terminal-neutral selector searches configured
-presets and those bound release candidates. It derives compatibility only from
-the frozen Profile's declared support for the record's primary dialect and the
-product adapters currently installed for that template/dialect pair; live
-availability and Recent remain unknown. User/discovery precedence and lazy
-refresh remain target behavior. Pricing still resolves
+Presets, bound release candidates, and locally saved discovery observations. A
+release candidate with the same Profile/model identity retains trusted release
+facts and adds discovery source/freshness; an unknown discovered ID remains a
+separate non-runnable candidate until the user chooses a Profile-supported
+dialect. Compatibility still derives only from the frozen Profile's declared
+support plus installed adapters. Availability means only that a matching
+current observation contained the ID; it is not a live health claim. Recent is
+derived from durable Usage Attempts, deduplicated by Profile/model, and never
+persisted separately. Pricing still resolves
 through a Price Schedule rather than becoming an unversioned catalog number.
 The Direct VT `/model` browser uses the latest successful local projection.
 Character input
 filters it, Tab and Shift-Tab move across Favorites, Recent, Compatible, and
 All, Up/Down move the selected row, and Enter opens source-tagged detail for a
-configured Preset or release candidate. Unknown Recent, availability, context,
-capability, and pricing facts remain visibly unknown. Browsing performs no
+configured Preset, release candidate, or discovered model. Missing or stale
+availability, context, capability, and pricing facts remain visibly unknown;
+Recent is known from the frozen Usage projection. Browsing performs no
 network request, credential lookup, Config or Ledger write, or Agent mutation.
 The installed execution matrix is deliberately closed: adapters accept
 `openai` and explicit `openai-compatible` Profiles for Responses and Chat
@@ -616,11 +622,14 @@ Draft/CAS path. Stale observations, absent models, duplicate Preset IDs, and
 unsupported dialects fail before Config write. The separate `test-provider`
 command remains ephemeral and never updates discovery state.
 
-The target model-selector path will run discovery lazily when the selector opens
-or the user requests refresh; it will never run as an idle background task.
-TUI selector merge, Recent evidence, richer precedence, automatic starter
-offers, and automatic update suggestions remain pending. Remote discovery can
-never add credentials, arbitrary endpoints, instructions, or capabilities.
+The Direct VT model selector reads the independent discovery file without
+network I/O and merges it with release and configured choices. F5 explicitly
+runs one synchronous bounded probe for the selected Profile; success atomically
+replaces only that Profile's observation and refreshes the selector, while any
+failure preserves the prior file and view. No on-open, idle, or background
+probe exists. Automatic starter offers and update suggestions remain pending.
+Remote discovery can never add credentials, arbitrary endpoints, instructions,
+or capabilities.
 
 The Direct VT `/model` browser accepts one compatible release candidate only
 after its detail is opened and Enter is pressed again. It requests a bounded
@@ -690,14 +699,21 @@ target behavior.
 
 The rendered model browser now provides Favorites, Recent, Compatible, and All
 views with fuzzy search and bounded provider, dialect, context, capability,
-price-reference, provenance, and availability detail. Incompatible entries
-remain visible; richer reasons and Provider-backed discovery/freshness inside
-the TUI remain target behavior. Manual TUI snapshot refresh only reloads local
-Config plus the bundled release projection and performs no network request.
+price-reference, provenance, freshness, and availability detail. Incompatible,
+stale, and discovery-only entries remain visible. F6/Ctrl-R only reloads local
+Config, Usage, release, and discovery projections; it performs no network
+request. F5 is the separate explicit Provider-discovery action described above.
 
 After detail opens, a second Enter on a compatible release candidate starts the
 explicit user-owned starter Draft described above; an incompatible release
-stays in detail and cannot start a Draft. A second Enter on a configured Preset
+stays in detail and cannot start a Draft. A second Enter on a current unknown
+discovered model requests a bounded Preset ID and then an explicit dialect from
+the trusted Profile before opening an ordinary user-scope Draft. The Profile
+template/fingerprint, observation timestamp, and exact model membership are
+checked again immediately before Draft creation. Drift returns to `/model` with
+an F5 retry path; revision conflict retains the normal Draft for discard and
+reopen. Discovery acceptance does not modify discovery state or any Ledger. A
+second Enter on a configured Preset
 durably selects it for the existing current Agent's next Turn. The pending Preset ID is rendered in the
 browser and can be replaced by another configured Preset. Selection is bound to the recovered Active Agent Session;
 it does not mutate Config, read a credential, contact a Provider, or affect a
