@@ -4793,7 +4793,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_eleven_records_provider_retry_stage_and_preserves_legacy_blocks() {
+    fn current_schema_records_provider_retry_stage_and_preserves_legacy_blocks() {
         let turn = TurnId::new(1).expect("Turn ID");
         let blocked = RuntimeEvent::TurnBlocked {
             turn,
@@ -4802,7 +4802,7 @@ mod tests {
             provider_unavailable_stage: Some(ProviderUnavailableStage::BeforeFirstEvent),
         };
         let encoded = blocked.encode().expect("encode provider block");
-        assert_eq!(encoded.schema, 11);
+        assert_eq!(encoded.schema, 12);
         assert_eq!(encoded.kind, 10);
         assert_eq!(
             RuntimeEvent::decode(&stored_runtime_event(encoded.clone()))
@@ -4838,7 +4838,7 @@ mod tests {
 
         let cancelled = RuntimeEvent::TurnCancelled { turn };
         let encoded = cancelled.encode().expect("encode Turn cancellation");
-        assert_eq!(encoded.schema, 11);
+        assert_eq!(encoded.schema, 12);
         assert_eq!(encoded.kind, 15);
         assert_eq!(
             RuntimeEvent::decode(&stored_runtime_event(encoded)).expect("decode Turn cancellation"),
@@ -4847,7 +4847,7 @@ mod tests {
 
         let retry = RuntimeEvent::TurnRetryRequested { turn };
         let encoded = retry.encode().expect("encode Turn retry request");
-        assert_eq!(encoded.schema, 11);
+        assert_eq!(encoded.schema, 12);
         assert_eq!(encoded.kind, 16);
         assert_eq!(
             RuntimeEvent::decode(&stored_runtime_event(encoded))

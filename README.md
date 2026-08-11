@@ -286,8 +286,9 @@ Ledger head. Reduction keeps a configurable recent raw tail and replaces older
 text with Item-bound SHA-256, byte-count, role, and token-estimate references;
 the Event Ledger remains authoritative. Runtime Event schema 12 publishes that
 projection only at a Ready Safe Barrier, verifies the prior Ledger head on
-replay, rejects stale drafts without writing, and rebuilds every checkpoint
-from complete canonical Items instead of recursively reducing summaries.
+replay, rejects stale drafts without writing, and validates every persisted
+checkpoint against complete canonical Items instead of recursively reducing
+summaries.
 `context status` inspects this state without creating or repairing a Ledger.
 `context reduce` explicitly publishes one bounded checkpoint, checks complete
 Product sidecars when present, and does not change Team or Tool Ledger bytes.

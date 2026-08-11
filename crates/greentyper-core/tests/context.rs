@@ -235,6 +235,32 @@ fn context_view_projects_ordered_canonical_items_from_an_exact_event_range() {
 }
 
 #[test]
+fn context_view_rejects_non_monotonic_canonical_item_ids() {
+    let item = |id| {
+        CanonicalItem::new(
+            ItemId::new(id).expect("Item"),
+            TurnId::new(1).expect("Turn"),
+            ItemRole::User,
+            format!("item {id}"),
+        )
+        .expect("canonical Item")
+    };
+    let head = LedgerHead {
+        transaction: 1,
+        sequence: 2,
+    };
+
+    assert_eq!(
+        ContextView::from_items(head, &[item(2), item(1)]),
+        Err(ContextViewError::InvalidStoredView)
+    );
+    assert_eq!(
+        ContextView::from_items(head, &[item(1), item(1)]),
+        Err(ContextViewError::InvalidStoredView)
+    );
+}
+
+#[test]
 fn context_view_rejects_cumulative_text_beyond_its_projection_boundary() {
     let oversized = "x".repeat(MAX_CONTEXT_VIEW_BYTES + 1);
     let items = [CanonicalItem::new(

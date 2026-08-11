@@ -355,9 +355,14 @@ impl ContextView {
             return Err(ContextViewError::TooManyItems);
         }
         let mut projected = Vec::with_capacity(items.len());
+        let mut last_item = 0_u64;
         let mut raw_bytes = 0_u64;
         let mut estimated_tokens = 0_u64;
         for item in items {
+            if item.id().get() <= last_item {
+                return Err(ContextViewError::InvalidStoredView);
+            }
+            last_item = item.id().get();
             raw_bytes = raw_bytes
                 .checked_add(
                     u64::try_from(item.text().len())
