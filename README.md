@@ -114,9 +114,13 @@ availability explicit. A first Direct VT product tracer now renders the Slash
 Panel, controller screens, and adaptive status rows through `greentyper tui` and
 includes rendered user-scope interactions for every Config Schema field,
 complete Config Object creation, existing-object field editing, and typed
-deletion confirmations. Credential fields expose only opaque references; the
-App Server Config surface remains pending. The product CLI can bind,
-replace, test, and forget origin-bound credential references without
+deletion confirmations. `greentyper app-server --stdio` now exposes the same
+non-secret Config Schema, effective reads with redacted repair errors and status,
+process-local typed Drafts,
+validation, and atomic CAS commit path over bounded newline-delimited JSON.
+Credential fields expose only opaque references and generic reads reject them;
+secure App Server credential operations remain pending. The product CLI can
+bind, replace, test, and forget origin-bound credential references without
 putting secret material in arguments, Config, or Ledgers. Windows stores values
 in the current user's Credential Manager; other platforms currently fail
 closed. Tool call identity, argument hashing, approval binding, independent
@@ -371,8 +375,8 @@ reconnect/retry, OpenCode Go Messages execution,
 Messages reasoning blocks, Preset context/fallback execution, richer approval
 presentation, broader Provider and Tool adapters,
 Workspace, project/new-Agent Preset defaults, dedicated Turn Usage navigation,
-richer cache distributions, Agent lifecycle actions, and App
-Server work remain. The loopback Provider tracer remains
+richer cache distributions, Agent lifecycle actions, and App Server credential,
+Runtime, and approval surfaces remain. The loopback Provider tracer remains
 an internal harness; `local.echo` is intentionally a fixed opt-in command rather
 than a general process runner. The file Ledger remains
 provisional. The acceptance runner can emit bound raw evidence,

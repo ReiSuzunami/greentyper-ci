@@ -368,13 +368,16 @@ charges still require a future dedicated authority path.
   Product sidecars fail closed before terminal entry. Manual read-only snapshot
   refresh is available; all Agent lifecycle actions remain pending.
 - Complete Config Schema default/constraint/normalization/migration metadata,
-  the App Server Config surface, live catalog discovery, and the rendered
+  secure App Server credential operations, live catalog discovery, and the rendered
   template-picker/starter-preset workflow. Release Provider Template defaults
   and seed catalog facts are present. The
   terminal-neutral schema route, field view, revision-bound editor session,
   dry-run validation, atomic commit path, interaction controller, Provider
   Profile candidate/connection-test flow, and deterministic viewport-row
-  projection are present.
+  projection are present. The bounded stdio App Server now exposes non-secret
+  schema/get and connection-local typed Draft begin/set/reset/validate/commit
+  through the same validation, CAS, backup, and atomic-write path; it contains no
+  Provider, Runtime, Team, Tool, or approval authority.
 - Automatic/background terminal Usage refresh, dedicated Turn aggregates, and
   richer cache distributions,
   automatic Context View construction/compaction, provider-reported charge

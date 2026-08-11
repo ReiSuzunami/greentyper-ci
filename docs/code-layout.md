@@ -76,14 +76,20 @@ and fails closed on corruption or incomplete Product sidecars. F6 or Ctrl-R
 replaces the local snapshot only after all independent reads succeed and
 preserves the prior Config runtime and view on failure; it does not claim a
 cross-Ledger transactional instant, and there is no background polling.
+The private App Server module owns a bounded newline-delimited JSON stdio loop
+over the existing Config Runtime. It keeps at most 64 connection-local Drafts,
+maps typed values and fixed public errors, rejects secret reads, and delegates
+validation, revision CAS, backup, and atomic commit policy to core instead of
+reimplementing it.
 Project/new-Agent Preset defaults,
 dedicated Turn Usage aggregates, richer cache
 distributions, and Agent lifecycle actions remain outside that browser boundary.
 Section-filtered typed remove
 routes render exact Config Object deletion confirmations; secret storage stays
 behind the credential adapter. Approval interaction, the App
-Server, and an audited Windows ConPTY wrapper remain pending. Platform wrappers for process,
-credential, transport, and eventually terminal facilities remain private to
+Server credential and Runtime-control surfaces, and an audited Windows ConPTY
+wrapper remain pending. Platform wrappers for process, credential, transport,
+and eventually terminal facilities remain private to
 this package unless a second real caller proves a smaller shared package is
 needed.
 

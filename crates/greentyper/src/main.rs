@@ -1,5 +1,6 @@
 //! GreenTyper product entry point.
 
+mod app_server;
 mod cli;
 mod credential_vault;
 mod local_process;

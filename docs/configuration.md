@@ -179,9 +179,9 @@ target-layer explicit and fails when the resulting effective configuration has
 dangling references. The snapshot-based `tui` tracer renders controller screens
 reachable from the Slash Panel, including the top-level Config Center. Every
 schema field has a rendered interaction, but commits do not automatically
-rebuild the active projection. Secret-entry/bind UI and the App Server surface
-described
-below remain pending. The current
+rebuild the active projection. Secret-entry/bind UI and secure App Server
+credential operations remain pending. The non-secret Config App Server
+described below is implemented. The current
 terminal-neutral Provider Profile wizard resolves release template defaults into
 user-configured Profile Drafts and supports the explicit bounded connection and
 model-list observation described below; it does not merge discovered records,
@@ -278,19 +278,57 @@ bounded value on standard input. Existing values are never returned.
 Generic effective-value reads also reject credential-reference fields; editor
 views expose only whether the target and effective layers are bound.
 
-The planned App Server exposes the same Config Runtime operations, independent of its eventual wire encoding:
+`greentyper app-server --stdio` exposes the non-secret Config Runtime through a
+bounded newline-delimited JSON stream. Each request carries an unsigned `id`, an
+`operation`, and optional object `params`; each flushed response carries the
+same `id` and exactly one `result` or `error`. A request frame is limited to 64
+KiB. Malformed or oversized frames receive a fixed error and do not stop the
+stream. Draft handles are process-local to that stream, at most 64 may be active,
+and EOF discards every uncommitted Draft without writing Config.
+
+```json
+{"id":1,"operation":"config.get","params":{"path":"provider.model"}}
+{"id":1,"result":{"path":"provider.model","entry":{"path":"provider.model","value":{"type":"string","value":"deterministic-v1"},"source":"built_in"},"status":{"ready":true,"issues":[]}}}
+```
+
+The current operations are:
 
 | Operation | Required behavior |
 | --- | --- |
 | `config.schema` | List addressable objects, types, scopes, editor metadata, and application timing |
-| `config.get` | Return requested and effective values with source layer; secret values are never addressable |
+| `config.get` | Return the requested path, effective value with source layer, and redacted repair status; secret values are never addressable |
 | `config.draft.begin` | Open a draft for one writable layer and return its base revision |
 | `config.draft.set` / `config.draft.reset` | Stage a typed change without affecting the current Config Epoch |
 | `config.draft.validate` | Return the normalized diff and field-addressed validation errors |
 | `config.draft.commit` | Compare the base revision, write atomically, and return the new revision and application timing |
-| `credential.bind` / `replace` / `test` / `forget` | Operate on secure-store references without returning credential material |
+| `credential.bind` / `replace` / `test` / `forget` | Pending: operate on secure-store references without returning credential material |
 
-All surfaces share stable error categories: `unknown_object`, `wrong_type`, `invalid_value`, `read_only_scope`, `revision_conflict`, and `secret_read_forbidden`. A running process retains its last valid Config Epoch after an invalid external edit; startup with no valid epoch enters a configuration-repair surface instead of silently dropping a layer.
+`config.draft.set` accepts the schema-owned tagged value forms `string`,
+`positive_integer`, `non_negative_integer`, `boolean`, and `string_list`.
+Successful commit consumes its Draft handle. Validation, storage, or revision
+failure leaves the Draft live for correction; a competing writer cannot be
+overwritten. On revision conflict the stream refreshes its effective Config to
+the winning file, so the client can begin a new Draft while the stale handle
+remains inspectable/editable. A no-change commit consumes the handle without
+creating or rewriting a Config file. Revisions are returned as 64-character
+lowercase hexadecimal fingerprints. Generic reads reject credential-reference
+fields. Repair status exposes only scope, category, and backup availability, not
+filesystem paths or parser details. Responses never contain credential material
+or raw malformed input.
+
+If startup has no last-valid projection, `config.get` returns
+`repair_required`. `config.draft.begin` remains available for the affected
+writable layer, so the client can reset invalid fields, validate the normalized
+diff, and commit a repaired Config without an out-of-band file rewrite.
+
+All Config surfaces share stable policy error categories: `unknown_object`,
+`wrong_type`, `invalid_value`, `read_only_scope`, `revision_conflict`, and
+`secret_read_forbidden`. The stream additionally reports bounded lifecycle and
+transport categories including `invalid_request`, `request_too_large`,
+`unknown_operation`, `unknown_draft`, `repair_required`, `resource_busy`, and
+`io`. A running process retains its last valid Config Epoch after an invalid
+external edit; startup with no valid epoch enters a configuration-repair surface
+instead of silently dropping a layer.
 
 ## Provider Profiles
 

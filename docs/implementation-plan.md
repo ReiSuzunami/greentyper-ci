@@ -415,9 +415,25 @@ three Ledgers remain byte-identical to the external writer's state. The refresh
 performs no Provider discovery, credential lookup, mutation, or background
 polling.
 
+The first App Server product slice is also complete. `greentyper app-server
+--stdio` owns a 64 KiB newline-delimited JSON request boundary and exposes
+`config.schema`, `config.get`, plus process-local `config.draft.begin`, `set`,
+`reset`, `validate`, and `commit`. Typed staging never changes effective Config;
+validation failure keeps the bounded Draft live; successful commit consumes the
+handle and uses the existing lock, revision CAS, backup, atomic write, and reload
+path. Integration tests prove fixed malformed/oversized-frame recovery,
+credential-reference read rejection, no-write staging, validation repair,
+no-change commit, commit/reopen, and two-process stale-writer rejection without
+overwriting the winner. Conflict refreshes the connection to the winning
+revision so a new Draft can begin while the stale handle remains live. This
+slice preserves a last-valid effective value when one exists, reports repair
+state without filesystem paths, and lets a startup repair proceed through the
+same begin/reset/validate/commit flow. It adds no credential, Provider, Runtime,
+Team, Tool, or approval operation.
+
 This does not complete Phase 3. Audited Windows ConPTY behavior, approval
 interaction, automatic/background snapshot refresh, rendered secret binding,
-custom-template/starter-preset workflow, live catalog
+secure App Server credential operations, custom-template/starter-preset workflow, live catalog
 discovery and Recent
 evidence, automatic Context View/token-source
 projection, provider-reported

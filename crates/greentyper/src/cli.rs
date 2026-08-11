@@ -45,6 +45,13 @@ use crate::provider_http::{
 
 pub fn run(arguments: impl Iterator<Item = String>) -> Result<(), CliError> {
     match parse(arguments)? {
+        Command::AppServer => {
+            let config = open_config_runtime(default_config_paths()?)?;
+            let stdin = io::stdin();
+            let stdout = io::stdout();
+            crate::app_server::run_stdio(stdin.lock(), stdout.lock(), config)?;
+            Ok(())
+        }
         Command::Tui { ledger } => {
             crate::terminal::require_interactive()?;
             let mut config = open_config_runtime(default_config_paths()?)?;
@@ -574,6 +581,7 @@ fn open_runtime(path: &Path) -> Result<RuntimeKernel, CliError> {
 
 #[derive(Debug, Eq, PartialEq)]
 enum Command {
+    AppServer,
     Tui {
         ledger: PathBuf,
     },
@@ -738,6 +746,12 @@ fn parse(mut arguments: impl Iterator<Item = String>) -> Result<Command, CliErro
     }
     if command == "tool" {
         return parse_tool(arguments).map(Command::Tool);
+    }
+    if command == "app-server" {
+        if arguments.next().as_deref() != Some("--stdio") || arguments.next().is_some() {
+            return Err(CliError::Usage("app-server requires exactly --stdio"));
+        }
+        return Ok(Command::AppServer);
     }
     if command == "__local-process-child" {
         let mode = LocalProcessChildMode::parse(arguments.next().as_deref())
@@ -1616,6 +1630,7 @@ const USAGE: &str = "\
 GreenTyper Runtime\n\
 \n\
 Usage:\n\
+  greentyper app-server --stdio\n\
   greentyper tui [--ledger PATH]\n\
   greentyper headless [--ledger PATH] [--preset ID | --dialect DIALECT] [--tool local.echo] --input TEXT\n\
   greentyper resume [--ledger PATH] [--tool local.echo]\n\
@@ -1640,6 +1655,7 @@ Usage:\n\
 pub enum CliError {
     Usage(&'static str),
     UsageRuntime(UsageError),
+    AppServer(crate::app_server::AppServerError),
     Io(io::Error),
     Json(serde_json::Error),
     Config(ConfigRuntimeError),
@@ -1658,6 +1674,7 @@ impl fmt::Display for CliError {
         match self {
             Self::Usage(message) => write!(formatter, "{message}\n\n{USAGE}"),
             Self::UsageRuntime(source) => write!(formatter, "{source}"),
+            Self::AppServer(source) => write!(formatter, "{source}"),
             Self::Io(source) => write!(formatter, "I/O failed: {source}"),
             Self::Json(source) => write!(formatter, "JSON output failed: {source}"),
             Self::Config(source) => {
@@ -1684,6 +1701,7 @@ impl fmt::Display for CliError {
 impl Error for CliError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
+            Self::AppServer(source) => Some(source),
             Self::Io(source) => Some(source),
             Self::Json(source) => Some(source),
             Self::Config(source) => Some(source),
@@ -1704,6 +1722,12 @@ impl Error for CliError {
 impl From<io::Error> for CliError {
     fn from(source: io::Error) -> Self {
         Self::Io(source)
+    }
+}
+
+impl From<crate::app_server::AppServerError> for CliError {
+    fn from(source: crate::app_server::AppServerError) -> Self {
+        Self::AppServer(source)
     }
 }
 

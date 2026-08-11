@@ -435,6 +435,24 @@ all non-secret Profile fields and reopens the normalized snapshot; a recovery
 test proves insecure-loopback permission is rejected for a remote HTTPS origin
 without consuming the Draft. They do not constitute real ConPTY, panic-abort
 cleanup, secret-store UI, approval, background refresh, or resource evidence.
+App Server integration tests launch the product over piped standard input and
+output. They stream schema and effective reads, reject credential-reference
+reads, recover after malformed and oversized frames, and prove read-only calls
+create no Config files. Further flows keep typed Draft changes isolated from
+effective Config, recover the same handle after wrong-type and cross-field
+validation failures, compare normalized preview and commit diffs, consume a
+successful handle, and reopen the written Config. A two-process test starts from
+one base revision, commits one winner, rejects the stale writer, proves the
+losing Draft remains editable, refreshes the losing connection to the winner,
+begins a new Draft at that revision, and compares winning bytes before and after
+the conflict. A no-change commit consumes its handle without creating or
+rewriting Config. A malformed startup Config keeps its exact bytes and makes
+`config.get` return `repair_required`; the same stream can then begin a Draft,
+reset the invalid field, validate, commit, and read the repaired ready value.
+The 65th active Draft is rejected and capacity returns after one handle is
+consumed. These tests do not prove App Server credential, Runtime, Tool
+approval, network transport, multi-client authentication, or long-lived
+resource behavior.
 Context Pressure tests freeze exact 65%/90% threshold transitions, estimated and
 missing-fact propagation, invalid policy/limit and arithmetic failure, and the
 no-side-effect hard admission gate. Product presentation tests assert estimated
