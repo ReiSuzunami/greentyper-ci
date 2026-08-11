@@ -157,8 +157,9 @@ complete-frame replay or explicit reconciliation without re-executing the
 effect; it is representative process-termination evidence, not real power-loss
 or exhaustive byte-offset evidence.
 
-Three configured dialect adapters now exercise seven exact template/dialect
-pairs across the concrete Responses, Chat Completions, and Messages HTTP seams.
+Three configured dialect adapters now exercise a closed set of exact
+template/model/dialect pairs across the concrete Responses, Chat Completions,
+and Messages HTTP seams.
 Config Runtime resolves and freezes its typed Provider Profile, origin,
 selected-dialect route, dialect, pricing decision, and opaque credential
 reference. Each adapter resolves a secret from the origin-bound product vault,
@@ -180,13 +181,17 @@ authorization. Tests cover fragmented success, canonical replay, exact
 dialect-specific request and one-Tool continuation bodies, HTTP failure-body
 redaction, timeout, endpoint/status policy, trusted and untrusted TLS, and
 missing credential failure before network access.
-The OpenCode Go adapters admit only release-catalog-verified Chat
-Completions models, uses the frozen Chat route and Bearer credential, maps the
-frozen output limit, rejects unsupported reasoning/service-tier policy before
-network I/O, and reconstructs the same frozen dialect from the Provider Epoch;
-and the exact GPT-5.6 Luna Responses pair, which uses the frozen Responses
-route, `max_output_tokens`, Bearer authorization, the same policy rejection,
-and one Responses Tool continuation through durable approval.
+The OpenCode Go adapters admit only release-catalog-verified model/dialect
+pairs. Chat Completions uses the frozen Chat route and Bearer credential, maps
+the frozen output limit, rejects unsupported reasoning/service-tier policy
+before network I/O, and reconstructs the same frozen dialect from the Provider
+Epoch. The exact GPT-5.6 Luna Responses pair uses the frozen Responses route,
+`max_output_tokens`, Bearer authorization, the same policy rejection, and one
+Responses Tool continuation through durable approval. Messages uses the frozen
+Messages route, `x-api-key`, the pinned Anthropic version header, and
+`max_tokens`; unlike DeepSeek Messages it omits the DeepSeek-only thinking
+field. One approved Messages Tool continuation crosses the same durable effect
+boundary, and prepared output survives restart without repeating that effect.
 
 The Provider interruption/recovery batch is implemented across all three HTTP
 dialects. Each adapter classifies unavailability before a response, before the
@@ -211,8 +216,8 @@ untyped states fail closed.
 
 The remaining slices are still policy, protocol, and fault-adapter work:
 live inference conformance, non-Windows credential backends, configurable proxy
-policy, automatic/on-open catalog discovery, OpenCode Go Messages execution,
-DeepSeek Chat/Messages reasoning blocks, Preset context-mode execution, broader
+policy, automatic/on-open catalog discovery, DeepSeek Chat/Messages reasoning
+blocks, Preset context-mode execution, broader
 canonical Items, multiple
 Tool calls,
 durable resumable Tool result references, richer TUI/App Server
@@ -312,8 +317,9 @@ a live health claim. `greentyper config catalog` emits the static snapshot witho
 credential, or network access. The current Responses and Chat Completions
 adapters accept the official OpenAI template through the same frozen capability,
 dialect, and endpoint checks as compatible gateways. The current Messages
-adapter accepts only the official DeepSeek template and its explicit frozen
-Messages route; no OpenCode Go wire compatibility is inferred from catalog data.
+adapter accepts the official DeepSeek template and exact release-catalog
+OpenCode Go Messages model/dialect pairs. A declared route or catalog record
+alone never grants wire compatibility.
 The DeepSeek release records also carry reviewed, versioned Flash and Pro price
 cards; official origins freeze `template` provenance and custom origins freeze
 `template_mirror` provenance without inheriting credential or origin authority.
@@ -571,8 +577,8 @@ automatic starter updates, provider capability probes, observed availability,
 and broader provider/model epoch switching. The
 OpenAI/openai-compatible Responses and Chat Completions adapters, official
 DeepSeek Responses, Chat Completions, and Messages pairs, and release-verified
-OpenCode Go Chat Completions pairs plus the exact GPT-5.6 Luna Responses pair
-are implemented; custom gateway routes and
+OpenCode Go Chat Completions and Messages pairs plus the exact GPT-5.6 Luna
+Responses pair are implemented; custom gateway routes and
 user-owned Model Presets can be selected explicitly by ID for headless Turns.
 The connection-test port also emits a bounded, one-shot model-list observation.
 An explicit four-slice CLI flow now adds missing-safe status, successful-only

@@ -219,6 +219,14 @@ also includes canonical text/usage, missing credential
 and unsupported-template rejection before network access, HTTP 503, wrong
 content type, provider error SSE redaction, and one exact `tool_use`/
 `tool_result` continuation with two Usage Records.
+OpenCode Go Messages coverage separately binds the exact release-catalog
+model/dialect pair before credential lookup, asserts the frozen `/messages`
+route, `x-api-key`, pinned Anthropic version, bounded `max_tokens`, and omission
+of DeepSeek-only thinking policy, then normalizes the same Messages stream. Its
+product-level Tool test proves exact initial and continuation bodies, one
+approved `local.echo` effect, two Usage Records, prepared output surviving
+restart, acknowledgement back to Ready, and byte-identical Team/Tool Ledgers
+across that acknowledgement.
 All three HTTP dialects also have one-connection interruption fixtures. They
 prove an early EOF before any decoded event reports `BeforeFirstEvent`, an EOF
 after one event reports `AfterFirstEvent`, malformed semantics remain
@@ -719,13 +727,12 @@ and one Tool continuation through durable approval. The Chat Completions adapter
 openai-compatible template identities plus the exact
 official DeepSeek identity with its DeepSeek-specific request policy. The
 Chat adapter also admits exact release-catalog OpenCode Go Chat model/dialect
-pairs with the OpenCode-specific request policy. The
-Messages adapter admits only the official DeepSeek template identity and its
-explicit Messages route. V4 Pro resolves a preferred Responses dialect to Chat
+pairs with the OpenCode-specific request policy. The Messages adapter admits the
+official DeepSeek identity and exact release-catalog OpenCode Go Messages
+model/dialect pairs; a route string alone does not grant compatibility. V4 Pro
+resolves a preferred Responses dialect to Chat
 before admission; this bounded single-candidate capability resolution is not a
-network retry or automatic Provider routing. OpenCode Go Messages remains
-outside this slice; a declared route or dialect is not treated as proof of wire
-compatibility.
+network retry or automatic Provider routing.
 
 Live provider inference tests are not implemented yet. Planned opt-in,
 credential-gated tests will verify OpenAI, DeepSeek, and OpenCode Go without

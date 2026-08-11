@@ -208,8 +208,8 @@ coverage.
 
 Configured OpenAI-compatible Responses and Chat Completions profiles, the
 official DeepSeek Responses, Chat Completions, and Anthropic-compatible Messages
-profiles, plus release-catalog OpenCode Go Chat Completions models and the
-GPT-5.6 Luna Responses pair now run through
+profiles, plus release-catalog OpenCode Go Chat Completions and Messages models
+and the GPT-5.6 Luna Responses pair now run through
 no-proxy, no-redirect HTTPS clients, origin-bound credential lookup, bounded
 streaming decode, and a fixed deadline. DeepSeek Chat uses Bearer authorization,
 the explicit `/chat/completions` route, `max_tokens`, and non-thinking mode; it
@@ -227,7 +227,12 @@ Responses route (template default `/responses`), and `max_output_tokens`. It
 admits only the exact GPT-5.6 Luna Responses catalog pair before credential
 lookup, rejects preset reasoning effort or service tier before network I/O, and
 supports one stateful Tool continuation through the same durable approval
-boundary. Config Runtime freezes the
+boundary. OpenCode Go Messages admits only release-catalog-verified Messages
+models, uses the frozen Messages route, `x-api-key`, and the pinned Anthropic
+version header, and deliberately omits DeepSeek-only thinking policy. It rejects
+preset reasoning effort or service tier before network I/O and supports one
+Messages Tool continuation through the same durable approval boundary. Config
+Runtime freezes the
 normalized origin, selected-dialect route, dialect, pricing decision, and opaque
 credential reference in the Provider Epoch; adapter reconstruction uses that
 snapshot without changing an explicit dialect. Private loopback fixtures retain
@@ -508,8 +513,8 @@ snapshot. The terminal and App Server approval surfaces are limited to the exact
 pending `local.echo` call; neither is a general Tool policy editor, audited
 ConPTY integration, automatic starter-update workflow, or automatic/on-open
 Provider discovery. Live inference conformance,
-automatic transport retry or partial-stream reconnect, OpenCode Go Messages execution,
-Messages reasoning blocks, Preset context-mode execution, broader multi-Tool approval
+automatic transport retry or partial-stream reconnect, Messages reasoning
+blocks, Preset context-mode execution, broader multi-Tool approval
 presentation, broader Provider and Tool adapters,
 Workspace, project/new-Agent Preset defaults,
 Agent lifecycle actions, general App Server Runtime control beyond the exact
