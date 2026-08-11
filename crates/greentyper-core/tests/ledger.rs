@@ -252,6 +252,14 @@ fn inspection_reports_but_does_not_repair_a_partial_tail() {
         fs::metadata(&path).expect("ledger metadata").len(),
         truncated_length
     );
+    assert!(matches!(
+        FileLedger::open_existing_strict(&path),
+        Err(LedgerError::IncompleteTail { bytes }) if bytes > 0
+    ));
+    assert_eq!(
+        fs::metadata(&path).expect("ledger metadata").len(),
+        truncated_length
+    );
     let (repaired, _) = FileLedger::open(&path).expect("repair through writer open");
     drop(repaired);
     assert!(fs::metadata(&path).expect("ledger metadata").len() < truncated_length);

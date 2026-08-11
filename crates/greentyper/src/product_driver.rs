@@ -107,9 +107,37 @@ impl<E: ToolEffectExecutor> ProductDriver<E> {
         }
         let team_path = sidecar_path(runtime_path, "team");
         let tool_path = sidecar_path(runtime_path, "tool");
-        let (mut kernel, recovery) =
+        let (kernel, recovery) =
             RuntimeKernel::open_with_team_and_tools(runtime_path, team_path, tool_path, 1)?;
+        Self::from_recovery(kernel, recovery, executor, interaction, true)
+    }
 
+    pub(crate) fn open_existing_with_executor(
+        runtime_path: &Path,
+        executor: E,
+        interaction: &mut impl ProductInteraction,
+    ) -> Result<Self, ProductDriverError> {
+        if !runtime_path.exists() || !has_product_driver_state(runtime_path)? {
+            return Err(ProductDriverError::ToolStateUnavailable);
+        }
+        let team_path = sidecar_path(runtime_path, "team");
+        let tool_path = sidecar_path(runtime_path, "tool");
+        let (kernel, recovery) = RuntimeKernel::open_with_team_and_tools_existing_strict(
+            runtime_path,
+            team_path,
+            tool_path,
+            1,
+        )?;
+        Self::from_recovery(kernel, recovery, executor, interaction, false)
+    }
+
+    fn from_recovery(
+        mut kernel: RuntimeKernel,
+        recovery: greentyper_core::runtime::KernelTeamRecovery,
+        executor: E,
+        interaction: &mut impl ProductInteraction,
+        admit_if_empty: bool,
+    ) -> Result<Self, ProductDriverError> {
         let pending_operations: Vec<_> = recovery
             .snapshot()
             .operations
@@ -126,7 +154,8 @@ impl<E: ToolEffectExecutor> ProductDriver<E> {
         }
 
         let session = match sessions.len() {
-            0 => admit_root(&mut kernel, interaction)?,
+            0 if admit_if_empty => admit_root(&mut kernel, interaction)?,
+            0 => return Err(ProductDriverError::UnexpectedRecovery),
             1 => sessions
                 .pop()
                 .ok_or(ProductDriverError::UnexpectedRecovery)?,
@@ -413,8 +442,12 @@ pub(crate) fn reconcile_product_tool(
     }
     let team_path = sidecar_path(runtime_path, "team");
     let tool_path = sidecar_path(runtime_path, "tool");
-    let (mut kernel, recovery) =
-        RuntimeKernel::open_with_team_and_tools(runtime_path, team_path, tool_path, 1)?;
+    let (mut kernel, recovery) = RuntimeKernel::open_with_team_and_tools_existing_strict(
+        runtime_path,
+        team_path,
+        tool_path,
+        1,
+    )?;
     let record = kernel
         .tool_snapshot()
         .and_then(|snapshot| {

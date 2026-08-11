@@ -91,10 +91,29 @@ pub struct FileLedger {
 
 impl FileLedger {
     pub fn open(path: impl AsRef<Path>) -> Result<(Self, ReplayReport), LedgerError> {
-        let path = path.as_ref();
-        validate_path(path, true)?;
+        Self::open_with_policy(path.as_ref(), true, true)
+    }
+
+    /// Opens an existing complete Ledger for mutation without creating or
+    /// repairing it. The exclusive lock remains held after validation.
+    pub fn open_existing_strict(
+        path: impl AsRef<Path>,
+    ) -> Result<(Self, ReplayReport), LedgerError> {
+        Self::open_with_policy(path.as_ref(), false, false)
+    }
+
+    fn open_with_policy(
+        path: &Path,
+        create: bool,
+        repair_tail: bool,
+    ) -> Result<(Self, ReplayReport), LedgerError> {
+        validate_path(path, create)?;
         let mut options = OpenOptions::new();
-        options.create(true).read(true).write(true).truncate(false);
+        options
+            .create(create)
+            .read(true)
+            .write(true)
+            .truncate(false);
         configure_no_follow(&mut options);
         #[cfg(unix)]
         {
@@ -107,7 +126,7 @@ impl FileLedger {
         ensure_regular_file(&file)?;
         tighten_private_permissions(&file)?;
         let length = file.metadata().map_err(LedgerError::Io)?.len();
-        if length == 0 {
+        if length == 0 && create {
             write_header(&mut file)?;
         } else {
             validate_header(&mut file, length)?;
@@ -124,6 +143,11 @@ impl FileLedger {
             .checked_sub(valid_bytes)
             .ok_or(LedgerError::IntegerOverflow)?;
         if truncated_tail_bytes > 0 {
+            if !repair_tail {
+                return Err(LedgerError::IncompleteTail {
+                    bytes: truncated_tail_bytes,
+                });
+            }
             file.set_len(valid_bytes).map_err(LedgerError::Io)?;
             file.sync_all().map_err(LedgerError::Io)?;
         }
@@ -796,6 +820,9 @@ pub enum LedgerError {
     ZeroEventKind,
     ReplayLimitExceeded,
     ReplayPayloadLimitExceeded,
+    IncompleteTail {
+        bytes: u64,
+    },
     IntegerOverflow,
     WriterPoisoned,
     Locked,
@@ -830,6 +857,9 @@ impl fmt::Display for LedgerError {
             Self::ReplayLimitExceeded => write!(formatter, "ledger replay event limit exceeded"),
             Self::ReplayPayloadLimitExceeded => {
                 write!(formatter, "ledger replay payload limit exceeded")
+            }
+            Self::IncompleteTail { bytes } => {
+                write!(formatter, "ledger has an incomplete tail of {bytes} bytes")
             }
             Self::IntegerOverflow => write!(formatter, "ledger integer overflow"),
             Self::WriterPoisoned => write!(formatter, "ledger writer requires recovery"),

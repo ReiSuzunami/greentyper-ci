@@ -384,6 +384,19 @@ impl KernelTeam {
         Ok((Self { runtime }, recovery))
     }
 
+    fn open_existing_strict(
+        path: impl AsRef<Path>,
+        max_active_agents: usize,
+    ) -> Result<(Self, KernelTeamRecovery), DurableTeamError> {
+        let runtime = DurableTeamRuntime::open_existing_strict(path, max_active_agents)?;
+        let sessions = runtime.trusted_rebind_nonterminal_sessions();
+        let recovery = KernelTeamRecovery {
+            snapshot: Self::snapshot_runtime(&runtime),
+            sessions,
+        };
+        Ok((Self { runtime }, recovery))
+    }
+
     fn snapshot(&self) -> KernelTeamSnapshot {
         Self::snapshot_runtime(&self.runtime)
     }
@@ -443,6 +456,19 @@ impl KernelTeam {
 impl RuntimeKernel {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, RuntimeError> {
         let (ledger, report) = FileLedger::open(path).map_err(RuntimeError::Ledger)?;
+        Self::from_opened_ledger(ledger, report)
+    }
+
+    pub fn open_existing_strict(path: impl AsRef<Path>) -> Result<Self, RuntimeError> {
+        let (ledger, report) =
+            FileLedger::open_existing_strict(path).map_err(RuntimeError::Ledger)?;
+        Self::from_opened_ledger(ledger, report)
+    }
+
+    fn from_opened_ledger(
+        ledger: FileLedger,
+        report: crate::ledger::ReplayReport,
+    ) -> Result<Self, RuntimeError> {
         let state = replay_runtime(&report.events)?;
         Ok(Self {
             ledger,
@@ -509,6 +535,43 @@ impl RuntimeKernel {
         let (team, recovery) =
             KernelTeam::open(team_path, max_active_agents).map_err(RuntimeError::Team)?;
         let tools = DurableToolRuntime::open(tool_path).map_err(RuntimeError::Tool)?;
+        kernel.team = Some(team);
+        kernel.tools = Some(tools);
+        Ok((kernel, recovery))
+    }
+
+    pub fn open_with_team_and_tools_existing_strict(
+        runtime_path: impl AsRef<Path>,
+        team_path: impl AsRef<Path>,
+        tool_path: impl AsRef<Path>,
+        max_active_agents: usize,
+    ) -> Result<(Self, KernelTeamRecovery), RuntimeError> {
+        let runtime_path = runtime_path.as_ref();
+        let team_path = team_path.as_ref();
+        let tool_path = tool_path.as_ref();
+        if ledger_paths_may_alias(runtime_path, team_path) {
+            return Err(RuntimeError::InvalidTeamConfiguration(
+                "Runtime and Team Ledgers must use different paths",
+            ));
+        }
+        if ledger_paths_may_alias(runtime_path, tool_path)
+            || ledger_paths_may_alias(team_path, tool_path)
+        {
+            return Err(RuntimeError::InvalidToolConfiguration(
+                "Tool Ledger must use a path distinct from Runtime and Team Ledgers",
+            ));
+        }
+        if max_active_agents == 0 {
+            return Err(RuntimeError::Team(DurableTeamError::Team(
+                TeamError::InvalidActiveAgentLimit,
+            )));
+        }
+
+        let mut kernel = Self::open_existing_strict(runtime_path)?;
+        let (team, recovery) = KernelTeam::open_existing_strict(team_path, max_active_agents)
+            .map_err(RuntimeError::Team)?;
+        let tools =
+            DurableToolRuntime::open_existing_strict(tool_path).map_err(RuntimeError::Tool)?;
         kernel.team = Some(team);
         kernel.tools = Some(tools);
         Ok((kernel, recovery))

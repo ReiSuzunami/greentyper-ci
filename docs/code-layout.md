@@ -94,8 +94,18 @@ bind/replace/test/forget policy to the credential adapter, scrub the owned input
 frame, return status only, and never acquire Provider or Agent authority.
 Its read-only Runtime status/Usage, Agent Team, and Tool status operations call
 existing strict inspection adapters and then apply narrow wire projections.
-They never create or repair Ledgers, return Runtime/Team/Tool text payloads, or
-acquire Runtime, Agent, Tool, approval, delivery, or Provider authority. The
+They never create or repair Ledgers or return Runtime/Team/Tool text payloads.
+The same module exposes bounded `runtime.delivery`, `runtime.acknowledge`,
+`tool.reconcile`, and fixed `local.echo` `tool.decide` operations. It delegates
+mutation and recovered Active Agent Session authority to ProductDriver and the
+Kernel. Mutating paths strictly open existing Ledgers under exclusive locks and
+reject incomplete tails without repair. `tool.decide` binds a same-stream review
+of exact arguments/resources to hash-confirmed approve or deny, then reconstructs
+and revalidates the Provider request before resolution. Numeric IDs only select
+an existing delivery/call and never become authority; empty Team state is not
+auto-admitted. Review and decision may each use credentials, append Usage/cost
+records, and affect quota or billing. Prepared output remains separately
+retrievable and unacknowledged. The
 three Ledgers are inspected independently, not as a transactional snapshot.
 Project/new-Agent Preset defaults,
 richer cache distributions, and Agent lifecycle actions remain outside that
@@ -104,9 +114,9 @@ per-Turn Provider/Model/Dialect/Policy distributions without adding a write or
 Provider authority path.
 Section-filtered typed remove
 routes render exact Config Object deletion confirmations; secret storage stays
-behind the credential adapter. Broader multi-Tool policy, App Server Runtime
-mutation and approval control, and an audited Windows ConPTY wrapper remain
-pending. Platform wrappers for process, credential, transport,
+behind the credential adapter. Broader multi-Tool policy, general App Server
+Runtime resume/control and remote transport, and an audited Windows ConPTY
+wrapper remain pending. Platform wrappers for process, credential, transport,
 and eventually terminal facilities remain private to
 this package unless a second real caller proves a smaller shared package is
 needed.

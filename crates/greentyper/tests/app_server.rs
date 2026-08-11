@@ -9,8 +9,13 @@ use greentyper_core::agent_team::{
     Capability, CapabilitySnapshot, CommandOutcome, MessageRecipient, ResourceBudget, TaskScope,
     TaskSpec, TeamCommand, TeamOperationAcknowledgeOutcome,
 };
-use greentyper_core::runtime::RuntimeKernel;
-use greentyper_core::tool_runtime::{ToolArguments, ToolIntent, ToolRequestOutcome, ToolResources};
+use greentyper_core::config::ConfigLayers;
+use greentyper_core::provider::DeterministicProvider;
+use greentyper_core::runtime::{RecoveryStatus, RuntimeKernel};
+use greentyper_core::tool_runtime::{
+    ApprovalDecision, AuthorizedToolCall, ToolArguments, ToolCallOutcome, ToolEffectExecutor,
+    ToolExecution, ToolIntent, ToolRequestOutcome, ToolResources,
+};
 use serde_json::Value;
 
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(1);
@@ -19,6 +24,16 @@ const CREDENTIAL_PROFILE: &str = "app-server";
 const CREDENTIAL_ORIGIN: &str = "https://app-server-credential.invalid/v1";
 const FIRST_CREDENTIAL: &str = "private-app-server-platform-first";
 const SECOND_CREDENTIAL: &str = "private-app-server-platform-second";
+
+struct AmbiguousExecutor;
+
+impl ToolEffectExecutor for AmbiguousExecutor {
+    fn execute(&mut self, _call: &AuthorizedToolCall<'_>) -> ToolExecution {
+        ToolExecution::Ambiguous {
+            reason: "private ambiguous App Server Tool result".into(),
+        }
+    }
+}
 
 struct TempTree {
     root: PathBuf,
@@ -239,6 +254,81 @@ impl TempTree {
             ToolRequestOutcome::ApprovalRequired(_)
         ));
     }
+
+    fn create_prepared_runtime(&self) -> u64 {
+        let mut runtime = RuntimeKernel::open(self.runtime_ledger())
+            .expect("open App Server prepared Runtime fixture");
+        let output = runtime
+            .execute(
+                &ConfigLayers::default(),
+                "private App Server prepared input",
+                &mut DeterministicProvider::default(),
+            )
+            .expect("prepare App Server Runtime output");
+        output.delivery().get()
+    }
+
+    fn create_reconciliation_tool_state(&self) -> u64 {
+        let (mut kernel, recovery) = RuntimeKernel::open_with_team_and_tools(
+            self.runtime_ledger(),
+            self.team_ledger(),
+            self.tool_ledger(),
+            1,
+        )
+        .expect("open App Server Tool reconciliation fixture");
+        assert!(recovery.into_sessions().is_empty());
+        let admission = kernel
+            .dispatch_team(TeamCommand::AdmitRoot {
+                task: TaskSpec::new(
+                    "private reconciliation task",
+                    TaskScope::from_labels(["private-reconciliation-scope"]),
+                ),
+                budget: ResourceBudget::new(1_000, 1),
+                capabilities: CapabilitySnapshot::from_capabilities([
+                    Capability::Tool("local.echo".into()),
+                    Capability::Process,
+                ]),
+            })
+            .expect("admit App Server Tool reconciliation owner");
+        assert!(matches!(
+            kernel
+                .acknowledge_team_operation(admission.operation)
+                .expect("acknowledge App Server Tool reconciliation owner"),
+            TeamOperationAcknowledgeOutcome::Durable(_)
+        ));
+        let root = match admission.commit.outcome {
+            CommandOutcome::RootAdmitted { session, .. } => session,
+            other => panic!("unexpected Tool reconciliation owner admission: {other:?}"),
+        };
+        let intent = ToolIntent::new(
+            "private-reconciliation-identity",
+            "local.echo",
+            ToolArguments::parse(r#"{"message":"private reconciliation argument"}"#)
+                .expect("Tool reconciliation arguments"),
+            ToolResources::default().with_process("local.echo"),
+        )
+        .expect("Tool reconciliation intent");
+        let request = match kernel
+            .request_tool_call(root, intent)
+            .expect("request App Server Tool reconciliation call")
+        {
+            ToolRequestOutcome::ApprovalRequired(request) => request,
+            other => panic!("unexpected Tool reconciliation request: {other:?}"),
+        };
+        match kernel
+            .resolve_tool_call(
+                request,
+                ApprovalDecision::Grant {
+                    expires_at_unix_ms: u64::MAX,
+                },
+                &mut AmbiguousExecutor,
+            )
+            .expect("record ambiguous App Server Tool effect")
+        {
+            ToolCallOutcome::ReconciliationRequired(record) => record.call.get(),
+            other => panic!("unexpected Tool reconciliation outcome: {other:?}"),
+        }
+    }
 }
 
 impl Drop for TempTree {
@@ -411,6 +501,151 @@ fn app_server_runtime_status_inspects_missing_state_without_creating_it() {
     assert!(!temp.runtime_ledger().exists());
     assert!(!temp.user_config().exists());
     assert!(!temp.project_config().exists());
+}
+
+#[test]
+fn app_server_acknowledges_a_prepared_delivery_once_and_preserves_failures() {
+    let missing = TempTree::new();
+    let missing_output = missing.run(
+        concat!(
+            "{\"id\":1,\"operation\":\"runtime.acknowledge\",\"params\":{\"delivery\":1}}\n",
+            "{\"id\":2,\"operation\":\"runtime.acknowledge\",\"params\":{\"delivery\":0}}\n",
+        )
+        .as_bytes(),
+    );
+    let missing_results = responses(&missing_output);
+    assert_eq!(
+        missing_results[0]["error"]["category"],
+        "runtime_unavailable"
+    );
+    assert_eq!(missing_results[1]["error"]["category"], "invalid_value");
+    assert!(!missing.runtime_ledger().exists());
+
+    let temp = TempTree::new();
+    let delivery = temp.create_prepared_runtime();
+    let before = fs::read(temp.runtime_ledger()).expect("read prepared Runtime Ledger");
+    let wrong = delivery.checked_add(1).expect("next delivery identifier");
+    let output = temp.run(
+        format!(
+            concat!(
+                "{{\"id\":3,\"operation\":\"runtime.acknowledge\",\"params\":{{\"delivery\":{wrong}}}}}\n",
+                "{{\"id\":4,\"operation\":\"runtime.status\"}}\n",
+                "{{\"id\":5,\"operation\":\"runtime.acknowledge\",\"params\":{{\"delivery\":{delivery}}}}}\n",
+                "{{\"id\":6,\"operation\":\"runtime.status\"}}\n",
+                "{{\"id\":7,\"operation\":\"runtime.acknowledge\",\"params\":{{\"delivery\":{delivery}}}}}\n",
+            ),
+            wrong = wrong,
+            delivery = delivery,
+        )
+        .as_bytes(),
+    );
+    let results = responses(&output);
+    assert_eq!(results[0]["error"]["category"], "unknown_delivery");
+    assert_eq!(results[1]["result"]["status"], "reconciliation_required");
+    assert_eq!(results[1]["result"]["delivery"], delivery);
+    assert_eq!(results[2]["result"]["status"], "acknowledged");
+    assert_eq!(results[2]["result"]["delivery"], delivery);
+    assert_eq!(results[3]["result"]["status"], "ready");
+    assert_eq!(results[4]["result"]["status"], "already_acknowledged");
+    assert_eq!(
+        results[2]["result"]["ledger"],
+        results[4]["result"]["ledger"]
+    );
+    assert_ne!(
+        fs::read(temp.runtime_ledger()).expect("read acknowledged Runtime Ledger"),
+        before
+    );
+    let recovered = RuntimeKernel::open(temp.runtime_ledger())
+        .expect("recover acknowledged App Server Runtime");
+    assert_eq!(recovered.snapshot().status, RecoveryStatus::Ready);
+    assert!(!temp.team_ledger().exists());
+    assert!(!temp.tool_ledger().exists());
+    assert!(!temp.user_config().exists());
+    assert!(!temp.project_config().exists());
+
+    let torn = TempTree::new();
+    let torn_delivery = torn.create_prepared_runtime();
+    let mut torn_bytes = fs::read(torn.runtime_ledger()).expect("read Runtime before torn ack");
+    torn_bytes.extend_from_slice(b"bad");
+    fs::write(torn.runtime_ledger(), &torn_bytes).expect("append torn Runtime ack tail");
+    let response = torn.run(
+        format!(
+            "{{\"id\":8,\"operation\":\"runtime.acknowledge\",\"params\":{{\"delivery\":{torn_delivery}}}}}\n"
+        )
+        .as_bytes(),
+    );
+    assert_eq!(
+        responses(&response)[0]["error"]["category"],
+        "runtime_unavailable"
+    );
+    assert_eq!(
+        fs::read(torn.runtime_ledger()).expect("read unmodified torn Runtime ack Ledger"),
+        torn_bytes
+    );
+}
+
+#[test]
+fn app_server_recovers_prepared_delivery_text_without_writing_or_repairing() {
+    let missing = TempTree::new();
+    let missing_output =
+        missing.run(b"{\"id\":1,\"operation\":\"runtime.delivery\",\"params\":{\"delivery\":1}}\n");
+    assert_eq!(
+        responses(&missing_output)[0]["error"]["category"],
+        "unknown_delivery"
+    );
+    assert!(!missing.runtime_ledger().exists());
+
+    let temp = TempTree::new();
+    let delivery = temp.create_prepared_runtime();
+    let before = fs::read(temp.runtime_ledger()).expect("read Runtime before delivery recovery");
+    let output = temp.run(
+        format!(
+            concat!(
+                "{{\"id\":2,\"operation\":\"runtime.delivery\",\"params\":{{\"delivery\":{wrong}}}}}\n",
+                "{{\"id\":3,\"operation\":\"runtime.delivery\",\"params\":{{\"delivery\":{delivery}}}}}\n",
+            ),
+            wrong = delivery + 1,
+            delivery = delivery,
+        )
+        .as_bytes(),
+    );
+    let results = responses(&output);
+    assert_eq!(results[0]["error"]["category"], "unknown_delivery");
+    assert_eq!(results[1]["result"]["status"], "prepared");
+    assert_eq!(results[1]["result"]["delivery"], delivery);
+    assert_eq!(results[1]["result"]["turn"], 1);
+    assert_eq!(
+        results[1]["result"]["text"],
+        "simulated: private App Server prepared input"
+    );
+    assert_eq!(
+        fs::read(temp.runtime_ledger()).expect("read Runtime after delivery recovery"),
+        before
+    );
+
+    let torn = TempTree::new();
+    let torn_delivery = torn.create_prepared_runtime();
+    let mut torn_bytes = fs::read(torn.runtime_ledger()).expect("read Runtime before torn tail");
+    torn_bytes.extend_from_slice(b"bad");
+    fs::write(torn.runtime_ledger(), &torn_bytes).expect("append torn Runtime tail");
+    let response = torn.run(
+        format!(
+            "{{\"id\":4,\"operation\":\"runtime.delivery\",\"params\":{{\"delivery\":{torn_delivery}}}}}\n"
+        )
+        .as_bytes(),
+    );
+    assert_eq!(
+        responses(&response)[0]["error"]["category"],
+        "runtime_unavailable"
+    );
+    assert_eq!(
+        fs::read(torn.runtime_ledger()).expect("read unmodified torn Runtime"),
+        torn_bytes
+    );
+    assert!(!torn.team_ledger().exists());
+    assert!(!torn.tool_ledger().exists());
+    assert!(!torn.user_config().exists());
+    assert!(!torn.project_config().exists());
 }
 
 #[test]
@@ -606,6 +841,121 @@ fn app_server_tool_status_is_redacted_read_only_and_recovers_after_sidecar_failu
     assert!(!incomplete.tool_ledger().exists());
     assert!(!incomplete.user_config().exists());
     assert!(!incomplete.project_config().exists());
+}
+
+#[test]
+fn app_server_reconciles_tool_effects_without_reexecution_or_cross_ledger_writes() {
+    let missing = TempTree::new();
+    let missing_output = missing.run(
+        b"{\"id\":1,\"operation\":\"tool.reconcile\",\"params\":{\"outcome\":\"failed\",\"call\":1}}\n",
+    );
+    assert_eq!(
+        responses(&missing_output)[0]["error"]["category"],
+        "tool_unavailable"
+    );
+    assert!(!missing.runtime_ledger().exists());
+    assert!(!missing.team_ledger().exists());
+    assert!(!missing.tool_ledger().exists());
+
+    let succeeded = TempTree::new();
+    let call = succeeded.create_reconciliation_tool_state();
+    let runtime_before =
+        fs::read(succeeded.runtime_ledger()).expect("read Runtime before Tool reconcile");
+    let team_before = fs::read(succeeded.team_ledger()).expect("read Team before Tool reconcile");
+    let tool_before = fs::read(succeeded.tool_ledger()).expect("read Tool before reconcile");
+    let mut server = succeeded.spawn();
+    let invalid = server.request(&format!(
+        r#"{{"id":2,"operation":"tool.reconcile","params":{{"outcome":"succeeded","call":{call},"result_sha256":"ABC"}}}}"#
+    ));
+    assert_eq!(invalid["error"]["category"], "invalid_value");
+    assert_eq!(
+        fs::read(succeeded.tool_ledger()).expect("read Tool after invalid digest"),
+        tool_before
+    );
+    let unknown = server.request(&format!(
+        r#"{{"id":3,"operation":"tool.reconcile","params":{{"outcome":"failed","call":{}}}}}"#,
+        call + 1
+    ));
+    assert_eq!(unknown["error"]["category"], "unknown_tool_call");
+    assert_eq!(
+        fs::read(succeeded.tool_ledger()).expect("read Tool after unknown call"),
+        tool_before
+    );
+    let digest = "11".repeat(32);
+    let reconciled = server.request(&format!(
+        r#"{{"id":4,"operation":"tool.reconcile","params":{{"outcome":"succeeded","call":{call},"result_sha256":"{digest}"}}}}"#
+    ));
+    assert_eq!(reconciled["result"]["call"], call);
+    assert_eq!(reconciled["result"]["status"], "succeeded");
+    assert_eq!(reconciled["result"]["result_sha256"], digest);
+    let tool_after = fs::read(succeeded.tool_ledger()).expect("read reconciled Tool Ledger");
+    assert_ne!(tool_after, tool_before);
+    let duplicate = server.request(&format!(
+        r#"{{"id":5,"operation":"tool.reconcile","params":{{"outcome":"failed","call":{call}}}}}"#
+    ));
+    assert_eq!(duplicate["result"], reconciled["result"]);
+    assert_eq!(
+        fs::read(succeeded.tool_ledger()).expect("read Tool after duplicate reconcile"),
+        tool_after
+    );
+    server.finish();
+    assert_eq!(
+        fs::read(succeeded.runtime_ledger()).expect("read Runtime after Tool reconcile"),
+        runtime_before
+    );
+    assert_eq!(
+        fs::read(succeeded.team_ledger()).expect("read Team after Tool reconcile"),
+        team_before
+    );
+
+    let failed = TempTree::new();
+    let failed_call = failed.create_reconciliation_tool_state();
+    let failed_runtime_before =
+        fs::read(failed.runtime_ledger()).expect("read Runtime before failed reconcile");
+    let failed_team_before =
+        fs::read(failed.team_ledger()).expect("read Team before failed reconcile");
+    let before = fs::read(failed.tool_ledger()).expect("read Tool before failed reconcile");
+    let mut server = failed.spawn();
+    let response = server.request(&format!(
+        r#"{{"id":6,"operation":"tool.reconcile","params":{{"outcome":"failed","call":{failed_call}}}}}"#
+    ));
+    assert_eq!(response["result"]["status"], "failed");
+    assert_eq!(response["result"]["result_sha256"], Value::Null);
+    let after = fs::read(failed.tool_ledger()).expect("read Tool after failed reconcile");
+    assert_ne!(after, before);
+    let output = response.to_string();
+    assert!(!output.contains("private ambiguous App Server Tool result"));
+    assert!(!output.contains("private-reconciliation-identity"));
+    assert!(!output.contains("private reconciliation argument"));
+    server.finish();
+    assert_eq!(
+        fs::read(failed.runtime_ledger()).expect("read Runtime after failed reconcile"),
+        failed_runtime_before
+    );
+    assert_eq!(
+        fs::read(failed.team_ledger()).expect("read Team after failed reconcile"),
+        failed_team_before
+    );
+
+    let torn = TempTree::new();
+    let torn_call = torn.create_reconciliation_tool_state();
+    let mut torn_bytes = fs::read(torn.tool_ledger()).expect("read Tool before torn reconcile");
+    torn_bytes.extend_from_slice(b"bad");
+    fs::write(torn.tool_ledger(), &torn_bytes).expect("append torn Tool reconcile tail");
+    let response = torn.run(
+        format!(
+            "{{\"id\":7,\"operation\":\"tool.reconcile\",\"params\":{{\"outcome\":\"failed\",\"call\":{torn_call}}}}}\n"
+        )
+        .as_bytes(),
+    );
+    assert_eq!(
+        responses(&response)[0]["error"]["category"],
+        "tool_unavailable"
+    );
+    assert_eq!(
+        fs::read(torn.tool_ledger()).expect("read unmodified torn Tool reconcile Ledger"),
+        torn_bytes
+    );
 }
 
 #[cfg(not(windows))]

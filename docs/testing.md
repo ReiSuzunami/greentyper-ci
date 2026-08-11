@@ -479,8 +479,8 @@ stdio test proves macOS and Linux return `credential_unavailable` for all four
 operations without writing Config; its Windows branch performs the same flow
 against the current user's Credential Manager, including duplicate bind,
 replace, forget, and final not-found status. Tests assert secret bytes never
-appear in stdout or stderr. They do not prove App Server Runtime mutation or
-Tool approval, remote network transport, multi-client authentication, non-Windows
+appear in stdout or stderr. They do not prove remote network transport,
+multi-client authentication, non-Windows
 credential backends, OS-level memory locking, or long-lived resource behavior.
 Additional real-process JSONL tests pin the App Server's fixed Ledger path and
 four read-only operational flows. Missing `runtime.status`, `agent.list`, and
@@ -494,9 +494,34 @@ identity, arguments, resources, and Task metadata remain absent. Runtime, Team,
 and Tool Ledger bytes are compared before and after inspection. A one-sided
 product sidecar returns a fixed error, preserves its bytes, creates no missing
 files, and the next request on the same stream succeeds. These tests do not
-prove a cross-Ledger transactional snapshot, remote transport, Runtime resume,
-Agent lifecycle mutation, Tool approval/reconciliation, output delivery, or
-multi-client authentication.
+prove a cross-Ledger transactional snapshot.
+
+Four bounded App Server control tests cover the fixed recovery flow.
+`runtime.delivery` retrieves exact persisted Assistant text for the matching
+prepared delivery without changing Runtime bytes, rejects missing or wrong
+deliveries, and rejects an incomplete tail without repair.
+`runtime.acknowledge` rejects missing, wrong, and incomplete-tail state before a
+write, closes the exact delivery, remains idempotent on repeat, and reopens
+Ready. Tool reconciliation rejects invalid digests and unknown calls without a
+write, records observed success/failure without an executor, preserves Runtime
+and Team bytes, remains terminally idempotent, and refuses an incomplete Tool
+tail without repair. Core Ledger tests also prove the strict existing-writer open
+rejects a tail under its exclusive lock and leaves exact bytes for explicit
+writer recovery. A loopback Responses fixture interrupts before the original
+decision, then proves direct `tool.decide` approval is rejected until the same
+stream reviews exact canonical arguments/resources and receives their hashes.
+Wrong confirmation hashes fail without a Provider or executor call; correct
+confirmation reconstructs the frozen Provider again and revalidates the binding
+under the recovered Active Agent Session. Approval executes fixed `local.echo`
+exactly once, returns output that
+`runtime.delivery` can recover, and reaches Ready only after explicit
+acknowledgement; denial executes zero effects and remains repeat-safe. Public
+errors omit secret, call identity, Provider details, and private failure reasons;
+only the explicit review result exposes the exact Tool material being approved.
+A clean zero-session Team cannot be auto-admitted by a failed review, and all
+three Ledgers remain byte-identical. These tests do not prove remote transport,
+general Runtime resume, Agent lifecycle mutation, arbitrary Tool
+approval/execution, or multi-client authentication.
 Context Pressure tests freeze exact 65%/90% threshold transitions, estimated and
 missing-fact propagation, invalid policy/limit and arithmetic failure, and the
 no-side-effect hard admission gate. Product presentation tests assert estimated

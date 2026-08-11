@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
+use std::fs;
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 
@@ -8,8 +9,14 @@ use greentyper_core::config::{
     CONFIG_FILE_SCHEMA_VERSION, ConfigCommit, ConfigDraft, ConfigErrorCategory, ConfigRuntime,
     ConfigRuntimeError, ConfigScope, ConfigValue, MAX_CONFIG_STRING_BYTES, config_schema,
 };
-use greentyper_core::runtime::{RecoveryStatus, RuntimeError, RuntimeKernel};
-use greentyper_core::tool_runtime::{ToolCallRecord, ToolCallStatus};
+use greentyper_core::model::{DeliveryId, ItemRole};
+use greentyper_core::runtime::{
+    AcknowledgeOutcome, ProviderToolApproval, RecoveryStatus, RuntimeError, RuntimeKernel,
+};
+use greentyper_core::tool_runtime::{
+    AuthorizedToolCall, ToolCallRecord, ToolCallStatus, ToolEffectExecutor, ToolExecution,
+    ToolReconciliationDecision, ToolRuntimeError,
+};
 use greentyper_core::usage::{RuntimeUsageQuery, UsageCursor, UsageError, UsageTimestamp};
 use serde::{Deserialize, Deserializer};
 use serde_json::value::RawValue;
@@ -19,8 +26,14 @@ use crate::credential_vault::{
     CredentialVault, CredentialVaultError, PlatformCredentialVault, ProviderCredentialScope,
     SecretValue,
 };
+use crate::local_process::LocalProcessExecutor;
 use crate::presentation::AgentCenterView;
-use crate::product_driver::{inspect_product_team, inspect_product_tools};
+use crate::product_driver::{
+    ProductDriver, ProductDriverError, ProductInteraction, ProductToolDecision,
+    ProductToolDecisionOutcome, has_product_driver_state, inspect_product_team,
+    inspect_product_tools, reconcile_product_tool,
+};
+use crate::provider_http::ConfiguredProvider;
 
 const MAX_REQUEST_BYTES: usize = 64 * 1024;
 const MAX_ACTIVE_DRAFTS: usize = 64;
@@ -36,13 +49,31 @@ pub(crate) fn run_stdio(
 }
 
 fn run_stdio_with_vault(
+    input: impl BufRead,
+    output: impl Write,
+    config: ConfigRuntime,
+    runtime_path: PathBuf,
+    vault: &mut impl CredentialVault,
+) -> Result<(), AppServerError> {
+    run_stdio_with_vault_and_executor_factory(input, output, config, runtime_path, vault, || {
+        LocalProcessExecutor::current()
+            .map(|executor| BoxedToolExecutor(Box::new(executor)))
+            .map_err(|_| ())
+    })
+}
+
+fn run_stdio_with_vault_and_executor_factory<F>(
     mut input: impl BufRead,
     mut output: impl Write,
     config: ConfigRuntime,
     runtime_path: PathBuf,
     vault: &mut impl CredentialVault,
-) -> Result<(), AppServerError> {
-    let mut server = AppServer::new(config, runtime_path, vault);
+    executor_factory: F,
+) -> Result<(), AppServerError>
+where
+    F: FnMut() -> Result<BoxedToolExecutor, ()>,
+{
+    let mut server = AppServer::new(config, runtime_path, vault, executor_factory);
     loop {
         let response = match read_request_line(&mut input)? {
             RequestLine::End => return Ok(()),
@@ -64,22 +95,60 @@ fn run_stdio_with_vault(
     }
 }
 
-struct AppServer<'vault, V> {
+struct BoxedToolExecutor(Box<dyn ToolEffectExecutor>);
+
+impl ToolEffectExecutor for BoxedToolExecutor {
+    fn execute(&mut self, call: &AuthorizedToolCall<'_>) -> ToolExecution {
+        self.0.execute(call)
+    }
+}
+
+struct ReviewOnlyExecutor;
+
+impl ToolEffectExecutor for ReviewOnlyExecutor {
+    fn execute(&mut self, _call: &AuthorizedToolCall<'_>) -> ToolExecution {
+        ToolExecution::Failed {
+            reason: "Tool review cannot execute an effect".into(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+struct ToolReviewBinding {
+    call: u64,
+    arguments_hash: [u8; 32],
+    resources_fingerprint: [u8; 32],
+}
+
+struct AppServer<'vault, V, F> {
     config: ConfigRuntime,
     runtime_path: PathBuf,
     drafts: BTreeMap<u64, ConfigDraft>,
     next_draft_id: u64,
+    tool_review: Option<ToolReviewBinding>,
     vault: &'vault mut V,
+    executor_factory: F,
 }
 
-impl<'vault, V: CredentialVault> AppServer<'vault, V> {
-    fn new(config: ConfigRuntime, runtime_path: PathBuf, vault: &'vault mut V) -> Self {
+impl<'vault, V, F> AppServer<'vault, V, F>
+where
+    V: CredentialVault,
+    F: FnMut() -> Result<BoxedToolExecutor, ()>,
+{
+    fn new(
+        config: ConfigRuntime,
+        runtime_path: PathBuf,
+        vault: &'vault mut V,
+        executor_factory: F,
+    ) -> Self {
         Self {
             config,
             runtime_path,
             drafts: BTreeMap::new(),
             next_draft_id: 1,
+            tool_review: None,
             vault,
+            executor_factory,
         }
     }
 
@@ -111,6 +180,92 @@ impl<'vault, V: CredentialVault> AppServer<'vault, V> {
                 },
                 Err(()) => invalid_params(request.id),
             },
+            "runtime.delivery" => {
+                let params = match parse_params::<RuntimeDeliveryParams>(request.params) {
+                    Ok(params) => params,
+                    Err(()) => return invalid_params(request.id),
+                };
+                let delivery = match DeliveryId::new(params.delivery) {
+                    Ok(delivery) => delivery,
+                    Err(_) => {
+                        return error_response(
+                            Some(request.id),
+                            "invalid_value",
+                            "delivery must be a positive identifier",
+                            None,
+                        );
+                    }
+                };
+                let snapshot = match RuntimeKernel::inspect(&self.runtime_path) {
+                    Ok(snapshot) if snapshot.recovered_tail_bytes == 0 => snapshot,
+                    Ok(_) | Err(_) => return runtime_inspection_error(request.id),
+                };
+                let (turn, pending_delivery) = match snapshot.status {
+                    RecoveryStatus::ReconciliationRequired { turn, delivery } => (turn, delivery),
+                    _ => return unknown_delivery(request.id),
+                };
+                if pending_delivery != delivery {
+                    return unknown_delivery(request.id);
+                }
+                let Some(output) = snapshot
+                    .items
+                    .iter()
+                    .rev()
+                    .find(|item| item.turn() == turn && item.role() == ItemRole::Assistant)
+                else {
+                    return runtime_inspection_error(request.id);
+                };
+                success_response(
+                    request.id,
+                    json!({
+                        "status": "prepared",
+                        "delivery": delivery.get(),
+                        "turn": turn.get(),
+                        "text": output.text(),
+                    }),
+                )
+            }
+            "runtime.acknowledge" => {
+                let params = match parse_params::<RuntimeAcknowledgeParams>(request.params) {
+                    Ok(params) => params,
+                    Err(()) => return invalid_params(request.id),
+                };
+                let delivery = match DeliveryId::new(params.delivery) {
+                    Ok(delivery) => delivery,
+                    Err(_) => {
+                        return error_response(
+                            Some(request.id),
+                            "invalid_value",
+                            "delivery must be a positive identifier",
+                            None,
+                        );
+                    }
+                };
+                let mut runtime = match RuntimeKernel::open_existing_strict(&self.runtime_path) {
+                    Ok(runtime) => runtime,
+                    Err(_) => return runtime_control_error(request.id),
+                };
+                let status = match runtime.acknowledge(delivery) {
+                    Ok(AcknowledgeOutcome::Durable(_)) => "acknowledged",
+                    Ok(AcknowledgeOutcome::AlreadyAcknowledged) => "already_acknowledged",
+                    Err(RuntimeError::UnknownDelivery(_)) => {
+                        return unknown_delivery(request.id);
+                    }
+                    Err(_) => return runtime_control_error(request.id),
+                };
+                let head = runtime.snapshot().head;
+                success_response(
+                    request.id,
+                    json!({
+                        "status": status,
+                        "delivery": delivery.get(),
+                        "ledger": {
+                            "transaction": head.transaction,
+                            "sequence": head.sequence,
+                        },
+                    }),
+                )
+            }
             "runtime.stats" => {
                 let params = match parse_params::<RuntimeStatsParams>(request.params) {
                     Ok(params) => params,
@@ -166,6 +321,199 @@ impl<'vault, V: CredentialVault> AppServer<'vault, V> {
                 },
                 Err(()) => invalid_params(request.id),
             },
+            "tool.reconcile" => {
+                let params = match parse_params::<ToolReconcileParams>(request.params) {
+                    Ok(params) => params,
+                    Err(()) => return invalid_params(request.id),
+                };
+                let (call, decision) = match params {
+                    ToolReconcileParams::Succeeded {
+                        call,
+                        result_sha256,
+                    } => {
+                        let Some(result_digest) = decode_sha256(&result_sha256) else {
+                            return error_response(
+                                Some(request.id),
+                                "invalid_value",
+                                "result_sha256 must be 64 lowercase hexadecimal characters",
+                                None,
+                            );
+                        };
+                        (
+                            call,
+                            ToolReconciliationDecision::ObservedSucceeded { result_digest },
+                        )
+                    }
+                    ToolReconcileParams::Failed { call } => (
+                        call,
+                        ToolReconciliationDecision::ObservedFailed {
+                            reason: "App Server client observed Tool effect failure".into(),
+                        },
+                    ),
+                };
+                if call == 0 {
+                    return error_response(
+                        Some(request.id),
+                        "invalid_value",
+                        "call must be a positive identifier",
+                        None,
+                    );
+                }
+                if !product_control_ready(&self.runtime_path) {
+                    return tool_control_unavailable(request.id);
+                }
+                match reconcile_product_tool(&self.runtime_path, call, decision) {
+                    Ok(record) => success_response(request.id, tool_status_record(&record)),
+                    Err(error) => tool_control_error(request.id, error),
+                }
+            }
+            "tool.decide" => {
+                let params = match parse_params::<ToolDecisionParams>(request.params) {
+                    Ok(params) => params,
+                    Err(()) => return invalid_params(request.id),
+                };
+                let call = params.call();
+                if call == 0 {
+                    return error_response(
+                        Some(request.id),
+                        "invalid_value",
+                        "call must be a positive identifier",
+                        None,
+                    );
+                }
+                if matches!(&params, ToolDecisionParams::Review { .. }) {
+                    self.tool_review = None;
+                    if !product_control_ready(&self.runtime_path) {
+                        return tool_control_unavailable(request.id);
+                    }
+                    let mut interaction = AppServerProductInteraction;
+                    let mut driver = match ProductDriver::open_existing_with_executor(
+                        &self.runtime_path,
+                        BoxedToolExecutor(Box::new(ReviewOnlyExecutor)),
+                        &mut interaction,
+                    ) {
+                        Ok(driver) => driver,
+                        Err(error) => return tool_control_error(request.id, error),
+                    };
+                    let mut provider = match driver.pending_provider_epoch() {
+                        Some(epoch) => match ConfiguredProvider::from_epoch(
+                            epoch,
+                            BorrowedCredentialVault(&mut *self.vault),
+                        ) {
+                            Ok(provider) => provider,
+                            Err(_) => return provider_control_error(request.id),
+                        },
+                        None => return tool_not_awaiting_approval(request.id),
+                    };
+                    provider.enable_local_echo();
+                    let approval = match driver.recover_pending_tool_approval(call, &mut provider) {
+                        Ok(approval) => approval,
+                        Err(error) => return tool_control_error(request.id, error),
+                    };
+                    let binding = tool_review_binding(&approval);
+                    let response = tool_review_response(request.id, &approval, binding);
+                    self.tool_review = Some(binding);
+                    return response;
+                }
+
+                let (decision, arguments_sha256, resources_sha256) = match params {
+                    ToolDecisionParams::Approve {
+                        arguments_sha256,
+                        resources_sha256,
+                        ..
+                    } => (
+                        ProductToolDecision::Approve,
+                        arguments_sha256,
+                        resources_sha256,
+                    ),
+                    ToolDecisionParams::Deny {
+                        arguments_sha256,
+                        resources_sha256,
+                        ..
+                    } => (
+                        ProductToolDecision::Deny,
+                        arguments_sha256,
+                        resources_sha256,
+                    ),
+                    ToolDecisionParams::Review { .. } => unreachable!("handled above"),
+                };
+                let Some(arguments_hash) = decode_sha256(&arguments_sha256) else {
+                    return invalid_confirmation(request.id);
+                };
+                let Some(resources_fingerprint) = decode_sha256(&resources_sha256) else {
+                    return invalid_confirmation(request.id);
+                };
+                let provided = ToolReviewBinding {
+                    call,
+                    arguments_hash,
+                    resources_fingerprint,
+                };
+                let Some(reviewed) = self.tool_review else {
+                    return tool_review_required(request.id);
+                };
+                if reviewed != provided {
+                    return tool_review_mismatch(request.id);
+                }
+                self.tool_review = None;
+                if !product_control_ready(&self.runtime_path) {
+                    return tool_control_unavailable(request.id);
+                }
+                let executor = match (self.executor_factory)() {
+                    Ok(executor) => executor,
+                    Err(()) => {
+                        return error_response(
+                            Some(request.id),
+                            "tool_execution_unavailable",
+                            "local Tool execution is unavailable",
+                            None,
+                        );
+                    }
+                };
+                let mut interaction = AppServerProductInteraction;
+                let mut driver = match ProductDriver::open_existing_with_executor(
+                    &self.runtime_path,
+                    executor,
+                    &mut interaction,
+                ) {
+                    Ok(driver) => driver,
+                    Err(error) => return tool_control_error(request.id, error),
+                };
+                let mut provider = match driver.pending_provider_epoch() {
+                    Some(epoch) => match ConfiguredProvider::from_epoch(
+                        epoch,
+                        BorrowedCredentialVault(&mut *self.vault),
+                    ) {
+                        Ok(provider) => provider,
+                        Err(_) => return provider_control_error(request.id),
+                    },
+                    None => return tool_not_awaiting_approval(request.id),
+                };
+                provider.enable_local_echo();
+                let approval = match driver.recover_pending_tool_approval(call, &mut provider) {
+                    Ok(approval) => approval,
+                    Err(error) => return tool_control_error(request.id, error),
+                };
+                if tool_review_binding(&approval) != reviewed {
+                    return tool_review_mismatch(request.id);
+                }
+                match driver.resolve_recovered_tool_approval(approval, decision, &mut provider) {
+                    Ok(ProductToolDecisionOutcome::Prepared(output)) => success_response(
+                        request.id,
+                        json!({
+                            "status": "prepared",
+                            "call": call,
+                            "delivery": output.delivery().get(),
+                            "turn": output.turn().get(),
+                            "text": output.text(),
+                            "usage_record_count": output.usage_records().len(),
+                        }),
+                    ),
+                    Ok(ProductToolDecisionOutcome::Denied) => {
+                        success_response(request.id, json!({ "status": "denied", "call": call }))
+                    }
+                    Err(error) => tool_control_error(request.id, error),
+                }
+            }
             "config.schema" => match parse_params::<EmptyParams>(request.params) {
                 Ok(_) => success_response(
                     request.id,
@@ -422,6 +770,59 @@ impl<'vault, V: CredentialVault> AppServer<'vault, V> {
     }
 }
 
+struct BorrowedCredentialVault<'vault, V>(&'vault mut V);
+
+impl<V: CredentialVault> CredentialVault for BorrowedCredentialVault<'_, V> {
+    fn bind(
+        &mut self,
+        scope: &ProviderCredentialScope,
+        secret: SecretValue,
+    ) -> Result<(), CredentialVaultError> {
+        self.0.bind(scope, secret)
+    }
+
+    fn replace(
+        &mut self,
+        scope: &ProviderCredentialScope,
+        secret: SecretValue,
+    ) -> Result<(), CredentialVaultError> {
+        self.0.replace(scope, secret)
+    }
+
+    fn resolve(
+        &self,
+        scope: &ProviderCredentialScope,
+    ) -> Result<SecretValue, CredentialVaultError> {
+        self.0.resolve(scope)
+    }
+
+    fn forget(&mut self, scope: &ProviderCredentialScope) -> Result<bool, CredentialVaultError> {
+        self.0.forget(scope)
+    }
+}
+
+struct AppServerProductInteraction;
+
+impl ProductInteraction for AppServerProductInteraction {
+    fn present_team_operation(
+        &mut self,
+        _record: greentyper_core::agent_team::TeamOperationRecord,
+    ) -> io::Result<()> {
+        Err(io::Error::other(
+            "App Server cannot acknowledge an unpresented Team operation",
+        ))
+    }
+
+    fn decide_tool(
+        &mut self,
+        _approval: &greentyper_core::runtime::ProviderToolApproval,
+    ) -> io::Result<ProductToolDecision> {
+        Err(io::Error::other(
+            "App Server Tool decisions require an explicit request",
+        ))
+    }
+}
+
 fn runtime_status(snapshot: greentyper_core::runtime::RuntimeSnapshot) -> Value {
     let (status, turn, delivery) = match snapshot.status {
         RecoveryStatus::Ready => ("ready", None, None),
@@ -453,6 +854,79 @@ fn runtime_inspection_error(id: u64) -> Value {
         Some(id),
         "runtime_unavailable",
         "Runtime state could not be inspected",
+        None,
+    )
+}
+
+fn runtime_control_error(id: u64) -> Value {
+    error_response(
+        Some(id),
+        "runtime_unavailable",
+        "Runtime state could not be changed",
+        None,
+    )
+}
+
+fn tool_review_binding(approval: &ProviderToolApproval) -> ToolReviewBinding {
+    ToolReviewBinding {
+        call: approval.call().get(),
+        arguments_hash: approval.arguments_hash().bytes(),
+        resources_fingerprint: approval.resources().binding().fingerprint(),
+    }
+}
+
+fn tool_review_response(
+    id: u64,
+    approval: &ProviderToolApproval,
+    binding: ToolReviewBinding,
+) -> Value {
+    let arguments = serde_json::from_str::<Value>(approval.arguments().canonical_json())
+        .expect("canonical Tool arguments are valid JSON");
+    let resources = approval.resources();
+    success_response(
+        id,
+        json!({
+            "status": "review_required",
+            "call": binding.call,
+            "tool": approval.tool(),
+            "arguments": arguments,
+            "resources": {
+                "filesystem_reads": resources.filesystem_reads().collect::<Vec<_>>(),
+                "filesystem_writes": resources.filesystem_writes().collect::<Vec<_>>(),
+                "process": resources.process(),
+                "network_targets": resources.network_targets().collect::<Vec<_>>(),
+            },
+            "confirmation": {
+                "arguments_sha256": encode_sha256(binding.arguments_hash),
+                "resources_sha256": encode_sha256(binding.resources_fingerprint),
+            },
+        }),
+    )
+}
+
+fn product_control_ready(runtime_path: &PathBuf) -> bool {
+    if fs::symlink_metadata(runtime_path).is_err()
+        || !RuntimeKernel::inspect(runtime_path)
+            .is_ok_and(|snapshot| snapshot.recovered_tail_bytes == 0)
+        || !matches!(has_product_driver_state(runtime_path), Ok(true))
+    {
+        return false;
+    }
+    let team_ready = inspect_product_team(runtime_path).is_ok_and(|team| {
+        team.is_some_and(|team| {
+            team.recovered_tail_bytes == 0 && team.projection.active_agent_count() == 1
+        })
+    });
+    let tools_ready =
+        inspect_product_tools(runtime_path).is_ok_and(|tools| tools.recovered_tail_bytes == 0);
+    team_ready && tools_ready
+}
+
+fn unknown_delivery(id: u64) -> Value {
+    error_response(
+        Some(id),
+        "unknown_delivery",
+        "output delivery is not awaiting acknowledgement",
         None,
     )
 }
@@ -492,11 +966,113 @@ fn encode_sha256(digest: [u8; 32]) -> String {
     encoded
 }
 
+fn decode_sha256(value: &str) -> Option<[u8; 32]> {
+    let bytes = value.as_bytes();
+    if bytes.len() != 64 {
+        return None;
+    }
+    let mut digest = [0_u8; 32];
+    for (index, pair) in bytes.chunks_exact(2).enumerate() {
+        digest[index] = (decode_hex_digit(pair[0])? << 4) | decode_hex_digit(pair[1])?;
+    }
+    Some(digest)
+}
+
+const fn decode_hex_digit(value: u8) -> Option<u8> {
+    match value {
+        b'0'..=b'9' => Some(value - b'0'),
+        b'a'..=b'f' => Some(value - b'a' + 10),
+        _ => None,
+    }
+}
+
 fn tool_inspection_error(id: u64) -> Value {
     error_response(
         Some(id),
         "tool_unavailable",
         "Tool state could not be inspected",
+        None,
+    )
+}
+
+fn tool_control_error(id: u64, error: ProductDriverError) -> Value {
+    let (category, message) = match error {
+        ProductDriverError::UnknownToolCall(_) => ("unknown_tool_call", "Tool call is unknown"),
+        ProductDriverError::ToolOwnerUnavailable(_) => (
+            "tool_owner_unavailable",
+            "Tool call owner cannot be recovered",
+        ),
+        ProductDriverError::Runtime(RuntimeError::Tool(ToolRuntimeError::InvalidTransition {
+            ..
+        })) => (
+            "tool_not_reconcilable",
+            "Tool call is not awaiting reconciliation",
+        ),
+        ProductDriverError::ToolApprovalUnavailable(_) => {
+            return tool_not_awaiting_approval(id);
+        }
+        ProductDriverError::ToolApprovalMismatch { .. } => (
+            "tool_approval_mismatch",
+            "Tool call does not match the pending approval",
+        ),
+        ProductDriverError::Runtime(RuntimeError::Provider(_)) => {
+            return provider_control_error(id);
+        }
+        _ => ("tool_unavailable", "Tool state could not be changed"),
+    };
+    error_response(Some(id), category, message, None)
+}
+
+fn tool_control_unavailable(id: u64) -> Value {
+    error_response(
+        Some(id),
+        "tool_unavailable",
+        "Tool state could not be changed",
+        None,
+    )
+}
+
+fn tool_not_awaiting_approval(id: u64) -> Value {
+    error_response(
+        Some(id),
+        "tool_not_awaiting_approval",
+        "Tool call is not awaiting approval",
+        None,
+    )
+}
+
+fn invalid_confirmation(id: u64) -> Value {
+    error_response(
+        Some(id),
+        "invalid_value",
+        "Tool confirmation hashes must be 64 lowercase hexadecimal characters",
+        None,
+    )
+}
+
+fn tool_review_required(id: u64) -> Value {
+    error_response(
+        Some(id),
+        "tool_review_required",
+        "Tool call must be reviewed on this connection before a decision",
+        None,
+    )
+}
+
+fn tool_review_mismatch(id: u64) -> Value {
+    error_response(
+        Some(id),
+        "tool_approval_mismatch",
+        "Tool confirmation does not match the reviewed approval",
+        None,
+    )
+}
+
+fn provider_control_error(id: u64) -> Value {
+    error_response(
+        Some(id),
+        "provider_unavailable",
+        "frozen Provider state could not be resumed",
         None,
     )
 }
@@ -570,6 +1146,51 @@ struct RuntimeStatsParams {
     as_of_unix_ms: Option<i64>,
     limit: Option<usize>,
     cursor: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RuntimeAcknowledgeParams {
+    delivery: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RuntimeDeliveryParams {
+    delivery: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
+enum ToolReconcileParams {
+    Succeeded { call: u64, result_sha256: String },
+    Failed { call: u64 },
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "decision", rename_all = "snake_case", deny_unknown_fields)]
+enum ToolDecisionParams {
+    Review {
+        call: u64,
+    },
+    Approve {
+        call: u64,
+        arguments_sha256: String,
+        resources_sha256: String,
+    },
+    Deny {
+        call: u64,
+        arguments_sha256: String,
+        resources_sha256: String,
+    },
+}
+
+impl ToolDecisionParams {
+    const fn call(&self) -> u64 {
+        match self {
+            Self::Review { call } | Self::Approve { call, .. } | Self::Deny { call, .. } => *call,
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -955,16 +1576,241 @@ impl From<serde_json::Error> for AppServerError {
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::io::Cursor;
+    use std::io::{self, Cursor, Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::thread::{self, JoinHandle};
+    use std::time::Duration;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    use greentyper_core::agent_team::TeamOperationRecord;
     use greentyper_core::config::{ConfigDocument, ConfigPaths, ConfigRuntime};
+    use greentyper_core::provider::ProviderDialect;
+    use greentyper_core::runtime::{ProviderToolApproval, RuntimeKernel};
+    use greentyper_core::tool_runtime::{AuthorizedToolCall, ToolEffectExecutor, ToolExecution};
     use serde_json::{Value, json};
 
-    use super::run_stdio_with_vault;
+    use super::{AppServer, BoxedToolExecutor, run_stdio_with_vault};
     use crate::credential_vault::{
-        CredentialVault, InMemoryCredentialVault, ProviderCredentialScope,
+        CredentialVault, InMemoryCredentialVault, ProviderCredentialScope, SecretValue,
     };
+    use crate::product_driver::{ProductDriver, ProductDriverError, ProductInteraction};
+    use crate::provider_http::ConfiguredProvider;
+
+    const TOOL_TEST_SECRET: &[u8] = b"private-app-server-tool-secret";
+    const TOOL_CALL_SSE: &[u8] =
+        include_bytes!("../../../tests/fixtures/provider/responses/v1/http-tool-call.sse");
+    const TOOL_CONTINUATION_SSE: &[u8] =
+        include_bytes!("../../../tests/fixtures/provider/responses/v1/http-tool-continuation.sse");
+
+    struct InterruptingInteraction;
+
+    impl ProductInteraction for InterruptingInteraction {
+        fn present_team_operation(&mut self, _record: TeamOperationRecord) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn decide_tool(
+            &mut self,
+            _approval: &ProviderToolApproval,
+        ) -> io::Result<super::ProductToolDecision> {
+            Err(io::Error::other("interrupt before Tool decision"))
+        }
+    }
+
+    struct NeverExecutor;
+
+    impl ToolEffectExecutor for NeverExecutor {
+        fn execute(&mut self, _call: &AuthorizedToolCall<'_>) -> ToolExecution {
+            panic!("interrupted approval must not execute the Tool")
+        }
+    }
+
+    struct CountingEchoExecutor {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl ToolEffectExecutor for CountingEchoExecutor {
+        fn execute(&mut self, call: &AuthorizedToolCall<'_>) -> ToolExecution {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            assert_eq!(call.tool(), "local.echo");
+            assert_eq!(
+                call.arguments().canonical_json(),
+                r#"{"message":"tool says hi"}"#
+            );
+            ToolExecution::Succeeded {
+                output: b"tool says hi".to_vec(),
+            }
+        }
+    }
+
+    struct ToolDecisionFixture {
+        root: PathBuf,
+        runtime_path: PathBuf,
+        config: ConfigRuntime,
+        vault: InMemoryCredentialVault,
+        server: JoinHandle<()>,
+    }
+
+    fn tool_decision_fixture(name: &str, responses: Vec<&'static [u8]>) -> ToolDecisionFixture {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time after epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "greentyper-app-server-tool-{name}-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).expect("create App Server Tool test directory");
+        let runtime_path = root.join("runtime.ledger");
+        let (base_url, server) = spawn_tool_server(responses);
+        let document = ConfigDocument::parse(&format!(
+            r#"
+schema_version = 1
+
+[provider]
+profile = "app-server-tool"
+model = "fixture-model"
+
+[providers.app-server-tool]
+template = "openai-compatible"
+credential = "app-server-tool"
+base_url = {base_url:?}
+dialects = ["responses"]
+allow_insecure_loopback = true
+
+[providers.app-server-tool.routes]
+responses = "/v1/responses"
+
+[providers.app-server-tool.pricing]
+source = "unknown"
+"#,
+        ))
+        .expect("parse App Server Tool Config");
+        let paths = ConfigPaths::new(root.join("user.toml"), root.join("project.toml"));
+        let config = ConfigRuntime::open(paths, document).expect("open App Server Tool Config");
+        let profile = config
+            .selected_provider_profile()
+            .expect("resolve App Server Tool profile")
+            .expect("external App Server Tool profile");
+        let scope = ProviderCredentialScope::from_profile(&profile)
+            .expect("App Server Tool credential scope");
+        let mut initial_vault = InMemoryCredentialVault::default();
+        initial_vault
+            .bind(
+                &scope,
+                SecretValue::new(TOOL_TEST_SECRET.to_vec()).expect("Tool test secret"),
+            )
+            .expect("bind initial Tool credential");
+        let mut vault = InMemoryCredentialVault::default();
+        vault
+            .bind(
+                &scope,
+                SecretValue::new(TOOL_TEST_SECRET.to_vec()).expect("Tool test secret"),
+            )
+            .expect("bind App Server Tool credential");
+        let mut provider = ConfiguredProvider::for_new_turn_with_dialect(
+            profile,
+            "fixture-model",
+            ProviderDialect::Responses,
+            initial_vault,
+        )
+        .expect("construct initial App Server Tool Provider");
+        provider.enable_local_echo();
+        let layers = config
+            .config_layers()
+            .expect("App Server Tool Config layers")
+            .clone();
+        let mut interaction = InterruptingInteraction;
+        let mut driver =
+            ProductDriver::open_with_executor(&runtime_path, NeverExecutor, &mut interaction)
+                .expect("open interrupted App Server Product driver");
+        assert!(matches!(
+            driver.execute(
+                &layers,
+                "echo through App Server",
+                &mut provider,
+                &mut interaction,
+            ),
+            Err(ProductDriverError::Interaction(_))
+        ));
+        drop(driver);
+        ToolDecisionFixture {
+            root,
+            runtime_path,
+            config,
+            vault,
+            server,
+        }
+    }
+
+    fn spawn_tool_server(responses: Vec<&'static [u8]>) -> (String, JoinHandle<()>) {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind App Server Tool server");
+        let address = listener
+            .local_addr()
+            .expect("App Server Tool server address");
+        let handle = thread::spawn(move || {
+            for response in responses {
+                let (mut stream, _) = listener.accept().expect("accept App Server Tool request");
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .expect("set App Server Tool read timeout");
+                let request = read_http_request(&mut stream);
+                assert!(request.starts_with("POST /v1/responses HTTP/1.1\r\n"));
+                assert!(request.contains("Bearer private-app-server-tool-secret"));
+                write_http_response(&mut stream, response);
+            }
+        });
+        (format!("http://{address}"), handle)
+    }
+
+    fn read_http_request(stream: &mut TcpStream) -> String {
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 4096];
+        let target_len = loop {
+            let read = stream
+                .read(&mut buffer)
+                .expect("read App Server Tool request");
+            assert!(read > 0, "App Server Tool request ended before headers");
+            request.extend_from_slice(&buffer[..read]);
+            let Some(header_end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n") else {
+                continue;
+            };
+            let headers =
+                std::str::from_utf8(&request[..header_end]).expect("UTF-8 App Server Tool headers");
+            let content_length = headers
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().ok())
+                        .flatten()
+                })
+                .expect("App Server Tool Content-Length");
+            break header_end + 4 + content_length;
+        };
+        while request.len() < target_len {
+            let read = stream.read(&mut buffer).expect("read App Server Tool body");
+            assert!(read > 0, "App Server Tool request ended before body");
+            request.extend_from_slice(&buffer[..read]);
+        }
+        String::from_utf8(request).expect("UTF-8 App Server Tool request")
+    }
+
+    fn write_http_response(stream: &mut TcpStream, body: &[u8]) {
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        )
+        .expect("write App Server Tool response headers");
+        stream
+            .write_all(body)
+            .expect("write App Server Tool response body");
+        stream.flush().expect("flush App Server Tool response");
+    }
 
     #[test]
     fn app_server_binds_and_replaces_credentials_without_readback() {
@@ -1230,5 +2076,275 @@ mod tests {
         assert!(!user.exists());
         assert!(!project.exists());
         fs::remove_dir_all(root).expect("remove App Server credential boundary directory");
+    }
+
+    #[test]
+    fn app_server_tool_review_never_admits_a_missing_root_session() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time after epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "greentyper-app-server-empty-tool-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).expect("create empty Tool review directory");
+        let runtime_path = root.join("runtime.ledger");
+        let team_path = runtime_path.with_extension("ledger.team");
+        let tool_path = runtime_path.with_extension("ledger.tool");
+        let (kernel, recovery) =
+            RuntimeKernel::open_with_team_and_tools(&runtime_path, &team_path, &tool_path, 1)
+                .expect("create empty Product Ledgers");
+        assert!(recovery.into_sessions().is_empty());
+        drop(kernel);
+        let runtime_before = fs::read(&runtime_path).expect("read empty Runtime Ledger");
+        let team_before = fs::read(&team_path).expect("read empty Team Ledger");
+        let tool_before = fs::read(&tool_path).expect("read empty Tool Ledger");
+        let user = root.join("user.toml");
+        let project = root.join("project.toml");
+        let config =
+            ConfigRuntime::open(ConfigPaths::new(&user, &project), ConfigDocument::empty())
+                .expect("open empty Tool review Config");
+        let mut vault = InMemoryCredentialVault::default();
+        let mut app = AppServer::new(config, runtime_path.clone(), &mut vault, || {
+            panic!("empty Team review must not construct an executor")
+        });
+
+        let response = app.handle(
+            br#"{"id":1,"operation":"tool.decide","params":{"call":1,"decision":"review"}}"#,
+        );
+
+        assert_eq!(response["error"]["category"], "tool_unavailable");
+        assert_eq!(
+            fs::read(&runtime_path).expect("read Runtime after review"),
+            runtime_before
+        );
+        assert_eq!(
+            fs::read(&team_path).expect("read Team after review"),
+            team_before
+        );
+        assert_eq!(
+            fs::read(&tool_path).expect("read Tool after review"),
+            tool_before
+        );
+        assert!(!user.exists());
+        assert!(!project.exists());
+        fs::remove_dir_all(root).expect("remove empty Tool review directory");
+    }
+
+    #[test]
+    fn app_server_approves_or_denies_a_recovered_tool_with_exact_authority() {
+        let approved = tool_decision_fixture(
+            "approve",
+            vec![
+                TOOL_CALL_SSE,
+                TOOL_CALL_SSE,
+                TOOL_CALL_SSE,
+                TOOL_CONTINUATION_SSE,
+            ],
+        );
+        let ToolDecisionFixture {
+            root,
+            runtime_path,
+            config,
+            mut vault,
+            server,
+        } = approved;
+        let team_path = runtime_path.with_extension("ledger.team");
+        let team_before = fs::read(&team_path).expect("read Team before App Server approval");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let factory_calls = Arc::clone(&calls);
+        let mut app = AppServer::new(config, runtime_path.clone(), &mut vault, move || {
+            Ok(BoxedToolExecutor(Box::new(CountingEchoExecutor {
+                calls: Arc::clone(&factory_calls),
+            })))
+        });
+        let zero_hash = "00".repeat(32);
+        let missing_review = app.handle(
+            json!({
+                "id": 1,
+                "operation": "tool.decide",
+                "params": {
+                    "call": 1,
+                    "decision": "approve",
+                    "arguments_sha256": zero_hash,
+                    "resources_sha256": zero_hash,
+                },
+            })
+            .to_string()
+            .as_bytes(),
+        );
+        assert_eq!(missing_review["error"]["category"], "tool_review_required");
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        let review = app.handle(
+            br#"{"id":2,"operation":"tool.decide","params":{"call":1,"decision":"review"}}"#,
+        );
+        assert_eq!(review["result"]["status"], "review_required");
+        assert_eq!(review["result"]["arguments"]["message"], "tool says hi");
+        assert_eq!(
+            review["result"]["resources"]["process"],
+            "greentyper.local.echo.v1"
+        );
+        let arguments_sha256 = review["result"]["confirmation"]["arguments_sha256"]
+            .as_str()
+            .expect("reviewed arguments hash");
+        let resources_sha256 = review["result"]["confirmation"]["resources_sha256"]
+            .as_str()
+            .expect("reviewed resources hash");
+        assert_eq!(arguments_sha256.len(), 64);
+        assert_eq!(resources_sha256.len(), 64);
+        let wrong_review = app.handle(
+            json!({
+                "id": 3,
+                "operation": "tool.decide",
+                "params": {
+                    "call": 1,
+                    "decision": "approve",
+                    "arguments_sha256": arguments_sha256,
+                    "resources_sha256": "00".repeat(32),
+                },
+            })
+            .to_string()
+            .as_bytes(),
+        );
+        assert_eq!(wrong_review["error"]["category"], "tool_approval_mismatch");
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        let approved = app.handle(
+            json!({
+                "id": 4,
+                "operation": "tool.decide",
+                "params": {
+                    "call": 1,
+                    "decision": "approve",
+                    "arguments_sha256": arguments_sha256,
+                    "resources_sha256": resources_sha256,
+                },
+            })
+            .to_string()
+            .as_bytes(),
+        );
+        let delivery =
+            app.handle(br#"{"id":5,"operation":"runtime.delivery","params":{"delivery":1}}"#);
+        let status = app.handle(br#"{"id":6,"operation":"tool.status"}"#);
+        let acknowledged =
+            app.handle(br#"{"id":7,"operation":"runtime.acknowledge","params":{"delivery":1}}"#);
+        let runtime_status = app.handle(br#"{"id":8,"operation":"runtime.status"}"#);
+        let output_text = [
+            &missing_review,
+            &review,
+            &wrong_review,
+            &approved,
+            &delivery,
+            &status,
+            &acknowledged,
+            &runtime_status,
+        ]
+        .into_iter()
+        .map(Value::to_string)
+        .collect::<String>();
+        server.join().expect("join App Server approval server");
+        assert!(!output_text.contains(std::str::from_utf8(TOOL_TEST_SECRET).unwrap()));
+        assert!(!output_text.contains("call_http_echo_1"));
+        assert_eq!(approved["result"]["status"], "prepared");
+        assert_eq!(approved["result"]["call"], 1);
+        assert_eq!(approved["result"]["delivery"], 1);
+        assert_eq!(approved["result"]["text"], "Echoed: tool says hi");
+        assert_eq!(approved["result"]["usage_record_count"], 2);
+        assert_eq!(delivery["result"]["text"], "Echoed: tool says hi");
+        assert_eq!(status["result"]["calls"][0]["status"], "succeeded");
+        assert_eq!(acknowledged["result"]["status"], "acknowledged");
+        assert_eq!(runtime_status["result"]["status"], "ready");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            fs::read(&team_path).expect("read Team after App Server approval"),
+            team_before
+        );
+        assert!(!root.join("user.toml").exists());
+        assert!(!root.join("project.toml").exists());
+        fs::remove_dir_all(&root).expect("remove App Server approval directory");
+
+        let denied =
+            tool_decision_fixture("deny", vec![TOOL_CALL_SSE, TOOL_CALL_SSE, TOOL_CALL_SSE]);
+        let ToolDecisionFixture {
+            root,
+            runtime_path,
+            config,
+            mut vault,
+            server,
+        } = denied;
+        let team_path = runtime_path.with_extension("ledger.team");
+        let tool_path = runtime_path.with_extension("ledger.tool");
+        let team_before = fs::read(&team_path).expect("read Team before App Server denial");
+        let tool_before = fs::read(&tool_path).expect("read Tool before App Server denial");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let factory_calls = Arc::clone(&calls);
+        let mut app = AppServer::new(config, runtime_path.clone(), &mut vault, move || {
+            Ok(BoxedToolExecutor(Box::new(CountingEchoExecutor {
+                calls: Arc::clone(&factory_calls),
+            })))
+        });
+        let review = app.handle(
+            br#"{"id":9,"operation":"tool.decide","params":{"call":1,"decision":"review"}}"#,
+        );
+        let arguments_sha256 = review["result"]["confirmation"]["arguments_sha256"]
+            .as_str()
+            .expect("reviewed denial arguments hash");
+        let resources_sha256 = review["result"]["confirmation"]["resources_sha256"]
+            .as_str()
+            .expect("reviewed denial resources hash");
+        let denied = app.handle(
+            json!({
+                "id": 10,
+                "operation": "tool.decide",
+                "params": {
+                    "call": 1,
+                    "decision": "deny",
+                    "arguments_sha256": arguments_sha256,
+                    "resources_sha256": resources_sha256,
+                },
+            })
+            .to_string()
+            .as_bytes(),
+        );
+        let repeated = app.handle(
+            json!({
+                "id": 11,
+                "operation": "tool.decide",
+                "params": {
+                    "call": 1,
+                    "decision": "deny",
+                    "arguments_sha256": arguments_sha256,
+                    "resources_sha256": resources_sha256,
+                },
+            })
+            .to_string()
+            .as_bytes(),
+        );
+        let status = app.handle(br#"{"id":12,"operation":"tool.status"}"#);
+        let runtime_status = app.handle(br#"{"id":13,"operation":"runtime.status"}"#);
+        server.join().expect("join App Server denial server");
+        let output_text = [&review, &denied, &repeated, &status, &runtime_status]
+            .into_iter()
+            .map(Value::to_string)
+            .collect::<String>();
+        assert!(!output_text.contains(std::str::from_utf8(TOOL_TEST_SECRET).unwrap()));
+        assert!(!output_text.contains("call_http_echo_1"));
+        assert_eq!(review["result"]["status"], "review_required");
+        assert_eq!(denied["result"]["status"], "denied");
+        assert_eq!(repeated["error"]["category"], "tool_review_required");
+        assert_eq!(status["result"]["calls"][0]["status"], "denied");
+        assert_eq!(runtime_status["result"]["status"], "blocked");
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            fs::read(&team_path).expect("read Team after App Server denial"),
+            team_before
+        );
+        assert_ne!(
+            fs::read(&tool_path).expect("read denied Tool Ledger"),
+            tool_before
+        );
+        assert!(!root.join("user.toml").exists());
+        assert!(!root.join("project.toml").exists());
+        fs::remove_dir_all(root).expect("remove App Server denial directory");
     }
 }

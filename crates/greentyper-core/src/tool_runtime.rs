@@ -302,7 +302,8 @@ impl ToolResources {
         Ok(())
     }
 
-    fn binding(&self) -> ToolResourceBinding {
+    #[must_use]
+    pub fn binding(&self) -> ToolResourceBinding {
         let mut hasher = Sha256::new();
         hasher.update(b"greentyper-tool-resource-binding-v1\0");
         hash_resource_axis(&mut hasher, 1, &self.filesystem_reads);
@@ -708,6 +709,19 @@ struct ToolResolveHooks<PrepareAppend, AfterExecute, OutcomeAppend> {
 impl DurableToolRuntime {
     pub(crate) fn open(path: impl AsRef<Path>) -> Result<Self, ToolRuntimeError> {
         let (ledger, report) = FileLedger::open(path).map_err(ToolRuntimeError::Ledger)?;
+        Self::from_opened_ledger(ledger, report)
+    }
+
+    pub(crate) fn open_existing_strict(path: impl AsRef<Path>) -> Result<Self, ToolRuntimeError> {
+        let (ledger, report) =
+            FileLedger::open_existing_strict(path).map_err(ToolRuntimeError::Ledger)?;
+        Self::from_opened_ledger(ledger, report)
+    }
+
+    fn from_opened_ledger(
+        ledger: FileLedger,
+        report: crate::ledger::ReplayReport,
+    ) -> Result<Self, ToolRuntimeError> {
         let state = replay_state(&report.events)?;
         Ok(Self {
             ledger,

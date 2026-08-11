@@ -54,15 +54,37 @@ impl DurableTeamInspection {
     }
 }
 
+fn validate_active_limit(max_active_agents: usize) -> Result<(), DurableTeamError> {
+    if max_active_agents == 0 {
+        Err(DurableTeamError::Team(TeamError::InvalidActiveAgentLimit))
+    } else {
+        Ok(())
+    }
+}
+
 impl DurableTeamRuntime {
     pub fn open(
         path: impl AsRef<Path>,
         max_active_agents: usize,
     ) -> Result<Self, DurableTeamError> {
-        if max_active_agents == 0 {
-            return Err(DurableTeamError::Team(TeamError::InvalidActiveAgentLimit));
-        }
-        let (ledger, report) = FileLedger::open(path).map_err(DurableTeamError::Ledger)?;
+        validate_active_limit(max_active_agents)?;
+        let opened = FileLedger::open(path).map_err(DurableTeamError::Ledger)?;
+        Self::from_opened_ledger(opened, max_active_agents)
+    }
+
+    pub(crate) fn open_existing_strict(
+        path: impl AsRef<Path>,
+        max_active_agents: usize,
+    ) -> Result<Self, DurableTeamError> {
+        validate_active_limit(max_active_agents)?;
+        let opened = FileLedger::open_existing_strict(path).map_err(DurableTeamError::Ledger)?;
+        Self::from_opened_ledger(opened, max_active_agents)
+    }
+
+    fn from_opened_ledger(
+        (ledger, report): (FileLedger, ReplayReport),
+        max_active_agents: usize,
+    ) -> Result<Self, DurableTeamError> {
         let runtime = recover_team(&report, max_active_agents)?;
 
         Ok(Self {
@@ -76,9 +98,7 @@ impl DurableTeamRuntime {
         path: impl AsRef<Path>,
         max_active_agents: usize,
     ) -> Result<DurableTeamInspection, DurableTeamError> {
-        if max_active_agents == 0 {
-            return Err(DurableTeamError::Team(TeamError::InvalidActiveAgentLimit));
-        }
+        validate_active_limit(max_active_agents)?;
         let report = FileLedger::inspect(path).map_err(DurableTeamError::Ledger)?;
         let runtime = recover_team(&report, max_active_agents)?;
         Ok(DurableTeamInspection {

@@ -167,12 +167,25 @@ acknowledgement succeeds. Recovery or resolution failures return to inspectable
 blocker state; an acknowledgement failure keeps the same output visible for
 retry.
 
-The local stdio App Server now has a redacted read-only `tool.status` projection
+The local stdio App Server has a redacted read-only `tool.status` projection
 with Call/Agent/Tool/status, approval expiry, and terminal digest only. It does
-not expose arguments, resources, call identity strings, or reasons and cannot
-approve, deny, reconcile, or execute a call.
+not expose arguments, resources, call identity strings, or reasons. A bounded
+`tool.reconcile` operation rebinds the original Active Agent Session and records
+only an observed-success digest or fixed failure without invoking the executor.
+`tool.decide` reconstructs the frozen Provider and exact pending `local.echo`
+approval under that recovered Session in a two-step flow. Review returns
+canonical arguments/resources and their confirmation hashes; approve or deny
+must echo both hashes on the same stream, then the product reconstructs and
+revalidates the binding before resolution. Denial invokes no effect; approval
+uses the existing identity/hash/resource/capability boundary, invokes the fixed
+executor once, and returns prepared output for separate retrieval and durable
+acknowledgement. Every mutation strictly opens existing Runtime/Team/Tool
+Ledgers under exclusive locks and rejects missing, incomplete, corrupt, or torn
+state without repair. Empty Team state is never admitted. Review and decision
+may each use the origin-bound credential, append Usage/cost records, and affect
+quota or billing.
 
-Still pending: broader multi-Tool TUI policy and App Server approval/result mutation,
+Still pending: broader multi-Tool TUI and App Server approval/result policy,
 caller-selected process policy, complete Windows Job kill-on-close and memory-
 limit evidence on the Target Machine, filesystem/network/MCP adapters,
 credential-vault integration for Tools, multiple Provider Tool calls,

@@ -332,8 +332,8 @@ charges still require a future dedicated authority path.
 
 ## Still Pending
 
-- Broader multi-Tool TUI approval policy and App Server approval/result
-  presentation beyond fixed `local.echo`. The current product driver delivers the persisted
+- Broader multi-Tool TUI and App Server approval/result policy beyond fixed
+  `local.echo`. The current product driver delivers the persisted
   operation receipt before acknowledgement and consumes only the complete
   Kernel-rebound Session bundle; it exposes no Agent-ID-to-session conversion.
   The Direct VT tracer now exposes `/blockers`. The first selection of one
@@ -349,6 +349,21 @@ charges still require a future dedicated authority path.
   Prepared Provider output remains visible until durable delivery
   acknowledgement succeeds. Failed recovery or resolution returns to blocker
   inspection; failed acknowledgement keeps the same output live for retry. The
+  local stdio App Server exposes the same narrow authority through four explicit
+  operations. `runtime.delivery` reads exact prepared output and
+  `runtime.acknowledge` closes it durably. `tool.reconcile` records an observed
+  digest or fixed failure without invoking the executor. `tool.decide` first
+  reviews the exact pending `local.echo` request, returning canonical arguments,
+  declared resources, and confirmation hashes. Approve or deny must echo those
+  hashes on the same stream; the decision reconstructs the Provider request and
+  revalidates the binding before crossing the existing Agent-session-bound
+  prepared-effect boundary. Denial has zero effects and approval returns
+  unacknowledged output. Review and decision may each use the origin-bound
+  credential, append Usage/cost records, and affect quota or billing. Every
+  mutation strictly opens existing Ledgers under exclusive locks and rejects an
+  incomplete tail without repair. These operations neither admit an Agent nor
+  expose Agent-ID-to-session conversion, general Runtime resume, or arbitrary
+  Tool execution. The
   Config surface gives every schema field a rendered user-scope interaction, supports all four
   Config Object creation flows, and renders typed target-layer deletion
   confirmations. Credential fields expose only an opaque reference and never
@@ -388,14 +403,17 @@ charges still require a future dedicated authority path.
   Profile candidate/connection-test flow, and deterministic viewport-row
   projection are present. The bounded stdio App Server now exposes non-secret
   schema/get, connection-local typed Draft begin/set/reset/validate/commit,
-  origin-bound credential bind/replace/test/forget, and read-only
-  `runtime.status`, `runtime.stats`, `agent.list`, and `tool.status` projections.
+  origin-bound credential bind/replace/test/forget, read-only `runtime.status`,
+  `runtime.stats`, `agent.list`, and `tool.status` projections, plus bounded
+  prepared-delivery read/acknowledgement, Tool reconciliation, and fixed
+  `local.echo` approval/denial controls.
   Operational reads use fixed startup paths, never create or repair Ledger
   state, and redact Runtime item/block contents, Team text/labels/Sessions, and
   Tool arguments/resources/reasons. Credential requests return status only and
-  use the platform vault. None of these operations grants Runtime, Team, Tool,
-  Agent, approval, delivery, or Provider authority. Each Ledger is inspected
-  independently rather than under one cross-Ledger transaction.
+  use the platform vault. Control delegates to the Kernel/ProductDriver with a
+  rebound Active Agent Session and never derives authority from numeric IDs.
+  Each Ledger is inspected independently rather than under one cross-Ledger
+  transaction.
 - Automatic/background terminal Usage refresh and richer cache distributions,
   automatic Context View construction/compaction, provider-reported charge
   and subscription-quota values, richer observed model/effort/tier

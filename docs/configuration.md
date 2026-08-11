@@ -290,7 +290,8 @@ Generic effective-value reads also reject credential-reference fields; editor
 views expose only whether the target and effective layers are bound.
 
 `greentyper app-server --stdio [--ledger PATH]` exposes the Config Runtime,
-local credential vault, and read-only operational projections through a bounded
+local credential vault, operational projections, and four bounded recovery
+controls through a bounded
 newline-delimited JSON stream. Each request carries an
 unsigned `id`, an `operation`, and optional object `params`; each flushed
 response carries the same `id` and exactly one `result` or `error`. A request
@@ -317,9 +318,13 @@ The current operations are:
 | `credential.bind` / `replace` | Store a new or replacement origin-bound secret and return only `bound` or `replaced` status |
 | `credential.test` / `credential.forget` | Return only `available`, `forgotten`, or `not_found`; `test` checks vault presence and performs no Provider request |
 | `runtime.status` | Inspect the Runtime Ledger and return its head, recovery status, numeric Turn/delivery/thread facts, item count, pending-selection presence, and incomplete-tail byte count without returning item text, block reasons, or selection contents |
+| `runtime.delivery` | Return the exact canonical text for the requested delivery only while that output is prepared and awaiting acknowledgement; never mutate a Ledger |
+| `runtime.acknowledge` | Durably acknowledge the exact prepared delivery; repeated acknowledgement is idempotent and a wrong delivery does not write |
 | `runtime.stats` | Return the revision-bound Usage summary; optional `limit` and `cursor` expose a bounded Attempt page, and optional `as_of_unix_ms` pins the reporting instant |
 | `agent.list` | Return the redacted Agent Center projection: canonical identities, status, Task identity/state, budgets, reservations, bounded counts, Team head/revision, message count, and incomplete-tail bytes; never Task titles, message/capsule contents, labels, or Sessions |
 | `tool.status` | Return the Tool head and redacted calls containing only Call/Agent/Tool/status, approval expiry, and terminal result digest; never call identity, arguments, resources, hashes, or reasons |
+| `tool.reconcile` | Record `succeeded` with one lowercase SHA-256 result digest or fixed `failed` for the original reconciliation-required call; never invoke the executor |
+| `tool.decide` | First `review` the exact awaiting fixed `local.echo` call and receive canonical arguments/resources plus confirmation hashes; then approve or deny on the same stream by echoing both hashes; approval returns prepared output without acknowledging it |
 
 Credential operations require `reference`, `profile`, and `origin` params.
 `bind` and `replace` additionally require a JSON string `secret`; its UTF-8
@@ -349,6 +354,35 @@ fixed public errors while the JSON stream remains usable. The four projections
 are separate reads, not one cross-Ledger transactional snapshot. None performs a
 Provider request, credential lookup, Config/Ledger write, Agent action, Tool
 approval, Runtime resume, output delivery, or acknowledgement.
+
+Control operations also use only the server's startup Ledger path. A read-only
+preflight supplies bounded public errors. Each mutating path then opens the
+existing Runtime Ledger and, for Tool control, the complete Team/Tool sidecar
+pair under exclusive locks; that strict open rejects an incomplete tail without
+repair even if it appeared after preflight. `runtime.delivery` remains read-only.
+`runtime.acknowledge` accepts the exact prepared delivery, makes repeats
+idempotent, and rejects a
+different or unavailable delivery without an append. `tool.reconcile` rebinds
+the original active owner Session and capability, records only an observed
+success digest or a fixed observed-failure reason, and never invokes an
+executor. `tool.decide` first accepts `decision: "review"` for the exact awaiting
+`local.echo` call. It returns canonical JSON arguments, every declared
+filesystem/process/network resource, and lowercase argument/resource SHA-256
+confirmation values. The next approve or deny on that same stdio stream must
+echo both values; a new review, EOF, or a completed decision invalidates the
+prior binding. Direct decisions and mismatches fail before Tool execution. The
+confirmed decision reconstructs the Provider request again and compares its
+actual binding to the reviewed facts before resolving it. Review and confirmed
+decision each run under the rebound Active Agent Session and frozen Provider
+Epoch; each may resolve an origin-bound credential, contact the Provider, append
+Usage Attempt and cost records, and affect quota or billing. Denial invokes no
+effect. Approval crosses the existing bound approval and prepared-effect
+transaction, invokes only the fixed executor once, and returns canonical
+prepared output that remains pending until `runtime.acknowledge`.
+`runtime.delivery` can recover that output if the prior JSON response was lost.
+No operation admits an Agent, accepts an Agent ID as authority, or exposes
+general Runtime resume, arbitrary Tool execution, Provider selection, Team
+lifecycle, or filesystem path control.
 
 `runtime.stats` defaults to summary-only. `limit` must use the core bounded page
 range and is required when `cursor` is present. A follow-up page must reuse the
@@ -388,7 +422,12 @@ a layer.
 Operational inspection additionally uses fixed `runtime_unavailable`,
 `team_unavailable`, `tool_unavailable`, `usage_unavailable`, `stale_cursor`, and
 `cursor_query_mismatch` categories without returning a Ledger path or underlying
-storage/parser text.
+storage/parser text. Recovery controls additionally use `unknown_delivery`,
+`unknown_tool_call`, `tool_not_reconcilable`,
+`tool_not_awaiting_approval`, `tool_review_required`, `tool_approval_mismatch`,
+`tool_owner_unavailable`, `provider_unavailable`, and
+`tool_execution_unavailable`; their messages do not expose Tool identity,
+arguments, resources, Provider details, credentials, or storage errors.
 
 ## Provider Profiles
 

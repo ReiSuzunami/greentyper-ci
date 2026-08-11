@@ -462,9 +462,28 @@ Missing state creates nothing; incomplete product sidecars fail closed and the
 stream remains usable; Runtime, Team, and Tool Ledger bytes stay unchanged.
 These independently read projections do not add Provider calls, credential
 lookup, Runtime/Team/Tool mutation, approval, delivery, or acknowledgement.
+A fourth contiguous App Server slice closes the fixed local recovery flow.
+`runtime.delivery` recovers exact prepared text without a write, and
+`runtime.acknowledge` durably closes only that delivery with idempotent repeats.
+`tool.reconcile` records an observed-success digest or fixed observed failure
+without invoking the executor. `tool.decide` authenticates the rebound Active
+Agent Session and uses a connection-local two-step protocol: review reconstructs
+the frozen Provider and returns exact canonical arguments/resources with
+confirmation hashes; approve or deny must echo those hashes, reconstruct the
+request again, and revalidate the binding. Denial executes nothing; approval
+crosses the existing bound prepared-effect transaction once and returns
+unacknowledged output for explicit retrieval and acknowledgement. All mutations
+strictly open existing Runtime/Team/Tool Ledgers under exclusive locks and reject
+incomplete tails without repair. Empty Team state never admits a root Agent.
+Tests prove missing, wrong, corrupt-tail, duplicate, interrupted-response,
+review mismatch, approve, deny, and restart paths; exact Ledger bytes and
+executor counts pin no-repair and no-reexecution behavior. Review and confirmed
+decision may each use credentials, append Usage/cost records, and affect quota
+or billing.
 
 This does not complete Phase 3. Audited Windows ConPTY behavior, broader
-multi-Tool/App Server approval and Runtime-control interaction,
+multi-Tool/App Server policy, general Runtime resume/control, remote App Server
+transport,
 automatic/background snapshot refresh, rendered secret binding,
 custom-template/starter-preset workflow, live catalog discovery and Recent
 evidence, automatic Context View/token-source
