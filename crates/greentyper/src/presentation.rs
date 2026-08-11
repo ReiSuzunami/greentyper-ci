@@ -1,7 +1,7 @@
 //! Terminal-neutral product presentation model.
 
 use std::borrow::Cow;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt;
 
@@ -28,10 +28,15 @@ use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 use crate::provider_connection::{ProviderConnectionTestStatus, ProviderConnectionTester};
+use crate::provider_discovery_catalog::{
+    ProviderDiscoveryAvailability, ProviderDiscoveryCatalogModel, ProviderDiscoveryCatalogView,
+    ProviderDiscoveryFreshness, ProviderDiscoverySource, ProviderDiscoverySuggestion,
+};
 use crate::provider_http::has_provider_adapter;
 
 const MAX_SLASH_RESULTS: usize = 12;
 const MAX_MODEL_QUERY_BYTES: usize = 256;
+const MAX_RECENT_MODELS: usize = 12;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(tag = "state", content = "value", rename_all = "snake_case")]
@@ -295,8 +300,22 @@ pub(crate) struct ProductToolApprovalView {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(tag = "source", rename_all = "snake_case")]
 pub(crate) enum ModelSelectorChoiceView {
-    ConfiguredPreset { preset: ModelPresetView },
-    ReleaseCatalog { model: ModelCatalogView },
+    ConfiguredPreset {
+        preset: ModelPresetView,
+    },
+    ReleaseCatalog {
+        model: ModelCatalogView,
+        #[serde(skip_serializing)]
+        discovery_acceptance: Option<DiscoveredModelAcceptance>,
+    },
+    DiscoveryCatalog {
+        profile: String,
+        template: String,
+        profile_fingerprint: u64,
+        dialects: Vec<greentyper_core::provider::ProviderDialect>,
+        observed_at_unix_ms: Option<i64>,
+        model: ProviderDiscoveryCatalogModel,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -304,6 +323,8 @@ pub(crate) struct ModelSelectorEntryView {
     choice: ModelSelectorChoiceView,
     compatibility: Availability<bool>,
     availability: Availability<bool>,
+    sources: Vec<ProviderDiscoverySource>,
+    freshness: Option<ProviderDiscoveryFreshness>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -311,8 +332,20 @@ pub(crate) enum ModelEntryAction {
     DetailChanged,
     ApplyConfigured(ModelPresetView),
     AcceptRelease,
+    AcceptDiscovery(DiscoveredModelAcceptance),
     ReleaseUnavailable,
+    DiscoveryUnavailable,
     None,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct DiscoveredModelAcceptance {
+    pub(crate) profile: String,
+    pub(crate) template: String,
+    pub(crate) profile_fingerprint: u64,
+    pub(crate) observed_at_unix_ms: i64,
+    pub(crate) model: String,
+    pub(crate) dialects: Vec<greentyper_core::provider::ProviderDialect>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -450,15 +483,30 @@ impl ModelSelectorEntryView {
             choice: ModelSelectorChoiceView::ConfiguredPreset { preset },
             compatibility: Availability::Unknown,
             availability: Availability::Unknown,
+            sources: Vec::new(),
+            freshness: None,
         }
     }
 
-    fn release_catalog(model: ModelCatalogView) -> Self {
-        let availability = match model.record().availability().value() {
-            CatalogAvailability::Unverified => Availability::Unknown,
-            CatalogAvailability::Available => Availability::Known(true),
-            CatalogAvailability::Unavailable => Availability::Known(false),
-        };
+    fn release_catalog(
+        model: ModelCatalogView,
+        discovery: Option<(
+            &ProviderDiscoveryCatalogView,
+            &ProviderDiscoveryCatalogModel,
+        )>,
+    ) -> Self {
+        let availability = discovery.map_or_else(
+            || match model.record().availability().value() {
+                CatalogAvailability::Unverified => Availability::Unknown,
+                CatalogAvailability::Available => Availability::Known(true),
+                CatalogAvailability::Unavailable => Availability::Known(false),
+            },
+            |(_, discovered)| match discovered.availability {
+                ProviderDiscoveryAvailability::Available => Availability::Known(true),
+                ProviderDiscoveryAvailability::Stale
+                | ProviderDiscoveryAvailability::Unverified => Availability::Unknown,
+            },
+        );
         let compatibility = Availability::Known(
             model.profile_compatible()
                 && has_provider_adapter(
@@ -466,31 +514,92 @@ impl ModelSelectorEntryView {
                     model.record().primary_dialect().value(),
                 ),
         );
+        let sources = discovery.map_or_else(
+            || vec![ProviderDiscoverySource::ReleaseSeed],
+            |(_, discovered)| discovered.sources.clone(),
+        );
+        let freshness = discovery.map(|(catalog, _)| catalog.freshness);
+        let discovery_acceptance = discovery.and_then(|(catalog, discovered)| {
+            let observed_at_unix_ms = catalog.observed_at_unix_ms?;
+            (discovered.suggestion == ProviderDiscoverySuggestion::AcceptDiscoveredWithDialect
+                && !catalog.dialects.is_empty())
+            .then(|| DiscoveredModelAcceptance {
+                profile: catalog.profile.clone(),
+                template: catalog.template.clone(),
+                profile_fingerprint: catalog.profile_fingerprint,
+                observed_at_unix_ms,
+                model: discovered.id.clone(),
+                dialects: catalog.dialects.clone(),
+            })
+        });
         Self {
-            choice: ModelSelectorChoiceView::ReleaseCatalog { model },
+            choice: ModelSelectorChoiceView::ReleaseCatalog {
+                model,
+                discovery_acceptance,
+            },
             compatibility,
             availability,
+            sources,
+            freshness,
+        }
+    }
+
+    fn discovery_catalog(
+        catalog: &ProviderDiscoveryCatalogView,
+        model: ProviderDiscoveryCatalogModel,
+    ) -> Self {
+        let availability = match model.availability {
+            ProviderDiscoveryAvailability::Available => Availability::Known(true),
+            ProviderDiscoveryAvailability::Stale | ProviderDiscoveryAvailability::Unverified => {
+                Availability::Unknown
+            }
+        };
+        let compatibility = model
+            .primary_dialect
+            .map_or(Availability::Unknown, |dialect| {
+                Availability::Known(
+                    model.profile_compatible && has_provider_adapter(&catalog.template, dialect),
+                )
+            });
+        Self {
+            choice: ModelSelectorChoiceView::DiscoveryCatalog {
+                profile: catalog.profile.clone(),
+                template: catalog.template.clone(),
+                profile_fingerprint: catalog.profile_fingerprint,
+                dialects: catalog.dialects.clone(),
+                observed_at_unix_ms: catalog.observed_at_unix_ms,
+                model: model.clone(),
+            },
+            compatibility,
+            availability,
+            sources: model.sources,
+            freshness: Some(catalog.freshness),
         }
     }
 
     fn id(&self) -> &str {
         match &self.choice {
             ModelSelectorChoiceView::ConfiguredPreset { preset } => &preset.id,
-            ModelSelectorChoiceView::ReleaseCatalog { model } => model.record().key(),
+            ModelSelectorChoiceView::ReleaseCatalog { model, .. } => model.record().key(),
+            ModelSelectorChoiceView::DiscoveryCatalog { model, .. } => &model.id,
         }
     }
 
     fn provider(&self) -> &str {
         match &self.choice {
             ModelSelectorChoiceView::ConfiguredPreset { preset } => &preset.provider,
-            ModelSelectorChoiceView::ReleaseCatalog { model } => model.provider(),
+            ModelSelectorChoiceView::ReleaseCatalog { model, .. } => model.provider(),
+            ModelSelectorChoiceView::DiscoveryCatalog { profile, .. } => profile,
         }
     }
 
     fn model(&self) -> &str {
         match &self.choice {
             ModelSelectorChoiceView::ConfiguredPreset { preset } => &preset.model,
-            ModelSelectorChoiceView::ReleaseCatalog { model } => model.record().model_id().value(),
+            ModelSelectorChoiceView::ReleaseCatalog { model, .. } => {
+                model.record().model_id().value()
+            }
+            ModelSelectorChoiceView::DiscoveryCatalog { model, .. } => &model.id,
         }
     }
 
@@ -510,6 +619,7 @@ impl ModelSelectorEntryView {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub(crate) struct ModelSelectorView {
     pending: Option<String>,
+    discovery: Availability<Vec<ProviderDiscoveryFreshness>>,
     favorites: Vec<ModelSelectorEntryView>,
     recent: Availability<Vec<ModelSelectorEntryView>>,
     compatible: Availability<Vec<ModelSelectorEntryView>>,
@@ -520,6 +630,7 @@ impl ModelSelectorView {
     pub(crate) fn build(
         presets: &[ModelPresetView],
         catalog_models: &[ModelCatalogView],
+        discovery_catalogs: Option<&[ProviderDiscoveryCatalogView]>,
         query: &str,
     ) -> Result<Self, PresentationError> {
         if query.len() > MAX_MODEL_QUERY_BYTES
@@ -531,16 +642,42 @@ impl ModelSelectorView {
             .split_whitespace()
             .map(str::to_ascii_lowercase)
             .collect::<Vec<_>>();
+        let mut discovered = BTreeMap::new();
+        if let Some(catalogs) = discovery_catalogs {
+            for catalog in catalogs {
+                for model in &catalog.models {
+                    if model.sources.contains(&ProviderDiscoverySource::Discovery) {
+                        discovered.insert(
+                            (catalog.profile.clone(), model.id.clone()),
+                            (catalog, model.clone()),
+                        );
+                    }
+                }
+            }
+        }
+        let release = catalog_models
+            .iter()
+            .cloned()
+            .map(|model| {
+                let discovery = discovered.remove(&(
+                    model.provider().to_owned(),
+                    model.record().model_id().value().to_owned(),
+                ));
+                ModelSelectorEntryView::release_catalog(
+                    model,
+                    discovery.as_ref().map(|(catalog, model)| (*catalog, model)),
+                )
+            })
+            .collect::<Vec<_>>();
+        let discovery = discovered
+            .into_values()
+            .map(|(catalog, model)| ModelSelectorEntryView::discovery_catalog(catalog, model));
         let all = presets
             .iter()
             .cloned()
             .map(ModelSelectorEntryView::configured_preset)
-            .chain(
-                catalog_models
-                    .iter()
-                    .cloned()
-                    .map(ModelSelectorEntryView::release_catalog),
-            )
+            .chain(release)
+            .chain(discovery)
             .filter(|entry| model_matches(entry, &tokens))
             .collect::<Vec<_>>();
         let favorites = all
@@ -548,7 +685,7 @@ impl ModelSelectorView {
             .filter(|entry| entry.favorite())
             .cloned()
             .collect();
-        let compatible = if catalog_models.is_empty() {
+        let compatible = if catalog_models.is_empty() && discovery_catalogs.is_none() {
             Availability::Unknown
         } else {
             Availability::Known(
@@ -560,11 +697,51 @@ impl ModelSelectorView {
         };
         Ok(Self {
             pending: None,
+            discovery: discovery_catalogs.map_or(Availability::Unknown, |catalogs| {
+                Availability::Known(catalogs.iter().map(|catalog| catalog.freshness).collect())
+            }),
             favorites,
             recent: Availability::Unknown,
             compatible,
             all,
         })
+    }
+
+    fn project_recent_usage(&mut self, usage: Option<&RuntimeUsageSnapshot>) {
+        let Some(usage) = usage else {
+            self.recent = Availability::Unknown;
+            return;
+        };
+        let mut attempts = usage.attempts().iter().collect::<Vec<_>>();
+        attempts.sort_by(|left, right| {
+            right
+                .completed_at()
+                .or(right.started_at())
+                .cmp(&left.completed_at().or(left.started_at()))
+                .then_with(|| right.turn().cmp(&left.turn()))
+                .then_with(|| right.attempt().cmp(&left.attempt()))
+        });
+        let mut seen = BTreeSet::new();
+        let mut recent = Vec::new();
+        for attempt in attempts {
+            let key = (
+                attempt.provider_profile().to_owned(),
+                attempt.requested_model().to_owned(),
+            );
+            if !seen.insert(key) {
+                continue;
+            }
+            if let Some(entry) = self.all.iter().find(|entry| {
+                entry.provider() == attempt.provider_profile()
+                    && entry.model() == attempt.requested_model()
+            }) {
+                recent.push(entry.clone());
+                if recent.len() == MAX_RECENT_MODELS {
+                    break;
+                }
+            }
+        }
+        self.recent = Availability::Known(recent);
     }
 
     fn filtered(&self, query: &str) -> Self {
@@ -596,10 +773,21 @@ impl ModelSelectorView {
             ),
             Availability::Unknown => Availability::Unknown,
         };
+        let recent = match &self.recent {
+            Availability::Known(entries) => Availability::Known(
+                entries
+                    .iter()
+                    .filter(|entry| model_matches(entry, &tokens))
+                    .cloned()
+                    .collect(),
+            ),
+            Availability::Unknown => Availability::Unknown,
+        };
         Self {
             pending: self.pending.clone(),
+            discovery: self.discovery.clone(),
             favorites,
-            recent: Availability::Unknown,
+            recent,
             compatible,
             all,
         }
@@ -632,10 +820,22 @@ fn model_matches(entry: &ModelSelectorEntryView, tokens: &[String]) -> bool {
                 preset.service_tier.as_ref().map(|value| value.as_str()),
                 preset.context_mode.as_deref(),
             ),
-            ModelSelectorChoiceView::ReleaseCatalog { model } => (
+            ModelSelectorChoiceView::ReleaseCatalog { model, .. } => (
                 model.record().primary_dialect().value().as_str(),
                 Some(model.record().display_name().value()),
                 Some(model.record().provider_template()),
+                None,
+                None,
+                None,
+            ),
+            ModelSelectorChoiceView::DiscoveryCatalog {
+                template, model, ..
+            } => (
+                model
+                    .primary_dialect
+                    .map_or("?", |dialect| dialect.as_str()),
+                None,
+                Some(template.as_str()),
                 None,
                 None,
                 None,
@@ -682,6 +882,7 @@ pub(crate) struct PresentationSources<'a> {
     pub(crate) context_pressure: Option<&'a ContextPressureSnapshot>,
     pub(crate) model_presets: &'a [ModelPresetView],
     pub(crate) catalog_models: &'a [ModelCatalogView],
+    pub(crate) discovery_catalogs: Option<&'a [ProviderDiscoveryCatalogView]>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -771,13 +972,18 @@ impl TuiViewModel {
         sources: PresentationSources<'_>,
     ) -> Result<Self, PresentationError> {
         let slash = SlashPanelView::build(slash_query, selected)?;
-        let mut models =
-            ModelSelectorView::build(sources.model_presets, sources.catalog_models, model_query)?;
+        let mut models = ModelSelectorView::build(
+            sources.model_presets,
+            sources.catalog_models,
+            sources.discovery_catalogs,
+            model_query,
+        )?;
         models.pending = sources
             .runtime
             .pending_model_selection
             .as_ref()
             .map(|pending| pending.selection().preset_id().to_owned());
+        models.project_recent_usage(sources.usage);
         let stats = sources
             .usage
             .cloned()
@@ -886,6 +1092,9 @@ enum PresentationState {
         selected: usize,
         detail: bool,
     },
+    ModelDiscoveryDialect {
+        selected: usize,
+    },
     Stats {
         group: StatsGroup,
         selected: usize,
@@ -914,9 +1123,12 @@ struct ActiveConfigObjectCreate {
 }
 
 #[derive(Clone)]
-struct ModelStarterSource {
-    provider: String,
-    catalog_key: String,
+enum ModelStarterSource {
+    Release {
+        provider: String,
+        catalog_key: String,
+    },
+    Discovery(DiscoveredModelAcceptance),
 }
 
 struct ActiveConfigEditor {
@@ -976,6 +1188,10 @@ impl PresentationController {
 
     pub(crate) const fn is_model_selector(&self) -> bool {
         matches!(self.state, PresentationState::ModelSelector { .. })
+    }
+
+    pub(crate) const fn is_model_discovery_dialect(&self) -> bool {
+        matches!(self.state, PresentationState::ModelDiscoveryDialect { .. })
     }
 
     pub(crate) const fn is_stats(&self) -> bool {
@@ -1070,7 +1286,7 @@ impl PresentationController {
     }
 
     pub(crate) fn set_model_query(&mut self, query: &str) -> Result<(), PresentationError> {
-        ModelSelectorView::build(&[], &[], query)?;
+        ModelSelectorView::build(&[], &[], None, query)?;
         self.model_query = query.to_owned();
         if let PresentationState::ModelSelector {
             selected, detail, ..
@@ -1165,13 +1381,13 @@ impl PresentationController {
             ModelSelectorChoiceView::ConfiguredPreset { preset } => {
                 ModelEntryAction::ApplyConfigured(preset.clone())
             }
-            ModelSelectorChoiceView::ReleaseCatalog { model }
+            ModelSelectorChoiceView::ReleaseCatalog { model, .. }
                 if entry.compatibility == Availability::Known(true) =>
             {
                 self.object_create = Some(ActiveConfigObjectCreate {
                     kind: ConfigObjectKind::ModelPreset,
                     id: String::new(),
-                    starter: Some(ModelStarterSource {
+                    starter: Some(ModelStarterSource::Release {
                         provider: model.provider().to_owned(),
                         catalog_key: model.record().key().to_owned(),
                     }),
@@ -1179,8 +1395,46 @@ impl PresentationController {
                 self.state = PresentationState::ConfigObjectCreate;
                 ModelEntryAction::AcceptRelease
             }
+            ModelSelectorChoiceView::ReleaseCatalog {
+                discovery_acceptance: Some(acceptance),
+                ..
+            } => ModelEntryAction::AcceptDiscovery(acceptance.clone()),
             ModelSelectorChoiceView::ReleaseCatalog { .. } => ModelEntryAction::ReleaseUnavailable,
+            ModelSelectorChoiceView::DiscoveryCatalog {
+                profile,
+                template,
+                profile_fingerprint,
+                dialects,
+                observed_at_unix_ms: Some(observed_at_unix_ms),
+                model,
+            } if model.suggestion == ProviderDiscoverySuggestion::AcceptDiscoveredWithDialect
+                && !dialects.is_empty() =>
+            {
+                ModelEntryAction::AcceptDiscovery(DiscoveredModelAcceptance {
+                    profile: profile.clone(),
+                    template: template.clone(),
+                    profile_fingerprint: *profile_fingerprint,
+                    observed_at_unix_ms: *observed_at_unix_ms,
+                    model: model.id.clone(),
+                    dialects: dialects.clone(),
+                })
+            }
+            ModelSelectorChoiceView::DiscoveryCatalog { .. } => {
+                ModelEntryAction::DiscoveryUnavailable
+            }
         }
+    }
+
+    pub(crate) fn begin_discovered_model_acceptance(
+        &mut self,
+        acceptance: DiscoveredModelAcceptance,
+    ) {
+        self.object_create = Some(ActiveConfigObjectCreate {
+            kind: ConfigObjectKind::ModelPreset,
+            id: String::new(),
+            starter: Some(ModelStarterSource::Discovery(acceptance)),
+        });
+        self.state = PresentationState::ConfigObjectCreate;
     }
 
     pub(crate) fn move_stats_selection(
@@ -1476,6 +1730,7 @@ impl PresentationController {
             PresentationState::ProductOutput { .. } => {}
             PresentationState::SlashPanel
             | PresentationState::ConfigObjectCreate
+            | PresentationState::ModelDiscoveryDialect { .. }
             | PresentationState::ConfigCenter { .. }
             | PresentationState::ConfigEditor
             | PresentationState::ProviderWizard => {}
@@ -1672,22 +1927,52 @@ impl PresentationController {
                 create.starter.clone(),
             )
         };
+        if let Some(ModelStarterSource::Discovery(acceptance)) = starter.as_ref() {
+            let dialect = acceptance
+                .dialects
+                .first()
+                .copied()
+                .ok_or(ConfigEditorError::ConfigObjectMismatch)?;
+            runtime.begin_model_preset(
+                scope,
+                object.id(),
+                &acceptance.profile,
+                &acceptance.model,
+                dialect,
+            )?;
+            self.state = PresentationState::ModelDiscoveryDialect { selected: 0 };
+            return Ok(());
+        }
         let session = match starter.as_ref() {
-            Some(starter) => ConfigEditorSession::create_model_starter(
+            Some(ModelStarterSource::Release {
+                provider,
+                catalog_key,
+            }) => ConfigEditorSession::create_model_starter(
                 runtime,
                 scope,
                 object.clone(),
-                &starter.provider,
-                &starter.catalog_key,
+                provider,
+                catalog_key,
             )?,
+            Some(ModelStarterSource::Discovery(_)) => unreachable!("handled discovery starter"),
             None => ConfigEditorSession::create_object(runtime, scope, object.clone())?,
         };
+        self.open_created_config_editor(runtime, object, session, starter.is_some())
+    }
+
+    fn open_created_config_editor(
+        &mut self,
+        runtime: &ConfigRuntime,
+        object: ConfigObjectRef,
+        session: ConfigEditorSession,
+        dirty: bool,
+    ) -> Result<(), PresentationControllerError> {
         let view = session.current_view(runtime)?;
         self.editor = Some(ActiveConfigEditor {
             object: Some(object),
             session,
             view,
-            dirty: starter.is_some(),
+            dirty,
             validated: false,
             connection: ProviderConnectionTestStatus::Untested,
         });
@@ -1703,6 +1988,77 @@ impl PresentationController {
         };
         self.object_create = None;
         Ok(())
+    }
+
+    pub(crate) fn move_discovered_model_dialect(&mut self, offset: isize) {
+        let PresentationState::ModelDiscoveryDialect { selected } = &mut self.state else {
+            return;
+        };
+        let Some(ModelStarterSource::Discovery(acceptance)) = self
+            .object_create
+            .as_ref()
+            .and_then(|create| create.starter.as_ref())
+        else {
+            *selected = 0;
+            return;
+        };
+        *selected = selected
+            .saturating_add_signed(offset)
+            .min(acceptance.dialects.len().saturating_sub(1));
+    }
+
+    pub(crate) fn discovered_model_acceptance(&self) -> Option<&DiscoveredModelAcceptance> {
+        if !matches!(self.state, PresentationState::ModelDiscoveryDialect { .. }) {
+            return None;
+        }
+        match self.object_create.as_ref()?.starter.as_ref()? {
+            ModelStarterSource::Discovery(acceptance) => Some(acceptance),
+            ModelStarterSource::Release { .. } => None,
+        }
+    }
+
+    pub(crate) fn cancel_discovered_model_acceptance(&mut self) {
+        if self.discovered_model_acceptance().is_none() {
+            return;
+        }
+        self.object_create = None;
+        self.state = PresentationState::ModelSelector {
+            group: ModelSelectorGroup::All,
+            selected: 0,
+            detail: false,
+        };
+    }
+
+    pub(crate) fn confirm_discovered_model_dialect(
+        &mut self,
+        runtime: &ConfigRuntime,
+        scope: ConfigScope,
+    ) -> Result<(), PresentationControllerError> {
+        let PresentationState::ModelDiscoveryDialect { selected } = self.state else {
+            return Err(PresentationControllerError::NotConfigObjectCreate);
+        };
+        let create = self
+            .object_create
+            .as_ref()
+            .ok_or(PresentationControllerError::NotConfigObjectCreate)?;
+        let Some(ModelStarterSource::Discovery(acceptance)) = create.starter.as_ref() else {
+            return Err(PresentationControllerError::NotConfigObjectCreate);
+        };
+        let dialect = acceptance
+            .dialects
+            .get(selected)
+            .copied()
+            .ok_or(ConfigEditorError::ConfigObjectMismatch)?;
+        let object = ConfigObjectRef::new(create.kind, create.id.clone());
+        let session = ConfigEditorSession::create_model_preset(
+            runtime,
+            scope,
+            object.clone(),
+            &acceptance.profile,
+            &acceptance.model,
+            dialect,
+        )?;
+        self.open_created_config_editor(runtime, object, session, true)
     }
 
     pub(crate) fn move_config_object_selection(
@@ -1753,6 +2109,10 @@ impl PresentationController {
     pub(crate) fn back(&mut self) -> Result<(), PresentationControllerError> {
         if self.is_tool_approval() {
             self.cancel_tool_approval();
+            return Ok(());
+        }
+        if self.is_model_discovery_dialect() {
+            self.state = PresentationState::ConfigObjectCreate;
             return Ok(());
         }
         if let PresentationState::ModelSelector { detail, .. }
@@ -1994,6 +2354,21 @@ impl PresentationController {
                 selected,
                 detail,
             }),
+            PresentationState::ModelDiscoveryDialect { selected } => {
+                let Some(ModelStarterSource::Discovery(acceptance)) = self
+                    .object_create
+                    .as_ref()
+                    .and_then(|create| create.starter.as_ref())
+                else {
+                    return Err(PresentationControllerError::NotConfigObjectCreate);
+                };
+                Ok(PresentationScreenView::ModelDiscoveryDialect {
+                    provider: acceptance.profile.clone(),
+                    model: acceptance.model.clone(),
+                    dialects: acceptance.dialects.clone(),
+                    selected,
+                })
+            }
             PresentationState::Stats {
                 group,
                 selected,
@@ -2048,6 +2423,7 @@ impl PresentationController {
             screen,
             PresentationScreenView::ConfigCenter { .. }
                 | PresentationScreenView::ModelSelector { detail: false, .. }
+                | PresentationScreenView::ModelDiscoveryDialect { .. }
                 | PresentationScreenView::Stats { detail: false, .. }
                 | PresentationScreenView::AgentCenter { detail: false, .. }
                 | PresentationScreenView::BlockerCenter { detail: false, .. }
@@ -2137,6 +2513,12 @@ pub(crate) enum PresentationScreenView {
         group: ModelSelectorGroup,
         selected: usize,
         detail: bool,
+    },
+    ModelDiscoveryDialect {
+        provider: String,
+        model: String,
+        dialects: Vec<greentyper_core::provider::ProviderDialect>,
+        selected: usize,
     },
     Stats {
         group: StatsGroup,
@@ -2624,6 +3006,30 @@ fn screen_rows(
                 true,
             ),
         ],
+        PresentationScreenView::ModelDiscoveryDialect {
+            provider,
+            model,
+            dialects,
+            selected,
+        } => {
+            let mut rows = vec![
+                LayoutRowView::new("Select trusted dialect", false),
+                LayoutRowView::new(format!("provider {provider} | model {model}"), false),
+                LayoutRowView::new("Discovery supplies a model ID only", false),
+            ];
+            rows.extend(dialects.iter().enumerate().map(|(index, dialect)| {
+                let is_selected = index == *selected;
+                LayoutRowView::new(
+                    format!(
+                        "{} {}",
+                        if is_selected { '>' } else { ' ' },
+                        dialect.as_str()
+                    ),
+                    is_selected,
+                )
+            }));
+            rows
+        }
         PresentationScreenView::ConfigCenter {
             section,
             objects,
@@ -3155,6 +3561,10 @@ fn model_selector_rows(
             false,
         ),
     ];
+    rows.push(LayoutRowView::new(
+        model_discovery_summary(&filtered.discovery),
+        false,
+    ));
     let Some(entries) = filtered.group_entries(group) else {
         rows.push(LayoutRowView::new(
             format!("{} unknown", group.label()),
@@ -3173,8 +3583,11 @@ fn model_selector_rows(
     }
     rows.push(LayoutRowView::new(
         format!(
-            "Favorites {} | Recent ? | Compatible {} | All {}",
+            "Favorites {} | Recent {} | Compatible {} | All {}",
             filtered.favorites.len(),
+            filtered
+                .group_entries(ModelSelectorGroup::Recent)
+                .map_or_else(|| "?".to_owned(), |entries| entries.len().to_string()),
             filtered
                 .group_entries(ModelSelectorGroup::Compatible)
                 .map_or_else(|| "?".to_owned(), |entries| entries.len().to_string()),
@@ -3183,10 +3596,7 @@ fn model_selector_rows(
         false,
     ));
     rows.extend(entries.iter().enumerate().map(|(index, entry)| {
-        let source = match &entry.choice {
-            ModelSelectorChoiceView::ConfiguredPreset { .. } => "configured",
-            ModelSelectorChoiceView::ReleaseCatalog { .. } => "release",
-        };
+        let source = model_source_label(entry);
         LayoutRowView::new(
             format!(
                 "{} [{}] {} / {} / {}",
@@ -3200,6 +3610,32 @@ fn model_selector_rows(
         )
     }));
     rows
+}
+
+fn model_discovery_summary(discovery: &Availability<Vec<ProviderDiscoveryFreshness>>) -> String {
+    let Availability::Known(freshness) = discovery else {
+        return "Discovery unavailable".to_owned();
+    };
+    if freshness.is_empty() {
+        return "Discovery not configured".to_owned();
+    }
+    let current = freshness
+        .iter()
+        .filter(|value| **value == ProviderDiscoveryFreshness::Current)
+        .count();
+    let stale = freshness
+        .iter()
+        .filter(|value| **value == ProviderDiscoveryFreshness::Stale)
+        .count();
+    let missing = freshness
+        .iter()
+        .filter(|value| **value == ProviderDiscoveryFreshness::Missing)
+        .count();
+    let disabled = freshness
+        .iter()
+        .filter(|value| **value == ProviderDiscoveryFreshness::Disabled)
+        .count();
+    format!("Discovery current {current} | stale {stale} | missing {missing} | disabled {disabled}")
 }
 
 fn model_detail_rows(entry: &ModelSelectorEntryView) -> Vec<LayoutRowView> {
@@ -3252,7 +3688,7 @@ fn model_detail_rows(entry: &ModelSelectorEntryView) -> Vec<LayoutRowView> {
                 ),
             ]);
         }
-        ModelSelectorChoiceView::ReleaseCatalog { model } => {
+        ModelSelectorChoiceView::ReleaseCatalog { model, .. } => {
             let record = model.record();
             let capabilities = record.capabilities().value().map_or_else(
                 || "?".to_owned(),
@@ -3269,7 +3705,7 @@ fn model_detail_rows(entry: &ModelSelectorEntryView) -> Vec<LayoutRowView> {
                 },
             );
             rows.extend([
-                LayoutRowView::new("source release", false),
+                LayoutRowView::new(format!("source {}", model_source_label(entry)), false),
                 LayoutRowView::new(format!("display {}", record.display_name().value()), false),
                 LayoutRowView::new(format!("provider {}", model.provider()), false),
                 LayoutRowView::new(format!("model {}", record.model_id().value()), false),
@@ -3313,9 +3749,93 @@ fn model_detail_rows(entry: &ModelSelectorEntryView) -> Vec<LayoutRowView> {
                 LayoutRowView::new(format!("seed {}", record.seed_revision()), false),
                 LayoutRowView::new(format!("observed {}", record.observed_at()), false),
             ]);
+            if let Some(freshness) = entry.freshness {
+                rows.push(LayoutRowView::new(
+                    format!("freshness {}", discovery_freshness_label(freshness)),
+                    false,
+                ));
+            }
+        }
+        ModelSelectorChoiceView::DiscoveryCatalog {
+            profile,
+            template,
+            observed_at_unix_ms,
+            model,
+            ..
+        } => {
+            rows.extend([
+                LayoutRowView::new(format!("source {}", model_source_label(entry)), false),
+                LayoutRowView::new(format!("provider {profile}"), false),
+                LayoutRowView::new(format!("model {}", model.id), false),
+                LayoutRowView::new(format!("template {template}"), false),
+                LayoutRowView::new(
+                    format!(
+                        "dialect {}",
+                        model
+                            .primary_dialect
+                            .map_or("?", |dialect| dialect.as_str())
+                    ),
+                    false,
+                ),
+                LayoutRowView::new(
+                    format!(
+                        "compatibility {}",
+                        availability_bool_label(&entry.compatibility)
+                    ),
+                    false,
+                ),
+                LayoutRowView::new(
+                    format!(
+                        "availability {}",
+                        availability_bool_label(&entry.availability)
+                    ),
+                    false,
+                ),
+                LayoutRowView::new(
+                    format!(
+                        "freshness {}",
+                        entry.freshness.map_or("?", discovery_freshness_label)
+                    ),
+                    false,
+                ),
+                LayoutRowView::new(
+                    format!(
+                        "observed unix ms {}",
+                        observed_at_unix_ms
+                            .map_or_else(|| "?".to_owned(), |value| value.to_string())
+                    ),
+                    false,
+                ),
+            ]);
         }
     }
     rows
+}
+
+fn model_source_label(entry: &ModelSelectorEntryView) -> &'static str {
+    if matches!(
+        entry.choice,
+        ModelSelectorChoiceView::ConfiguredPreset { .. }
+    ) {
+        return "configured";
+    }
+    match entry.sources.as_slice() {
+        [
+            ProviderDiscoverySource::ReleaseSeed,
+            ProviderDiscoverySource::Discovery,
+        ] => "release+discovery",
+        [ProviderDiscoverySource::Discovery] => "discovery",
+        _ => "release",
+    }
+}
+
+const fn discovery_freshness_label(freshness: ProviderDiscoveryFreshness) -> &'static str {
+    match freshness {
+        ProviderDiscoveryFreshness::Disabled => "disabled",
+        ProviderDiscoveryFreshness::Missing => "missing",
+        ProviderDiscoveryFreshness::Current => "current",
+        ProviderDiscoveryFreshness::Stale => "stale",
+    }
 }
 
 fn availability_bool_label(value: &Availability<bool>) -> &'static str {
@@ -4445,6 +4965,7 @@ pub(crate) fn build_smoke_view(
             context_pressure: None,
             model_presets: &[],
             catalog_models: &[],
+            discovery_catalogs: None,
         },
     )?;
     let mut controller = PresentationController::new();
@@ -4643,9 +5164,9 @@ mod tests {
     use greentyper_core::config::{
         CommandMatchKind, CommandTarget, ConfigDocument, ConfigEditorError, ConfigEditorOperation,
         ConfigEditorSession, ConfigEditorView, ConfigErrorCategory, ConfigFieldContents,
-        ConfigFieldView, ConfigObjectKind, ConfigObjectRef, ConfigPaths, ConfigRepairIssue,
-        ConfigRuntime, ConfigRuntimeError, ConfigRuntimeStatus, ConfigScope, ConfigSection,
-        ConfigValue, ModelPresetView,
+        ConfigFieldView, ConfigLayers, ConfigObjectKind, ConfigObjectRef, ConfigPaths,
+        ConfigRepairIssue, ConfigRuntime, ConfigRuntimeError, ConfigRuntimeStatus, ConfigScope,
+        ConfigSection, ConfigValue, ModelPresetView,
     };
     use greentyper_core::context::{
         ContextPressure, ContextPressureAccuracy, ContextPressureInput, ContextPressurePolicy,
@@ -4653,17 +5174,22 @@ mod tests {
     };
     use greentyper_core::ledger::LedgerHead;
     use greentyper_core::model::{DeliveryId, ThreadId, TurnId};
-    use greentyper_core::provider::{ProviderDialect, UsageAccuracy};
+    use greentyper_core::provider::{DeterministicProvider, ProviderDialect, UsageAccuracy};
+    use greentyper_core::provider_catalog::ProviderCatalogMode;
     use greentyper_core::runtime::{
         KernelTeamSnapshot, RecoveryStatus, RuntimeKernel, RuntimeSnapshot,
     };
     use greentyper_core::usage::{RuntimeUsageSnapshot, UsageTimestamp};
 
     use crate::provider_connection::{ProviderConnectionTestStatus, ProviderConnectionTester};
+    use crate::provider_discovery_catalog::{
+        ProviderDiscoveryAvailability, ProviderDiscoveryCatalogModel, ProviderDiscoveryCatalogView,
+        ProviderDiscoveryFreshness, ProviderDiscoverySource, ProviderDiscoverySuggestion,
+    };
 
     use super::{
-        Availability, BlockerView, CostQuantityView, ModelEntryAction, ModelSelectorGroup,
-        ModelSelectorView, PresentationController, PresentationControllerError,
+        Availability, BlockerView, CostQuantityView, DiscoveredModelAcceptance, ModelEntryAction,
+        ModelSelectorGroup, ModelSelectorView, PresentationController, PresentationControllerError,
         PresentationScreenView, PresentationSources, PresentationState, ProductToolApprovalView,
         RecoveryBadge, SlashPanelView, StatsGroup, StatusSegmentKind, ToolApprovalAction,
         ToolApprovalEntryAction, TuiViewModel, UsageQuantityView, UsageRatioView, UsageSummaryView,
@@ -5082,6 +5608,97 @@ source = "unknown"
     }
 
     #[test]
+    fn discovered_preset_draft_survives_a_revision_conflict_and_can_be_reopened() {
+        let temp = TempTree::new("discovered-preset-race");
+        let mut runtime = temp.open_provider_runtime();
+        let profile = runtime
+            .provider_profile("edge")
+            .expect("resolve acceptance Profile")
+            .expect("external acceptance Profile");
+        let acceptance = DiscoveredModelAcceptance {
+            profile: profile.profile().to_owned(),
+            template: profile.template().to_owned(),
+            profile_fingerprint: profile.fingerprint(),
+            observed_at_unix_ms: 1_786_451_200_000,
+            model: "gpt-5.6-live".to_owned(),
+            dialects: vec![ProviderDialect::Responses],
+        };
+        let mut controller = PresentationController::new();
+        controller.begin_discovered_model_acceptance(acceptance.clone());
+        controller
+            .set_config_object_id("accepted-live")
+            .expect("set accepted Preset ID");
+        controller
+            .submit_config_object_id(&mut runtime, ConfigScope::Project)
+            .expect("stage accepted Preset identity");
+        controller
+            .confirm_discovered_model_dialect(&runtime, ConfigScope::Project)
+            .expect("stage accepted Preset dialect");
+        controller
+            .preview_config(&mut runtime)
+            .expect("preview accepted Preset");
+
+        let mut winner_runtime = ConfigRuntime::open(temp.paths(), ConfigDocument::empty())
+            .expect("open competing Config Runtime");
+        let provider = ConfigObjectRef::new(ConfigObjectKind::ProviderProfile, "edge");
+        let mut winner = ConfigEditorSession::open_from_query(
+            &winner_runtime,
+            ConfigScope::Project,
+            "/config provider url",
+            0,
+            Some(&provider),
+        )
+        .expect("open competing editor");
+        winner
+            .stage_raw("https://winner.example.com/v1")
+            .expect("stage competing change");
+        winner
+            .commit(&mut winner_runtime)
+            .expect("commit competing change");
+
+        assert!(matches!(
+            controller.commit_config(&mut runtime),
+            Err(PresentationControllerError::ConfigEditor(
+                ConfigEditorError::Config(ConfigRuntimeError::RevisionConflict { .. })
+            ))
+        ));
+        assert!(matches!(
+            controller
+                .screen(Some(&runtime))
+                .expect("conflicted accepted Preset remains visible"),
+            PresentationScreenView::ConfigEditor { dirty: true, .. }
+        ));
+
+        controller
+            .discard_config()
+            .expect("discard conflicted accepted Preset");
+        runtime.reload().expect("reload winning Config revision");
+        controller.begin_discovered_model_acceptance(acceptance);
+        controller
+            .set_config_object_id("accepted-live")
+            .expect("restore accepted Preset ID");
+        controller
+            .submit_config_object_id(&mut runtime, ConfigScope::Project)
+            .expect("restore accepted Preset identity");
+        controller
+            .confirm_discovered_model_dialect(&runtime, ConfigScope::Project)
+            .expect("restore accepted Preset dialect");
+        controller
+            .preview_config(&mut runtime)
+            .expect("preview restored accepted Preset");
+        controller
+            .commit_config(&mut runtime)
+            .expect("commit restored accepted Preset");
+
+        let preset = runtime
+            .model_preset("accepted-live")
+            .expect("resolve restored accepted Preset");
+        assert_eq!(preset.provider, "edge");
+        assert_eq!(preset.model, "gpt-5.6-live");
+        assert_eq!(preset.dialect, ProviderDialect::Responses);
+    }
+
+    #[test]
     fn view_model_preserves_every_actionable_blocker() {
         let operation = TeamOperationRecord {
             operation: TeamOperationId::default(),
@@ -5143,6 +5760,7 @@ source = "unknown"
                 context_pressure: None,
                 model_presets: &[],
                 catalog_models: &[],
+                discovery_catalogs: None,
             },
         )
         .expect("view model");
@@ -5199,6 +5817,7 @@ source = "unknown"
                 context_pressure: None,
                 model_presets: &[],
                 catalog_models: &[],
+                discovery_catalogs: None,
             },
         )
         .expect("view model");
@@ -5253,6 +5872,7 @@ source = "unknown"
                 context_pressure: Some(&pressure),
                 model_presets: &[],
                 catalog_models: &[],
+                discovery_catalogs: None,
             },
         )
         .expect("view model");
@@ -5443,6 +6063,7 @@ source = "unknown"
                 context_pressure: None,
                 model_presets: &presets,
                 catalog_models: &[],
+                discovery_catalogs: None,
             },
         )
         .expect("model selector")
@@ -5462,9 +6083,165 @@ source = "unknown"
                 "Models / Recent".to_owned(),
                 "query ".to_owned(),
                 "next turn unchanged".to_owned(),
+                "Discovery unavailable".to_owned(),
                 "Recent unknown".to_owned(),
             ]
         );
+    }
+
+    #[test]
+    fn model_selector_projects_recent_usage_in_stable_deduplicated_order() {
+        let temp = TempTree::new("recent-model-selector");
+        let ledger = temp.root.join("runtime.ledger");
+        let mut runtime = RuntimeKernel::open(&ledger).expect("open recent Runtime Ledger");
+        let mut provider = DeterministicProvider::default();
+        for model in [
+            "recent-old",
+            "recent-new",
+            "recent-old",
+            "recent-discovered",
+        ] {
+            let mut layers = ConfigLayers::default();
+            layers.cli.provider_model = Some(model.to_owned());
+            let output = runtime
+                .execute(&layers, model, &mut provider)
+                .expect("execute recent model Turn");
+            runtime
+                .acknowledge(output.delivery())
+                .expect("acknowledge recent model Turn");
+        }
+        let usage = runtime.usage_snapshot(UsageTimestamp::now().expect("recent Usage instant"));
+        let presets = [
+            ModelPresetView {
+                id: "old-preset".into(),
+                provider: "simulator".into(),
+                model: "recent-old".into(),
+                dialect: ProviderDialect::Responses,
+                reasoning_effort: None,
+                service_tier: None,
+                max_output_tokens: None,
+                context_mode: None,
+                favorite: false,
+                fallback: Vec::new(),
+            },
+            ModelPresetView {
+                id: "new-preset".into(),
+                provider: "simulator".into(),
+                model: "recent-new".into(),
+                dialect: ProviderDialect::Responses,
+                reasoning_effort: None,
+                service_tier: None,
+                max_output_tokens: None,
+                context_mode: None,
+                favorite: false,
+                fallback: Vec::new(),
+            },
+        ];
+        let discovery_catalogs = [ProviderDiscoveryCatalogView {
+            schema_version: 1,
+            profile: "simulator".into(),
+            template: "simulator".into(),
+            profile_fingerprint: 7,
+            dialects: vec![ProviderDialect::Responses],
+            mode: ProviderCatalogMode::Discovery,
+            freshness: ProviderDiscoveryFreshness::Current,
+            observed_at_unix_ms: Some(1_786_451_200_000),
+            models: vec![ProviderDiscoveryCatalogModel {
+                id: "recent-discovered".into(),
+                release_catalog_key: None,
+                sources: vec![ProviderDiscoverySource::Discovery],
+                availability: ProviderDiscoveryAvailability::Available,
+                primary_dialect: None,
+                profile_compatible: false,
+                configured_presets: Vec::new(),
+                executable: false,
+                suggestion: ProviderDiscoverySuggestion::AcceptDiscoveredWithDialect,
+            }],
+        }];
+        let view = TuiViewModel::build(
+            "/model",
+            "",
+            0,
+            PresentationSources {
+                runtime: &runtime.snapshot(),
+                usage: Some(&usage),
+                team: None,
+                tools: None,
+                config: &ConfigRuntimeStatus {
+                    ready: true,
+                    issues: Vec::new(),
+                },
+                provider_profile: Some("simulator"),
+                model: Some("recent-old"),
+                context_pressure: None,
+                model_presets: &presets,
+                catalog_models: &[],
+                discovery_catalogs: Some(&discovery_catalogs),
+            },
+        )
+        .expect("recent model selector");
+        let Availability::Known(recent) = &view.models.recent else {
+            panic!("durable Usage must make Recent known");
+        };
+        assert_eq!(
+            recent.iter().map(|entry| entry.id()).collect::<Vec<_>>(),
+            vec!["recent-discovered", "old-preset", "new-preset"]
+        );
+
+        let filtered = view.models.filtered("new");
+        let Availability::Known(filtered_recent) = filtered.recent else {
+            panic!("filtering must preserve known Recent evidence");
+        };
+        assert_eq!(
+            filtered_recent
+                .iter()
+                .map(|entry| entry.id())
+                .collect::<Vec<_>>(),
+            vec!["new-preset"]
+        );
+        let rows = model_selector_rows(&view.models, "", ModelSelectorGroup::Recent, 0, false);
+        assert!(
+            rows.iter()
+                .any(|row| row.text() == "Favorites 0 | Recent 3 | Compatible 0 | All 3")
+        );
+
+        let missing_ledger = temp.root.join("missing-runtime.ledger");
+        let empty_usage = RuntimeKernel::inspect_usage(
+            &missing_ledger,
+            UsageTimestamp::from_unix_millis(1_000).expect("empty Usage instant"),
+        )
+        .expect("inspect missing Runtime Ledger");
+        let empty = TuiViewModel::build(
+            "/model",
+            "",
+            0,
+            PresentationSources {
+                runtime: &runtime.snapshot(),
+                usage: Some(&empty_usage),
+                team: None,
+                tools: None,
+                config: &ConfigRuntimeStatus {
+                    ready: true,
+                    issues: Vec::new(),
+                },
+                provider_profile: Some("simulator"),
+                model: Some("recent-old"),
+                context_pressure: None,
+                model_presets: &presets,
+                catalog_models: &[],
+                discovery_catalogs: None,
+            },
+        )
+        .expect("empty recent model selector");
+        assert_eq!(empty.models.recent, Availability::Known(Vec::new()));
+        assert_eq!(
+            model_selector_rows(&empty.models, "", ModelSelectorGroup::Recent, 0, false,)
+                .last()
+                .expect("empty Recent row")
+                .text(),
+            "No models"
+        );
+        assert!(!missing_ledger.exists());
     }
 
     #[test]
@@ -5501,6 +6278,7 @@ source = "unknown"
                 context_pressure: None,
                 model_presets: &presets,
                 catalog_models: &[],
+                discovery_catalogs: None,
             },
         )
         .expect("refreshed model view");
@@ -5599,6 +6377,7 @@ source = "unknown"
                 context_pressure: None,
                 model_presets: &[],
                 catalog_models: &[],
+                discovery_catalogs: None,
             },
         )
         .expect("empty Stats view");
@@ -5662,7 +6441,7 @@ credential = "synthetic-deepseek-credential-reference"
         let runtime = ConfigRuntime::open(temp.paths(), config).expect("open Config Runtime");
         let catalog_models = runtime.catalog_models().expect("catalog model candidates");
 
-        let selector = ModelSelectorView::build(&[], &catalog_models, "terra")
+        let selector = ModelSelectorView::build(&[], &catalog_models, None, "terra")
             .expect("catalog-backed selector");
         assert!(selector.favorites.is_empty());
         assert_eq!(selector.recent, Availability::Unknown);
@@ -5715,7 +6494,7 @@ credential = "synthetic-deepseek-credential-reference"
             } if id.is_empty()
         ));
 
-        let deepseek = ModelSelectorView::build(&[], &catalog_models, "deepseek-v4-pro")
+        let deepseek = ModelSelectorView::build(&[], &catalog_models, None, "deepseek-v4-pro")
             .expect("catalog model with DeepSeek Chat adapter");
         assert_eq!(deepseek.all.len(), 1);
         assert_eq!(deepseek.all[0].compatibility, Availability::Known(true));
@@ -5727,7 +6506,7 @@ credential = "synthetic-deepseek-credential-reference"
         assert!(!encoded.contains("synthetic-deepseek-credential-reference"));
 
         let deepseek_responses =
-            ModelSelectorView::build(&[], &catalog_models, "deepseek-v4-flash")
+            ModelSelectorView::build(&[], &catalog_models, None, "deepseek-v4-flash")
                 .expect("catalog model with DeepSeek Responses adapter");
         assert_eq!(deepseek_responses.all.len(), 1);
         assert_eq!(
@@ -5757,7 +6536,7 @@ dialects = ["chat_completions"]
         let runtime = ConfigRuntime::open(temp.paths(), config).expect("open incompatible profile");
         let models = runtime.catalog_models().expect("catalog candidates");
         let selector =
-            ModelSelectorView::build(&[], &models, "sol").expect("incompatible selector");
+            ModelSelectorView::build(&[], &models, None, "sol").expect("incompatible selector");
         assert_eq!(selector.all.len(), 1);
         assert_eq!(selector.all[0].compatibility, Availability::Known(false));
         let mut controller = PresentationController::new();
@@ -5781,6 +6560,78 @@ dialects = ["chat_completions"]
         ));
         assert!(!runtime.paths().user().exists());
         assert!(!runtime.paths().project().exists());
+    }
+
+    #[test]
+    fn current_discovery_can_supply_a_trusted_dialect_for_an_incompatible_release() {
+        let temp = TempTree::new("incompatible-release-discovery");
+        let config = ConfigDocument::parse(
+            r#"
+schema_version = 1
+
+[providers.chat-only]
+template = "openai"
+credential = "synthetic-chat-only-reference"
+dialects = ["chat_completions"]
+"#,
+        )
+        .expect("parse discovery-compatible Profile");
+        let runtime = ConfigRuntime::open(temp.paths(), config).expect("open Config Runtime");
+        let profile = runtime
+            .provider_profile("chat-only")
+            .expect("resolve discovery-compatible Profile")
+            .expect("external discovery-compatible Profile");
+        let models = runtime.catalog_models().expect("release candidates");
+        let discovery = [ProviderDiscoveryCatalogView {
+            schema_version: 1,
+            profile: profile.profile().to_owned(),
+            template: profile.template().to_owned(),
+            profile_fingerprint: profile.fingerprint(),
+            dialects: profile.dialects().collect(),
+            mode: ProviderCatalogMode::TemplateAndDiscovery,
+            freshness: ProviderDiscoveryFreshness::Current,
+            observed_at_unix_ms: Some(1_786_451_200_000),
+            models: vec![ProviderDiscoveryCatalogModel {
+                id: "gpt-5.6-sol".into(),
+                release_catalog_key: Some("openai/gpt-5.6-sol".into()),
+                sources: vec![
+                    ProviderDiscoverySource::ReleaseSeed,
+                    ProviderDiscoverySource::Discovery,
+                ],
+                availability: ProviderDiscoveryAvailability::Available,
+                primary_dialect: Some(ProviderDialect::Responses),
+                profile_compatible: false,
+                configured_presets: Vec::new(),
+                executable: false,
+                suggestion: ProviderDiscoverySuggestion::AcceptDiscoveredWithDialect,
+            }],
+        }];
+        let selector = ModelSelectorView::build(&[], &models, Some(&discovery), "sol")
+            .expect("merged discovery selector");
+        assert_eq!(selector.all.len(), 1);
+        assert_eq!(selector.all[0].compatibility, Availability::Known(false));
+        let mut controller = PresentationController::new();
+        controller.state = PresentationState::ModelSelector {
+            group: ModelSelectorGroup::All,
+            selected: 0,
+            detail: false,
+        };
+
+        assert_eq!(
+            controller.activate_model_entry(&selector),
+            ModelEntryAction::DetailChanged
+        );
+        assert_eq!(
+            controller.activate_model_entry(&selector),
+            ModelEntryAction::AcceptDiscovery(DiscoveredModelAcceptance {
+                profile: "chat-only".into(),
+                template: "openai".into(),
+                profile_fingerprint: profile.fingerprint(),
+                observed_at_unix_ms: 1_786_451_200_000,
+                model: "gpt-5.6-sol".into(),
+                dialects: vec![ProviderDialect::ChatCompletions],
+            })
+        );
     }
 
     #[test]
@@ -6299,6 +7150,7 @@ dialects = ["chat_completions"]
                 context_pressure: None,
                 model_presets: &[],
                 catalog_models: &[],
+                discovery_catalogs: None,
             },
         )
         .expect("view model");

@@ -114,6 +114,21 @@ impl ConfigEditorSession {
         Self::create_with_draft(runtime, draft, object)
     }
 
+    pub fn create_model_preset(
+        runtime: &ConfigRuntime,
+        scope: ConfigScope,
+        object: ConfigObjectRef,
+        provider: &str,
+        model: &str,
+        dialect: crate::provider::ProviderDialect,
+    ) -> Result<Self, ConfigEditorError> {
+        if object.kind() != ConfigObjectKind::ModelPreset {
+            return Err(ConfigEditorError::ConfigObjectMismatch);
+        }
+        let draft = runtime.begin_model_preset(scope, object.id(), provider, model, dialect)?;
+        Self::create_with_draft(runtime, draft, object)
+    }
+
     fn create_with_draft(
         runtime: &ConfigRuntime,
         draft: ConfigDraft,

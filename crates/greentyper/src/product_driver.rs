@@ -1207,6 +1207,7 @@ source = "unknown"
                 context_pressure: None,
                 model_presets: &[],
                 catalog_models: &[],
+                discovery_catalogs: None,
             },
         )
         .expect("approval presentation");

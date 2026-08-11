@@ -3,7 +3,7 @@
 use std::error::Error;
 use std::fmt;
 use std::io::{self, IsTerminal, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::terminal as crossterm_terminal;
@@ -18,6 +18,7 @@ use greentyper_core::config::{
 };
 use greentyper_core::model::DeliveryId;
 use greentyper_core::provider::ProviderError;
+use greentyper_core::provider_discovery::{ProviderDiscoveryError, ProviderDiscoveryState};
 use greentyper_core::runtime::{
     KernelTeamSnapshot, ProviderToolApproval, RuntimeError, RuntimeKernel, RuntimeSnapshot,
 };
@@ -30,10 +31,10 @@ use crate::credential_vault::{
 };
 use crate::local_process::{LocalProcessError, LocalProcessExecutor};
 use crate::presentation::{
-    BlockerEntryAction, CredentialFlowView, ModelEntryAction, PresentationController,
-    PresentationControllerError, PresentationError, PresentationLayoutView, PresentationSources,
-    ProductToolApprovalView, ToolApprovalAction, ToolApprovalEntryAction, TuiViewModel, Viewport,
-    ViewportError,
+    BlockerEntryAction, CredentialFlowView, DiscoveredModelAcceptance, ModelEntryAction,
+    PresentationController, PresentationControllerError, PresentationError, PresentationLayoutView,
+    PresentationSources, ProductToolApprovalView, ToolApprovalAction, ToolApprovalEntryAction,
+    TuiViewModel, Viewport, ViewportError,
 };
 use crate::product_driver::{
     ProductDriver, ProductDriverError, ProductInteraction, ProductToolDecision,
@@ -41,6 +42,7 @@ use crate::product_driver::{
     inspect_product_team, inspect_product_tools, stage_product_model_selection,
 };
 use crate::provider_connection::{ModelsHttpConnectionTester, ProviderConnectionTester};
+use crate::provider_discovery_catalog::{provider_discovery_catalogs, refresh_provider_discovery};
 use crate::provider_http::ConfiguredProvider;
 
 enum TerminalToolResolution {
@@ -220,7 +222,16 @@ fn build_terminal_view(
     let usage = RuntimeKernel::inspect_usage(ledger, UsageTimestamp::now()?)?;
     let team = inspect_product_team(ledger)?;
     let tools = inspect_product_tools(ledger)?;
-    build_terminal_view_from_sources(config, query, &runtime, &usage, team.as_ref(), &tools)
+    let discovery = inspect_terminal_discovery(ledger);
+    build_terminal_view_from_sources(
+        config,
+        query,
+        &runtime,
+        &usage,
+        team.as_ref(),
+        &tools,
+        discovery.as_ref(),
+    )
 }
 
 fn refresh_terminal_view(
@@ -233,8 +244,16 @@ fn refresh_terminal_view(
     let team = inspect_product_team(ledger)?;
     let tools = inspect_product_tools(ledger)?;
     let config = config.reload_candidate()?;
-    let view =
-        build_terminal_view_from_sources(&config, query, &runtime, &usage, team.as_ref(), &tools)?;
+    let discovery = inspect_terminal_discovery(ledger);
+    let view = build_terminal_view_from_sources(
+        &config,
+        query,
+        &runtime,
+        &usage,
+        team.as_ref(),
+        &tools,
+        discovery.as_ref(),
+    )?;
     Ok(RefreshedTerminalSnapshot { config, view })
 }
 
@@ -268,11 +287,15 @@ fn build_terminal_view_from_sources(
     usage: &RuntimeUsageSnapshot,
     team: Option<&KernelTeamSnapshot>,
     tools: &ToolSnapshot,
+    discovery: Option<&ProviderDiscoveryState>,
 ) -> Result<TuiViewModel, TerminalError> {
     let status = config.status();
     let resolved = config.config_layers()?.resolve()?;
     let model_presets = config.model_presets()?;
     let catalog_models = config.catalog_models()?;
+    let discovery_catalogs = discovery
+        .map(|state| provider_discovery_catalogs(config, state))
+        .transpose()?;
     TuiViewModel::build(
         query,
         "",
@@ -288,9 +311,85 @@ fn build_terminal_view_from_sources(
             context_pressure: None,
             model_presets: &model_presets,
             catalog_models: &catalog_models,
+            discovery_catalogs: discovery_catalogs.as_deref(),
         },
     )
     .map_err(TerminalError::PresentationModel)
+}
+
+fn terminal_discovery_path(ledger: &Path) -> PathBuf {
+    ledger.with_file_name("provider-discovery.json")
+}
+
+fn inspect_terminal_discovery(ledger: &Path) -> Option<ProviderDiscoveryState> {
+    ProviderDiscoveryState::inspect(&terminal_discovery_path(ledger)).ok()
+}
+
+fn refresh_terminal_discovery<T: ProviderConnectionTester + ?Sized>(
+    ledger: &Path,
+    config: &ConfigRuntime,
+    tester: &mut T,
+) -> Result<crate::provider_connection::ProviderConnectionTestStatus, TerminalError> {
+    let profile =
+        config
+            .selected_provider_profile()?
+            .ok_or(ProviderError::InvalidConfiguration(
+                "selected simulator profile has no Provider discovery endpoint",
+            ))?;
+    if !config
+        .provider_catalog_mode(profile.profile())?
+        .includes_discovery()
+    {
+        return Err(ProviderError::InvalidConfiguration(
+            "selected Provider Profile catalog mode does not allow discovery",
+        )
+        .into());
+    }
+    refresh_provider_discovery(
+        &profile,
+        &terminal_discovery_path(ledger),
+        UsageTimestamp::now()?.unix_millis(),
+        tester,
+    )
+    .map_err(TerminalError::from)
+}
+
+fn validate_terminal_discovery_acceptance(
+    ledger: &Path,
+    config: &ConfigRuntime,
+    acceptance: &DiscoveredModelAcceptance,
+) -> Result<(), TerminalError> {
+    let profile = config
+        .provider_profile(&acceptance.profile)?
+        .ok_or(ProviderDiscoveryError::StaleObservation)?;
+    if profile.template() != acceptance.template
+        || profile.fingerprint() != acceptance.profile_fingerprint
+        || !config
+            .provider_catalog_mode(&acceptance.profile)?
+            .includes_discovery()
+    {
+        return Err(ProviderDiscoveryError::StaleObservation.into());
+    }
+    let state = ProviderDiscoveryState::inspect(&terminal_discovery_path(ledger))?;
+    let observation = state
+        .profiles()
+        .iter()
+        .find(|candidate| candidate.profile() == acceptance.profile)
+        .ok_or(ProviderDiscoveryError::MissingObservation)?;
+    if observation.template() != acceptance.template
+        || observation.fingerprint() != acceptance.profile_fingerprint
+        || observation.observed_at_unix_ms() != acceptance.observed_at_unix_ms
+    {
+        return Err(ProviderDiscoveryError::StaleObservation.into());
+    }
+    if !observation
+        .models()
+        .iter()
+        .any(|model| model.id() == acceptance.model)
+    {
+        return Err(ProviderDiscoveryError::UnknownModel.into());
+    }
+    Ok(())
 }
 
 const ENTER_TERMINAL: &[u8] = b"\x1b[?1049h\x1b[?25l\x1b[2J\x1b[H";
@@ -689,6 +788,9 @@ enum TerminalIntent {
     MoveModelGroup(isize),
     MoveModelSelection(isize),
     ToggleModelDetail,
+    RefreshProviderDiscovery,
+    MoveDiscoveredModelDialect(isize),
+    ConfirmDiscoveredModelDialect,
     MoveStatsGroup(isize),
     MoveStatsSelection(isize),
     ToggleStatsDetail,
@@ -739,6 +841,7 @@ enum TerminalIntent {
 enum TerminalInputContext {
     SlashPanel,
     ModelSelector,
+    ModelDiscoveryDialect,
     Stats,
     AgentCenter,
     BlockerCenter,
@@ -791,6 +894,11 @@ impl TerminalInputState {
                 ) =>
             {
                 TerminalIntent::RefreshSnapshot
+            }
+            TerminalInputEvent::TestProviderConnection
+                if context == TerminalInputContext::ModelSelector =>
+            {
+                TerminalIntent::RefreshProviderDiscovery
             }
             TerminalInputEvent::TestProviderConnection
                 if !matches!(
@@ -898,6 +1006,15 @@ impl TerminalInputState {
             }
             TerminalInputEvent::Enter if context == TerminalInputContext::ModelSelector => {
                 TerminalIntent::ToggleModelDetail
+            }
+            TerminalInputEvent::Up if context == TerminalInputContext::ModelDiscoveryDialect => {
+                TerminalIntent::MoveDiscoveredModelDialect(-1)
+            }
+            TerminalInputEvent::Down if context == TerminalInputContext::ModelDiscoveryDialect => {
+                TerminalIntent::MoveDiscoveredModelDialect(1)
+            }
+            TerminalInputEvent::Enter if context == TerminalInputContext::ModelDiscoveryDialect => {
+                TerminalIntent::ConfirmDiscoveredModelDialect
             }
             TerminalInputEvent::Up if context == TerminalInputContext::Stats => {
                 TerminalIntent::MoveStatsSelection(-1)
@@ -1090,6 +1207,9 @@ enum TerminalLoopOutcome {
     Redraw,
     Resize(u16, u16),
     RefreshSnapshot,
+    RefreshProviderDiscovery,
+    BeginDiscoveryAcceptance,
+    ConfirmDiscoveryAcceptance,
     ApplyModelSelection,
     LoadToolApproval(u64),
     ResolveToolApproval,
@@ -1233,6 +1353,7 @@ struct TerminalSession {
     validated_config_text: Option<String>,
     confirming_discard: bool,
     pending_model_selection: Option<ModelPresetView>,
+    pending_discovery_acceptance: Option<DiscoveredModelAcceptance>,
     pending_tool_action: Option<(u64, ProductToolDecision)>,
     credential_flow: Option<CredentialFlow>,
     pending_credential_command: Option<CredentialCommand>,
@@ -1258,6 +1379,7 @@ impl TerminalSession {
             validated_config_text: None,
             confirming_discard: false,
             pending_model_selection: None,
+            pending_discovery_acceptance: None,
             pending_tool_action: None,
             credential_flow: None,
             pending_credential_command: None,
@@ -1363,6 +1485,10 @@ impl TerminalSession {
                             Some("Enter a Preset ID to accept this release starter".to_owned());
                         Ok(TerminalLoopOutcome::Redraw)
                     }
+                    ModelEntryAction::AcceptDiscovery(acceptance) => {
+                        self.pending_discovery_acceptance = Some(acceptance);
+                        Ok(TerminalLoopOutcome::BeginDiscoveryAcceptance)
+                    }
                     ModelEntryAction::ReleaseUnavailable => {
                         self.notice = Some(
                             "Release model is incompatible with the selected Provider Profile"
@@ -1370,8 +1496,26 @@ impl TerminalSession {
                         );
                         Ok(TerminalLoopOutcome::Redraw)
                     }
+                    ModelEntryAction::DiscoveryUnavailable => {
+                        self.notice = Some(
+                            "Discovered model requires an explicit trusted dialect".to_owned(),
+                        );
+                        Ok(TerminalLoopOutcome::Redraw)
+                    }
                     ModelEntryAction::None => Ok(TerminalLoopOutcome::Noop),
                 }
+            }
+            TerminalIntent::RefreshProviderDiscovery => {
+                self.notice = None;
+                Ok(TerminalLoopOutcome::RefreshProviderDiscovery)
+            }
+            TerminalIntent::MoveDiscoveredModelDialect(offset) => {
+                self.controller.move_discovered_model_dialect(offset);
+                self.notice = None;
+                Ok(TerminalLoopOutcome::Redraw)
+            }
+            TerminalIntent::ConfirmDiscoveredModelDialect => {
+                Ok(TerminalLoopOutcome::ConfirmDiscoveryAcceptance)
             }
             TerminalIntent::MoveStatsSelection(offset) => {
                 let view = view.ok_or(TerminalError::ViewModelRequired)?;
@@ -1738,6 +1882,10 @@ impl TerminalSession {
         self.pending_model_selection.take()
     }
 
+    fn take_discovery_acceptance(&mut self) -> Option<DiscoveredModelAcceptance> {
+        self.pending_discovery_acceptance.take()
+    }
+
     fn take_tool_action(&mut self) -> Option<(u64, ProductToolDecision)> {
         self.pending_tool_action.take()
     }
@@ -2028,6 +2176,8 @@ impl TerminalSession {
             TerminalInputContext::SlashPanel
         } else if self.controller.is_model_selector() {
             TerminalInputContext::ModelSelector
+        } else if self.controller.is_model_discovery_dialect() {
+            TerminalInputContext::ModelDiscoveryDialect
         } else if self.controller.is_stats() {
             TerminalInputContext::Stats
         } else if self.controller.is_agent_center() {
@@ -2726,6 +2876,103 @@ where
                 let frame = session.frame(Some(config), &view)?;
                 surface.write_frame(&renderer.draw(&frame)?)?;
             }
+            TerminalLoopOutcome::RefreshProviderDiscovery => {
+                if let Some(ledger) = snapshot.refresh_ledger {
+                    match refresh_terminal_discovery(ledger, config, tester) {
+                        Ok(
+                            crate::provider_connection::ProviderConnectionTestStatus::Succeeded {
+                                ..
+                            },
+                        ) => match refresh_terminal_view(
+                            ledger,
+                            config,
+                            session.controller.slash_query(),
+                        ) {
+                            Ok(refreshed) => {
+                                session.controller.reconcile_snapshot(&refreshed.view);
+                                *config = refreshed.config;
+                                view = refreshed.view;
+                                session.notice = Some("Provider discovery refreshed".to_owned());
+                            }
+                            Err(_) => {
+                                session.notice = Some(
+                                    "Provider discovery refresh failed; showing previous catalog"
+                                        .to_owned(),
+                                );
+                            }
+                        },
+                        Ok(
+                            crate::provider_connection::ProviderConnectionTestStatus::Failed {
+                                ..
+                            }
+                            | crate::provider_connection::ProviderConnectionTestStatus::Untested,
+                        )
+                        | Err(_) => {
+                            session.notice = Some(
+                                "Provider discovery refresh failed; showing previous catalog"
+                                    .to_owned(),
+                            );
+                        }
+                    }
+                } else {
+                    session.notice = Some("Provider discovery refresh unavailable".to_owned());
+                }
+                let frame = session.frame(Some(config), &view)?;
+                surface.write_frame(&renderer.draw(&frame)?)?;
+            }
+            TerminalLoopOutcome::BeginDiscoveryAcceptance => {
+                let acceptance = session
+                    .take_discovery_acceptance()
+                    .ok_or(TerminalError::ViewModelRequired)?;
+                if let Some(ledger) = snapshot.refresh_ledger {
+                    match validate_terminal_discovery_acceptance(ledger, config, &acceptance) {
+                        Ok(()) => {
+                            session
+                                .controller
+                                .begin_discovered_model_acceptance(acceptance);
+                            session.notice = Some("Enter a Preset ID".to_owned());
+                        }
+                        Err(_) => {
+                            session.notice = Some(
+                                "Discovery observation is stale; press F5 and retry".to_owned(),
+                            );
+                        }
+                    }
+                } else {
+                    session.notice = Some("Discovery Preset acceptance unavailable".to_owned());
+                }
+                let frame = session.frame(Some(config), &view)?;
+                surface.write_frame(&renderer.draw(&frame)?)?;
+            }
+            TerminalLoopOutcome::ConfirmDiscoveryAcceptance => {
+                let acceptance = session
+                    .controller
+                    .discovered_model_acceptance()
+                    .cloned()
+                    .ok_or(TerminalError::ViewModelRequired)?;
+                let valid = snapshot.refresh_ledger.is_some_and(|ledger| {
+                    validate_terminal_discovery_acceptance(ledger, config, &acceptance).is_ok()
+                });
+                if valid {
+                    match session
+                        .controller
+                        .confirm_discovered_model_dialect(config, ConfigScope::User)
+                    {
+                        Ok(()) => {
+                            session.validated_config_choice = None;
+                            session.sync_config_text();
+                            session.notice = Some("Discovery Preset draft staged".to_owned());
+                        }
+                        Err(source) => session.notice = Some(presentation_notice(&source)),
+                    }
+                } else {
+                    session.controller.cancel_discovered_model_acceptance();
+                    session.notice =
+                        Some("Discovery observation is stale; press F5 and retry".to_owned());
+                }
+                let frame = session.frame(Some(config), &view)?;
+                surface.write_frame(&renderer.draw(&frame)?)?;
+            }
             TerminalLoopOutcome::ApplyModelSelection => {
                 let preset = session
                     .take_model_selection()
@@ -2986,6 +3233,7 @@ pub(crate) enum TerminalError {
     Usage(UsageError),
     ProductDriver(ProductDriverError),
     Provider(ProviderError),
+    ProviderDiscovery(ProviderDiscoveryError),
     LocalProcess(LocalProcessError),
     Io(std::io::Error),
 }
@@ -3023,6 +3271,7 @@ impl fmt::Display for TerminalError {
             Self::Usage(source) => write!(formatter, "{source}"),
             Self::ProductDriver(source) => write!(formatter, "{source}"),
             Self::Provider(source) => write!(formatter, "{source}"),
+            Self::ProviderDiscovery(source) => write!(formatter, "{source}"),
             Self::LocalProcess(source) => write!(formatter, "{source}"),
             Self::Io(source) => write!(formatter, "terminal I/O failed: {source}"),
         }
@@ -3042,6 +3291,7 @@ impl Error for TerminalError {
             Self::Usage(source) => Some(source),
             Self::ProductDriver(source) => Some(source),
             Self::Provider(source) => Some(source),
+            Self::ProviderDiscovery(source) => Some(source),
             Self::LocalProcess(source) => Some(source),
             Self::InvalidDimensions
             | Self::DimensionMismatch
@@ -3110,6 +3360,12 @@ impl From<ProviderError> for TerminalError {
     }
 }
 
+impl From<ProviderDiscoveryError> for TerminalError {
+    fn from(source: ProviderDiscoveryError) -> Self {
+        Self::ProviderDiscovery(source)
+    }
+}
+
 impl From<LocalProcessError> for TerminalError {
     fn from(source: LocalProcessError) -> Self {
         Self::LocalProcess(source)
@@ -3134,7 +3390,7 @@ mod tests {
     };
     use greentyper_core::config::{
         ConfigDocument, ConfigEditorSession, ConfigFieldContents, ConfigLayers, ConfigObjectKind,
-        ConfigObjectRef, ConfigPaths, ConfigRuntime, ConfigScope, ConfigValue,
+        ConfigObjectRef, ConfigPaths, ConfigRuntime, ConfigRuntimeError, ConfigScope, ConfigValue,
         MAX_CONFIG_STRING_BYTES, ReasoningEffort, ServiceTier,
     };
     use greentyper_core::pricing::PriceScheduleSource;
@@ -3142,18 +3398,22 @@ mod tests {
         ProviderDialect, ProviderError, ProviderEvent, ProviderPricingSource,
         ProviderProfileSnapshot, ProviderRequest, ProviderRuntime, UsageRecord,
     };
+    use greentyper_core::provider_discovery::{
+        DiscoveredProviderModel, ProviderDiscoveryProfile, ProviderDiscoveryState,
+    };
     use greentyper_core::runtime::{ProviderToolApproval, ProviderTurnOutcome, RuntimeKernel};
     use greentyper_core::usage::{UsageWeekday, UsageWindow};
 
     use crate::credential_vault::{
-        CredentialVault, CredentialVaultError, InMemoryCredentialVault, ProviderCredentialScope,
-        SecretValue,
+        CredentialVault, CredentialVaultError, InMemoryCredentialVault, PlatformCredentialVault,
+        ProviderCredentialScope, SecretValue,
     };
     use crate::local_process::LocalProcessExecutor;
     use crate::presentation::{PresentationScreenView, ProductToolApprovalView, build_smoke_view};
     use crate::product_driver::{ProductDriver, ProductInteraction, ProductToolDecision};
     use crate::provider_connection::{
-        ProviderConnectionFailureCategory, ProviderConnectionTestStatus, ProviderConnectionTester,
+        ObservedProviderModel, ProviderConnectionFailureCategory, ProviderConnectionTestStatus,
+        ProviderConnectionTester,
     };
 
     use super::{
@@ -3741,6 +4001,564 @@ dialect = "responses"
         );
         assert!(!ledger.exists());
         std::fs::remove_dir_all(root).expect("remove model browser fixture");
+    }
+
+    #[test]
+    fn terminal_model_browser_merges_current_discovery_without_writing_state() {
+        let root = terminal_test_root("model-discovery-browser");
+        let ledger = root.join("runtime.ledger");
+        let discovery = ledger.with_file_name("provider-discovery.json");
+        let paths = ConfigPaths::new(root.join("user.toml"), root.join("project.toml"));
+        std::fs::create_dir_all(&root).expect("create discovery browser fixture directory");
+        std::fs::write(
+            paths.user(),
+            r#"schema_version = 1
+
+[providers.edge]
+template = "openai"
+credential = "synthetic-discovery-browser-credential-reference"
+
+[providers.edge.catalog]
+mode = "template_and_discovery"
+"#,
+        )
+        .expect("write discovery browser config");
+        let mut config =
+            ConfigRuntime::open(paths.clone(), ConfigDocument::empty()).expect("Config Runtime");
+        let profile = config
+            .provider_profile("edge")
+            .expect("resolve discovery Profile")
+            .expect("external discovery Profile");
+        ProviderDiscoveryState::replace_profile(
+            &discovery,
+            ProviderDiscoveryProfile::new(
+                profile.profile(),
+                profile.template(),
+                profile.fingerprint(),
+                1_786_451_200_000,
+                vec![DiscoveredProviderModel::new("gpt-5.6-live", None).expect("discovered model")],
+            )
+            .expect("discovery observation"),
+        )
+        .expect("persist discovery observation");
+        let config_before = std::fs::read(paths.user()).expect("read discovery browser config");
+        let discovery_before =
+            std::fs::read(&discovery).expect("read discovery browser observation");
+        let view = build_terminal_view(&ledger, &config, "/").expect("discovery browser view");
+        let mut events = "model"
+            .chars()
+            .map(|character| {
+                Event::Key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
+            })
+            .collect::<VecDeque<_>>();
+        events.push_back(Event::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )));
+        events.extend("live".chars().map(|character| {
+            Event::Key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
+        }));
+        events.extend([
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL)),
+        ]);
+
+        let output = run_terminal_loop(
+            Vec::new(),
+            FakeTerminalMode::default(),
+            &mut config,
+            &view,
+            100,
+            24,
+            move || {
+                Ok(events
+                    .pop_front()
+                    .expect("bounded discovery browser events"))
+            },
+        )
+        .expect("discovery browser loop");
+        let output = String::from_utf8(output).expect("discovery browser VT output");
+
+        assert!(output.contains("gpt-5.6-live"), "{output}");
+        assert!(output.contains("source discovery"), "{output}");
+        assert!(output.contains("freshness"), "{output}");
+        assert!(output.contains("current"), "{output}");
+        assert!(output.contains("availability"), "{output}");
+        assert!(output.contains("yes"), "{output}");
+        assert!(!output.contains("synthetic-discovery-browser-credential-reference"));
+        assert_eq!(
+            std::fs::read(paths.user()).expect("reread discovery browser config"),
+            config_before
+        );
+        assert_eq!(
+            std::fs::read(&discovery).expect("reread discovery browser observation"),
+            discovery_before
+        );
+        assert!(!ledger.exists());
+        std::fs::remove_dir_all(root).expect("remove discovery browser fixture");
+    }
+
+    #[test]
+    fn terminal_model_browser_accepts_discovery_with_an_explicit_dialect() {
+        let root = terminal_test_root("model-discovery-accept");
+        let ledger = root.join("runtime.ledger");
+        let discovery = ledger.with_file_name("provider-discovery.json");
+        let paths = ConfigPaths::new(root.join("user.toml"), root.join("project.toml"));
+        std::fs::create_dir_all(&root).expect("create discovery acceptance fixture directory");
+        std::fs::write(
+            paths.user(),
+            r#"schema_version = 1
+
+[provider]
+profile = "edge"
+model = "gpt-5.6-live"
+
+[providers.edge]
+template = "openai-compatible"
+credential = "synthetic-discovery-acceptance-reference"
+base_url = "https://gateway.example.com/v1"
+dialects = ["responses", "chat_completions"]
+
+[providers.edge.routes]
+responses = "/responses"
+chat_completions = "/chat/completions"
+models = "/models"
+
+[providers.edge.catalog]
+mode = "discovery"
+
+[providers.edge.pricing]
+source = "unknown"
+"#,
+        )
+        .expect("write discovery acceptance config");
+        let mut config =
+            ConfigRuntime::open(paths.clone(), ConfigDocument::empty()).expect("Config Runtime");
+        let profile = config
+            .provider_profile("edge")
+            .expect("resolve discovery acceptance Profile")
+            .expect("external discovery acceptance Profile");
+        ProviderDiscoveryState::replace_profile(
+            &discovery,
+            ProviderDiscoveryProfile::new(
+                profile.profile(),
+                profile.template(),
+                profile.fingerprint(),
+                1_786_451_200_000,
+                vec![
+                    DiscoveredProviderModel::new("gpt-5.6-live", None)
+                        .expect("discovered acceptance model"),
+                ],
+            )
+            .expect("discovery acceptance observation"),
+        )
+        .expect("persist discovery acceptance observation");
+        let discovery_before =
+            std::fs::read(&discovery).expect("read discovery acceptance observation");
+        let view = build_terminal_view(&ledger, &config, "/").expect("discovery acceptance view");
+        let mut events = "model"
+            .chars()
+            .map(|character| {
+                Event::Key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
+            })
+            .collect::<VecDeque<_>>();
+        events.push_back(Event::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )));
+        events.extend("live".chars().map(|character| {
+            Event::Key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
+        }));
+        events.extend([
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        ]);
+        events.extend("accepted-live".chars().map(|character| {
+            Event::Key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
+        }));
+        events.extend([
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL)),
+        ]);
+
+        let output = run_terminal_loop_with_snapshot_refresh(
+            Vec::new(),
+            FakeTerminalMode::default(),
+            &mut config,
+            &view,
+            &ledger,
+            Viewport::new(100, 24).expect("discovery acceptance viewport"),
+            move || {
+                Ok(events
+                    .pop_front()
+                    .expect("bounded discovery acceptance events"))
+            },
+        )
+        .expect("discovery acceptance loop");
+        let output = String::from_utf8(output).expect("discovery acceptance VT output");
+
+        let reopened = ConfigRuntime::open(paths.clone(), ConfigDocument::empty())
+            .expect("reopen accepted discovery Config");
+        let preset = reopened
+            .model_preset("accepted-live")
+            .unwrap_or_else(|source| panic!("accepted discovery Preset: {source}\n{output}"));
+        assert_eq!(preset.provider, "edge");
+        assert_eq!(preset.model, "gpt-5.6-live");
+        assert_eq!(preset.dialect, ProviderDialect::ChatCompletions);
+        assert!(output.contains("trusted dialect"), "{output}");
+        assert!(output.contains("chat_completions"), "{output}");
+        assert!(!output.contains("synthetic-discovery-acceptance-reference"));
+        assert_eq!(
+            std::fs::read(&discovery).expect("reread discovery acceptance observation"),
+            discovery_before
+        );
+        assert!(!ledger.exists());
+        std::fs::remove_dir_all(root).expect("remove discovery acceptance fixture");
+    }
+
+    #[test]
+    fn terminal_model_browser_revalidates_discovery_before_creating_a_preset_draft() {
+        let root = terminal_test_root("model-discovery-stale-accept");
+        let ledger = root.join("runtime.ledger");
+        let discovery = ledger.with_file_name("provider-discovery.json");
+        let paths = ConfigPaths::new(root.join("user.toml"), root.join("project.toml"));
+        std::fs::create_dir_all(&root).expect("create stale acceptance fixture directory");
+        std::fs::write(
+            paths.user(),
+            r#"schema_version = 1
+
+[provider]
+profile = "edge"
+model = "gpt-5.6-live"
+
+[providers.edge]
+template = "openai-compatible"
+credential = "synthetic-stale-acceptance-reference"
+base_url = "https://gateway.example.com/v1"
+dialects = ["responses"]
+
+[providers.edge.routes]
+responses = "/responses"
+models = "/models"
+
+[providers.edge.catalog]
+mode = "discovery"
+
+[providers.edge.pricing]
+source = "unknown"
+"#,
+        )
+        .expect("write stale acceptance config");
+        let mut config =
+            ConfigRuntime::open(paths.clone(), ConfigDocument::empty()).expect("Config Runtime");
+        let profile = config
+            .provider_profile("edge")
+            .expect("resolve stale acceptance Profile")
+            .expect("external stale acceptance Profile");
+        ProviderDiscoveryState::replace_profile(
+            &discovery,
+            ProviderDiscoveryProfile::new(
+                profile.profile(),
+                profile.template(),
+                profile.fingerprint(),
+                1_786_451_200_000,
+                vec![
+                    DiscoveredProviderModel::new("gpt-5.6-live", None)
+                        .expect("stale acceptance model"),
+                ],
+            )
+            .expect("initial stale acceptance observation"),
+        )
+        .expect("persist initial stale acceptance observation");
+        let view = build_terminal_view(&ledger, &config, "/").expect("stale acceptance view");
+        let config_before = std::fs::read(paths.user()).expect("read stale acceptance Config");
+        let external_discovery_bytes = Rc::new(RefCell::new(None));
+        let mut events = "model"
+            .chars()
+            .map(|character| {
+                Event::Key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
+            })
+            .collect::<VecDeque<_>>();
+        events.push_back(Event::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )));
+        events.extend("live".chars().map(|character| {
+            Event::Key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
+        }));
+        events.extend([
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        ]);
+        events.extend("accepted-live".chars().map(|character| {
+            Event::Key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
+        }));
+        events.extend([
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL)),
+            Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL)),
+        ]);
+        let discovery_for_change = discovery.clone();
+        let profile_id = profile.profile().to_owned();
+        let template = profile.template().to_owned();
+        let fingerprint = profile.fingerprint();
+        let external_discovery_bytes_for_event = Rc::clone(&external_discovery_bytes);
+
+        let output = run_terminal_loop_with_snapshot_refresh(
+            Vec::new(),
+            FakeTerminalMode::default(),
+            &mut config,
+            &view,
+            &ledger,
+            Viewport::new(100, 24).expect("stale acceptance viewport"),
+            move || {
+                let event = events.pop_front().expect("bounded stale acceptance events");
+                if matches!(event, Event::Key(key) if key.code == KeyCode::Enter)
+                    && events.len() == 4
+                {
+                    ProviderDiscoveryState::replace_profile(
+                        &discovery_for_change,
+                        ProviderDiscoveryProfile::new(
+                            &profile_id,
+                            &template,
+                            fingerprint,
+                            1_786_451_201_000,
+                            vec![
+                                DiscoveredProviderModel::new("gpt-5.6-live", None)
+                                    .expect("replacement stale acceptance model"),
+                            ],
+                        )
+                        .expect("replacement stale acceptance observation"),
+                    )
+                    .expect("replace stale acceptance observation externally");
+                    *external_discovery_bytes_for_event.borrow_mut() = Some(
+                        std::fs::read(&discovery_for_change)
+                            .expect("read external stale observation"),
+                    );
+                }
+                Ok(event)
+            },
+        )
+        .expect("stale acceptance loop");
+        let output = String::from_utf8(output).expect("stale acceptance VT output");
+
+        assert!(output.contains("press F5 and retry"), "{output}");
+        assert!(matches!(
+            config.model_preset("accepted-live"),
+            Err(ConfigRuntimeError::UnknownObject(_))
+        ));
+        assert_eq!(
+            std::fs::read(paths.user()).expect("reread stale acceptance Config"),
+            config_before
+        );
+        assert_eq!(
+            std::fs::read(&discovery).expect("reread external stale observation"),
+            external_discovery_bytes
+                .borrow()
+                .clone()
+                .expect("external stale observation captured")
+        );
+        assert!(!output.contains("synthetic-stale-acceptance-reference"));
+        assert!(!ledger.exists());
+        std::fs::remove_dir_all(root).expect("remove stale acceptance fixture");
+    }
+
+    #[test]
+    fn terminal_model_browser_keeps_local_models_when_discovery_is_corrupt() {
+        let root = terminal_test_root("model-discovery-corrupt");
+        let ledger = root.join("runtime.ledger");
+        let discovery = ledger.with_file_name("provider-discovery.json");
+        let paths = ConfigPaths::new(root.join("user.toml"), root.join("project.toml"));
+        std::fs::create_dir_all(&root).expect("create corrupt discovery fixture directory");
+        std::fs::write(
+            paths.user(),
+            r#"schema_version = 1
+
+[providers.edge]
+template = "openai"
+credential = "synthetic-corrupt-discovery-reference"
+
+[providers.edge.catalog]
+mode = "template_and_discovery"
+"#,
+        )
+        .expect("write corrupt discovery config");
+        std::fs::write(&discovery, b"not-json").expect("write corrupt discovery state");
+        let mut config =
+            ConfigRuntime::open(paths.clone(), ConfigDocument::empty()).expect("Config Runtime");
+        let config_before = std::fs::read(paths.user()).expect("read corrupt discovery config");
+        let discovery_before = std::fs::read(&discovery).expect("read corrupt discovery state");
+        let view = build_terminal_view(&ledger, &config, "/").expect("local fallback view");
+        let mut events = "model"
+            .chars()
+            .map(|character| {
+                Event::Key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
+            })
+            .collect::<VecDeque<_>>();
+        events.extend([
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL)),
+        ]);
+
+        let output = run_terminal_loop(
+            Vec::new(),
+            FakeTerminalMode::default(),
+            &mut config,
+            &view,
+            100,
+            24,
+            move || {
+                Ok(events
+                    .pop_front()
+                    .expect("bounded corrupt discovery events"))
+            },
+        )
+        .expect("corrupt discovery fallback loop");
+        let output = String::from_utf8(output).expect("corrupt discovery VT output");
+
+        assert!(output.contains("Discovery"), "{output}");
+        assert!(output.contains("unavailable"), "{output}");
+        assert!(output.contains("gpt-5.6-sol"), "{output}");
+        assert!(!output.contains("synthetic-corrupt-discovery-reference"));
+        assert_eq!(
+            std::fs::read(paths.user()).expect("reread corrupt discovery config"),
+            config_before
+        );
+        assert_eq!(
+            std::fs::read(&discovery).expect("reread corrupt discovery state"),
+            discovery_before
+        );
+        assert!(!ledger.exists());
+        std::fs::remove_dir_all(root).expect("remove corrupt discovery fixture");
+    }
+
+    #[test]
+    fn terminal_model_discovery_refresh_preserves_failure_and_retries() {
+        let root = terminal_test_root("model-discovery-refresh");
+        let ledger = root.join("runtime.ledger");
+        let discovery = ledger.with_file_name("provider-discovery.json");
+        let paths = ConfigPaths::new(root.join("user.toml"), root.join("project.toml"));
+        std::fs::create_dir_all(&root).expect("create discovery refresh fixture directory");
+        std::fs::write(
+            paths.user(),
+            r#"schema_version = 1
+
+[provider]
+profile = "edge"
+model = "gpt-5.6-sol"
+
+[providers.edge]
+template = "openai"
+credential = "synthetic-discovery-refresh-reference"
+
+[providers.edge.catalog]
+mode = "template_and_discovery"
+"#,
+        )
+        .expect("write discovery refresh config");
+        let config_before = std::fs::read(paths.user()).expect("read discovery refresh config");
+        let mut config =
+            ConfigRuntime::open(paths.clone(), ConfigDocument::empty()).expect("Config Runtime");
+        let view = build_terminal_view(&ledger, &config, "/").expect("discovery refresh view");
+        let mut tester = ScriptedDiscoveryTester {
+            results: [
+                DiscoveryTestResult::Success("gpt-5.6-live-one"),
+                DiscoveryTestResult::Failure,
+                DiscoveryTestResult::Success("gpt-5.6-live-two"),
+            ]
+            .into(),
+            calls: Vec::new(),
+        };
+        let mut events = "model"
+            .chars()
+            .map(|character| {
+                Event::Key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
+            })
+            .collect::<VecDeque<_>>();
+        events.extend([
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::F(5), KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::F(5), KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::F(5), KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL)),
+        ]);
+        let first_success = Rc::new(RefCell::new(None::<Vec<u8>>));
+        let first_success_for_events = Rc::clone(&first_success);
+        let discovery_for_events = discovery.clone();
+        let mut f5_count = 0;
+        let mut credential_vault = PlatformCredentialVault;
+        let output = super::run_terminal_loop_core(
+            Vec::new(),
+            FakeTerminalMode::default(),
+            &mut config,
+            TerminalSnapshotSource {
+                initial: &view,
+                refresh_ledger: Some(&ledger),
+                viewport: Viewport::new(100, 24).expect("discovery refresh viewport"),
+            },
+            super::TerminalLoopServices {
+                tester: &mut tester,
+                credential_vault: &mut credential_vault,
+                product: None,
+            },
+            move || {
+                let event = events
+                    .pop_front()
+                    .expect("bounded discovery refresh events");
+                if matches!(&event, Event::Key(key) if key.code == KeyCode::F(5)) {
+                    f5_count += 1;
+                    if f5_count == 2 {
+                        *first_success_for_events.borrow_mut() = Some(
+                            std::fs::read(&discovery_for_events)
+                                .expect("first successful discovery observation"),
+                        );
+                    } else if f5_count == 3 {
+                        assert_eq!(
+                            std::fs::read(&discovery_for_events)
+                                .expect("discovery observation after failed refresh"),
+                            *first_success_for_events
+                                .borrow()
+                                .as_ref()
+                                .expect("captured successful discovery observation")
+                        );
+                    }
+                }
+                Ok(event)
+            },
+        )
+        .expect("discovery refresh loop");
+        let output = String::from_utf8(output).expect("discovery refresh VT output");
+
+        assert_eq!(tester.calls.len(), 3);
+        assert!(tester.calls.iter().all(|(profile, _)| profile == "edge"));
+        assert!(output.contains("Provider discovery refreshed"), "{output}");
+        assert!(
+            output.contains("failed; showing previous catalog"),
+            "{output}"
+        );
+        assert!(output.contains("gpt-5.6-live-one"), "{output}");
+        assert_eq!(output.matches("two").count(), 2, "{output}");
+        assert!(!output.contains("synthetic-discovery-refresh-reference"));
+        let final_state =
+            ProviderDiscoveryState::inspect(&discovery).expect("inspect final discovery state");
+        assert_eq!(final_state.profiles().len(), 1);
+        assert_eq!(
+            final_state.profiles()[0].models()[0].id(),
+            "gpt-5.6-live-two"
+        );
+        assert_eq!(
+            std::fs::read(paths.user()).expect("reread discovery refresh config"),
+            config_before
+        );
+        assert!(!ledger.exists());
+        std::fs::remove_dir_all(root).expect("remove discovery refresh fixture");
     }
 
     #[test]
@@ -5805,6 +6623,37 @@ favorite = true
             ProviderConnectionTestStatus::Failed {
                 category: ProviderConnectionFailureCategory::Unavailable,
                 retryable: true,
+            }
+        }
+    }
+
+    enum DiscoveryTestResult {
+        Success(&'static str),
+        Failure,
+    }
+
+    struct ScriptedDiscoveryTester {
+        results: VecDeque<DiscoveryTestResult>,
+        calls: Vec<(String, u64)>,
+    }
+
+    impl ProviderConnectionTester for ScriptedDiscoveryTester {
+        fn test(&mut self, profile: &ProviderProfileSnapshot) -> ProviderConnectionTestStatus {
+            self.calls
+                .push((profile.profile().to_owned(), profile.fingerprint()));
+            match self.results.pop_front().expect("scripted discovery result") {
+                DiscoveryTestResult::Success(model) => ProviderConnectionTestStatus::Succeeded {
+                    profile: profile.profile().to_owned(),
+                    fingerprint: profile.fingerprint(),
+                    models: vec![ObservedProviderModel {
+                        id: model.to_owned(),
+                        release_catalog_key: None,
+                    }],
+                },
+                DiscoveryTestResult::Failure => ProviderConnectionTestStatus::Failed {
+                    category: ProviderConnectionFailureCategory::Unavailable,
+                    retryable: true,
+                },
             }
         }
     }
