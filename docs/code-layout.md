@@ -59,8 +59,10 @@ and raw-mode lifecycle, the public `tui` command, and metadata-driven rendered
 interactions for every user-scope Config Schema field over the existing Config
 Runtime. Top-level and statusline fields open directly; existing object fields
 use kind-filtered selection. It also owns a bounded Provider Profile ID prompt,
-complete non-secret Profile field flow, status-only opaque-reference editor, and
-an F5 control that invokes the bounded Provider candidate connection tester. A
+complete non-secret Profile field flow, status-only opaque-reference editor, an
+F5 control that invokes the bounded Provider candidate connection tester, and
+an F7 flow that delegates hidden bind/replace, status-only test, and confirmed
+forget to the origin-bound platform credential adapter. A
 second bounded object-name flow creates complete Model Presets across required
 and optional fields.
 The third bounded object-name flow creates named Usage Windows from start, end,

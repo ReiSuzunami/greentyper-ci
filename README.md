@@ -291,8 +291,10 @@ provenanced, credential-safe field views for existing Provider Profiles, Model
 Presets, Price Schedules, and Usage Windows. Config Runtime can now open a selected field route as
 one revision-bound draft, preview the normalized diff through the real validation
 and locking path, reset it, and commit it atomically. Credential routes expose
-binding state; the TUI may replace only the opaque reference, while secret-store
-mutation remains a separate secure credential operation. The product
+binding state; the TUI may replace only the opaque reference. From the clean
+Provider credential field, F7 opens a separate secure-store flow for hidden
+bind/replace input, status-only test, and confirmed forget. Existing values and
+scope identifiers are never rendered. The product
 now also has typed nested Config Object add/remove routes. One schema-driven
 Draft can create a Profile, Preset, Price Schedule, or Usage Window across multiple focused
 fields; whole-object deletion is target-layer explicit and reference validated.
@@ -328,8 +330,10 @@ no-change commit does not create a Config file, and tests reopen committed files
 release-template choice. Tab and Shift-Tab move across template, opaque
 credential reference, base URL, four routes, dialect list, catalog mode, pricing
 source, and explicit insecure-loopback permission. Credential references are
-never rendered or read back; secret bind/replace remains a separate credential
-operation. The same fields edit existing Profiles. Core validation still owns
+never rendered or read back; F7 performs the separate origin-bound credential
+operation without changing Config or a Ledger. Replace and forget require an
+extra confirmation, and a changed Profile origin/reference discards any pending
+secret before dispatch. The same fields edit existing Profiles. Core validation still owns
 route normalization, dialects, pricing provenance, and loopback-origin policy.
 Within the wizard, F5 runs the existing bounded connection and model-list test
 against the current revision-bound candidate. The rendered status is
@@ -444,7 +448,7 @@ is no background polling or automatic refresh. Runtime, Team, and Tool Ledgers
 are inspected independently, so one refresh is not a cross-Ledger transactional
 snapshot. The terminal and App Server approval surfaces are limited to the exact
 pending `local.echo` call; neither is a general Tool policy editor, audited
-ConPTY integration, secret-entry/bind surface, automatic starter-update
+ConPTY integration, automatic starter-update
 workflow, or persistent live catalog discovery. Live inference conformance,
 automatic retry policy or partial-stream reconnect, OpenCode Go Messages execution,
 Messages reasoning blocks, Preset context/fallback execution, broader multi-Tool approval

@@ -371,6 +371,13 @@ dirty Draft across a retryable failure, reset the observation after the next
 edit, and reject a stale revision before invoking the tester. These tests assert that dirty
 Escape/quit is blocked, a failed preview
 is rendered without ending the loop, and a no-change commit creates no file.
+Five credential-flow tests drive the same Provider field through F7 with an
+in-memory vault. They prove hidden bind input, confirmed replace without old
+value readback, availability-only test, cancel then confirm forget, and a bound
+credential reused by F5 for the exact origin scope. A stale Profile origin
+invalidates the flow before dispatch; macOS and Linux exercise the production
+platform vault's fixed unavailable result. Every flow excludes secret and
+reference bytes from VT output, preserves Config bytes, and creates no Ledger.
 Another real-key loop carries `/config provider remove` through the
 section-filtered object selector and exact deletion confirmation, commits, and
 reopens Config to prove the target is absent. Focused tests freeze the
@@ -488,8 +495,8 @@ and route existing Model Preset, Price Schedule, and Usage Window fields through
 their object selectors before commit and reopen. A real-key Provider test edits
 all non-secret Profile fields and reopens the normalized snapshot; a recovery
 test proves insecure-loopback permission is rejected for a remote HTTPS origin
-without consuming the Draft. They do not constitute real ConPTY, panic-abort
-cleanup, secret-store UI, approval, background refresh, or resource evidence.
+without consuming the Draft. Those Config-field tests do not constitute real
+ConPTY, panic-abort cleanup, approval, background refresh, or resource evidence.
 App Server integration tests launch the product over piped standard input and
 output. They stream schema and effective reads, reject credential-reference
 reads, recover after malformed and oversized frames, and prove read-only calls

@@ -15,7 +15,7 @@ use greentyper_core::config::{
 };
 use greentyper_core::context::{ContextPressureAccuracy, ContextPressureSnapshot};
 use greentyper_core::ledger::LedgerHead;
-use greentyper_core::provider::UsageAccuracy;
+use greentyper_core::provider::{ProviderProfileSnapshot, UsageAccuracy};
 use greentyper_core::provider_catalog::{CatalogAvailability, ModelCapability};
 use greentyper_core::runtime::{KernelTeamSnapshot, RecoveryStatus, RuntimeSnapshot};
 use greentyper_core::tool_runtime::{ToolCallStatus, ToolSnapshot};
@@ -1871,6 +1871,19 @@ impl PresentationController {
         Ok(status)
     }
 
+    pub(crate) fn current_provider_profile(
+        &self,
+        runtime: &ConfigRuntime,
+    ) -> Result<ProviderProfileSnapshot, PresentationControllerError> {
+        if self.state != PresentationState::ProviderWizard {
+            return Err(PresentationControllerError::NotProviderWizard);
+        }
+        self.active_editor()?
+            .session
+            .provider_profile(runtime)
+            .map_err(Into::into)
+    }
+
     pub(crate) fn commit_config(
         &mut self,
         runtime: &mut ConfigRuntime,
@@ -2198,6 +2211,14 @@ pub(crate) struct PresentationLayoutView {
     statusline: StatuslineLayoutView,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CredentialFlowView {
+    Actions { selected: usize },
+    Secret { replacing: bool, byte_len: usize },
+    ConfirmReplace,
+    ConfirmForget,
+}
+
 impl PresentationLayoutView {
     pub(crate) const fn viewport(&self) -> Viewport {
         self.viewport
@@ -2219,6 +2240,61 @@ impl PresentationLayoutView {
         if let Some(draft) = self.body.get_mut(selected + 1) {
             draft.text = "draft pending".to_owned();
         }
+    }
+
+    pub(crate) fn show_credential_flow(&mut self, flow: CredentialFlowView) {
+        let mut body = match flow {
+            CredentialFlowView::Actions { selected } => vec![
+                LayoutRowView::new("Provider Credential", false),
+                LayoutRowView::new("> Bind credential", selected == 0),
+                LayoutRowView::new("> Replace credential", selected == 1),
+                LayoutRowView::new("> Test credential", selected == 2),
+                LayoutRowView::new("> Forget credential", selected == 3),
+                LayoutRowView::new("Enter selects; Escape returns", false),
+                LayoutRowView::new("credential values are never displayed", false),
+            ],
+            CredentialFlowView::Secret {
+                replacing,
+                byte_len,
+            } => vec![
+                LayoutRowView::new(
+                    if replacing {
+                        "Provider Credential / Replace"
+                    } else {
+                        "Provider Credential / Bind"
+                    },
+                    false,
+                ),
+                LayoutRowView::new(format!("> secret {byte_len} bytes hidden"), true),
+                LayoutRowView::new(
+                    if replacing {
+                        "Enter reviews; Escape discards"
+                    } else {
+                        "Enter binds; Escape discards"
+                    },
+                    false,
+                ),
+                LayoutRowView::new("credential values are never displayed", false),
+            ],
+            CredentialFlowView::ConfirmReplace => vec![
+                LayoutRowView::new("Provider Credential / Replace", false),
+                LayoutRowView::new("> Confirm replacement", true),
+                LayoutRowView::new("Enter replaces; Escape discards", false),
+                LayoutRowView::new("the existing value cannot be recovered", false),
+            ],
+            CredentialFlowView::ConfirmForget => vec![
+                LayoutRowView::new("Provider Credential / Forget", false),
+                LayoutRowView::new("> Confirm removal", true),
+                LayoutRowView::new("Enter forgets; Escape returns", false),
+                LayoutRowView::new("the existing value cannot be recovered", false),
+            ],
+        };
+        let capacity = usize::from(self.viewport.height).saturating_sub(self.statusline.rows.len());
+        truncate_rows_keeping_selection(&mut body, capacity);
+        for row in &mut body {
+            row.text = fit_text(&row.text, usize::from(self.viewport.width));
+        }
+        self.body = body;
     }
 }
 
@@ -3949,6 +4025,9 @@ fn config_editor_rows(
                 ),
                 input_selected,
             ));
+            if input_selected {
+                rows.push(LayoutRowView::new("F7 credential vault actions", false));
+            }
         }
     }
     rows.push(LayoutRowView::new(

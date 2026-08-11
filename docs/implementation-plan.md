@@ -362,8 +362,8 @@ invalid-ID, policy, or stale-revision Drafts for correction or explicit discard.
 F5 now invokes the existing bounded Provider connection and model-list tester
 against the current revision-bound candidate and renders its ephemeral status.
 The action does not commit Config; staged edits invalidate the result, and a
-stale revision fails before the tester runs. Secret bind/replace remains outside
-the TUI. This slice adds no Runtime, Tool, secret-store, catalog, Provider Epoch,
+stale revision fails before the tester runs. This slice adds no Runtime, Tool,
+secret-store, catalog, Provider Epoch,
 or approval authority and does not automatically rebuild the active status
 projection after commit.
 Typed `/config provider|model|pricing|stats-window remove` routes now carry the
@@ -518,10 +518,21 @@ Team incomplete tails, restart recovery, cross-Ledger byte identity, output
 retrieval, and final acknowledgement. Resume may contact the Provider, append
 Usage/cost records, and repeat quota or billing; cancel and retry cannot.
 
+The terminal credential batch closes the Provider credential flow in four
+bounded slices. F7 on a clean Provider credential field opens Bind, Replace,
+Test, and Forget for the exact Profile/reference/canonical-origin scope. Bind
+uses hidden bounded input; Replace adds a separate confirmation without reading
+the old value; Test reports vault presence without a Provider request; Forget
+supports cancel before its confirmation. The terminal revalidates scope before
+dispatch, clears discarded input, disables F5 inside the credential modal, and
+uses only fixed status notices. Real-key tests prove bind-to-F5 scope reuse,
+replace, test, cancel/forget, stale-scope recovery, secret/reference redaction,
+Config and Ledger byte identity, and non-Windows fail-closed behavior.
+
 This does not complete Phase 3. Audited Windows ConPTY behavior, broader
 multi-Tool/App Server policy, general App Server Runtime control beyond the
 exact cancel/retry/resume recovery flow, remote App Server transport,
-automatic/background snapshot refresh, rendered secret binding,
+automatic/background snapshot refresh,
 custom-template and automatic starter-offer/update workflow, live catalog
 discovery and Recent evidence, automatic Context View/token-source
 projection, provider-reported

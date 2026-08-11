@@ -76,7 +76,9 @@ discovery, and automatic starter-update workflows remain later work. The App
 Server Config surface is implemented. The product now provides origin-bound
 credential bind, replace, test, and forget operations backed by Windows
 Credential Manager; non-Windows
-access fails closed until another platform backend is implemented.
+access fails closed until another platform backend is implemented. The Direct
+VT Provider wizard exposes those same four vault operations through a bounded
+F7 flow without making credential material a Config value.
 
 | Config Object | Type and constraint | Application timing |
 | --- | --- | --- |
@@ -120,8 +122,15 @@ with Enter and commit with a second Enter; Delete resets the field, and dirty
 Escape requires discard confirmation.
 `/config provider credential` uses a status-only text interaction for an opaque
 secure-store reference. It starts empty even when a reference is already bound,
-never renders or reads back the reference, and leaves secret bind/replace to the
-separate credential command. `/config provider add` prompts for a bounded
+and never renders or reads back the reference. With a clean Provider Draft, F7
+opens separate Bind, Replace, Test, and Forget actions for the exact committed
+Profile/reference/canonical-origin scope. Bind and Replace accept at most 2560
+hidden UTF-8 bytes; Replace and Forget require an explicit confirmation. Test
+checks vault presence only and performs no Provider request. Escape discards the
+owned input, and a changed Provider scope invalidates the flow before vault
+dispatch. Every response is status-only; these actions write neither Config nor
+a Ledger and grant no Provider, Agent, Tool, or workspace authority.
+`/config provider add` prompts for a bounded
 lowercase Profile ID, opens a release-template choice, and uses Tab/Shift-Tab to
 move across template, credential reference, base URL, routes, dialects, catalog
 mode, pricing source, and insecure-loopback permission. Routes and list values
@@ -181,7 +190,8 @@ target-layer explicit and fails when the resulting effective configuration has
 dangling references. The snapshot-based `tui` tracer renders controller screens
 reachable from the Slash Panel, including the top-level Config Center. Every
 schema field has a rendered interaction, but commits do not automatically
-rebuild the active projection. Secret-entry/bind UI remains pending. The Config
+rebuild the active projection. The F7 credential flow is available only from a
+clean Provider credential field and uses the platform vault directly. The Config
 and secure-store App Server described below is implemented. The current
 terminal-neutral Provider Profile wizard resolves release template defaults into
 user-configured Profile Drafts and supports the explicit bounded connection and
@@ -520,10 +530,10 @@ other than `id` are ignored and never enter the result. The check returns a
 fixed failure category for an invalid response, never exposes response bodies,
 does not commit Config or mutate a Provider Epoch, and is not yet a commit gate.
 The rendered TUI now supplies the narrow release-template and opaque
-credential-reference creation flow plus the explicit F5 connection-test control
-and typed target-layer deletion confirmation described above. Secure credential
-secret binding, custom template editing, and automatic starter offers or updates
-remain pending.
+credential-reference creation flow, the separate F7 origin-bound vault flow,
+the explicit F5 connection-test control, and the typed target-layer deletion
+confirmation described above. Custom template editing and automatic starter
+offers or updates remain pending.
 
 ## Model Catalog and Presets
 
@@ -811,6 +821,18 @@ labeled as cash paid. Rich terminal-backed cost presentation remains pending.
 
 ## Credentials
 
-Credential values live in Windows Credential Manager, never TOML, the Event Ledger, checkpoints, diagnostics, command history, or exported configuration. The current product backend uses the logged-in user's Windows Credential Manager set with local-machine persistence across that user's logon sessions. Product CLI and local stdio App Server operations can bind, replace, test, and forget a credential but cannot reveal its existing value. App Server bind/replace requests necessarily carry the new value in their bounded local pipe frame; GreenTyper does not log it, returns status only, and overwrites its owned frame after dispatch. Other platforms currently fail closed.
+Credential values live in Windows Credential Manager, never TOML, the Event
+Ledger, checkpoints, diagnostics, command history, or exported configuration.
+The current product backend uses the logged-in user's Windows Credential Manager
+set with local-machine persistence across that user's logon sessions. Product
+CLI, local stdio App Server, and the Provider wizard's F7 flow can bind, replace,
+test, and forget a credential but cannot reveal its existing value. The TUI
+keeps typed input hidden, bounds it to 2560 bytes, clears discarded buffers,
+requires confirmation before replace/forget, and reports status only. App Server
+bind/replace requests necessarily carry the new value in their bounded local
+pipe frame; GreenTyper does not log it, returns status only, and overwrites its
+owned frame after dispatch. Other platforms currently fail closed.
 
-Credential scope includes Provider Profile or MCP identity and Provider Origin. Delegation does not propagate credentials implicitly.
+Current credential scope binds one Provider Profile, opaque reference, and
+canonical Provider Origin. MCP credential identity remains Phase 5 work.
+Delegation does not propagate credentials implicitly.

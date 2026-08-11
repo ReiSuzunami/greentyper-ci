@@ -412,7 +412,11 @@ charges still require a future dedicated authority path.
   read it back. F5 can run the existing
   bounded connection/model-list tester against that revision-bound candidate
   and render its ephemeral status. It never reads back a credential reference,
-  commits through that action, or mutates a secret store.
+  commits through that action, or mutates a secret store. F7 separately opens
+  bounded hidden bind/replace, status-only test, and confirmed forget actions
+  for the exact Profile/reference/origin scope. Those actions delegate to the
+  platform vault, never change Config or a Ledger, and fail closed when the
+  platform backend is unavailable.
   `/config model add` can commit all required and optional Model Preset fields,
   including explicit fallback references. The separate `/model` action can
   stage one configured Preset for the existing current Agent's next Turn. It

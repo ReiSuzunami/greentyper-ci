@@ -24,12 +24,16 @@ use greentyper_core::runtime::{
 use greentyper_core::tool_runtime::{ToolCallStatus, ToolSnapshot};
 use greentyper_core::usage::{RuntimeUsageSnapshot, UsageError, UsageTimestamp};
 
-use crate::credential_vault::PlatformCredentialVault;
+use crate::credential_vault::{
+    CredentialVault, CredentialVaultError, MAX_SECRET_BYTES, PlatformCredentialVault,
+    ProviderCredentialScope, SecretValue,
+};
 use crate::local_process::{LocalProcessError, LocalProcessExecutor};
 use crate::presentation::{
-    BlockerEntryAction, ModelEntryAction, PresentationController, PresentationControllerError,
-    PresentationError, PresentationLayoutView, PresentationSources, ProductToolApprovalView,
-    ToolApprovalAction, ToolApprovalEntryAction, TuiViewModel, Viewport, ViewportError,
+    BlockerEntryAction, CredentialFlowView, ModelEntryAction, PresentationController,
+    PresentationControllerError, PresentationError, PresentationLayoutView, PresentationSources,
+    ProductToolApprovalView, ToolApprovalAction, ToolApprovalEntryAction, TuiViewModel, Viewport,
+    ViewportError,
 };
 use crate::product_driver::{
     ProductDriver, ProductDriverError, ProductInteraction, ProductToolDecision,
@@ -627,6 +631,7 @@ enum TerminalInputEvent {
     Enter,
     Escape,
     TestProviderConnection,
+    CredentialActions,
     RefreshSnapshot,
     Resize(u16, u16),
     Quit,
@@ -666,6 +671,7 @@ fn map_crossterm_event(event: Event) -> TerminalInputEvent {
             KeyCode::Esc => TerminalInputEvent::Escape,
             KeyCode::F(5) if key.modifiers.is_empty() => TerminalInputEvent::TestProviderConnection,
             KeyCode::F(6) if key.modifiers.is_empty() => TerminalInputEvent::RefreshSnapshot,
+            KeyCode::F(7) if key.modifiers.is_empty() => TerminalInputEvent::CredentialActions,
             _ => TerminalInputEvent::Ignore,
         },
         _ => TerminalInputEvent::Ignore,
@@ -705,6 +711,15 @@ enum TerminalIntent {
     MoveConfigField(isize),
     MoveConfigChoice(isize),
     TestProviderConnection,
+    OpenCredentialActions,
+    MoveCredentialAction(isize),
+    ActivateCredentialAction,
+    EditCredentialSecret(char),
+    BackspaceCredentialSecret,
+    ClearCredentialSecret,
+    SubmitCredentialSecret,
+    ConfirmCredentialAction,
+    CancelCredentialFlow,
     ConfirmConfigDelete,
     PreviewConfig,
     CommitConfig,
@@ -734,6 +749,9 @@ enum TerminalInputContext {
     ConfigChoice,
     ConfigText,
     ConfigCredentialReference,
+    CredentialActions,
+    CredentialSecret,
+    CredentialConfirmation,
     ConfigDeleteConfirmation,
     DiscardConfirmation,
     Other,
@@ -774,7 +792,59 @@ impl TerminalInputState {
             {
                 TerminalIntent::RefreshSnapshot
             }
-            TerminalInputEvent::TestProviderConnection => TerminalIntent::TestProviderConnection,
+            TerminalInputEvent::TestProviderConnection
+                if !matches!(
+                    context,
+                    TerminalInputContext::CredentialActions
+                        | TerminalInputContext::CredentialSecret
+                        | TerminalInputContext::CredentialConfirmation
+                ) =>
+            {
+                TerminalIntent::TestProviderConnection
+            }
+            TerminalInputEvent::CredentialActions
+                if context == TerminalInputContext::ConfigCredentialReference =>
+            {
+                TerminalIntent::OpenCredentialActions
+            }
+            TerminalInputEvent::Up if context == TerminalInputContext::CredentialActions => {
+                TerminalIntent::MoveCredentialAction(-1)
+            }
+            TerminalInputEvent::Down if context == TerminalInputContext::CredentialActions => {
+                TerminalIntent::MoveCredentialAction(1)
+            }
+            TerminalInputEvent::Enter if context == TerminalInputContext::CredentialActions => {
+                TerminalIntent::ActivateCredentialAction
+            }
+            TerminalInputEvent::Character(character)
+                if context == TerminalInputContext::CredentialSecret && !character.is_control() =>
+            {
+                TerminalIntent::EditCredentialSecret(character)
+            }
+            TerminalInputEvent::Backspace if context == TerminalInputContext::CredentialSecret => {
+                TerminalIntent::BackspaceCredentialSecret
+            }
+            TerminalInputEvent::Delete if context == TerminalInputContext::CredentialSecret => {
+                TerminalIntent::ClearCredentialSecret
+            }
+            TerminalInputEvent::Enter if context == TerminalInputContext::CredentialSecret => {
+                TerminalIntent::SubmitCredentialSecret
+            }
+            TerminalInputEvent::Enter
+                if context == TerminalInputContext::CredentialConfirmation =>
+            {
+                TerminalIntent::ConfirmCredentialAction
+            }
+            TerminalInputEvent::Escape
+                if matches!(
+                    context,
+                    TerminalInputContext::CredentialActions
+                        | TerminalInputContext::CredentialSecret
+                        | TerminalInputContext::CredentialConfirmation
+                ) =>
+            {
+                TerminalIntent::CancelCredentialFlow
+            }
             TerminalInputEvent::Character(character)
                 if context == TerminalInputContext::SlashPanel
                     && !character.is_control()
@@ -1007,6 +1077,8 @@ impl TerminalInputState {
             | TerminalInputEvent::Up
             | TerminalInputEvent::Down
             | TerminalInputEvent::Enter
+            | TerminalInputEvent::TestProviderConnection
+            | TerminalInputEvent::CredentialActions
             | TerminalInputEvent::RefreshSnapshot
             | TerminalInputEvent::Ignore => TerminalIntent::None,
         }
@@ -1023,8 +1095,133 @@ enum TerminalLoopOutcome {
     ResolveToolApproval,
     CancelToolApproval,
     AcknowledgeProductOutput(u64),
+    ResolveCredential,
     Quit,
     Noop,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum CredentialAction {
+    Bind,
+    Replace,
+    Test,
+    Forget,
+}
+
+impl CredentialAction {
+    const ALL: [Self; 4] = [Self::Bind, Self::Replace, Self::Test, Self::Forget];
+}
+
+enum CredentialFlow {
+    Actions {
+        scope: ProviderCredentialScope,
+        selected: usize,
+    },
+    Secret {
+        scope: ProviderCredentialScope,
+        action: CredentialAction,
+        input: CredentialSecretInput,
+    },
+    ConfirmReplace {
+        scope: ProviderCredentialScope,
+        secret: SecretValue,
+    },
+    ConfirmForget {
+        scope: ProviderCredentialScope,
+    },
+}
+
+struct CredentialSecretInput {
+    bytes: Vec<u8>,
+}
+
+impl Default for CredentialSecretInput {
+    fn default() -> Self {
+        Self {
+            bytes: Vec::with_capacity(MAX_SECRET_BYTES),
+        }
+    }
+}
+
+impl CredentialSecretInput {
+    fn push(&mut self, character: char) -> bool {
+        if self.bytes.len().saturating_add(character.len_utf8()) > MAX_SECRET_BYTES {
+            return false;
+        }
+        let mut encoded = [0_u8; 4];
+        self.bytes
+            .extend_from_slice(character.encode_utf8(&mut encoded).as_bytes());
+        true
+    }
+
+    fn backspace(&mut self) {
+        let Ok(value) = std::str::from_utf8(&self.bytes) else {
+            self.clear();
+            return;
+        };
+        let new_len = value
+            .char_indices()
+            .next_back()
+            .map_or(0, |(index, _)| index);
+        self.bytes[new_len..].fill(0);
+        self.bytes.truncate(new_len);
+    }
+
+    fn clear(&mut self) {
+        self.bytes.fill(0);
+        self.bytes.clear();
+    }
+
+    fn len(&self) -> usize {
+        self.bytes.len()
+    }
+
+    fn take_secret(&mut self) -> Result<SecretValue, CredentialVaultError> {
+        let mut bytes = Vec::with_capacity(MAX_SECRET_BYTES);
+        std::mem::swap(&mut bytes, &mut self.bytes);
+        SecretValue::new(bytes)
+    }
+}
+
+impl Drop for CredentialSecretInput {
+    fn drop(&mut self) {
+        self.bytes.fill(0);
+    }
+}
+
+enum CredentialCommand {
+    Bind {
+        scope: ProviderCredentialScope,
+        secret: SecretValue,
+    },
+    Replace {
+        scope: ProviderCredentialScope,
+        secret: SecretValue,
+    },
+    Test {
+        scope: ProviderCredentialScope,
+    },
+    Forget {
+        scope: ProviderCredentialScope,
+    },
+}
+
+impl CredentialCommand {
+    fn scope(&self) -> &ProviderCredentialScope {
+        match self {
+            Self::Bind { scope, .. }
+            | Self::Replace { scope, .. }
+            | Self::Test { scope }
+            | Self::Forget { scope } => scope,
+        }
+    }
+}
+
+enum CredentialCommandOutcome {
+    Completed,
+    Available,
+    Missing,
+    Forgotten,
 }
 
 struct TerminalSession {
@@ -1037,6 +1234,8 @@ struct TerminalSession {
     confirming_discard: bool,
     pending_model_selection: Option<ModelPresetView>,
     pending_tool_action: Option<(u64, ProductToolDecision)>,
+    credential_flow: Option<CredentialFlow>,
+    pending_credential_command: Option<CredentialCommand>,
     notice: Option<String>,
 }
 
@@ -1060,6 +1259,8 @@ impl TerminalSession {
             confirming_discard: false,
             pending_model_selection: None,
             pending_tool_action: None,
+            credential_flow: None,
+            pending_credential_command: None,
             notice: None,
         })
     }
@@ -1358,6 +1559,55 @@ impl TerminalSession {
                 }
                 Ok(TerminalLoopOutcome::Redraw)
             }
+            TerminalIntent::OpenCredentialActions => {
+                let runtime = runtime.ok_or(TerminalError::ConfigRuntimeRequired)?;
+                self.open_credential_actions(runtime);
+                Ok(TerminalLoopOutcome::Redraw)
+            }
+            TerminalIntent::MoveCredentialAction(offset) => {
+                self.move_credential_action(offset);
+                Ok(TerminalLoopOutcome::Redraw)
+            }
+            TerminalIntent::ActivateCredentialAction => {
+                let runtime = runtime.ok_or(TerminalError::ConfigRuntimeRequired)?;
+                if self.activate_credential_action(runtime) {
+                    Ok(TerminalLoopOutcome::ResolveCredential)
+                } else {
+                    Ok(TerminalLoopOutcome::Redraw)
+                }
+            }
+            TerminalIntent::EditCredentialSecret(character) => {
+                self.edit_credential_secret(Some(character));
+                Ok(TerminalLoopOutcome::Redraw)
+            }
+            TerminalIntent::BackspaceCredentialSecret => {
+                self.edit_credential_secret(None);
+                Ok(TerminalLoopOutcome::Redraw)
+            }
+            TerminalIntent::ClearCredentialSecret => {
+                self.clear_credential_secret();
+                Ok(TerminalLoopOutcome::Redraw)
+            }
+            TerminalIntent::SubmitCredentialSecret => {
+                let runtime = runtime.ok_or(TerminalError::ConfigRuntimeRequired)?;
+                if self.submit_credential_secret(runtime) {
+                    Ok(TerminalLoopOutcome::ResolveCredential)
+                } else {
+                    Ok(TerminalLoopOutcome::Redraw)
+                }
+            }
+            TerminalIntent::ConfirmCredentialAction => {
+                let runtime = runtime.ok_or(TerminalError::ConfigRuntimeRequired)?;
+                if self.confirm_credential_action(runtime) {
+                    Ok(TerminalLoopOutcome::ResolveCredential)
+                } else {
+                    Ok(TerminalLoopOutcome::Redraw)
+                }
+            }
+            TerminalIntent::CancelCredentialFlow => {
+                self.cancel_credential_flow();
+                Ok(TerminalLoopOutcome::Redraw)
+            }
             TerminalIntent::ConfirmConfigDelete => {
                 if !self.controller.is_config_object_delete() {
                     return Ok(TerminalLoopOutcome::Noop);
@@ -1492,13 +1742,287 @@ impl TerminalSession {
         self.pending_tool_action.take()
     }
 
+    fn take_credential_command(&mut self) -> Option<CredentialCommand> {
+        self.pending_credential_command.take()
+    }
+
+    fn validate_credential_command_scope(
+        &mut self,
+        runtime: &ConfigRuntime,
+        command: &CredentialCommand,
+    ) -> bool {
+        if matches!(
+            self.current_credential_scope(runtime),
+            Ok(scope) if scope == *command.scope()
+        ) {
+            return true;
+        }
+        self.credential_flow = None;
+        self.notice = Some("Credential scope changed; reopen credential actions".to_owned());
+        false
+    }
+
     fn show_product_output(&mut self, delivery: u64, text: String) {
         self.controller.show_product_output(delivery, text);
         self.notice = Some("Provider output prepared".to_owned());
     }
 
+    fn open_credential_actions(&mut self, runtime: &ConfigRuntime) {
+        if self.has_unsaved_config_input() {
+            self.notice = Some("Commit the Provider Profile before credential actions".to_owned());
+            return;
+        }
+        match self.current_credential_scope(runtime) {
+            Ok(scope) => {
+                self.credential_flow = Some(CredentialFlow::Actions { scope, selected: 0 });
+                self.notice = None;
+            }
+            Err(()) => {
+                self.notice = Some(
+                    "Credential actions require a committed reference and Provider origin"
+                        .to_owned(),
+                );
+            }
+        }
+    }
+
+    fn current_credential_scope(
+        &self,
+        runtime: &ConfigRuntime,
+    ) -> Result<ProviderCredentialScope, ()> {
+        self.controller
+            .current_provider_profile(runtime)
+            .map_err(|_| ())
+            .and_then(|profile| ProviderCredentialScope::from_profile(&profile).map_err(|_| ()))
+    }
+
+    fn move_credential_action(&mut self, offset: isize) {
+        let Some(CredentialFlow::Actions { selected, .. }) = self.credential_flow.as_mut() else {
+            return;
+        };
+        *selected = selected
+            .saturating_add_signed(offset)
+            .min(CredentialAction::ALL.len() - 1);
+        self.notice = None;
+    }
+
+    fn activate_credential_action(&mut self, runtime: &ConfigRuntime) -> bool {
+        let Ok(current_scope) = self.current_credential_scope(runtime) else {
+            self.credential_flow = None;
+            self.notice = Some("Credential scope changed; reopen credential actions".to_owned());
+            return false;
+        };
+        let Some(CredentialFlow::Actions { scope, selected }) = self.credential_flow.take() else {
+            return false;
+        };
+        if scope != current_scope {
+            self.notice = Some("Credential scope changed; reopen credential actions".to_owned());
+            return false;
+        }
+        let Some(action) = CredentialAction::ALL.get(selected).copied() else {
+            self.credential_flow = Some(CredentialFlow::Actions { scope, selected: 0 });
+            return false;
+        };
+        match action {
+            CredentialAction::Bind | CredentialAction::Replace => {
+                self.credential_flow = Some(CredentialFlow::Secret {
+                    scope,
+                    action,
+                    input: CredentialSecretInput::default(),
+                });
+                self.notice = None;
+                false
+            }
+            CredentialAction::Test => {
+                self.pending_credential_command = Some(CredentialCommand::Test {
+                    scope: scope.clone(),
+                });
+                self.credential_flow = Some(CredentialFlow::Actions { scope, selected });
+                self.notice = None;
+                true
+            }
+            CredentialAction::Forget => {
+                self.credential_flow = Some(CredentialFlow::ConfirmForget { scope });
+                self.notice = Some("Confirm credential removal".to_owned());
+                false
+            }
+        }
+    }
+
+    fn edit_credential_secret(&mut self, character: Option<char>) {
+        let Some(CredentialFlow::Secret { input, .. }) = self.credential_flow.as_mut() else {
+            return;
+        };
+        match character {
+            Some(character) if !input.push(character) => {
+                self.notice = Some("Credential value exceeds its input limit".to_owned());
+                return;
+            }
+            Some(_) => {}
+            None => input.backspace(),
+        }
+        self.notice = None;
+    }
+
+    fn clear_credential_secret(&mut self) {
+        let Some(CredentialFlow::Secret { input, .. }) = self.credential_flow.as_mut() else {
+            return;
+        };
+        input.clear();
+        self.notice = None;
+    }
+
+    fn submit_credential_secret(&mut self, runtime: &ConfigRuntime) -> bool {
+        let Ok(current_scope) = self.current_credential_scope(runtime) else {
+            self.credential_flow = None;
+            self.notice = Some("Credential scope changed; reopen credential actions".to_owned());
+            return false;
+        };
+        let Some(CredentialFlow::Secret {
+            scope,
+            action,
+            input,
+        }) = self.credential_flow.as_mut()
+        else {
+            return false;
+        };
+        if *scope != current_scope {
+            self.credential_flow = None;
+            self.notice = Some("Credential scope changed; reopen credential actions".to_owned());
+            return false;
+        }
+        let secret = match input.take_secret() {
+            Ok(secret) => secret,
+            Err(_) => {
+                self.notice = Some("Credential value is invalid".to_owned());
+                return false;
+            }
+        };
+        let scope = scope.clone();
+        match action {
+            CredentialAction::Bind => {
+                self.pending_credential_command = Some(CredentialCommand::Bind { scope, secret });
+            }
+            CredentialAction::Replace => {
+                self.credential_flow = Some(CredentialFlow::ConfirmReplace { scope, secret });
+                self.notice = Some("Confirm credential replacement".to_owned());
+                return false;
+            }
+            CredentialAction::Test | CredentialAction::Forget => {
+                self.credential_flow = None;
+                self.notice = Some("Credential action is unavailable".to_owned());
+                return false;
+            }
+        }
+        self.notice = None;
+        true
+    }
+
+    fn confirm_credential_action(&mut self, runtime: &ConfigRuntime) -> bool {
+        let Ok(current_scope) = self.current_credential_scope(runtime) else {
+            self.credential_flow = None;
+            self.notice = Some("Credential scope changed; reopen credential actions".to_owned());
+            return false;
+        };
+        let (scope, selected, command) = match self.credential_flow.take() {
+            Some(CredentialFlow::ConfirmReplace { scope, secret }) => {
+                let command = CredentialCommand::Replace {
+                    scope: scope.clone(),
+                    secret,
+                };
+                (scope, 1, command)
+            }
+            Some(CredentialFlow::ConfirmForget { scope }) => {
+                let command = CredentialCommand::Forget {
+                    scope: scope.clone(),
+                };
+                (scope, 3, command)
+            }
+            _ => return false,
+        };
+        if scope != current_scope {
+            self.notice = Some("Credential scope changed; reopen credential actions".to_owned());
+            return false;
+        }
+        self.pending_credential_command = Some(command);
+        self.credential_flow = Some(CredentialFlow::Actions { scope, selected });
+        self.notice = None;
+        true
+    }
+
+    fn finish_credential_command(
+        &mut self,
+        action: CredentialAction,
+        result: Result<CredentialCommandOutcome, CredentialVaultError>,
+    ) {
+        let scope = match self.credential_flow.take() {
+            Some(CredentialFlow::Secret { scope, .. })
+            | Some(CredentialFlow::ConfirmReplace { scope, .. })
+            | Some(CredentialFlow::ConfirmForget { scope })
+            | Some(CredentialFlow::Actions { scope, .. }) => scope,
+            None => return,
+        };
+        let selected = CredentialAction::ALL
+            .iter()
+            .position(|candidate| *candidate == action)
+            .unwrap_or(0);
+        self.credential_flow = Some(CredentialFlow::Actions { scope, selected });
+        self.notice = Some(match result {
+            Ok(CredentialCommandOutcome::Completed) => match action {
+                CredentialAction::Bind => "Credential bound".to_owned(),
+                CredentialAction::Replace => "Credential replaced".to_owned(),
+                CredentialAction::Test | CredentialAction::Forget => {
+                    "Credential action completed".to_owned()
+                }
+            },
+            Ok(CredentialCommandOutcome::Available) => "Credential available".to_owned(),
+            Ok(CredentialCommandOutcome::Missing) => "Credential not found".to_owned(),
+            Ok(CredentialCommandOutcome::Forgotten) => "Credential forgotten".to_owned(),
+            Err(CredentialVaultError::AlreadyBound) => {
+                "Credential is already bound; use Replace".to_owned()
+            }
+            Err(CredentialVaultError::NotFound) => "Credential was not found".to_owned(),
+            Err(CredentialVaultError::Unavailable) => {
+                "Platform credential vault is unavailable".to_owned()
+            }
+            Err(CredentialVaultError::InvalidScope(_)) => "Credential scope is invalid".to_owned(),
+            Err(CredentialVaultError::InvalidSecret) => "Credential value is invalid".to_owned(),
+        });
+    }
+
+    fn cancel_credential_flow(&mut self) {
+        match self.credential_flow.take() {
+            Some(CredentialFlow::Secret { scope, action, .. }) => {
+                let selected = CredentialAction::ALL
+                    .iter()
+                    .position(|candidate| *candidate == action)
+                    .unwrap_or(0);
+                self.credential_flow = Some(CredentialFlow::Actions { scope, selected });
+            }
+            Some(CredentialFlow::ConfirmReplace { scope, .. }) => {
+                self.credential_flow = Some(CredentialFlow::Actions { scope, selected: 1 });
+            }
+            Some(CredentialFlow::ConfirmForget { scope }) => {
+                self.credential_flow = Some(CredentialFlow::Actions { scope, selected: 3 });
+            }
+            Some(CredentialFlow::Actions { .. }) | None => {}
+        }
+        self.pending_credential_command = None;
+        self.notice = None;
+    }
+
     fn input_context(&self) -> TerminalInputContext {
-        if self.confirming_discard {
+        if matches!(self.credential_flow, Some(CredentialFlow::Actions { .. })) {
+            TerminalInputContext::CredentialActions
+        } else if matches!(self.credential_flow, Some(CredentialFlow::Secret { .. })) {
+            TerminalInputContext::CredentialSecret
+        } else if matches!(
+            self.credential_flow,
+            Some(CredentialFlow::ConfirmReplace { .. })
+                | Some(CredentialFlow::ConfirmForget { .. })
+        ) {
+            TerminalInputContext::CredentialConfirmation
+        } else if self.confirming_discard {
             TerminalInputContext::DiscardConfirmation
         } else if self.controller.is_slash_panel() {
             TerminalInputContext::SlashPanel
@@ -1863,6 +2387,19 @@ impl TerminalSession {
         if let Some(input) = self.config_text.as_ref().filter(|input| input.pending) {
             layout.show_pending_config_text(&input.value);
         }
+        if let Some(flow) = self.credential_flow.as_ref() {
+            layout.show_credential_flow(match flow {
+                CredentialFlow::Actions { selected, .. } => CredentialFlowView::Actions {
+                    selected: *selected,
+                },
+                CredentialFlow::Secret { action, input, .. } => CredentialFlowView::Secret {
+                    replacing: *action == CredentialAction::Replace,
+                    byte_len: input.len(),
+                },
+                CredentialFlow::ConfirmReplace { .. } => CredentialFlowView::ConfirmReplace,
+                CredentialFlow::ConfirmForget { .. } => CredentialFlowView::ConfirmForget,
+            });
+        }
         Ok(layout)
     }
 
@@ -1948,8 +2485,9 @@ where
     M: TerminalMode,
     F: FnMut() -> io::Result<Event>,
 {
-    let vault = PlatformCredentialVault;
-    let mut tester = ModelsHttpConnectionTester::new(&vault);
+    let tester_vault = PlatformCredentialVault;
+    let mut tester = ModelsHttpConnectionTester::new(&tester_vault);
+    let mut credential_vault = PlatformCredentialVault;
     let viewport = Viewport::new(width, height)?;
     run_terminal_loop_core(
         writer,
@@ -1960,8 +2498,11 @@ where
             refresh_ledger: None,
             viewport,
         },
-        &mut tester,
-        None,
+        TerminalLoopServices {
+            tester: &mut tester,
+            credential_vault: &mut credential_vault,
+            product: None,
+        },
         read_event,
     )
 }
@@ -1980,8 +2521,9 @@ where
     M: TerminalMode,
     F: FnMut() -> io::Result<Event>,
 {
-    let vault = PlatformCredentialVault;
-    let mut tester = ModelsHttpConnectionTester::new(&vault);
+    let tester_vault = PlatformCredentialVault;
+    let mut tester = ModelsHttpConnectionTester::new(&tester_vault);
+    let mut credential_vault = PlatformCredentialVault;
     let mut product = LedgerTerminalProductActions {
         ledger,
         pending: None,
@@ -1995,8 +2537,11 @@ where
             refresh_ledger: Some(ledger),
             viewport,
         },
-        &mut tester,
-        Some(&mut product),
+        TerminalLoopServices {
+            tester: &mut tester,
+            credential_vault: &mut credential_vault,
+            product: Some(&mut product),
+        },
         read_event,
     )
 }
@@ -2017,6 +2562,7 @@ where
     T: ProviderConnectionTester,
     F: FnMut() -> io::Result<Event>,
 {
+    let mut credential_vault = PlatformCredentialVault;
     run_terminal_loop_core(
         writer,
         mode,
@@ -2026,8 +2572,42 @@ where
             refresh_ledger: None,
             viewport,
         },
-        tester,
-        None,
+        TerminalLoopServices {
+            tester,
+            credential_vault: &mut credential_vault,
+            product: None,
+        },
+        read_event,
+    )
+}
+
+#[cfg(test)]
+fn run_terminal_loop_with_credential_vault<W, M, T, V, F>(
+    writer: W,
+    mode: M,
+    config: &mut ConfigRuntime,
+    snapshot: TerminalSnapshotSource<'_>,
+    tester: &mut T,
+    credential_vault: &mut V,
+    read_event: F,
+) -> Result<W, TerminalError>
+where
+    W: Write,
+    M: TerminalMode,
+    T: ProviderConnectionTester,
+    V: CredentialVault,
+    F: FnMut() -> io::Result<Event>,
+{
+    run_terminal_loop_core(
+        writer,
+        mode,
+        config,
+        snapshot,
+        TerminalLoopServices {
+            tester,
+            credential_vault,
+            product: None,
+        },
         read_event,
     )
 }
@@ -2047,15 +2627,19 @@ where
     P: TerminalProductActions,
     F: FnMut() -> io::Result<Event>,
 {
-    let vault = PlatformCredentialVault;
-    let mut tester = ModelsHttpConnectionTester::new(&vault);
+    let tester_vault = PlatformCredentialVault;
+    let mut tester = ModelsHttpConnectionTester::new(&tester_vault);
+    let mut credential_vault = PlatformCredentialVault;
     run_terminal_loop_core(
         writer,
         mode,
         config,
         snapshot,
-        &mut tester,
-        Some(product),
+        TerminalLoopServices {
+            tester: &mut tester,
+            credential_vault: &mut credential_vault,
+            product: Some(product),
+        },
         read_event,
     )
 }
@@ -2066,13 +2650,18 @@ struct TerminalSnapshotSource<'a> {
     viewport: Viewport,
 }
 
+struct TerminalLoopServices<'a, T> {
+    tester: &'a mut T,
+    credential_vault: &'a mut dyn CredentialVault,
+    product: Option<&'a mut dyn TerminalProductActions>,
+}
+
 fn run_terminal_loop_core<W, M, T, F>(
     writer: W,
     mode: M,
     config: &mut ConfigRuntime,
     snapshot: TerminalSnapshotSource<'_>,
-    tester: &mut T,
-    mut product: Option<&mut dyn TerminalProductActions>,
+    services: TerminalLoopServices<'_, T>,
     mut read_event: F,
 ) -> Result<W, TerminalError>
 where
@@ -2081,6 +2670,11 @@ where
     T: ProviderConnectionTester,
     F: FnMut() -> io::Result<Event>,
 {
+    let TerminalLoopServices {
+        tester,
+        credential_vault,
+        mut product,
+    } = services;
     let width = snapshot.viewport.width();
     let height = snapshot.viewport.height();
     let mut surface = TerminalSurface::enter(writer, mode)?;
@@ -2169,6 +2763,11 @@ where
                 } else {
                     session.notice = Some("Model selection unavailable".to_owned());
                 }
+                let frame = session.frame(Some(config), &view)?;
+                surface.write_frame(&renderer.draw(&frame)?)?;
+            }
+            TerminalLoopOutcome::ResolveCredential => {
+                resolve_pending_credential_command(&mut session, config, credential_vault)?;
                 let frame = session.frame(Some(config), &view)?;
                 surface.write_frame(&renderer.draw(&frame)?)?;
             }
@@ -2314,6 +2913,57 @@ where
     }
 
     Ok(surface.finish()?)
+}
+
+fn resolve_pending_credential_command(
+    session: &mut TerminalSession,
+    config: &ConfigRuntime,
+    credential_vault: &mut dyn CredentialVault,
+) -> Result<(), TerminalError> {
+    let command = session
+        .take_credential_command()
+        .ok_or(TerminalError::ViewModelRequired)?;
+    if !session.validate_credential_command_scope(config, &command) {
+        drop(command);
+        return Ok(());
+    }
+    let (action, result) = match command {
+        CredentialCommand::Bind { scope, secret } => (
+            CredentialAction::Bind,
+            credential_vault
+                .bind(&scope, secret)
+                .map(|()| CredentialCommandOutcome::Completed),
+        ),
+        CredentialCommand::Replace { scope, secret } => (
+            CredentialAction::Replace,
+            credential_vault
+                .replace(&scope, secret)
+                .map(|()| CredentialCommandOutcome::Completed),
+        ),
+        CredentialCommand::Test { scope } => (
+            CredentialAction::Test,
+            match credential_vault.resolve(&scope) {
+                Ok(secret) => {
+                    drop(secret);
+                    Ok(CredentialCommandOutcome::Available)
+                }
+                Err(CredentialVaultError::NotFound) => Ok(CredentialCommandOutcome::Missing),
+                Err(source) => Err(source),
+            },
+        ),
+        CredentialCommand::Forget { scope } => (
+            CredentialAction::Forget,
+            credential_vault.forget(&scope).map(|forgotten| {
+                if forgotten {
+                    CredentialCommandOutcome::Forgotten
+                } else {
+                    CredentialCommandOutcome::Missing
+                }
+            }),
+        ),
+    };
+    session.finish_credential_command(action, result);
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -2495,6 +3145,10 @@ mod tests {
     use greentyper_core::runtime::{ProviderToolApproval, ProviderTurnOutcome, RuntimeKernel};
     use greentyper_core::usage::{UsageWeekday, UsageWindow};
 
+    use crate::credential_vault::{
+        CredentialVault, CredentialVaultError, InMemoryCredentialVault, ProviderCredentialScope,
+        SecretValue,
+    };
     use crate::local_process::LocalProcessExecutor;
     use crate::presentation::{PresentationScreenView, ProductToolApprovalView, build_smoke_view};
     use crate::product_driver::{ProductDriver, ProductInteraction, ProductToolDecision};
@@ -2508,8 +3162,8 @@ mod tests {
         TerminalLoopOutcome, TerminalMode, TerminalProductActions, TerminalSession,
         TerminalSnapshotSource, TerminalSurface, TerminalToolResolution, Viewport,
         build_terminal_view, map_crossterm_event, refresh_terminal_view, run_terminal_loop,
-        run_terminal_loop_with_connection_tester, run_terminal_loop_with_product_actions,
-        run_terminal_loop_with_snapshot_refresh,
+        run_terminal_loop_with_connection_tester, run_terminal_loop_with_credential_vault,
+        run_terminal_loop_with_product_actions, run_terminal_loop_with_snapshot_refresh,
     };
 
     struct CompleteStatsUsageProvider;
@@ -2773,6 +3427,23 @@ mod tests {
             ),
             TerminalIntent::None
         );
+        assert_eq!(
+            input.apply(
+                TerminalInputEvent::CredentialActions,
+                TerminalInputContext::ConfigCredentialReference,
+            ),
+            TerminalIntent::OpenCredentialActions
+        );
+        for context in [
+            TerminalInputContext::CredentialActions,
+            TerminalInputContext::CredentialSecret,
+            TerminalInputContext::CredentialConfirmation,
+        ] {
+            assert_eq!(
+                input.apply(TerminalInputEvent::TestProviderConnection, context),
+                TerminalIntent::None
+            );
+        }
         assert_eq!(
             input.apply(TerminalInputEvent::Down, TerminalInputContext::ConfigObject),
             TerminalIntent::MoveConfigObjectSelection(1)
@@ -5011,6 +5682,19 @@ favorite = true
         );
         assert_eq!(
             map_crossterm_event(Event::Key(
+                KeyEvent::new(KeyCode::F(7), KeyModifiers::NONE,)
+            )),
+            TerminalInputEvent::CredentialActions
+        );
+        assert_eq!(
+            map_crossterm_event(Event::Key(KeyEvent::new(
+                KeyCode::F(7),
+                KeyModifiers::CONTROL,
+            ))),
+            TerminalInputEvent::Ignore
+        );
+        assert_eq!(
+            map_crossterm_event(Event::Key(
                 KeyEvent::new(KeyCode::F(6), KeyModifiers::NONE,)
             )),
             TerminalInputEvent::RefreshSnapshot
@@ -5083,6 +5767,79 @@ favorite = true
         }
     }
 
+    #[derive(Clone, Default)]
+    struct SharedCredentialVault(Rc<RefCell<InMemoryCredentialVault>>);
+
+    impl CredentialVault for SharedCredentialVault {
+        fn bind(
+            &mut self,
+            scope: &ProviderCredentialScope,
+            secret: SecretValue,
+        ) -> Result<(), CredentialVaultError> {
+            self.0.borrow_mut().bind(scope, secret)
+        }
+
+        fn replace(
+            &mut self,
+            scope: &ProviderCredentialScope,
+            secret: SecretValue,
+        ) -> Result<(), CredentialVaultError> {
+            self.0.borrow_mut().replace(scope, secret)
+        }
+
+        fn resolve(
+            &self,
+            scope: &ProviderCredentialScope,
+        ) -> Result<SecretValue, CredentialVaultError> {
+            self.0.borrow().resolve(scope)
+        }
+
+        fn forget(
+            &mut self,
+            scope: &ProviderCredentialScope,
+        ) -> Result<bool, CredentialVaultError> {
+            self.0.borrow_mut().forget(scope)
+        }
+    }
+
+    struct VaultConnectionTester {
+        vault: SharedCredentialVault,
+        calls: usize,
+    }
+
+    impl ProviderConnectionTester for VaultConnectionTester {
+        fn test(&mut self, profile: &ProviderProfileSnapshot) -> ProviderConnectionTestStatus {
+            self.calls += 1;
+            let scope = match ProviderCredentialScope::from_profile(profile) {
+                Ok(scope) => scope,
+                Err(_) => {
+                    return ProviderConnectionTestStatus::Failed {
+                        category: ProviderConnectionFailureCategory::InvalidConfiguration,
+                        retryable: false,
+                    };
+                }
+            };
+            match self.vault.resolve(&scope) {
+                Ok(secret) => {
+                    drop(secret);
+                    ProviderConnectionTestStatus::Succeeded {
+                        profile: profile.profile().to_owned(),
+                        fingerprint: profile.fingerprint(),
+                        models: Vec::new(),
+                    }
+                }
+                Err(CredentialVaultError::NotFound) => ProviderConnectionTestStatus::Failed {
+                    category: ProviderConnectionFailureCategory::CredentialMissing,
+                    retryable: false,
+                },
+                Err(_) => ProviderConnectionTestStatus::Failed {
+                    category: ProviderConnectionFailureCategory::CredentialUnavailable,
+                    retryable: true,
+                },
+            }
+        }
+    }
+
     #[test]
     fn terminal_provider_connection_f5_is_scoped_to_the_provider_wizard() {
         let mut session = TerminalSession::new("/", 80, 24).expect("terminal session");
@@ -5150,6 +5907,7 @@ favorite = true
         std::fs::remove_dir_all(root).expect("remove test config");
     }
 
+    include!("terminal/credential_tests.rs");
     #[test]
     fn terminal_provider_connection_failure_keeps_draft_and_edit_resets_status() {
         let root = terminal_test_root("provider-connection-recovery");
