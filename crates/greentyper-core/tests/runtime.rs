@@ -137,7 +137,10 @@ fn context_checkpoint_rejects_stale_source_without_mutating_the_ledger() {
         .acknowledge(second.delivery())
         .expect("complete second Turn");
     let before = runtime.snapshot();
+    drop(runtime);
     let bytes_before = fs::read(&path).expect("read Runtime ledger");
+    let mut runtime = RuntimeKernel::open(&path).expect("reopen Runtime");
+    assert_eq!(runtime.snapshot(), before);
 
     assert!(matches!(
         runtime.publish_context_checkpoint(stale),
@@ -145,11 +148,11 @@ fn context_checkpoint_rejects_stale_source_without_mutating_the_ledger() {
             if expected != actual && actual == before.head
     ));
     assert_eq!(runtime.snapshot(), before);
+    drop(runtime);
     assert_eq!(
         fs::read(&path).expect("read unchanged Runtime ledger"),
         bytes_before
     );
-    drop(runtime);
     fs::remove_file(path).expect("cleanup Runtime ledger");
 }
 
