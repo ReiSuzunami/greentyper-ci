@@ -115,7 +115,7 @@ framing retain that boundary; other malformed Provider data remains an invalid
 response. No boundary triggers an automatic retry or reconnect, and the
 requests carry no inference idempotency key, so an absent response is not proof
 that the remote service did no work or incurred no usage. Runtime Event schema
-11 marks only Provider-origin failures before a response or before the first
+12 preserves schema 11's rule that only Provider-origin failures before a response or before the first
 event as `retryable`. `retry --turn ID` durably rearms that exact Turn, input,
 Config Epoch, and Provider Epoch before making one new Provider attempt. It may
 repeat remote work, usage, or billing. A preflight failure after rearming leaves
@@ -241,9 +241,10 @@ Flash, maps `max_output_tokens` plus `reasoning.effort` values `low`, `high`, an
 continuation reconstructs bounded input items instead of using
 `previous_response_id`. Reasoning text is bounded and transition-validated by
 the dialect decoder but is not projected as visible output or persisted raw.
-Runtime Event schema 11 preserves schema 10's typed Provider-block origin and
-durable `TurnCancelled` recovery, plus the schema-9 selected Preset policy, and
-adds the redacted unavailability stage and durable `TurnRetryRequested` recovery.
+Runtime Event schema 12 preserves schema 11's redacted Provider-unavailability
+stage and durable `TurnRetryRequested` recovery, schema 10's typed block origin
+and `TurnCancelled`, and schema 9's selected Preset policy. It adds an exact-head
+Context checkpoint event.
 OpenAI Responses sends reasoning as `reasoning.effort`, OpenAI Chat Completions
 sends `reasoning_effort`, and both send `service_tier`; their output-token
 fields are `max_output_tokens` and `max_completion_tokens`. DeepSeek Chat and
@@ -270,15 +271,28 @@ Explicit `--summary-only` and `--limit 1..1000` modes instead return a
 revision-stamped report; bounded pages carry a checksummed `next_cursor` tied to
 the Ledger head and requested instant, so an append makes an old cursor fail
 stale rather than mixing revisions.
-Core now also has a deterministic Context Pressure projector. It combines an
+Core now also has a deterministic Context foundation. Its Pressure projector combines an
 explicit context limit, used-token fact, output reserve, and exact/estimated
 marker with checked integer arithmetic and default 65% soft / 90% hard
 thresholds. Missing facts remain explicitly unknown. The optional Runtime
 admission path rejects a known hard-pressure Turn before any Ledger append or
-Provider call; soft and unknown projections preserve the existing path. The
+Provider call. Soft pressure publishes a bounded checkpoint at a Safe Barrier
+before the next Turn; unknown pressure admits without inventing a checkpoint. The
 terminal-neutral status projection serializes the immutable facts and marks an
-estimate as `ctx ~N%`. Automatic Context View construction, reduction,
-compaction, checkpoints, and provider-native adapters remain Phase 6 work.
+estimate as `ctx ~N%`.
+
+The Context View projects ordered canonical Item/Turn/role facts from an exact
+Ledger head. Reduction keeps a configurable recent raw tail and replaces older
+text with Item-bound SHA-256, byte-count, role, and token-estimate references;
+the Event Ledger remains authoritative. Runtime Event schema 12 publishes that
+projection only at a Ready Safe Barrier, verifies the prior Ledger head on
+replay, rejects stale drafts without writing, and rebuilds every checkpoint
+from complete canonical Items instead of recursively reducing summaries.
+`context status` inspects this state without creating or repairing a Ledger.
+`context reduce` explicitly publishes one bounded checkpoint, checks complete
+Product sidecars when present, and does not change Team or Tool Ledger bytes.
+Provider-request consumption, semantic Compactor output, provider-native
+compaction, external Artifact storage, and Durable Memory remain Phase 6 work.
 Editable Config schedules require manual provenance. The bundled DeepSeek rate
 card supplies versioned official schedules. A custom DeepSeek origin with no
 pricing override defaults to an immutable `template_mirror` estimate; explicit

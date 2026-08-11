@@ -1,8 +1,8 @@
-//! Deterministic Context Pressure projection and admission policy.
+//! Deterministic Context Pressure, bounded Views, and reduction evidence.
 //!
-//! This module only projects immutable token facts. It does not compact
-//! Context Views, mutate the Event Ledger, or hold Tool, credential, or Memory
-//! authority.
+//! This module is pure data policy. Runtime owns checkpoint persistence and
+//! Safe Barrier validation; neither layer holds Tool, credential, MCP, or
+//! Durable Memory authority.
 
 use std::error::Error;
 use std::fmt;

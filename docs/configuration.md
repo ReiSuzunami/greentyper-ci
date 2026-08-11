@@ -772,9 +772,15 @@ arbitrary shell commands from the statusline.
 
 The implemented terminal-neutral Context snapshot carries projected occupancy,
 used tokens, reserved output tokens, exact/estimated provenance, and the 65% / 90%
-soft/hard policy. The compact segment renders only occupancy. Automatic Context
-View construction and the target comparison with last provider-reported input
-remain pending. Cache display uses read and write ratios where reported;
+soft/hard policy. The compact segment renders only occupancy. The core Context
+View now projects canonical Items at an exact Runtime Ledger head; soft pressure
+publishes a default bounded checkpoint at a Safe Barrier, while unknown pressure
+does not invent one. `context status` is a missing-safe read-only JSON projection.
+`context reduce` accepts bounded `--max-raw-bytes` and `--max-raw-items`, strictly
+opens existing state, and publishes only counts and source-head facts. It does
+not expose Item text or mutate Config, Team, or Tool state. Provider consumption
+of the checkpoint and comparison with last provider-reported input remain pending.
+Cache display uses read and write ratios where reported;
 unsupported values display as unknown rather than zero.
 
 ## Usage and Cost Windows
@@ -845,7 +851,7 @@ reasoning_output_micros_per_million = 3000000
 ```
 
 The resolved schedule book rejects duplicate or overlapping selectors. Config
-Epoch creation freezes the book and its fingerprints. Runtime Event schema 11
+Epoch creation freezes the book and its fingerprints. Runtime Event schema 12
 appends normalized Usage first and its cost evaluation second in one transaction;
 replay recomputes the result from that frozen evidence. Missing token classes,
 missing selectors, inconsistent accounting, and arithmetic overflow remain

@@ -165,11 +165,11 @@ effort, service tier, and distinct template-mirror pricing provenance while
 rejecting fingerprint, outcome, timestamp, and transition tampering. A schema-5
 Config Epoch without the optional token field, a schema-6 Config Epoch without
 request-policy fields, and a schema-7 Config Epoch without template-mirror tags
-remain replayable under current Runtime Event schema 11; schema 8 Ledgers remain
+remain replayable under current Runtime Event schema 12; schema 8 Ledgers remain
 compatible before the schema-9 Model-selection event, and schema-9 Ledgers
 replay with legacy untyped block origin before schema-10 cancellation events.
 Schema-10 blocks replay without a retry stage and therefore remain
-non-retryable; schema-11 round trips the stage and retry-request event.
+non-retryable; schema 12 preserves schema 11's stage and retry-request event.
 
 Product integration tests also run the configured Responses, Chat Completions,
 and Messages adapters against concrete loopback HTTP tracers. They resolve and
@@ -235,7 +235,7 @@ Negative tests preserve bytes while rejecting missing state, prepared output,
 Tool denial or reconciliation, and the corresponding delivery/tool recovery
 still succeeds afterward.
 Provider retry tests persist failed Usage/cost evidence, expose retryability only
-for `BeforeResponse` and `BeforeFirstEvent`, append one explicit schema-11 retry
+for `BeforeResponse` and `BeforeFirstEvent`, append one explicit schema-11+ retry
 request, recover it as `resume-required`, reuse the frozen Provider Epoch, and
 record a new Attempt. Core tests reject partial-stream, malformed, post-Tool
 continuation, duplicate, and stale-session requests without changing the
@@ -597,8 +597,17 @@ Context Pressure tests freeze exact 65%/90% threshold transitions, estimated and
 missing-fact propagation, invalid policy/limit and arithmetic failure, and the
 no-side-effect hard admission gate. Product presentation tests assert estimated
 occupancy renders with `~` while an unavailable pressure fact remains unknown.
-These tests do not constitute Artifact offload, compaction, checkpoint,
-provider-native context adaptation, or P6 resource evidence.
+Context tests now prove exact-head canonical projection, bounded recent raw
+tails, SHA-256 references for old Items, reduction of history larger than the raw
+View boundary, and foreign-reference rejection. Runtime schema-12 tests prove a
+Safe Barrier checkpoint replays, stale publication leaves exact bytes unchanged,
+wrong prior heads and tampered references fail closed, soft pressure checkpoints
+before the next Turn, and unknown pressure creates none. CLI tests prove missing
+`context status` is read-only, `context reduce` exposes no Item text, busy or
+incomplete state is retryable without writes, and Product Team/Tool Ledgers stay
+byte-identical. Tool tests also reject an unresolved approval as non-barrier.
+These tests do not constitute provider-native context adaptation, semantic
+compaction, external Artifact persistence, Durable Memory, or P6 resource evidence.
 Provider-wizard tests derive a normalized Profile from an uncommitted multi-field
 Draft, keep credential references out of serialized screens, leave Config
 untouched during the connection check, invalidate a prior result after any staged

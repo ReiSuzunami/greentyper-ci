@@ -86,6 +86,12 @@ Owns Context Pressure calculation, artifact offload, deterministic reduction, Ru
 
 Checkpoint creation uses a Safe Barrier and event-range compare-and-swap. The Compactor has no tools, MCP access, credentials, or Durable Memory write capability. Periodic full rebases from the Event Ledger prevent recursive-summary drift.
 
+The current foundation implements exact-head canonical Views, bounded recent
+raw tails with Item-bound SHA-256 references, schema-12 Safe Barrier checkpoints,
+full-Item rebases, soft-pressure publication, and explicit CLI inspect/reduce.
+Provider consumption, semantic/provider-native compaction, external Artifact
+storage, and Durable Memory remain target behavior.
+
 ### Config Runtime
 
 Owns the Config Schema, layer resolution, validation, Config Drafts, atomic writes, backups, effective provenance, Config Epochs, and hierarchical Command Paths. TUI editors, CLI operations, and App Server operations call the same interface.

@@ -127,7 +127,7 @@ existing durable Tool approval/effect state machine, feeds one successful UTF-8
 result into a Provider continuation, and durably prepares combined canonical
 output. Recovery tests prove stale Sessions cannot invoke the Provider,
 ambiguous effects cannot continue, and process death after a durable Tool
-success blocks rather than repeating the effect. Runtime Event schema 11 stores
+success blocks rather than repeating the effect. Runtime Event schema 12 preserves
 durable Usage Attempt boundaries, frozen Usage Windows, Provider dialect, the
 expanded optional Usage Records, frozen Provider Profile snapshot, and the
 subsequent frozen Price Schedule cost evaluation plus an optional selected-Preset
@@ -192,7 +192,7 @@ dialects. Each adapter classifies unavailability before a response, before the
 first decoded event, or after the first event; early EOF uses the same decoder
 progress while semantic format failures remain invalid responses. Loopback
 fixtures assert one connection and therefore no automatic retry. Runtime Event
-schema 11 preserves the typed Provider block and exact idempotent
+schema 12 preserves the typed Provider block and exact idempotent
 `TurnCancelled`, adds the unavailability stage, and records
 `TurnRetryRequested`. The CLI can explicitly retry only an initial request that
 failed before its first event, using the same Turn/input/frozen Epochs and a new
@@ -230,7 +230,7 @@ Exit criteria:
 
 Add VT/ConPTY TUI, hierarchical Command Paths, global command palette, Config Schema-driven editors, Provider wizard, model selector, adaptive statusline, Context Pressure, Usage Records/Rollups, `/stats`, and named Usage Windows.
 
-The first observability slice is implemented. Runtime Event schema 11 preserves
+The first observability slice is implemented. Runtime Event schema 12 preserves
 the schema-6 contract that durably brackets each Provider request and continuation with an immutable Usage Attempt,
 including UTC start/completion, outcome, Agent scope when present, frozen
 Provider Profile/model/dialect, exact or estimated Usage Records, and explicit
@@ -335,9 +335,12 @@ combines caller-supplied context limit, used tokens, output reserve, and
 exact/estimated provenance with checked arithmetic and explicit unknown reasons.
 The default policy classifies normal, soft, and hard pressure at 65% and 90%.
 An optional single-Agent Runtime path stops a known hard-pressure Turn before
-Ledger or Provider effects; soft and unknown facts preserve existing admission.
+Ledger or Provider effects. Soft pressure publishes a bounded Context checkpoint
+at a Safe Barrier before admission; unknown facts preserve admission without
+inventing a checkpoint.
 The terminal-neutral status projection carries the immutable snapshot and marks
-estimated occupancy with `~`. No reduction or compaction is performed.
+estimated occupancy with `~`. Provider consumption and semantic compaction are
+not performed by this presentation slice.
 
 A first product terminal tracer is now implemented. `greentyper tui`
 inspects the selected Ledger without creating it, renders the existing
@@ -617,10 +620,20 @@ Exit criteria:
 
 Implement Artifact offload, Context Pressure thresholds, deterministic reduction, Runtime Fold, Safe Barrier checkpoints, semantic handoff, provider-native compaction adapters, typed Memory Candidates, evidence promotion, scoped retrieval, supersession, user edit/forget/export, and periodic full rebase.
 
-The pure pressure value object, default threshold classification, optional hard
-admission gate, and terminal-neutral exact/estimated/unknown projection already
-exist. This phase supplies the authoritative Context View inputs and every
-mutation/recovery mechanism around that decision.
+The Context foundation is implemented as four vertical slices. The core projects
+ordered canonical Items from an exact Ledger head; reduction replaces old raw
+text with Item-bound SHA-256 references while retaining a bounded recent tail;
+schema 12 publishes a singleton checkpoint only at a Safe Barrier and rejects a
+stale source head; and `context status`/`context reduce` expose missing-safe
+inspection plus explicit recovery. Soft pressure uses the same checkpoint path
+before admission, hard pressure still stops before effects, and unknown pressure
+does not invent state. Every checkpoint is a full rebase from authoritative
+Items. Tests preserve Runtime bytes on stale/unsafe failure and preserve Team and
+Tool bytes for Product state.
+
+This is not the full phase. Provider requests do not yet consume the checkpoint;
+there is no semantic handoff, provider-native compactor, external Artifact store,
+typed Memory Candidate, retrieval, supersession, or user memory lifecycle.
 
 Exit criteria:
 

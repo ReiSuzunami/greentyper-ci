@@ -89,7 +89,7 @@ work or incurred no usage. Each attempted request is already closed as one
 durable failed Usage Attempt with its cost evaluation before the Turn becomes
 blocked.
 
-Runtime Event schema 11 records the redacted unavailability stage. Only an
+Runtime Event schema 12 preserves schema 11's redacted unavailability stage. Only an
 initial Provider request blocked at `BeforeResponse` or `BeforeFirstEvent` is
 marked retryable. `greentyper retry --ledger PATH --turn ID` appends a validated
 `TurnRetryRequested`, preserving the exact Turn, input, Config Epoch, Provider
@@ -103,7 +103,7 @@ retry without mutation.
 
 `greentyper cancel --ledger PATH --turn ID` remains the explicit terminal
 recovery for a typed Provider-origin block. Schema 10 introduced the block origin
-and validated `TurnCancelled`; schema 11 preserves that contract. The event
+and validated `TurnCancelled`; schema 12 preserves that contract. The event
 clears only the pending Turn; it retains its user item, immutable Usage/cost
 history, and frozen Config and Provider Epochs. Repeating the exact cancellation
 is a no-op. Product retry and cancellation strictly open existing Runtime, Team,

@@ -24,16 +24,20 @@ The only library package. It contains the canonical model, Config Runtime,
 provisional file Ledger, deterministic Provider seam, bounded generic SSE plus
 OpenAI Responses, Chat Completions, and Anthropic Messages dialect decoding,
 recoverable single-Agent Runtime Kernel,
-Agent Team Runtime, durable Tool Runtime policy, and the immutable Usage
-Attempt/window/rollup projection. It also owns the immutable release Provider
+Agent Team Runtime, durable Tool Runtime policy, the immutable Usage
+Attempt/window/rollup projection, and the initial Context Engine foundation.
+The latter owns exact-head canonical Context Views, bounded SHA-256 artifact
+references, Safe Barrier checkpoint CAS/replay, and soft-pressure publication;
+it has no Tool, credential, MCP, or Memory authority. Core also owns the immutable release Provider
 Catalog and its field provenance. The independent Provider Discovery module owns
 the bounded schema-1 observation file, no-follow inspection, writer locking,
 validation, and atomic per-Profile replacement; it stores no Config, Ledger,
 credential, origin, capability, or execution authority. Config Runtime owns catalog-template
 resolution, schema-derived Command Paths, and the terminal-neutral
 revision-bound editor session used by future presentation adapters. Later slices
-add Workspace Coordinator and deepen the initial pure Context Pressure projector
-into the full Context Engine; concrete Provider and Tool integration stays
+add Workspace Coordinator and deepen the Context foundation with semantic
+handoff, provider-native compaction, Artifact storage, and Durable Memory;
+concrete Provider and Tool integration stays
 behind the narrow core interfaces and is owned by the product package.
 
 Provider simulators, in-memory stores, and other test adapters live beside the interfaces they exercise. Internal helpers are not promoted into packages merely to make them independently visible.
@@ -53,7 +57,7 @@ Object lifecycle/Provider-wizard controller, deterministic viewport-row layout, 
 ProductDriver that composes the Kernel-owned Team, Tool, Provider, approval, and
 delivery seams. The public `retry --turn ID` and `cancel --turn ID` paths use
 strict existing-state open, recovered Active Agent authority for Product
-Ledgers, and schema-11 Provider-block recovery. Retry is limited to an initial
+Ledgers, and schema-12 Runtime recovery. Retry is limited to an initial
 Provider request blocked before its first event and reuses the frozen Turn and
 Epochs; cancellation calls no Provider. Neither path repairs or creates state or
 mutates Team/Tool Ledgers. Its first product terminal tracer privately owns a
@@ -70,6 +74,10 @@ uses the same shared release/discovery projection, derives Recent from durable
 Usage, and exposes only an explicit F5 discovery probe. Success swaps the local
 observation/view; failure preserves both. Discovery acceptance revalidates the
 exact observation before it opens an ordinary Config Draft. It also owns a
+bounded `context status`/`context reduce` CLI surface. Status delegates to
+read-only Runtime inspection; reduce strictly reopens existing Runtime state,
+includes Team/Tool sidecars when present so the core can enforce its Safe
+Barrier, and writes no Config, Team, Tool, credential, or Provider state. It also owns a
 bounded Provider Profile ID prompt,
 complete non-secret Profile field flow, status-only opaque-reference editor, an
 F5 control that invokes the bounded Provider candidate connection tester, and
