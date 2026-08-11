@@ -753,7 +753,7 @@ impl TerminalSession {
                 match self.controller.activate(runtime, ConfigScope::User, None) {
                     Ok(()) => {
                         self.validated_config_choice = None;
-                        self.clear_config_text();
+                        self.sync_config_text();
                         self.notice = None;
                     }
                     Err(source) => self.notice = Some(presentation_notice(&source)),
@@ -1268,6 +1268,7 @@ impl TerminalSession {
             .or(effective.as_ref())
             .and_then(|value| match value {
                 ConfigValue::String(value) => Some(value.as_str()),
+                ConfigValue::Boolean(value) => Some(if *value { "true" } else { "false" }),
                 _ => None,
             })
     }
@@ -1583,10 +1584,12 @@ mod tests {
     use greentyper_core::config::{
         ConfigDocument, ConfigEditorSession, ConfigFieldContents, ConfigObjectKind,
         ConfigObjectRef, ConfigPaths, ConfigRuntime, ConfigScope, ConfigValue,
-        MAX_CONFIG_STRING_BYTES,
+        MAX_CONFIG_STRING_BYTES, ReasoningEffort, ServiceTier,
     };
     use greentyper_core::pricing::PriceScheduleSource;
-    use greentyper_core::provider::{ProviderDialect, ProviderProfileSnapshot};
+    use greentyper_core::provider::{
+        ProviderDialect, ProviderPricingSource, ProviderProfileSnapshot,
+    };
     use greentyper_core::usage::UsageWeekday;
 
     use crate::presentation::{PresentationScreenView, build_smoke_view};
@@ -2463,6 +2466,205 @@ mod tests {
     }
 
     #[test]
+    fn terminal_edits_top_level_config_fields_and_reopens() {
+        let root = terminal_test_root("top-level-config-fields");
+        let paths = ConfigPaths::new(root.join("user.toml"), root.join("project.toml"));
+        write_terminal_provider_config(&paths);
+        let mut config =
+            ConfigRuntime::open(paths.clone(), ConfigDocument::empty()).expect("config runtime");
+
+        for (query, value) in [
+            ("/config provider selected", "edge"),
+            ("/config model selected", "fixture-model-v2"),
+            ("/config runtime max-output", "131072"),
+        ] {
+            commit_terminal_config_text(&mut config, query, value);
+        }
+
+        let assert_values = |config: &ConfigRuntime| {
+            let resolved = config
+                .config_layers()
+                .expect("resolved Config layers")
+                .resolve()
+                .expect("resolve Config values");
+            assert_eq!(resolved.provider_profile().value(), "edge");
+            assert_eq!(resolved.provider_model().value(), "fixture-model-v2");
+            assert_eq!(*resolved.max_output_bytes().value(), 131_072);
+        };
+        assert_values(&config);
+        drop(config);
+
+        let reopened = ConfigRuntime::open(paths, ConfigDocument::empty()).expect("reopen config");
+        assert_values(&reopened);
+        std::fs::remove_dir_all(root).expect("remove test config");
+    }
+
+    #[test]
+    fn terminal_edits_statusline_reference_and_segment_lists_and_reopens() {
+        let root = terminal_test_root("statusline-local-fields");
+        let paths = ConfigPaths::new(root.join("user.toml"), root.join("project.toml"));
+        std::fs::create_dir_all(paths.user().parent().expect("statusline config parent"))
+            .expect("create statusline config directory");
+        std::fs::write(
+            paths.user(),
+            r#"schema_version = 1
+
+[ui.statusline]
+preset = "custom"
+primary_usage_window = "workday"
+
+[ui.statusline.custom]
+left = ["mode"]
+right = ["cache"]
+
+[[stats.windows]]
+id = "workday"
+start = "09:00"
+end = "17:00"
+days = ["mon", "tue", "wed", "thu", "fri"]
+timezone = "local"
+
+[[stats.windows]]
+id = "after-hours"
+start = "17:00"
+end = "23:00"
+days = ["mon", "tue", "wed", "thu", "fri"]
+timezone = "local"
+"#,
+        )
+        .expect("write statusline config");
+        let mut config =
+            ConfigRuntime::open(paths.clone(), ConfigDocument::empty()).expect("config runtime");
+
+        for (query, value) in [
+            ("/config statusline usage-window", "after-hours"),
+            ("/config statusline left", "[\"mode\",\"agent\",\"task\"]"),
+            (
+                "/config statusline right",
+                "[\"model\",\"context\",\"thread_cost\"]",
+            ),
+        ] {
+            commit_terminal_config_text(&mut config, query, value);
+        }
+
+        let assert_values = |config: &ConfigRuntime| {
+            assert_eq!(
+                config_string_target(config, "ui.statusline.primary_usage_window").as_deref(),
+                Some("after-hours")
+            );
+            for (path, expected) in [
+                ("ui.statusline.custom.left", &["mode", "agent", "task"][..]),
+                (
+                    "ui.statusline.custom.right",
+                    &["model", "context", "thread_cost"][..],
+                ),
+            ] {
+                let field = config
+                    .inspect_field(ConfigScope::User, path)
+                    .expect("inspect statusline list");
+                let ConfigFieldContents::Value {
+                    target: Some(ConfigValue::StringList(values)),
+                    ..
+                } = field.contents
+                else {
+                    panic!("expected statusline list target")
+                };
+                assert_eq!(
+                    values.iter().map(String::as_str).collect::<Vec<_>>(),
+                    expected
+                );
+            }
+        };
+        assert_values(&config);
+        drop(config);
+
+        let reopened = ConfigRuntime::open(paths, ConfigDocument::empty()).expect("reopen config");
+        assert_values(&reopened);
+        std::fs::remove_dir_all(root).expect("remove test config");
+    }
+
+    #[test]
+    fn terminal_edits_existing_model_pricing_and_usage_objects_and_reopens() {
+        let root = terminal_test_root("existing-config-objects");
+        let paths = ConfigPaths::new(root.join("user.toml"), root.join("project.toml"));
+        std::fs::create_dir_all(paths.user().parent().expect("Config fixture parent"))
+            .expect("create Config fixture directory");
+        std::fs::write(
+            paths.user(),
+            r#"schema_version = 1
+
+[providers.edge]
+template = "openai"
+credential = "synthetic-edge-credential-reference"
+
+[providers.edge.pricing]
+source = "manual"
+
+[model_presets.fast]
+provider = "edge"
+model = "fixture-model"
+dialect = "responses"
+
+[price_schedules.manual]
+version = "2026-08-11.1"
+currency = "USD"
+provider = "edge"
+model = "fixture-model"
+minimum_context_tokens = 0
+effective_from = "2026-08-11T00:00:00Z"
+source = "manual"
+source_ref = "synthetic-manual-rate-card"
+
+[price_schedules.manual.rates]
+input_micros_per_million = 1
+cached_input_micros_per_million = 2
+cache_write_micros_per_million = 3
+output_micros_per_million = 4
+reasoning_output_micros_per_million = 5
+
+[[stats.windows]]
+id = "workday"
+start = "09:00"
+end = "17:00"
+days = ["mon", "tue", "wed", "thu", "fri"]
+timezone = "local"
+"#,
+        )
+        .expect("write Config fixture");
+        let mut config =
+            ConfigRuntime::open(paths.clone(), ConfigDocument::empty()).expect("config runtime");
+
+        for (query, value) in [
+            ("/config model model", "fixture-model-v2"),
+            ("/config pricing currency", "EUR"),
+            ("/config stats-window timezone", "Asia/Hong_Kong"),
+        ] {
+            commit_existing_object_config_text(&mut config, query, value);
+        }
+
+        let assert_values = |config: &ConfigRuntime| {
+            assert_eq!(
+                config_string_target(config, "model_presets.fast.model").as_deref(),
+                Some("fixture-model-v2")
+            );
+            assert_eq!(
+                config_string_target(config, "price_schedules.manual.currency").as_deref(),
+                Some("EUR")
+            );
+            assert_eq!(
+                config_string_target(config, "stats.windows.workday.timezone").as_deref(),
+                Some("Asia/Hong_Kong")
+            );
+        };
+        assert_values(&config);
+        drop(config);
+
+        let reopened = ConfigRuntime::open(paths, ConfigDocument::empty()).expect("reopen config");
+        assert_values(&reopened);
+        std::fs::remove_dir_all(root).expect("remove test config");
+    }
+
+    #[test]
     fn terminal_loop_selects_provider_and_commits_url_from_real_key_events() {
         let root = terminal_test_root("provider-url-loop");
         std::fs::create_dir_all(&root).expect("create provider config directory");
@@ -2519,6 +2721,154 @@ mod tests {
             Some("https://new-gateway.example.com/v2")
         );
         assert!(!ledger.exists());
+        std::fs::remove_dir_all(root).expect("remove test config");
+    }
+
+    #[test]
+    fn terminal_loop_edits_all_non_secret_provider_fields_from_real_key_events() {
+        let root = terminal_test_root("provider-non-secret-fields-loop");
+        let ledger = root.join("runtime.ledger");
+        let paths = ConfigPaths::new(root.join("user.toml"), root.join("project.toml"));
+        write_terminal_provider_config(&paths);
+        let mut config =
+            ConfigRuntime::open(paths.clone(), ConfigDocument::empty()).expect("config runtime");
+        let view = build_terminal_view(&ledger, &config, "/").expect("terminal view");
+        let mut events: VecDeque<_> = "config provider url"
+            .chars()
+            .map(|character| {
+                Event::Key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
+            })
+            .collect();
+        events.extend([
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        ]);
+        for value in [
+            "http://127.0.0.1:43123/v1",
+            "/v2/responses",
+            "/v2/chat/completions",
+            "/v2/messages",
+            "/v2/models",
+            "[\"responses\",\"messages\"]",
+        ] {
+            events.extend(value.chars().map(|character| {
+                Event::Key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
+            }));
+            events.push_back(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)));
+        }
+        events.extend([
+            Event::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL)),
+        ]);
+
+        let output = run_terminal_loop(
+            Vec::new(),
+            FakeTerminalMode::default(),
+            &mut config,
+            &view,
+            80,
+            24,
+            move || Ok(events.pop_front().expect("bounded event sequence")),
+        )
+        .expect("terminal loop");
+
+        let assert_profile = |config: &ConfigRuntime| {
+            let profile = config
+                .provider_profile("edge")
+                .expect("resolve Provider Profile")
+                .expect("external Provider Profile");
+            assert_eq!(profile.base_url(), Some("http://127.0.0.1:43123/v1"));
+            assert_eq!(
+                profile.route(ProviderDialect::Responses),
+                Some("/v2/responses")
+            );
+            assert_eq!(
+                profile.route(ProviderDialect::ChatCompletions),
+                Some("/v2/chat/completions")
+            );
+            assert_eq!(
+                profile.route(ProviderDialect::Messages),
+                Some("/v2/messages")
+            );
+            assert_eq!(profile.models_route(), Some("/v2/models"));
+            assert_eq!(
+                profile.dialects().collect::<Vec<_>>(),
+                vec![ProviderDialect::Responses, ProviderDialect::Messages]
+            );
+            assert_eq!(
+                profile.pricing_source(),
+                Some(ProviderPricingSource::Manual)
+            );
+            assert!(profile.allow_insecure_loopback());
+            assert_eq!(
+                config_string_target(config, "providers.edge.catalog.mode").as_deref(),
+                Some("manual")
+            );
+        };
+        assert_profile(&config);
+        assert!(output.starts_with(ENTER_TERMINAL));
+        assert!(output.ends_with(LEAVE_TERMINAL));
+        drop(config);
+
+        let reopened = ConfigRuntime::open(paths, ConfigDocument::empty()).expect("reopen config");
+        assert_profile(&reopened);
+        assert!(!ledger.exists());
+        std::fs::remove_dir_all(root).expect("remove test config");
+    }
+
+    #[test]
+    fn terminal_provider_loopback_permission_rejects_remote_origin_and_recovers() {
+        let root = terminal_test_root("provider-loopback-policy-recovery");
+        let paths = ConfigPaths::new(root.join("user.toml"), root.join("project.toml"));
+        write_terminal_provider_config(&paths);
+        let mut config =
+            ConfigRuntime::open(paths, ConfigDocument::empty()).expect("config runtime");
+        let mut session = TerminalSession::new("/config provider insecure-loopback", 80, 24)
+            .expect("terminal session");
+
+        session
+            .handle(TerminalInputEvent::Enter, Some(&mut config))
+            .expect("open Provider selector");
+        session
+            .handle(TerminalInputEvent::Enter, Some(&mut config))
+            .expect("open loopback permission");
+        session
+            .handle(TerminalInputEvent::Up, Some(&mut config))
+            .expect("enable insecure loopback");
+        session
+            .handle(TerminalInputEvent::Enter, Some(&mut config))
+            .expect("invalid preview remains live");
+        assert_eq!(
+            session.notice.as_deref(),
+            Some("Config validation failed at providers.edge.allow_insecure_loopback")
+        );
+        assert!(session.controller.has_unsaved_config_draft());
+
+        session
+            .handle(TerminalInputEvent::Up, Some(&mut config))
+            .expect("disable insecure loopback");
+        session
+            .handle(TerminalInputEvent::Enter, Some(&mut config))
+            .expect("validate repaired policy");
+        assert_eq!(session.notice.as_deref(), Some("Config draft validated"));
+        session
+            .handle(TerminalInputEvent::Character('c'), Some(&mut config))
+            .expect("commit repaired policy");
+        assert!(
+            !config
+                .provider_profile("edge")
+                .expect("resolve Provider Profile")
+                .expect("external Provider Profile")
+                .allow_insecure_loopback()
+        );
         std::fs::remove_dir_all(root).expect("remove test config");
     }
 
@@ -2626,8 +2976,29 @@ mod tests {
         events.extend([
             Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
             Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+        ]);
+        events.extend("2048".chars().map(|character| {
+            Event::Key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
+        }));
+        events.push_back(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)));
+        events.extend("full".chars().map(|character| {
+            Event::Key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
+        }));
+        events.extend([
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Char('['), KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Char(']'), KeyModifiers::NONE)),
             Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
-            Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
             Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL)),
         ]);
 
@@ -2648,6 +3019,12 @@ mod tests {
         assert_eq!(preset.provider, "edge");
         assert_eq!(preset.model, "fixture-model");
         assert_eq!(preset.dialect, ProviderDialect::Responses);
+        assert_eq!(preset.reasoning_effort, Some(ReasoningEffort::Low));
+        assert_eq!(preset.service_tier, Some(ServiceTier::Fast));
+        assert_eq!(preset.max_output_tokens, Some(2_048));
+        assert_eq!(preset.context_mode.as_deref(), Some("full"));
+        assert!(preset.favorite);
+        assert!(preset.fallback.is_empty());
         assert!(output.starts_with(ENTER_TERMINAL));
         assert!(output.ends_with(LEAVE_TERMINAL));
         drop(config);
@@ -2659,6 +3036,12 @@ mod tests {
         assert_eq!(preset.provider, "edge");
         assert_eq!(preset.model, "fixture-model");
         assert_eq!(preset.dialect, ProviderDialect::Responses);
+        assert_eq!(preset.reasoning_effort, Some(ReasoningEffort::Low));
+        assert_eq!(preset.service_tier, Some(ServiceTier::Fast));
+        assert_eq!(preset.max_output_tokens, Some(2_048));
+        assert_eq!(preset.context_mode.as_deref(), Some("full"));
+        assert!(preset.favorite);
+        assert!(preset.fallback.is_empty());
         assert!(!ledger.exists());
         std::fs::remove_dir_all(root).expect("remove test config");
     }
@@ -4012,6 +4395,70 @@ mod tests {
                 .handle(TerminalInputEvent::Character(character), Some(config))
                 .expect("type terminal Config value");
         }
+    }
+
+    fn commit_terminal_config_text(config: &mut ConfigRuntime, query: &str, value: &str) {
+        let mut session = TerminalSession::new(query, 80, 24).expect("terminal session");
+        session
+            .handle(TerminalInputEvent::Enter, Some(config))
+            .expect("open Config text editor");
+        assert_eq!(session.input_context(), TerminalInputContext::ConfigText);
+        type_terminal_config_text(&mut session, config, value);
+        assert_eq!(
+            session
+                .config_text
+                .as_ref()
+                .map(|input| input.value.as_str()),
+            Some(value),
+            "failed to buffer {query}: {:?}",
+            session.notice
+        );
+        assert!(
+            session.controller.has_unsaved_config_draft()
+                || session
+                    .config_text
+                    .as_ref()
+                    .is_some_and(|input| input.pending),
+            "failed to stage {query}: {:?}",
+            session.notice
+        );
+        session
+            .handle(TerminalInputEvent::Enter, Some(config))
+            .expect("preview Config text value");
+        assert_eq!(
+            session.notice.as_deref(),
+            Some("Config draft validated"),
+            "failed to preview {query}"
+        );
+        session
+            .handle(TerminalInputEvent::Enter, Some(config))
+            .expect("commit Config text value");
+        assert!(session.controller.is_slash_panel());
+    }
+
+    fn commit_existing_object_config_text(config: &mut ConfigRuntime, query: &str, value: &str) {
+        let mut session = TerminalSession::new(query, 80, 24).expect("terminal session");
+        session
+            .handle(TerminalInputEvent::Enter, Some(config))
+            .expect("open Config Object selector");
+        assert_eq!(session.input_context(), TerminalInputContext::ConfigObject);
+        session
+            .handle(TerminalInputEvent::Enter, Some(config))
+            .expect("open selected Config Object field");
+        assert_eq!(session.input_context(), TerminalInputContext::ConfigText);
+        type_terminal_config_text(&mut session, config, value);
+        session
+            .handle(TerminalInputEvent::Enter, Some(config))
+            .expect("preview Config Object field");
+        assert_eq!(
+            session.notice.as_deref(),
+            Some("Config draft validated"),
+            "failed to preview {query}"
+        );
+        session
+            .handle(TerminalInputEvent::Enter, Some(config))
+            .expect("commit Config Object field");
+        assert!(session.controller.is_slash_panel());
     }
 
     fn write_terminal_provider_config(paths: &ConfigPaths) {

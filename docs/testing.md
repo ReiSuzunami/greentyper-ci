@@ -350,23 +350,23 @@ object, while a competing revision keeps the confirmation live, blocks dirty
 quit, and requires explicit discard. A short-viewport regression keeps the
 selected object visible before destructive activation. Core Config tests
 continue to freeze target-layer and dangling-reference deletion rules.
-A real-key loop now carries `/config model add` through its bounded ID prompt,
-required Provider/model text fields, dialect choice, preview, commit, and Config
-reopen. A recovery test leaves the Draft live when model is missing, repairs it,
-then proves a competing revision cannot be overwritten, dirty quit is blocked,
-and explicit discard preserves the winner. Schema tests pin the 64-byte Provider
-ID input, 512-byte model input, and the three parseable dialect choices. These
-tests do not prove interactive `/model` selection, optional Preset field editors,
-starter acceptance, or live catalog refresh.
+A real-key loop now carries `/config model add` through its bounded ID prompt and
+all nine fields, including reasoning effort, service tier, maximum output tokens,
+context mode, favorite, and fallback list. It previews, commits, reopens, and
+checks every optional value. A recovery test leaves the Draft live when model is
+missing, repairs it, then proves a competing revision cannot be overwritten,
+dirty quit is blocked, and explicit discard preserves the winner. Schema tests
+pin every Model Preset interaction and parseable choice. These tests do not prove
+interactive `/model` application, starter acceptance, or live catalog refresh.
 A real-key loop now carries `/config stats-window add` through its bounded ID
 prompt and start/end/days/time-zone fields, previews, commits, and reopens the
 resolved window. Focused tests prove all four schema fields expose 512-byte text
 interactions, TOML weekday arrays remain visibly buffered and dirty while
 incomplete, invalid arrays cannot move focus, and dirty quit requires explicit
 discard. Further tests repair an invalid equal-time window, then prove a stale
-revision cannot overwrite the winner and leaves the Draft live. These tests do
-not prove live usage refresh, interactive `/stats`, or editing an existing
-Usage Window through every field route.
+revision cannot overwrite the winner and leaves the Draft live. Existing-object
+tests carry a Usage Window field command through the section selector, commit,
+and reopen. These tests do not prove live usage refresh or interactive `/stats`.
 A real-key loop now carries `/config pricing add` through its bounded ID prompt,
 all 17 schema fields, manual provenance choice, preview, commit, and Config
 reopen. Schema tests pin the 64-byte Provider Profile input, 512-byte text and
@@ -376,8 +376,14 @@ repairs it, then proves a stale revision cannot overwrite the winner, dirty quit
 is blocked, explicit discard preserves the winner, and Config reopen contains no
 losing schedule. These tests do not prove live pricing-book refresh,
 provider-reported charge ingestion, or rich terminal cost presentation.
-They do not constitute real ConPTY, panic-abort cleanup, secret-store UI,
-remaining mutable editors, approval, live-refresh, or resource evidence.
+Additional Config tests assert every schema field has a rendered interaction,
+edit top-level Provider/model/output-limit values, edit every statusline field,
+and route existing Model Preset, Price Schedule, and Usage Window fields through
+their object selectors before commit and reopen. A real-key Provider test edits
+all non-secret Profile fields and reopens the normalized snapshot; a recovery
+test proves insecure-loopback permission is rejected for a remote HTTPS origin
+without consuming the Draft. They do not constitute real ConPTY, panic-abort
+cleanup, secret-store UI, approval, live-refresh, or resource evidence.
 Context Pressure tests freeze exact 65%/90% threshold transitions, estimated and
 missing-fact propagation, invalid policy/limit and arithmetic failure, and the
 no-side-effect hard admission gate. Product presentation tests assert estimated
@@ -401,9 +407,8 @@ read-only `config catalog` integration test proves the snapshot contains no
 local path or credential reference.
 
 Remaining terminal-backend evidence covers real terminal/ConPTY resize and input,
-the remaining rendered mutable Config dialogs, interactive model selector states,
-approval/blocker actions, panic-abort cleanup, final host cell geometry, and
-input-ready/idle resource budgets.
+interactive model selector states, approval/blocker actions, panic-abort cleanup,
+final host cell geometry, and input-ready/idle resource budgets.
 
 Tests assert that `/config pro url` resolves through Provider selection to the
 focused rendered editor without registering a flat root command. Every Config

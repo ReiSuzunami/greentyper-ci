@@ -50,13 +50,14 @@ Object lifecycle/Provider-wizard controller, deterministic viewport-row layout, 
 ProductDriver that composes the Kernel-owned Team, Tool, Provider, approval, and
 delivery seams. Its first product terminal tracer privately owns a
 Direct VT cell-diff renderer, blocking Crossterm event adapter, alternate-screen
-and raw-mode lifecycle, the public `tui` command, metadata-driven user-scope
-statusline-preset and statusline-expansion choice editors, and one existing-
-Provider base-URL text editor over the existing Config Runtime. It also owns a
-bounded Provider Profile ID prompt, release-template/opaque-reference creation
-flow, status-only existing-reference editor, and an F5 control that invokes the
-bounded Provider candidate connection tester. A second bounded object-name flow
-creates minimal Model Presets from Provider, model, and dialect fields.
+and raw-mode lifecycle, the public `tui` command, and metadata-driven rendered
+interactions for every user-scope Config Schema field over the existing Config
+Runtime. Top-level and statusline fields open directly; existing object fields
+use kind-filtered selection. It also owns a bounded Provider Profile ID prompt,
+complete non-secret Profile field flow, status-only opaque-reference editor, and
+an F5 control that invokes the bounded Provider candidate connection tester. A
+second bounded object-name flow creates complete Model Presets across required
+and optional fields.
 The third bounded object-name flow creates named Usage Windows from start, end,
 weekday-list, and time-zone fields while keeping partial structured input local
 until it can be parsed atomically.
@@ -65,9 +66,8 @@ keeping partial non-negative-integer input local until it can be parsed
 atomically.
 Section-filtered typed remove
 routes render exact Config Object deletion confirmations; secret storage stays
-behind the credential adapter. Remaining
-mutable terminal editors, approval interaction, live refresh, the App Server, and an audited Windows
-ConPTY wrapper remain pending. Platform wrappers for process,
+behind the credential adapter. Approval interaction, live refresh, the App
+Server, and an audited Windows ConPTY wrapper remain pending. Platform wrappers for process,
 credential, transport, and eventually terminal facilities remain private to
 this package unless a second real caller proves a smaller shared package is
 needed.

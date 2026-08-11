@@ -71,9 +71,9 @@ field-level provenance. Effective Profiles inherit those defaults unless the
 user overrides a field. A custom origin under a template with a bundled,
 versioned release rate card defaults to `template_mirror`; other custom origins
 still require an explicit pricing decision.
-Default/constraint/normalization/migration metadata in Config Schema, remaining
-rendered TUI and App Server surfaces, live discovery, and starter-preset workflows
-remain later work. The product now provides origin-bound credential bind, replace,
+Default/constraint/normalization/migration metadata in Config Schema, the App
+Server Config surface, live discovery, and starter-preset workflows remain later
+work. The product now provides origin-bound credential bind, replace,
 test, and forget operations backed by Windows Credential Manager; non-Windows
 access fails closed until another platform backend is implemented.
 
@@ -101,34 +101,40 @@ a terminal-neutral hierarchical Command Path registry generated from Config
 Schema metadata, provenance-aware field views, typed nested object lifecycle
 actions, and a reusable Config Runtime editor session for focused multi-field
 draft validation, atomic create/edit/delete, and commit. The Direct VT product
-TUI now connects three focused non-secret editors, Provider Profile creation,
-minimal Model Preset creation, Usage Window creation, Price Schedule creation,
-and typed Config Object deletion confirmations to that real session in the user
-scope.
+TUI now exposes one rendered interaction for every Config Schema field in the
+user scope, plus Provider Profile, Model Preset, Usage Window, and Price Schedule
+creation and typed Config Object deletion confirmations.
 `/config statusline preset` stages a bounded enum choice with Up/Down, previews
 with Enter, commits the currently previewed choice with `c`, and explicitly
 discards with `d`. `/config statusline expansion` uses the same interaction,
 selected from the schema editor metadata, for `auto`, `compact`, and `expanded`.
-`/config provider url` carries the selected command into a
-Provider-filtered Config Center, opens one existing Profile, and edits its base
-URL through a 512-byte text input. Its first Enter previews and its second Enter
-commits; Delete resets the field, and dirty Escape requires discard
-confirmation.
+Top-level `/config provider selected`, `/config model selected`, and
+`/config runtime max-output` routes open bounded text editors directly. The
+remaining statusline routes edit the optional Usage Window reference and custom
+left/right TOML segment lists. Cross-reference and output-limit validation use
+the same dry-run and CAS path.
+Object field commands carry the selected command into a kind-filtered Config
+Center, open one existing object, and edit the exact field. Text fields preview
+with Enter and commit with a second Enter; Delete resets the field, and dirty
+Escape requires discard confirmation.
 `/config provider credential` uses a status-only text interaction for an opaque
 secure-store reference. It starts empty even when a reference is already bound,
 never renders or reads back the reference, and leaves secret bind/replace to the
 separate credential command. `/config provider add` prompts for a bounded
 lowercase Profile ID, opens a release-template choice, and uses Tab/Shift-Tab to
-move among the rendered template, credential-reference, and base-URL fields.
-The same dry-run and CAS rules apply before the Profile is committed.
+move across template, credential reference, base URL, routes, dialects, catalog
+mode, pricing source, and insecure-loopback permission. Routes and list values
+use bounded input, enum and boolean values use schema-owned choices, and the core
+still rejects invalid origins, routes, dialects, pricing provenance, and
+loopback permission. The same dry-run and CAS rules apply before commit.
 `/config model add` prompts for a bounded Preset ID, then uses the same
-Tab/Shift-Tab navigation for its three required fields. The Provider Profile ID
-is a 64-byte text input, the model ID is a 512-byte text input, and dialect is a
-schema-owned choice of `responses`, `chat_completions`, or `messages`. The
-complete Draft must pass validation before `c` commits from the dialect choice;
-missing fields and stale revisions stay recoverable. The form manually defines a
-Preset. It does not accept release starters, apply it to the current Agent, or
-expose optional policy fields yet.
+Tab/Shift-Tab navigation across all nine fields. Provider, model, and dialect
+are required. Reasoning effort, service tier, maximum output tokens, context
+mode, favorite, and fallback list are optional and editable. Choices remain
+schema-owned; numeric and TOML-list values stay in the local dirty buffer until
+they parse. Missing fields, unknown fallback references, cycles, invalid limits,
+and stale revisions stay recoverable. The form manually defines a Preset. It
+does not accept release starters or apply the Preset to the current Agent.
 `/config stats-window add` prompts for a bounded Usage Window ID, then uses
 Tab/Shift-Tab across start, end, days, and time-zone fields. All four raw inputs
 are bounded to 512 bytes. Days uses a TOML array of weekday strings; partial
@@ -170,10 +176,10 @@ Config Runtime. The running TUI still uses its frozen startup snapshot, so live
 statusline reconstruction is not claimed by this slice. Object deletion remains
 target-layer explicit and fails when the resulting effective configuration has
 dangling references. The snapshot-based `tui` tracer renders controller screens
-reachable from the Slash Panel, including the top-level Config Center; only the
-workflows above mutate a Draft. It does not yet ship remaining schema-driven
-terminal editor dialogs, secret-entry/bind UI, or the App Server surface
-described below. The current
+reachable from the Slash Panel, including the top-level Config Center. Every
+schema field has a rendered interaction, but commits do not rebuild the frozen
+startup projection. Secret-entry/bind UI and the App Server surface described
+below remain pending. The current
 terminal-neutral Provider Profile wizard resolves release template defaults into
 user-configured Profile Drafts and supports the explicit bounded connection and
 model-list observation described below; it does not merge discovered records,
@@ -439,10 +445,10 @@ fact, reserve, or accuracy marker stays unknown. Its compact row now applies
 a deterministic priority and Unicode-safe truncation at 40, 80, and 160 columns,
 and adds a detail row from 120 columns. This is a terminal-neutral layout
 contract. The first product `tui` tracer now renders it through a Direct VT diff,
-reacts to blocking key and resize events, and can persist the user-scope preset
-through the narrow dialog described above. It does not rebuild the frozen
-underlying snapshot after that commit, make other statusline fields mutable, or
-establish ConPTY/resource evidence. The target has four
+reacts to blocking key and resize events, and can persist every user-scope
+statusline field through the schema-driven dialogs described above. It does not
+rebuild the frozen underlying snapshot after a commit or establish
+ConPTY/resource evidence. The target has four
 presets:
 
 - `minimal`: model, Context Pressure, blocker/approval

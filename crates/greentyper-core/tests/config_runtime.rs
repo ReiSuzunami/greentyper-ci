@@ -269,6 +269,63 @@ reasoning_output_micros_per_million = 3000000
 fn schema_and_parser_are_versioned_typed_and_secret_safe() {
     let schema = config_schema();
     assert!(schema.len() >= 30);
+    assert!(
+        schema
+            .iter()
+            .all(|entry| entry.interaction() != ConfigFieldInteraction::ReadOnly),
+        "every Config Schema field must expose a rendered interaction"
+    );
+    for (path_pattern, value_kind, interaction) in [
+        (
+            "provider.profile",
+            ConfigValueKind::String,
+            ConfigFieldInteraction::Text {
+                max_bytes: MAX_CONFIG_ID_BYTES,
+            },
+        ),
+        (
+            "provider.model",
+            ConfigValueKind::String,
+            ConfigFieldInteraction::Text {
+                max_bytes: MAX_CONFIG_STRING_BYTES,
+            },
+        ),
+        (
+            "runtime.max_output_bytes",
+            ConfigValueKind::PositiveInteger,
+            ConfigFieldInteraction::Text {
+                max_bytes: MAX_CONFIG_STRING_BYTES,
+            },
+        ),
+        (
+            "ui.statusline.primary_usage_window",
+            ConfigValueKind::String,
+            ConfigFieldInteraction::Text {
+                max_bytes: MAX_CONFIG_ID_BYTES,
+            },
+        ),
+        (
+            "ui.statusline.custom.left",
+            ConfigValueKind::StringList,
+            ConfigFieldInteraction::Text {
+                max_bytes: MAX_CONFIG_STRING_BYTES,
+            },
+        ),
+        (
+            "ui.statusline.custom.right",
+            ConfigValueKind::StringList,
+            ConfigFieldInteraction::Text {
+                max_bytes: MAX_CONFIG_STRING_BYTES,
+            },
+        ),
+    ] {
+        let field = schema
+            .iter()
+            .find(|entry| entry.path_pattern == path_pattern)
+            .expect("top-level Config field schema");
+        assert_eq!(field.value_kind, value_kind);
+        assert_eq!(field.interaction(), interaction);
+    }
     let credential = schema
         .iter()
         .find(|entry| entry.path_pattern == "providers.<id>.credential")
@@ -344,6 +401,104 @@ fn schema_and_parser_are_versioned_typed_and_secret_safe() {
             max_bytes: MAX_CONFIG_STRING_BYTES,
         }
     );
+    for (path_pattern, value_kind, interaction) in [
+        (
+            "providers.<id>.routes.responses",
+            ConfigValueKind::String,
+            ConfigFieldInteraction::Text {
+                max_bytes: MAX_CONFIG_STRING_BYTES,
+            },
+        ),
+        (
+            "providers.<id>.routes.chat_completions",
+            ConfigValueKind::String,
+            ConfigFieldInteraction::Text {
+                max_bytes: MAX_CONFIG_STRING_BYTES,
+            },
+        ),
+        (
+            "providers.<id>.routes.messages",
+            ConfigValueKind::String,
+            ConfigFieldInteraction::Text {
+                max_bytes: MAX_CONFIG_STRING_BYTES,
+            },
+        ),
+        (
+            "providers.<id>.routes.models",
+            ConfigValueKind::String,
+            ConfigFieldInteraction::Text {
+                max_bytes: MAX_CONFIG_STRING_BYTES,
+            },
+        ),
+        (
+            "providers.<id>.dialects",
+            ConfigValueKind::StringList,
+            ConfigFieldInteraction::Text {
+                max_bytes: MAX_CONFIG_STRING_BYTES,
+            },
+        ),
+        (
+            "providers.<id>.catalog.mode",
+            ConfigValueKind::String,
+            ConfigFieldInteraction::Choice {
+                choices: &["template", "discovery", "template_and_discovery", "manual"],
+            },
+        ),
+        (
+            "providers.<id>.pricing.source",
+            ConfigValueKind::String,
+            ConfigFieldInteraction::Choice {
+                choices: &[
+                    "unknown",
+                    "template",
+                    "template_mirror",
+                    "manual",
+                    "provider_reported",
+                ],
+            },
+        ),
+        (
+            "providers.<id>.allow_insecure_loopback",
+            ConfigValueKind::Boolean,
+            ConfigFieldInteraction::Choice {
+                choices: &["false", "true"],
+            },
+        ),
+    ] {
+        let field = schema
+            .iter()
+            .find(|entry| entry.path_pattern == path_pattern)
+            .expect("Provider Profile field schema");
+        assert_eq!(field.value_kind, value_kind);
+        assert_eq!(field.interaction(), interaction);
+    }
+    for (path, choices) in [
+        (
+            "providers.edge.catalog.mode",
+            &["template", "discovery", "template_and_discovery", "manual"][..],
+        ),
+        (
+            "providers.edge.pricing.source",
+            &[
+                "unknown",
+                "template",
+                "template_mirror",
+                "manual",
+                "provider_reported",
+            ][..],
+        ),
+        (
+            "providers.edge.allow_insecure_loopback",
+            &["false", "true"][..],
+        ),
+    ] {
+        for choice in choices {
+            assert!(
+                parse_config_value(path, choice).is_ok(),
+                "Provider Profile interaction offered an invalid choice: {path}={choice}"
+            );
+        }
+    }
     let model_provider = schema
         .iter()
         .find(|entry| entry.path_pattern == "model_presets.<id>.provider")
@@ -379,6 +534,75 @@ fn schema_and_parser_are_versioned_typed_and_secret_safe() {
             parse_config_value("model_presets.fast.dialect", choice).is_ok(),
             "Model Preset dialect interaction offered an invalid choice: {choice}"
         );
+    }
+    for (path_pattern, value_kind, interaction) in [
+        (
+            "model_presets.<id>.reasoning_effort",
+            ConfigValueKind::String,
+            ConfigFieldInteraction::Choice {
+                choices: &["none", "minimal", "low", "medium", "high", "xhigh", "max"],
+            },
+        ),
+        (
+            "model_presets.<id>.service_tier",
+            ConfigValueKind::String,
+            ConfigFieldInteraction::Choice {
+                choices: &["auto", "default", "flex", "scale", "priority", "fast"],
+            },
+        ),
+        (
+            "model_presets.<id>.max_output_tokens",
+            ConfigValueKind::PositiveInteger,
+            ConfigFieldInteraction::Text {
+                max_bytes: MAX_CONFIG_STRING_BYTES,
+            },
+        ),
+        (
+            "model_presets.<id>.context_mode",
+            ConfigValueKind::String,
+            ConfigFieldInteraction::Text {
+                max_bytes: MAX_CONFIG_STRING_BYTES,
+            },
+        ),
+        (
+            "model_presets.<id>.favorite",
+            ConfigValueKind::Boolean,
+            ConfigFieldInteraction::Choice {
+                choices: &["false", "true"],
+            },
+        ),
+        (
+            "model_presets.<id>.fallback",
+            ConfigValueKind::StringList,
+            ConfigFieldInteraction::Text {
+                max_bytes: MAX_CONFIG_STRING_BYTES,
+            },
+        ),
+    ] {
+        let field = schema
+            .iter()
+            .find(|entry| entry.path_pattern == path_pattern)
+            .expect("optional Model Preset field schema");
+        assert_eq!(field.value_kind, value_kind);
+        assert_eq!(field.interaction(), interaction);
+    }
+    for (path, choices) in [
+        (
+            "model_presets.fast.reasoning_effort",
+            &["none", "minimal", "low", "medium", "high", "xhigh", "max"][..],
+        ),
+        (
+            "model_presets.fast.service_tier",
+            &["auto", "default", "flex", "scale", "priority", "fast"][..],
+        ),
+        ("model_presets.fast.favorite", &["false", "true"][..]),
+    ] {
+        for choice in choices {
+            assert!(
+                parse_config_value(path, choice).is_ok(),
+                "optional Model Preset interaction offered an invalid choice: {path}={choice}"
+            );
+        }
     }
     for (path_pattern, value_kind) in [
         ("stats.windows.<id>.start", ConfigValueKind::String),

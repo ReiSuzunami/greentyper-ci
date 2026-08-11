@@ -323,24 +323,21 @@ Presentation Controller through a Unicode-aware Direct VT cell diff, maps
 blocking Crossterm key and resize events, suppresses model-equality redraws,
 clears stale cells, bounds the viewport and Slash query before allocation, and
 restores raw mode, cursor visibility, and the alternate screen on normal and
-error returns. Windows startup explicitly requires VT output support. Its first
-mutable route is the user-scope `/config statusline preset` choice dialog. A
-second metadata-driven choice route, `/config statusline expansion`, exposes
-`auto`, `compact`, and `expanded`. A third route, `/config provider url`, carries
-the pending field command into a Provider-filtered Config Center, selects an
-existing Profile, and edits its base URL through a 512-byte text input. All
-three require a successful real dry-run
-preview before commit, persist through the Config Runtime CAS/backup path,
-explicitly discard, block dirty escape/quit, preserve the editor on validation
-or revision conflict, and render bounded error notices. Tests prove no-change
-commit creates no file and committed state survives reopen. The rest of the TUI
-is snapshot-based. A fourth workflow, `/config provider add`, now prompts for a
-bounded Profile ID, offers the release Provider templates, and moves among the
-rendered template, opaque credential-reference, and base-URL fields with
-Tab/Shift-Tab. It previews and CAS-commits through the same Config Draft,
+error returns. Windows startup explicitly requires VT output support. Every
+Config Schema field now has a rendered interaction in the user scope. Top-level
+and statusline fields open directly; object field routes carry their pending
+query through a kind-filtered Config Center. Choice, bounded text, integer,
+boolean, credential-reference, and TOML-list interactions all require a real
+dry-run preview before commit, persist through the Config Runtime CAS/backup
+path, explicitly discard, block dirty escape/quit, preserve the editor on
+validation or revision conflict, and render bounded error notices. Tests prove
+no-change commit creates no file, existing objects can be edited through their
+field routes, and committed state survives reopen. The TUI's non-Config
+projection remains snapshot-based. `/config provider add` prompts for a bounded
+Profile ID and traverses template, opaque credential reference, base URL,
+routes, dialects, catalog mode, pricing source, and loopback permission. It
 reopens the created Profile, never renders a credential reference, and retains
-invalid-ID or stale-revision Drafts for correction or explicit discard. Existing
-Profiles can replace the opaque reference through the same status-only field.
+invalid-ID, policy, or stale-revision Drafts for correction or explicit discard.
 F5 now invokes the existing bounded Provider connection and model-list tester
 against the current revision-bound candidate and renders its ephemeral status.
 The action does not commit Config; staged edits invalidate the result, and a
@@ -354,12 +351,13 @@ confirmation. Enter dry-runs and CAS-commits the target-layer deletion; Escape
 cancels it. Reference-validation and stale-revision failures keep the
 confirmation live, and a real-key test reopens Config to prove persistence.
 `/config model add` now supplies the second rendered object-name workflow. It
-collects a bounded Preset ID, existing Provider Profile ID, bounded model ID,
-and schema-owned dialect choice in one revision-bound Draft. Tab/Shift-Tab move
-between the three required fields; preview, CAS commit, invalid-field recovery,
-stale-revision retention, explicit discard, and reopen persistence use the same
-terminal-neutral editor path. It does not implement optional Preset policy fields,
-interactive `/model` selection, starter acceptance, or live catalog data.
+collects a bounded Preset ID and traverses all nine fields in one revision-bound
+Draft. Provider, model, and dialect remain required; reasoning effort, service
+tier, maximum output tokens, context mode, favorite, and fallback list are
+optional. Preview, CAS commit, cross-reference/cycle validation, stale-revision
+retention, explicit discard, and reopen persistence use the same terminal-neutral
+editor path. It does not implement interactive `/model` application, starter
+acceptance, or live catalog data.
 `/config stats-window add` now supplies a third rendered object-name workflow.
 It collects a bounded ID plus start, end, weekday-list, and IANA-time-zone text
 in one schema-driven Draft. Structured weekday input is visibly buffered until
@@ -379,9 +377,9 @@ explicit discard without overwriting the winner. This slice does not rebuild
 the frozen pricing book, ingest provider-reported charges, or add rich cost
 presentation.
 
-This does not complete Phase 3. Audited Windows ConPTY behavior, remaining
-terminal-backed schema editing and approval interaction, live snapshot refresh,
-rendered secret binding, custom-template/starter-preset workflow, live catalog
+This does not complete Phase 3. Audited Windows ConPTY behavior, approval
+interaction, live snapshot refresh, rendered secret binding,
+custom-template/starter-preset workflow, live catalog
 discovery and Recent
 evidence, automatic Context View/token-source
 projection, provider-reported

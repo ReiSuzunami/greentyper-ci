@@ -333,17 +333,17 @@ charges still require a future dedicated authority path.
   `local.echo` CLI. The current product driver already delivers the persisted
   operation receipt before acknowledgement and consumes only the complete
   Kernel-rebound Session bundle; it exposes no Agent-ID-to-session conversion.
-  The Direct VT tracer carries no approval authority; its mutable surface is
-  limited to the user-scope statusline-preset, statusline-expansion, and
-  existing-Provider base-URL/opaque-credential-reference Config Drafts plus the
-  bounded Provider Profile creation workflow and typed target-layer Config
-  Object deletion confirmations described below. F5 can run the existing
+  The Direct VT tracer carries no approval authority; its Config surface now
+  gives every schema field a rendered user-scope interaction, supports all four
+  Config Object creation flows, and renders typed target-layer deletion
+  confirmations. Credential fields expose only an opaque reference and never
+  read it back. F5 can run the existing
   bounded connection/model-list tester against that revision-bound candidate
   and render its ephemeral status. It never reads back a credential reference,
   commits through that action, or mutates a secret store.
-  `/config model add` can also commit a manually defined minimal Model Preset
-  through bounded Provider/model inputs and a schema-owned dialect choice. It
-  does not apply that Preset to a running Agent or grant Provider authority.
+  `/config model add` can commit all required and optional Model Preset fields,
+  including explicit fallback references. It does not apply that Preset to a
+  running Agent or grant Provider authority.
   `/config stats-window add` can commit one named Usage Window from bounded
   start, end, weekday-list, and IANA-time-zone inputs. Structured weekday text
   stays in a visible dirty buffer until it parses; preview, CAS conflict,
@@ -355,7 +355,7 @@ charges still require a future dedicated authority path.
   contract. The action does not rebuild the frozen Price Schedule book or grant
   provider-reported pricing authority.
 - Complete Config Schema default/constraint/normalization/migration metadata,
-  remaining mutable rendered TUI/App Server editors, live catalog discovery, and the rendered
+  the App Server Config surface, live catalog discovery, and the rendered
   template-picker/starter-preset workflow. Release Provider Template defaults
   and seed catalog facts are present. The
   terminal-neutral schema route, field view, revision-bound editor session,
@@ -369,10 +369,8 @@ charges still require a future dedicated authority path.
   pinned Usage Windows, revision-bound summary/page `stats` projections, and
   terminal-neutral width-degradation and Context Pressure projection contracts
   are present. The first Direct VT tracer renders those frozen rows and can
-  persist the statusline-preset, statusline-expansion, and existing-Provider
-  base-URL/credential-reference fields plus a release-template Provider Profile,
-  can create a minimal required-field Model Preset, a named Usage Window, and a
-  manual Price Schedule,
+  persist every user-scope Config Schema field, can create a complete Provider
+  Profile or Model Preset, a named Usage Window, and a manual Price Schedule,
   and can confirm typed
   target-layer Config Object deletion, but it does not
   rebuild the frozen row projection in-process.

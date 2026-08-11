@@ -118,6 +118,37 @@ const PROVIDER_DIALECT_CHOICES: &[&str] = &[
     ProviderDialect::ChatCompletions.as_str(),
     ProviderDialect::Messages.as_str(),
 ];
+const PROVIDER_CATALOG_MODE_CHOICES: &[&str] = &[
+    ProviderCatalogMode::Template.as_str(),
+    ProviderCatalogMode::Discovery.as_str(),
+    ProviderCatalogMode::TemplateAndDiscovery.as_str(),
+    ProviderCatalogMode::Manual.as_str(),
+];
+const PROVIDER_PRICING_SOURCE_CHOICES: &[&str] = &[
+    ProviderPricingSource::Unknown.as_str(),
+    ProviderPricingSource::Template.as_str(),
+    ProviderPricingSource::TemplateMirror.as_str(),
+    ProviderPricingSource::Manual.as_str(),
+    ProviderPricingSource::ProviderReported.as_str(),
+];
+const REASONING_EFFORT_CHOICES: &[&str] = &[
+    ReasoningEffort::None.as_str(),
+    ReasoningEffort::Minimal.as_str(),
+    ReasoningEffort::Low.as_str(),
+    ReasoningEffort::Medium.as_str(),
+    ReasoningEffort::High.as_str(),
+    ReasoningEffort::XHigh.as_str(),
+    ReasoningEffort::Max.as_str(),
+];
+const SERVICE_TIER_CHOICES: &[&str] = &[
+    ServiceTier::Auto.as_str(),
+    ServiceTier::Default.as_str(),
+    ServiceTier::Flex.as_str(),
+    ServiceTier::Scale.as_str(),
+    ServiceTier::Priority.as_str(),
+    ServiceTier::Fast.as_str(),
+];
+const BOOLEAN_CHOICES: &[&str] = &["false", "true"];
 const STATUSLINE_PRESET_CHOICES: &[&str] = &["minimal", "balanced", "diagnostic", "custom"];
 const STATUSLINE_EXPANSION_CHOICES: &[&str] = &["auto", "compact", "expanded"];
 const PRICE_SCHEDULE_SOURCE_CHOICES: &[&str] = &[PriceScheduleSource::Manual.as_str()];
@@ -598,6 +629,21 @@ fn config_field_interaction(descriptor: &ConfigSchemaEntry) -> ConfigFieldIntera
         descriptor.credential_reference,
         descriptor.editor,
     ) {
+        ("provider.profile", ConfigValueKind::String, false, "provider_selector") => {
+            ConfigFieldInteraction::Text {
+                max_bytes: MAX_CONFIG_ID_BYTES,
+            }
+        }
+        ("provider.model", ConfigValueKind::String, false, "model_selector") => {
+            ConfigFieldInteraction::Text {
+                max_bytes: MAX_CONFIG_STRING_BYTES,
+            }
+        }
+        ("runtime.max_output_bytes", ConfigValueKind::PositiveInteger, false, "integer") => {
+            ConfigFieldInteraction::Text {
+                max_bytes: MAX_CONFIG_STRING_BYTES,
+            }
+        }
         ("providers.<id>.template", ConfigValueKind::String, false, "provider_template") => {
             ConfigFieldInteraction::Choice {
                 choices: PROVIDER_TEMPLATE_CHOICES,
@@ -618,9 +664,54 @@ fn config_field_interaction(descriptor: &ConfigSchemaEntry) -> ConfigFieldIntera
                 choices: STATUSLINE_EXPANSION_CHOICES,
             }
         }
+        (
+            "ui.statusline.primary_usage_window",
+            ConfigValueKind::String,
+            false,
+            "usage_window_selector",
+        ) => ConfigFieldInteraction::Text {
+            max_bytes: MAX_CONFIG_ID_BYTES,
+        },
+        (
+            "ui.statusline.custom.left" | "ui.statusline.custom.right",
+            ConfigValueKind::StringList,
+            false,
+            "segment_list",
+        ) => ConfigFieldInteraction::Text {
+            max_bytes: MAX_CONFIG_STRING_BYTES,
+        },
         ("providers.<id>.base_url", ConfigValueKind::String, false, "url") => {
             ConfigFieldInteraction::Text {
                 max_bytes: MAX_CONFIG_STRING_BYTES,
+            }
+        }
+        (
+            "providers.<id>.routes.responses"
+            | "providers.<id>.routes.chat_completions"
+            | "providers.<id>.routes.messages"
+            | "providers.<id>.routes.models",
+            ConfigValueKind::String,
+            false,
+            "route",
+        )
+        | ("providers.<id>.dialects", ConfigValueKind::StringList, false, "dialect_list") => {
+            ConfigFieldInteraction::Text {
+                max_bytes: MAX_CONFIG_STRING_BYTES,
+            }
+        }
+        ("providers.<id>.catalog.mode", ConfigValueKind::String, false, "catalog_mode") => {
+            ConfigFieldInteraction::Choice {
+                choices: PROVIDER_CATALOG_MODE_CHOICES,
+            }
+        }
+        ("providers.<id>.pricing.source", ConfigValueKind::String, false, "pricing_source") => {
+            ConfigFieldInteraction::Choice {
+                choices: PROVIDER_PRICING_SOURCE_CHOICES,
+            }
+        }
+        ("providers.<id>.allow_insecure_loopback", ConfigValueKind::Boolean, false, "toggle") => {
+            ConfigFieldInteraction::Choice {
+                choices: BOOLEAN_CHOICES,
             }
         }
         ("model_presets.<id>.provider", ConfigValueKind::String, false, "provider_selector") => {
@@ -636,6 +727,36 @@ fn config_field_interaction(descriptor: &ConfigSchemaEntry) -> ConfigFieldIntera
         ("model_presets.<id>.dialect", ConfigValueKind::String, false, "dialect") => {
             ConfigFieldInteraction::Choice {
                 choices: PROVIDER_DIALECT_CHOICES,
+            }
+        }
+        (
+            "model_presets.<id>.reasoning_effort",
+            ConfigValueKind::String,
+            false,
+            "reasoning_effort",
+        ) => ConfigFieldInteraction::Choice {
+            choices: REASONING_EFFORT_CHOICES,
+        },
+        ("model_presets.<id>.service_tier", ConfigValueKind::String, false, "service_tier") => {
+            ConfigFieldInteraction::Choice {
+                choices: SERVICE_TIER_CHOICES,
+            }
+        }
+        (
+            "model_presets.<id>.max_output_tokens",
+            ConfigValueKind::PositiveInteger,
+            false,
+            "integer",
+        )
+        | ("model_presets.<id>.context_mode", ConfigValueKind::String, false, "context_mode")
+        | ("model_presets.<id>.fallback", ConfigValueKind::StringList, false, "preset_list") => {
+            ConfigFieldInteraction::Text {
+                max_bytes: MAX_CONFIG_STRING_BYTES,
+            }
+        }
+        ("model_presets.<id>.favorite", ConfigValueKind::Boolean, false, "toggle") => {
+            ConfigFieldInteraction::Choice {
+                choices: BOOLEAN_CHOICES,
             }
         }
         ("price_schedules.<id>.provider", ConfigValueKind::String, false, "provider_selector") => {

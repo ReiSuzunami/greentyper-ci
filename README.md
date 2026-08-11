@@ -112,11 +112,10 @@ OpenCode Go template defaults plus seed model facts with field provenance. The
 selector exposes compatible release candidates while keeping unverified live
 availability explicit. A first Direct VT product tracer now renders the Slash
 Panel, controller screens, and adaptive status rows through `greentyper tui` and
-includes narrow mutable user-scope editors for the statusline preset, statusline
-expansion policy, an existing Provider Profile's base URL and opaque credential
-reference, plus a bounded Provider Profile creation wizard and typed Config
-Object deletion confirmations. Remaining rendered TUI/App Server editors remain
-pending. The product CLI can bind,
+includes rendered user-scope interactions for every Config Schema field,
+complete Config Object creation, existing-object field editing, and typed
+deletion confirmations. Credential fields expose only opaque references; the
+App Server Config surface remains pending. The product CLI can bind,
 replace, test, and forget origin-bound credential references without
 putting secret material in arguments, Config, or Ledgers. Windows stores values
 in the current user's Credential Manager; other platforms currently fail
@@ -261,33 +260,28 @@ Provider Epoch, or return endpoint or credential data. The CLI offers the same
 read-only observation for the currently selected committed Profile through
 `config test-provider`.
 Dirty drafts cannot be discarded implicitly, and failed validation or revision
-conflicts leave the editor live. The public `tui` command is the first real
-product terminal adapter: it enters the alternate screen and raw mode, maps
-blocking Crossterm key and resize events into the existing controller, emits a
-Unicode-aware Direct VT cell diff, suppresses identical frames, clears stale
-cells, and restores the terminal on normal and error returns. The route
-`/config statusline preset` is its first mutable dialog: Up/Down stages one of
-the four schema values, Enter runs the real dry-run preview, `c` commits the
-validated user-scope Draft, and `d` explicitly discards it. The second route,
-`/config statusline expansion`, uses the same metadata-driven choice interaction
-for `auto`, `compact`, and `expanded`. The third route, `/config provider url`,
-opens a Provider-filtered Config Center, selects one
-existing Profile, and edits its base URL through a 512-byte input. The first
-Enter previews the complete Draft and the second commits it; Delete resets the
-field, while dirty Escape requires explicit discard confirmation. Invalid
-previews and revision conflicts render a bounded notice and keep the Draft live;
-Escape, Ctrl-C, and Ctrl-Q do not implicitly discard a dirty Draft. A no-change
-commit does not create a Config file, and tests reopen committed files.
+conflicts leave the editor live. The public `tui` command enters the alternate
+screen and raw mode, maps blocking Crossterm key and resize events into the
+existing controller, emits a Unicode-aware Direct VT cell diff, suppresses
+identical frames, clears stale cells, and restores the terminal on normal and
+error returns. Every Config Schema field now has a rendered interaction. Choice
+fields stage with Up/Down, preview with Enter, commit with `c`, and discard with
+`d`; bounded text, integer, boolean, and TOML-list fields preview with Enter and
+commit with a second Enter. Top-level Provider/model/output-limit and statusline
+routes open directly. Object field routes enter a kind-filtered Config Center,
+select an existing Profile, Preset, Price Schedule, or Usage Window, and open the
+exact field. Invalid previews and revision conflicts render a bounded notice and
+keep the Draft live; Escape, Ctrl-C, and Ctrl-Q do not implicitly discard it. A
+no-change commit does not create a Config file, and tests reopen committed files.
 `/config provider add` now opens a bounded lowercase Profile-ID prompt, then a
-release-template choice. Tab and Shift-Tab move among the rendered template,
-opaque credential-reference, and base-URL fields; credential references are
-never rendered or read back. Enter previews a text-field Draft and a second
-Enter commits it, while a template choice uses Enter to preview and `c` to
-commit. The same status-only credential-reference interaction is available for
-an existing Profile. Real-key tests commit and reopen a created Profile, and
-invalid IDs or revision conflicts leave the wizard recoverable. Within rendered
-Provider wizard fields, F5 runs the existing bounded connection and model-list
-test against the current revision-bound candidate. The rendered status is
+release-template choice. Tab and Shift-Tab move across template, opaque
+credential reference, base URL, four routes, dialect list, catalog mode, pricing
+source, and explicit insecure-loopback permission. Credential references are
+never rendered or read back; secret bind/replace remains a separate credential
+operation. The same fields edit existing Profiles. Core validation still owns
+route normalization, dialects, pricing provenance, and loopback-origin policy.
+Within the wizard, F5 runs the existing bounded connection and model-list test
+against the current revision-bound candidate. The rendered status is
 ephemeral, a staged change resets it, and a stale revision stops before the
 tester. The action does not commit Config, mutate a Provider Epoch, merge a
 catalog, expose the credential reference, or grant execution authority. The
@@ -298,15 +292,16 @@ target confirmation. Enter dry-runs and CAS-commits the deletion; Escape cancels
 it. Reference validation or revision conflict leaves the confirmation live, and
 a real-key test reopens Config to prove the selected object is absent. The
 delete action does not write a Ledger or grant Runtime or Provider authority.
-`/config model add` now prompts for a bounded Model Preset ID and moves with
-Tab/Shift-Tab across the three required fields: an existing Provider Profile ID,
-a model ID, and one of `responses`, `chat_completions`, or `messages`. Provider
-and model text inputs are bounded at 64 and 512 bytes. Enter previews the complete
-Draft and `c` commits it from the dialect choice; tests reopen the file and prove
-the runnable preset survives. Missing fields and revision conflicts keep the
-Draft live for repair or explicit discard. This is manual preset definition, not
-interactive `/model` selection, starter-preset installation, or optional policy
-field editing.
+`/config model add` now prompts for a bounded Model Preset ID and moves across
+all nine fields. Provider, model, and dialect are required; reasoning effort,
+service tier, maximum output tokens, context mode, favorite, and explicit
+fallback list are optional. Enum and boolean values use schema-owned choices;
+numeric and TOML-list input is buffered until it parses atomically. Existing
+Preset field routes use the same selector and Draft. Tests commit and reopen
+required and optional values. Missing references, fallback cycles, invalid
+limits, and revision conflicts keep the Draft live for repair or explicit
+discard. This is manual preset definition and editing, not interactive `/model`
+application or starter-preset installation.
 `/config stats-window add` now prompts for a bounded Usage Window ID and moves
 across start, end, weekday-list, and IANA-time-zone fields in one user-scope
 Draft. Each input is bounded to 512 bytes. The weekday list accepts a TOML
@@ -328,14 +323,14 @@ previews, a second Enter CAS-commits, and tests reopen the resolved schedule.
 Invalid selector ranges, effective intervals, provenance, and stale revisions
 retain the Draft for repair or explicit discard. This does not rebuild the
 running TUI's frozen Price Schedule book or add rich cost presentation.
-Outside these narrow workflows the tracer remains snapshot-based and read-only. It is not a
-general mutable terminal editor, approval surface, live refresh loop, audited
-ConPTY integration, secret-entry/bind surface, starter-preset
+Config commits do not rebuild the running TUI's frozen status, usage, pricing,
+or Provider projection. The tracer is not an approval surface, live refresh
+loop, audited ConPTY integration, secret-entry/bind surface, starter-preset
 workflow, or persistent live catalog discovery. Live inference conformance,
 reconnect/retry, OpenCode Go Messages execution,
 Messages reasoning blocks, Preset context/fallback execution, richer approval
 presentation, broader Provider and Tool adapters,
-Workspace, remaining TUI, and App Server work remain. The loopback Provider tracer remains
+Workspace, interactive selectors, and App Server work remain. The loopback Provider tracer remains
 an internal harness; `local.echo` is intentionally a fixed opt-in command rather
 than a general process runner. The file Ledger remains
 provisional. The acceptance runner can emit bound raw evidence,
