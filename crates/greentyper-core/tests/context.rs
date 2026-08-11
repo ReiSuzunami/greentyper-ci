@@ -345,6 +345,92 @@ fn context_reduction_offloads_old_items_and_keeps_a_bounded_recent_raw_tail() {
 }
 
 #[test]
+fn reduced_context_materializes_only_recent_and_post_checkpoint_history_for_a_request() {
+    let item = |id, turn, role, text| {
+        CanonicalItem::new(
+            ItemId::new(id).expect("Item"),
+            TurnId::new(turn).expect("Turn"),
+            role,
+            text,
+        )
+        .expect("canonical Item")
+    };
+    let checkpoint_items = vec![
+        item(1, 1, ItemRole::User, "old user"),
+        item(2, 1, ItemRole::Assistant, "old answer"),
+        item(3, 2, ItemRole::User, "recent user"),
+    ];
+    let reduced = ReducedContextView::from_items(
+        LedgerHead {
+            transaction: 4,
+            sequence: 12,
+        },
+        &checkpoint_items,
+        ContextReductionPolicy::new(11, 1).expect("policy"),
+    )
+    .expect("reduced Context View");
+    let mut authoritative = checkpoint_items;
+    authoritative.push(item(4, 2, ItemRole::Assistant, "delta answer"));
+
+    let request = reduced
+        .materialize_request(&authoritative)
+        .expect("request Context View");
+
+    assert_eq!(request.source(), reduced.source());
+    assert_eq!(request.archived_items(), 2);
+    assert_eq!(request.items().len(), 2);
+    assert_eq!(request.items()[0].item(), 3);
+    assert_eq!(request.items()[0].role(), ContextViewRole::User);
+    assert_eq!(request.items()[0].text(), "recent user");
+    assert_eq!(request.items()[1].item(), 4);
+    assert_eq!(request.items()[1].role(), ContextViewRole::Assistant);
+    assert_eq!(request.items()[1].text(), "delta answer");
+    assert_eq!(request.raw_bytes(), 23);
+    assert_eq!(request.estimated_tokens(), 6);
+    let json = serde_json::to_string(&request).expect("serialize request Context View");
+    assert!(!json.contains("old user"));
+    assert!(!json.contains("old answer"));
+    assert!(json.contains("recent user"));
+    assert!(json.contains("delta answer"));
+}
+
+#[test]
+fn reduced_context_request_rejects_missing_or_changed_authoritative_history() {
+    let original = CanonicalItem::new(
+        ItemId::new(1).expect("Item"),
+        TurnId::new(1).expect("Turn"),
+        ItemRole::User,
+        "authoritative",
+    )
+    .expect("canonical Item");
+    let reduced = ReducedContextView::from_items(
+        LedgerHead {
+            transaction: 1,
+            sequence: 1,
+        },
+        std::slice::from_ref(&original),
+        ContextReductionPolicy::new(1, 1).expect("policy"),
+    )
+    .expect("reduced Context View");
+    let changed = CanonicalItem::new(
+        ItemId::new(1).expect("Item"),
+        TurnId::new(1).expect("Turn"),
+        ItemRole::User,
+        "changed",
+    )
+    .expect("canonical Item");
+
+    assert_eq!(
+        reduced.materialize_request(&[]),
+        Err(ContextViewError::ArtifactMismatch)
+    );
+    assert_eq!(
+        reduced.materialize_request(&[changed]),
+        Err(ContextViewError::ArtifactMismatch)
+    );
+}
+
+#[test]
 fn context_reduction_rejects_invalid_limits_and_foreign_artifact_references() {
     assert_eq!(
         ContextReductionPolicy::new(MAX_CONTEXT_VIEW_BYTES + 1, 1),

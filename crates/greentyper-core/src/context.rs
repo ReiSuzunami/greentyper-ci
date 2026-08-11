@@ -605,6 +605,42 @@ pub struct ReducedContextView {
     estimated_tokens: u64,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct ContextRequestView {
+    source: ContextEventRange,
+    archived_items: u64,
+    items: Vec<ContextViewItem>,
+    raw_bytes: u64,
+    estimated_tokens: u64,
+}
+
+impl ContextRequestView {
+    #[must_use]
+    pub const fn source(&self) -> ContextEventRange {
+        self.source
+    }
+
+    #[must_use]
+    pub const fn archived_items(&self) -> u64 {
+        self.archived_items
+    }
+
+    #[must_use]
+    pub fn items(&self) -> &[ContextViewItem] {
+        &self.items
+    }
+
+    #[must_use]
+    pub const fn raw_bytes(&self) -> u64 {
+        self.raw_bytes
+    }
+
+    #[must_use]
+    pub const fn estimated_tokens(&self) -> u64 {
+        self.estimated_tokens
+    }
+}
+
 impl ReducedContextView {
     pub fn from_items(
         head: LedgerHead,
@@ -719,6 +755,66 @@ impl ReducedContextView {
             }
         }
         Ok(())
+    }
+
+    pub fn materialize_request(
+        &self,
+        authoritative: &[CanonicalItem],
+    ) -> Result<ContextRequestView, ContextViewError> {
+        if authoritative.len() > MAX_CONTEXT_VIEW_ITEMS {
+            return Err(ContextViewError::TooManyItems);
+        }
+        let checkpoint_items = self
+            .artifacts
+            .len()
+            .checked_add(self.recent_items.len())
+            .ok_or(ContextViewError::ArithmeticOverflow)?;
+        let checkpoint_prefix = authoritative
+            .get(..checkpoint_items)
+            .ok_or(ContextViewError::ArtifactMismatch)?;
+        self.validate_against_items(checkpoint_prefix)?;
+
+        let mut items = self.recent_items.clone();
+        let mut last_item = self
+            .recent_items
+            .last()
+            .map(ContextViewItem::item)
+            .or_else(|| self.artifacts.last().map(ContextArtifactRef::item))
+            .unwrap_or(0);
+        for item in &authoritative[checkpoint_items..] {
+            if item.id().get() <= last_item {
+                return Err(ContextViewError::InvalidStoredView);
+            }
+            let item = ContextViewItem::from_item(item)?;
+            last_item = item.item();
+            items.push(item);
+        }
+
+        let mut raw_bytes = 0_u64;
+        let mut estimated_tokens = 0_u64;
+        for item in &items {
+            raw_bytes = raw_bytes
+                .checked_add(
+                    u64::try_from(item.text.len())
+                        .map_err(|_| ContextViewError::ArithmeticOverflow)?,
+                )
+                .ok_or(ContextViewError::ArithmeticOverflow)?;
+            estimated_tokens = estimated_tokens
+                .checked_add(item.estimated_tokens)
+                .ok_or(ContextViewError::ArithmeticOverflow)?;
+        }
+        if raw_bytes > MAX_CONTEXT_VIEW_BYTES as u64 {
+            return Err(ContextViewError::ViewTooLarge);
+        }
+
+        Ok(ContextRequestView {
+            source: self.source,
+            archived_items: u64::try_from(self.artifacts.len())
+                .map_err(|_| ContextViewError::ArithmeticOverflow)?,
+            items,
+            raw_bytes,
+            estimated_tokens,
+        })
     }
 
     #[must_use]
