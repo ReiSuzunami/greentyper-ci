@@ -15,7 +15,7 @@ use crate::agent_team::{
 };
 use crate::config::{
     ConfigEpoch, ConfigError, ConfigLayer, ConfigLayers, ConfigSource, MAX_CONFIG_ID_BYTES,
-    MAX_CONFIG_STRING_BYTES, ReasoningEffort, ServiceTier,
+    MAX_CONFIG_STRING_BYTES, MAX_MODEL_PRESET_FALLBACK_CANDIDATES, ReasoningEffort, ServiceTier,
 };
 use crate::context::{
     ContextAdmissionDecision, ContextArtifactRef, ContextEventRange, ContextPressureSnapshot,
@@ -225,13 +225,7 @@ impl ModelSelection {
 
     fn validate(&self) -> Result<(), RuntimeError> {
         let id = self.preset_id.as_str();
-        if id.is_empty()
-            || id.len() > MAX_CONFIG_ID_BYTES
-            || !id
-                .bytes()
-                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
-            || !id.as_bytes().first().is_some_and(u8::is_ascii_alphanumeric)
-        {
+        if !valid_preset_id(id) {
             return Err(RuntimeError::InvalidModelSelection("Preset ID is invalid"));
         }
         for value in [&self.provider_profile, &self.provider_model] {
@@ -246,6 +240,31 @@ impl ModelSelection {
             }
         }
         Ok(())
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct ProviderFallbackCandidate {
+    selection: ModelSelection,
+    layers: ConfigLayers,
+    provider_snapshot: Option<ProviderProfileSnapshot>,
+    provider_dialect: Option<ProviderDialect>,
+}
+
+impl ProviderFallbackCandidate {
+    pub fn new(
+        selection: ModelSelection,
+        layers: ConfigLayers,
+        provider_snapshot: Option<ProviderProfileSnapshot>,
+        provider_dialect: Option<ProviderDialect>,
+    ) -> Result<Self, RuntimeError> {
+        selection.validate()?;
+        Ok(Self {
+            selection,
+            layers,
+            provider_snapshot,
+            provider_dialect,
+        })
     }
 }
 
@@ -449,6 +468,8 @@ struct TurnAdmission {
     input: String,
     provider_snapshot: Option<ProviderProfileSnapshot>,
     provider_dialect: Option<ProviderDialect>,
+    primary_selection: Option<ModelSelection>,
+    fallbacks: Vec<ProviderFallbackCandidate>,
     agent: Option<AgentId>,
 }
 
@@ -980,10 +1001,77 @@ impl RuntimeKernel {
                 input: input.into(),
                 provider_snapshot: provider.profile_snapshot().cloned(),
                 provider_dialect: provider.dialect(),
+                primary_selection: None,
+                fallbacks: Vec::new(),
                 agent: None,
             },
         )?;
         self.drive_pending(provider)
+    }
+
+    pub fn execute_with_provider_fallbacks<P: ProviderRuntime>(
+        &mut self,
+        candidates: &[ProviderFallbackCandidate],
+        usage_windows: Vec<UsageWindow>,
+        price_schedules: PriceScheduleBook,
+        input: impl Into<String>,
+        providers: &mut [P],
+    ) -> Result<PreparedOutput, RuntimeError> {
+        if candidates.len() < 2
+            || candidates.len() > MAX_MODEL_PRESET_FALLBACK_CANDIDATES
+            || candidates.len() != providers.len()
+        {
+            return Err(RuntimeError::InvalidModelSelection(
+                "Provider fallback plan is invalid",
+            ));
+        }
+        for (candidate, provider) in candidates.iter().zip(providers.iter()) {
+            if candidate.provider_snapshot.as_ref() != provider.profile_snapshot()
+                || candidate.provider_dialect != provider.dialect()
+            {
+                return Err(RuntimeError::Provider(ProviderError::InvalidConfiguration(
+                    "Provider Runtime does not match its fallback candidate",
+                )));
+            }
+        }
+
+        let primary = &candidates[0];
+        self.admit_turn(
+            &primary.layers,
+            TurnAdmission {
+                usage_windows,
+                price_schedules,
+                context_pressure: None,
+                input: input.into(),
+                provider_snapshot: primary.provider_snapshot.clone(),
+                provider_dialect: primary.provider_dialect,
+                primary_selection: Some(primary.selection.clone()),
+                fallbacks: candidates[1..].to_vec(),
+                agent: None,
+            },
+        )?;
+
+        let mut candidate_index = 0;
+        loop {
+            match self.drive_pending(&mut providers[candidate_index]) {
+                Ok(output) => return Ok(output),
+                Err(RuntimeError::Provider(source)) => {
+                    let turn = self
+                        .state
+                        .pending
+                        .as_ref()
+                        .map(|pending| pending.turn)
+                        .ok_or(RuntimeError::CorruptState(
+                            "Provider fallback Turn is missing",
+                        ))?;
+                    if self.advance_provider_fallback(None, turn)?.is_none() {
+                        return Err(RuntimeError::Provider(source));
+                    }
+                    candidate_index += 1;
+                }
+                Err(source) => return Err(source),
+            }
+        }
     }
 
     /// Executes one Turn with an immutable Context Pressure projection.
@@ -1014,6 +1102,8 @@ impl RuntimeKernel {
                 input,
                 provider_snapshot: provider.profile_snapshot().cloned(),
                 provider_dialect: provider.dialect(),
+                primary_selection: None,
+                fallbacks: Vec::new(),
                 agent: None,
             },
         )?;
@@ -1093,6 +1183,8 @@ impl RuntimeKernel {
                 input: input.into(),
                 provider_snapshot: provider.profile_snapshot().cloned(),
                 provider_dialect: provider.dialect(),
+                primary_selection: None,
+                fallbacks: Vec::new(),
                 agent: Some(session.agent()),
             },
         )?;
@@ -1404,6 +1496,47 @@ impl RuntimeKernel {
         self.commit(&[RuntimeEvent::TurnRetryRequested { turn }])
     }
 
+    fn advance_provider_fallback(
+        &mut self,
+        agent: Option<AgentId>,
+        turn: TurnId,
+    ) -> Result<Option<DurabilityReceipt>, RuntimeError> {
+        let record = self
+            .state
+            .turns
+            .get(&turn)
+            .ok_or(RuntimeError::UnknownTurn(turn))?;
+        let pending = self
+            .state
+            .pending
+            .as_ref()
+            .filter(|pending| pending.turn == turn);
+        let Some(pending) = pending else {
+            return Ok(None);
+        };
+        let next_index = pending
+            .fallback_index
+            .checked_add(1)
+            .ok_or(RuntimeError::IntegerOverflow)?;
+        if record.agent != agent
+            || record.completed
+            || record.cancelled
+            || pending.phase != PendingPhase::Blocked
+            || pending.block_origin != Some(TurnBlockOrigin::Provider)
+            || !provider_stage_is_retryable(pending.provider_unavailable_stage)
+            || usize::try_from(next_index)
+                .ok()
+                .is_none_or(|index| index > record.fallbacks.len())
+        {
+            return Ok(None);
+        }
+        self.commit(&[RuntimeEvent::ProviderFallbackRequested {
+            turn,
+            fallback_index: next_index,
+        }])
+        .map(Some)
+    }
+
     fn admit_turn(
         &mut self,
         layers: &ConfigLayers,
@@ -1416,6 +1549,8 @@ impl RuntimeKernel {
             input,
             provider_snapshot,
             provider_dialect,
+            primary_selection,
+            fallbacks,
             agent,
         } = admission;
         self.require_ready()?;
@@ -1447,16 +1582,22 @@ impl RuntimeKernel {
         let config = ConfigEpoch::freeze_with_observability(
             config_id,
             layers,
-            usage_windows,
-            price_schedules,
+            usage_windows.clone(),
+            price_schedules.clone(),
         )
         .map_err(RuntimeError::Config)?;
+        if let Some(selection) = &primary_selection {
+            validate_fallback_selection(selection, &config)?;
+        }
         if let Some(pending) = &self.state.pending_model_selection {
             let resolved = config.resolved();
             if agent != Some(pending.agent)
                 || config.fingerprint() != pending.selection.config_fingerprint()
                 || resolved.provider_profile().value() != pending.selection.provider_profile()
                 || resolved.provider_model().value() != pending.selection.provider_model()
+                || primary_selection
+                    .as_ref()
+                    .is_some_and(|selection| selection != &pending.selection)
             {
                 return Err(RuntimeError::InvalidModelSelection(
                     "pending Preset no longer matches the next Turn",
@@ -1465,25 +1606,58 @@ impl RuntimeKernel {
         }
         let profile = config.resolved().provider_profile().value().clone();
         let model = config.resolved().provider_model().value().clone();
-        let provider_epoch = match provider_snapshot {
-            Some(snapshot) => ProviderEpoch::with_profile_snapshot_and_dialect(
-                provider_id,
-                profile,
-                model,
-                snapshot,
-                provider_dialect,
-            ),
-            None if profile == "simulator" && provider_dialect.is_none() => {
-                ProviderEpoch::new(provider_id, profile, model)
-            }
-            None if profile == "simulator" => Err(ProviderError::InvalidConfiguration(
-                "simulator Provider cannot select a wire dialect",
-            )),
-            None => Err(ProviderError::InvalidConfiguration(
-                "non-simulator provider requires a frozen Provider Profile snapshot",
-            )),
+        let provider_epoch = freeze_provider_epoch(
+            provider_id,
+            profile,
+            model,
+            provider_snapshot,
+            provider_dialect,
+        )?;
+
+        let mut frozen_fallbacks = Vec::with_capacity(fallbacks.len());
+        let mut fallback_epochs = Vec::with_capacity(fallbacks.len());
+        for (index, fallback) in fallbacks.into_iter().enumerate() {
+            let offset = u64::try_from(index)
+                .map_err(|_| RuntimeError::IntegerOverflow)?
+                .checked_add(1)
+                .ok_or(RuntimeError::IntegerOverflow)?;
+            let fallback_config_id = ConfigEpochId::new(
+                self.state
+                    .next_config
+                    .checked_add(offset)
+                    .ok_or(RuntimeError::IntegerOverflow)?,
+            )
+            .map_err(RuntimeError::Model)?;
+            let fallback_provider_id = ProviderEpochId::new(
+                self.state
+                    .next_provider
+                    .checked_add(offset)
+                    .ok_or(RuntimeError::IntegerOverflow)?,
+            )
+            .map_err(RuntimeError::Model)?;
+            let fallback_config = ConfigEpoch::freeze_with_observability(
+                fallback_config_id,
+                &fallback.layers,
+                usage_windows.clone(),
+                price_schedules.clone(),
+            )
+            .map_err(RuntimeError::Config)?;
+            validate_fallback_selection(&fallback.selection, &fallback_config)?;
+            let resolved = fallback_config.resolved();
+            let fallback_provider = freeze_provider_epoch(
+                fallback_provider_id,
+                resolved.provider_profile().value().clone(),
+                resolved.provider_model().value().clone(),
+                fallback.provider_snapshot,
+                fallback.provider_dialect,
+            )?;
+            frozen_fallbacks.push(FrozenProviderFallback {
+                preset_id: fallback.selection.preset_id,
+                config: fallback_config_id,
+                provider: fallback_provider_id,
+            });
+            fallback_epochs.push((fallback_config, fallback_provider));
         }
-        .map_err(RuntimeError::Provider)?;
 
         let mut admission = Vec::new();
         if self.state.thread.is_none() {
@@ -1495,12 +1669,19 @@ impl RuntimeKernel {
         admission.push(RuntimeEvent::ProviderFrozen {
             epoch: Box::new(provider_epoch),
         });
+        for (config, provider) in fallback_epochs {
+            admission.push(RuntimeEvent::ConfigFrozen { epoch: config });
+            admission.push(RuntimeEvent::ProviderFrozen {
+                epoch: Box::new(provider),
+            });
+        }
         admission.push(RuntimeEvent::TurnAdmitted {
             thread,
             turn,
             user_item,
             config: config_id,
             provider: provider_id,
+            fallbacks: frozen_fallbacks,
             agent,
             input,
         });
@@ -2105,6 +2286,15 @@ fn validate_input(input: &str) -> Result<(), RuntimeError> {
     Ok(())
 }
 
+fn valid_preset_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= MAX_CONFIG_ID_BYTES
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        && id.as_bytes().first().is_some_and(u8::is_ascii_alphanumeric)
+}
+
 enum ValidatedProviderStep {
     Completed {
         deltas: Vec<String>,
@@ -2197,6 +2387,46 @@ fn require_provider_snapshot(
     }
 }
 
+fn validate_fallback_selection(
+    selection: &ModelSelection,
+    config: &ConfigEpoch,
+) -> Result<(), RuntimeError> {
+    let resolved = config.resolved();
+    if config.fingerprint() != selection.config_fingerprint()
+        || resolved.provider_profile().value() != selection.provider_profile()
+        || resolved.provider_model().value() != selection.provider_model()
+    {
+        return Err(RuntimeError::InvalidModelSelection(
+            "fallback Preset no longer matches its frozen Config",
+        ));
+    }
+    Ok(())
+}
+
+fn freeze_provider_epoch(
+    id: ProviderEpochId,
+    profile: String,
+    model: String,
+    snapshot: Option<ProviderProfileSnapshot>,
+    dialect: Option<ProviderDialect>,
+) -> Result<ProviderEpoch, RuntimeError> {
+    match snapshot {
+        Some(snapshot) => {
+            ProviderEpoch::with_profile_snapshot_and_dialect(id, profile, model, snapshot, dialect)
+        }
+        None if profile == "simulator" && dialect.is_none() => {
+            ProviderEpoch::new(id, profile, model)
+        }
+        None if profile == "simulator" => Err(ProviderError::InvalidConfiguration(
+            "simulator Provider cannot select a wire dialect",
+        )),
+        None => Err(ProviderError::InvalidConfiguration(
+            "non-simulator provider requires a frozen Provider Profile snapshot",
+        )),
+    }
+    .map_err(RuntimeError::Provider)
+}
+
 fn provider_tool_identity(turn: TurnId, call_id: &str) -> String {
     let digest = Sha256::digest(call_id.as_bytes());
     let mut identity = format!("provider-turn-{}-", turn.get());
@@ -2234,6 +2464,13 @@ enum FrozenCostEvaluation {
         amount_pico_units: u64,
     },
     Unknown(CostEstimateUnknownReason),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct FrozenProviderFallback {
+    preset_id: String,
+    config: ConfigEpochId,
+    provider: ProviderEpochId,
 }
 
 impl FrozenCostEvaluation {
@@ -2292,6 +2529,7 @@ enum RuntimeEvent {
         user_item: ItemId,
         config: ConfigEpochId,
         provider: ProviderEpochId,
+        fallbacks: Vec<FrozenProviderFallback>,
         agent: Option<AgentId>,
         input: String,
     },
@@ -2330,6 +2568,10 @@ enum RuntimeEvent {
     },
     TurnRetryRequested {
         turn: TurnId,
+    },
+    ProviderFallbackRequested {
+        turn: TurnId,
+        fallback_index: u32,
     },
     UsageAttemptStarted {
         turn: TurnId,
@@ -2387,6 +2629,7 @@ impl RuntimeEvent {
                 user_item,
                 config,
                 provider,
+                fallbacks,
                 agent,
                 input,
             } => {
@@ -2397,6 +2640,14 @@ impl RuntimeEvent {
                 payload.u64(provider.get());
                 encode_optional_agent(&mut payload, *agent);
                 payload.string(input)?;
+                payload.u32(
+                    u32::try_from(fallbacks.len()).map_err(|_| RuntimeError::IntegerOverflow)?,
+                );
+                for fallback in fallbacks {
+                    payload.string(&fallback.preset_id)?;
+                    payload.u64(fallback.config.get());
+                    payload.u64(fallback.provider.get());
+                }
                 4
             }
             Self::AssistantItemStarted { turn, item } => {
@@ -2462,6 +2713,14 @@ impl RuntimeEvent {
             Self::TurnRetryRequested { turn } => {
                 payload.u64(turn.get());
                 16
+            }
+            Self::ProviderFallbackRequested {
+                turn,
+                fallback_index,
+            } => {
+                payload.u64(turn.get());
+                payload.u32(*fallback_index);
+                18
             }
             Self::UsageAttemptStarted {
                 turn,
@@ -2569,19 +2828,50 @@ impl RuntimeEvent {
             3 => Self::ProviderFrozen {
                 epoch: Box::new(decode_provider_epoch(&mut payload, event.data.schema)?),
             },
-            4 => Self::TurnAdmitted {
-                thread: ThreadId::new(payload.u64()?).map_err(RuntimeError::Model)?,
-                turn: TurnId::new(payload.u64()?).map_err(RuntimeError::Model)?,
-                user_item: ItemId::new(payload.u64()?).map_err(RuntimeError::Model)?,
-                config: ConfigEpochId::new(payload.u64()?).map_err(RuntimeError::Model)?,
-                provider: ProviderEpochId::new(payload.u64()?).map_err(RuntimeError::Model)?,
-                agent: if event.data.schema >= 4 {
+            4 => {
+                let thread = ThreadId::new(payload.u64()?).map_err(RuntimeError::Model)?;
+                let turn = TurnId::new(payload.u64()?).map_err(RuntimeError::Model)?;
+                let user_item = ItemId::new(payload.u64()?).map_err(RuntimeError::Model)?;
+                let config = ConfigEpochId::new(payload.u64()?).map_err(RuntimeError::Model)?;
+                let provider = ProviderEpochId::new(payload.u64()?).map_err(RuntimeError::Model)?;
+                let agent = if event.data.schema >= 4 {
                     decode_optional_agent(&mut payload)?
                 } else {
                     None
-                },
-                input: payload.string(MAX_INPUT_BYTES)?,
-            },
+                };
+                let input = payload.string(MAX_INPUT_BYTES)?;
+                let fallbacks = if event.data.schema >= 13 {
+                    let count = payload.u32()? as usize;
+                    if count >= MAX_MODEL_PRESET_FALLBACK_CANDIDATES {
+                        return Err(RuntimeError::CorruptEvent(
+                            "Provider fallback count is invalid",
+                        ));
+                    }
+                    (0..count)
+                        .map(|_| {
+                            Ok(FrozenProviderFallback {
+                                preset_id: payload.string(MAX_CONFIG_ID_BYTES)?,
+                                config: ConfigEpochId::new(payload.u64()?)
+                                    .map_err(RuntimeError::Model)?,
+                                provider: ProviderEpochId::new(payload.u64()?)
+                                    .map_err(RuntimeError::Model)?,
+                            })
+                        })
+                        .collect::<Result<Vec<_>, RuntimeError>>()?
+                } else {
+                    Vec::new()
+                };
+                Self::TurnAdmitted {
+                    thread,
+                    turn,
+                    user_item,
+                    config,
+                    provider,
+                    fallbacks,
+                    agent,
+                    input,
+                }
+            }
             5 => Self::AssistantItemStarted {
                 turn: TurnId::new(payload.u64()?).map_err(RuntimeError::Model)?,
                 item: ItemId::new(payload.u64()?).map_err(RuntimeError::Model)?,
@@ -2637,6 +2927,10 @@ impl RuntimeEvent {
             },
             16 if event.data.schema >= 11 => Self::TurnRetryRequested {
                 turn: TurnId::new(payload.u64()?).map_err(RuntimeError::Model)?,
+            },
+            18 if event.data.schema >= 13 => Self::ProviderFallbackRequested {
+                turn: TurnId::new(payload.u64()?).map_err(RuntimeError::Model)?,
+                fallback_index: payload.u32()?,
             },
             11 if event.data.schema >= 4 => Self::UsageAttemptStarted {
                 turn: TurnId::new(payload.u64()?).map_err(RuntimeError::Model)?,
@@ -2712,6 +3006,7 @@ struct TurnRecord {
     user_item: ItemId,
     config: ConfigEpochId,
     provider: ProviderEpochId,
+    fallbacks: Vec<FrozenProviderFallback>,
     agent: Option<AgentId>,
     assistant_item: Option<ItemId>,
     delivery: Option<DeliveryId>,
@@ -2762,6 +3057,7 @@ struct PendingTurn {
     turn: TurnId,
     config: ConfigEpochId,
     provider: ProviderEpochId,
+    fallback_index: u32,
     agent: Option<AgentId>,
     input: String,
     phase: PendingPhase,
@@ -2918,6 +3214,7 @@ impl RuntimeState {
                 user_item,
                 config,
                 provider,
+                fallbacks,
                 agent,
                 input,
             } => {
@@ -2926,6 +3223,27 @@ impl RuntimeState {
                 }
                 if !self.configs.contains_key(&config) || !self.providers.contains_key(&provider) {
                     return Err(RuntimeError::CorruptState("Turn snapshot is missing"));
+                }
+                if fallbacks.len() >= MAX_MODEL_PRESET_FALLBACK_CANDIDATES {
+                    return Err(RuntimeError::CorruptState(
+                        "Provider fallback count is invalid",
+                    ));
+                }
+                let mut fallback_configs = BTreeSet::new();
+                let mut fallback_providers = BTreeSet::new();
+                for fallback in &fallbacks {
+                    if !valid_preset_id(&fallback.preset_id)
+                        || fallback.config == config
+                        || fallback.provider == provider
+                        || !fallback_configs.insert(fallback.config)
+                        || !fallback_providers.insert(fallback.provider)
+                        || !self.configs.contains_key(&fallback.config)
+                        || !self.providers.contains_key(&fallback.provider)
+                    {
+                        return Err(RuntimeError::CorruptState(
+                            "Provider fallback snapshot is invalid",
+                        ));
+                    }
                 }
                 if let Some(pending) = &self.pending_model_selection {
                     let config_epoch = self
@@ -2959,6 +3277,7 @@ impl RuntimeState {
                         user_item,
                         config,
                         provider,
+                        fallbacks,
                         agent,
                         assistant_item: None,
                         delivery: None,
@@ -2970,6 +3289,7 @@ impl RuntimeState {
                     turn,
                     config,
                     provider,
+                    fallback_index: 0,
                     agent,
                     input,
                     phase: PendingPhase::Admitted,
@@ -3226,6 +3546,47 @@ impl RuntimeState {
                 pending.block_origin = None;
                 pending.provider_unavailable_stage = None;
             }
+            RuntimeEvent::ProviderFallbackRequested {
+                turn,
+                fallback_index,
+            } => {
+                let position =
+                    usize::try_from(fallback_index).map_err(|_| RuntimeError::IntegerOverflow)?;
+                let fallback = self
+                    .turns
+                    .get(&turn)
+                    .and_then(|record| {
+                        position
+                            .checked_sub(1)
+                            .and_then(|i| record.fallbacks.get(i))
+                    })
+                    .cloned()
+                    .ok_or(RuntimeError::CorruptState(
+                        "Provider fallback index is invalid",
+                    ))?;
+                let pending = self.pending_for(turn)?;
+                if pending.phase != PendingPhase::Blocked
+                    || pending.block_origin != Some(TurnBlockOrigin::Provider)
+                    || !provider_stage_is_retryable(pending.provider_unavailable_stage)
+                    || pending.open_usage_attempt.is_some()
+                    || pending.prepared.is_some()
+                    || pending.assistant_item.is_some()
+                    || !pending.streamed_text.is_empty()
+                    || pending.acknowledged
+                    || pending.fallback_index.checked_add(1) != Some(fallback_index)
+                {
+                    return Err(RuntimeError::CorruptState(
+                        "invalid Provider fallback transition",
+                    ));
+                }
+                pending.config = fallback.config;
+                pending.provider = fallback.provider;
+                pending.fallback_index = fallback_index;
+                pending.phase = PendingPhase::Admitted;
+                pending.blocked_reason = None;
+                pending.block_origin = None;
+                pending.provider_unavailable_stage = None;
+            }
             RuntimeEvent::UsageAttemptStarted {
                 turn,
                 attempt,
@@ -3343,9 +3704,10 @@ impl RuntimeState {
                 }
                 let context = self.usage_context(turn)?;
                 let config = self
-                    .turns
-                    .get(&turn)
-                    .map(|record| record.config)
+                    .pending
+                    .as_ref()
+                    .filter(|pending| pending.turn == turn)
+                    .map(|pending| pending.config)
                     .and_then(|config| self.configs.get(&config))
                     .ok_or(RuntimeError::CorruptState(
                         "Cost Estimate Config Epoch is missing",
@@ -3396,7 +3758,13 @@ impl RuntimeState {
                 "Thread and Turn history disagree",
             ));
         }
-        if self.configs.len() != self.turns.len() || self.providers.len() != self.turns.len() {
+        let expected_snapshots = self.turns.values().try_fold(0usize, |total, record| {
+            total
+                .checked_add(1)
+                .and_then(|value| value.checked_add(record.fallbacks.len()))
+                .ok_or(RuntimeError::IntegerOverflow)
+        })?;
+        if self.configs.len() != expected_snapshots || self.providers.len() != expected_snapshots {
             return Err(RuntimeError::CorruptState(
                 "snapshot and Turn counts disagree",
             ));
@@ -3417,6 +3785,10 @@ impl RuntimeState {
         for (turn, record) in &self.turns {
             if !self.configs.contains_key(&record.config)
                 || !self.providers.contains_key(&record.provider)
+                || record.fallbacks.iter().any(|fallback| {
+                    !self.configs.contains_key(&fallback.config)
+                        || !self.providers.contains_key(&fallback.provider)
+                })
                 || !self
                     .items
                     .iter()
@@ -3476,15 +3848,22 @@ impl RuntimeState {
             .turns
             .get(&turn)
             .ok_or(RuntimeError::CorruptState("usage Turn is missing"))?;
+        let (config, provider) = self
+            .pending
+            .as_ref()
+            .filter(|pending| pending.turn == turn)
+            .map_or((record.config, record.provider), |pending| {
+                (pending.config, pending.provider)
+            });
         let provider = self
             .providers
-            .get(&record.provider)
+            .get(&provider)
             .ok_or(RuntimeError::CorruptState(
                 "usage Provider Epoch is missing",
             ))?;
         let config = self
             .configs
-            .get(&record.config)
+            .get(&config)
             .ok_or(RuntimeError::CorruptState("usage Config Epoch is missing"))?;
         Ok(UsageContext {
             thread,
@@ -4833,7 +5212,7 @@ mod tests {
             provider_unavailable_stage: Some(ProviderUnavailableStage::BeforeFirstEvent),
         };
         let encoded = blocked.encode().expect("encode provider block");
-        assert_eq!(encoded.schema, 12);
+        assert_eq!(encoded.schema, RUNTIME_EVENT_SCHEMA);
         assert_eq!(encoded.kind, 10);
         assert_eq!(
             RuntimeEvent::decode(&stored_runtime_event(encoded.clone()))
@@ -4869,7 +5248,7 @@ mod tests {
 
         let cancelled = RuntimeEvent::TurnCancelled { turn };
         let encoded = cancelled.encode().expect("encode Turn cancellation");
-        assert_eq!(encoded.schema, 12);
+        assert_eq!(encoded.schema, RUNTIME_EVENT_SCHEMA);
         assert_eq!(encoded.kind, 15);
         assert_eq!(
             RuntimeEvent::decode(&stored_runtime_event(encoded)).expect("decode Turn cancellation"),
@@ -4878,12 +5257,25 @@ mod tests {
 
         let retry = RuntimeEvent::TurnRetryRequested { turn };
         let encoded = retry.encode().expect("encode Turn retry request");
-        assert_eq!(encoded.schema, 12);
+        assert_eq!(encoded.schema, RUNTIME_EVENT_SCHEMA);
         assert_eq!(encoded.kind, 16);
         assert_eq!(
             RuntimeEvent::decode(&stored_runtime_event(encoded))
                 .expect("decode Turn retry request"),
             retry
+        );
+
+        let fallback = RuntimeEvent::ProviderFallbackRequested {
+            turn,
+            fallback_index: 1,
+        };
+        let encoded = fallback.encode().expect("encode Provider fallback request");
+        assert_eq!(encoded.schema, RUNTIME_EVENT_SCHEMA);
+        assert_eq!(encoded.kind, 18);
+        assert_eq!(
+            RuntimeEvent::decode(&stored_runtime_event(encoded))
+                .expect("decode Provider fallback request"),
+            fallback
         );
     }
 
@@ -5246,6 +5638,7 @@ mod tests {
                 user_item: ItemId::new(1).expect("Item id"),
                 config: config_id,
                 provider: provider_id,
+                fallbacks: Vec::new(),
                 agent: None,
                 input: "input".to_owned(),
             },
@@ -5349,6 +5742,7 @@ mod tests {
                 user_item,
                 config: config_id,
                 provider: provider_id,
+                fallbacks: Vec::new(),
                 agent: None,
                 input: "input".to_owned(),
             },

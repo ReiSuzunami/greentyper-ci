@@ -3,18 +3,25 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use greentyper_core::config::{ConfigDocument, ConfigLayers, ConfigPaths, ConfigRuntime};
+use greentyper_core::config::{
+    ConfigDocument, ConfigEpoch, ConfigLayers, ConfigPaths, ConfigRuntime,
+};
 use greentyper_core::context::{
     ContextPressure, ContextPressureAccuracy, ContextPressureInput, ContextPressurePolicy,
     ContextReductionPolicy, ContextViewError, MAX_CONTEXT_VIEW_BYTES,
 };
 use greentyper_core::ledger::{EventData, FileLedger, LedgerHead};
+use greentyper_core::model::ConfigEpochId;
+use greentyper_core::pricing::{
+    PriceSchedule, PriceScheduleBook, PriceScheduleDefinition, PriceScheduleSource, TokenRates,
+};
 use greentyper_core::provider::{
-    DeterministicProvider, ProviderError, ProviderEvent, ProviderProfileSnapshot, ProviderRequest,
-    ProviderRuntime, ProviderUnavailableStage, UsageAccuracy, UsageRecord,
+    DeterministicProvider, ProviderDialect, ProviderError, ProviderEvent, ProviderProfileSnapshot,
+    ProviderRequest, ProviderRuntime, ProviderUnavailableStage, UsageAccuracy, UsageRecord,
 };
 use greentyper_core::runtime::{
-    AcknowledgeOutcome, CancelTurnOutcome, RecoveryStatus, RuntimeError, RuntimeKernel,
+    AcknowledgeOutcome, CancelTurnOutcome, ModelSelection, ProviderFallbackCandidate,
+    RecoveryStatus, RuntimeError, RuntimeKernel,
 };
 use greentyper_core::usage::{UsageAttemptOutcome, UsageCostProvenance, UsageTimestamp};
 
@@ -753,6 +760,98 @@ fn retryable_provider_failure_is_durably_rearmed_and_records_a_new_attempt() {
 }
 
 #[test]
+fn provider_fallback_freezes_each_candidate_and_attributes_usage_and_cost() {
+    let path = temp_path("provider-fallback");
+    let price_schedules = fallback_price_book();
+    let candidates = [
+        fallback_candidate("primary", "model-primary", &price_schedules),
+        fallback_candidate("backup", "model-backup", &price_schedules),
+    ];
+    let mut providers = [
+        FallbackFixtureProvider::unavailable("model-primary"),
+        FallbackFixtureProvider::complete("model-backup"),
+    ];
+    let mut runtime = RuntimeKernel::open(&path).expect("open Runtime");
+
+    let output = runtime
+        .execute_with_provider_fallbacks(
+            &candidates,
+            Vec::new(),
+            price_schedules,
+            "fallback input",
+            &mut providers,
+        )
+        .expect("fall back to the second Provider candidate");
+    assert_eq!(output.text(), "backup response");
+    let usage = runtime.usage_snapshot(UsageTimestamp::now().expect("usage timestamp"));
+    assert_eq!(usage.attempts().len(), 2);
+    assert_eq!(usage.attempts()[0].requested_model(), "model-primary");
+    assert_eq!(usage.attempts()[0].outcome(), UsageAttemptOutcome::Failed);
+    assert_eq!(usage.attempts()[1].requested_model(), "model-backup");
+    assert_eq!(
+        usage.attempts()[1]
+            .cost_estimate()
+            .expect("backup Cost Estimate")
+            .amount_pico_units(),
+        200
+    );
+    drop(runtime);
+
+    let recovered = RuntimeKernel::open(&path).expect("replay fallback Runtime");
+    let replayed = recovered.usage_snapshot(UsageTimestamp::now().expect("usage timestamp"));
+    assert_eq!(replayed.attempts(), usage.attempts());
+    drop(recovered);
+    fs::remove_file(path).expect("cleanup Runtime ledger");
+}
+
+#[test]
+fn provider_fallback_never_switches_after_the_first_provider_event() {
+    let path = temp_path("provider-fallback-partial");
+    let price_schedules = fallback_price_book();
+    let candidates = [
+        fallback_candidate("primary", "model-primary", &price_schedules),
+        fallback_candidate("backup", "model-backup", &price_schedules),
+    ];
+    let mut providers = [
+        FallbackFixtureProvider::unavailable_at(
+            "model-primary",
+            ProviderUnavailableStage::AfterFirstEvent,
+        ),
+        FallbackFixtureProvider::complete("model-backup"),
+    ];
+    let mut runtime = RuntimeKernel::open(&path).expect("open Runtime");
+
+    assert!(matches!(
+        runtime.execute_with_provider_fallbacks(
+            &candidates,
+            Vec::new(),
+            price_schedules,
+            "partial fallback input",
+            &mut providers,
+        ),
+        Err(RuntimeError::Provider(ProviderError::Unavailable { .. }))
+    ));
+    assert_eq!(providers[0].runs(), 1);
+    assert_eq!(providers[1].runs(), 0);
+    assert!(matches!(
+        runtime.snapshot().status,
+        RecoveryStatus::Blocked {
+            retryable: false,
+            ..
+        }
+    ));
+    assert_eq!(
+        runtime
+            .usage_snapshot(UsageTimestamp::now().expect("usage timestamp"))
+            .attempts()
+            .len(),
+        1
+    );
+    drop(runtime);
+    fs::remove_file(path).expect("cleanup Runtime ledger");
+}
+
+#[test]
 fn partial_provider_failure_is_not_retryable_and_does_not_mutate_on_rejection() {
     let path = temp_path("provider-retry-partial");
     let mut runtime = RuntimeKernel::open(&path).expect("open Runtime");
@@ -1213,6 +1312,124 @@ impl ProviderRuntime for CompletedOnlyProvider {
 }
 
 struct UnavailableProvider;
+
+fn fallback_candidate(
+    preset_id: &str,
+    model: &str,
+    price_schedules: &PriceScheduleBook,
+) -> ProviderFallbackCandidate {
+    let mut layers = ConfigLayers::default();
+    layers.cli.provider_profile = Some("simulator".to_owned());
+    layers.cli.provider_model = Some(model.to_owned());
+    let config = ConfigEpoch::freeze_with_observability(
+        ConfigEpochId::new(1).expect("Config Epoch ID"),
+        &layers,
+        Vec::new(),
+        price_schedules.clone(),
+    )
+    .expect("freeze fallback Config fingerprint");
+    let selection = ModelSelection::new(
+        preset_id,
+        config.fingerprint(),
+        "simulator",
+        model,
+        ProviderDialect::Responses,
+    )
+    .expect("fallback Model selection");
+    ProviderFallbackCandidate::new(selection, layers, None, None)
+        .expect("fallback Provider candidate")
+}
+
+fn fallback_price_book() -> PriceScheduleBook {
+    PriceScheduleBook::new(vec![
+        PriceSchedule::new(PriceScheduleDefinition {
+            id: "backup-price".to_owned(),
+            version: "2026-08-12.1".to_owned(),
+            currency: "USD".to_owned(),
+            provider_profile: "simulator".to_owned(),
+            model: "model-backup".to_owned(),
+            dialect: None,
+            service_tier: None,
+            minimum_context_tokens: 0,
+            maximum_context_tokens: None,
+            effective_from: UsageTimestamp::from_unix_millis(0).expect("price start"),
+            effective_until: None,
+            source: PriceScheduleSource::Manual,
+            source_ref: "synthetic-fallback-price".to_owned(),
+            rates: TokenRates::new(2, 0, 0, 0, 0),
+        })
+        .expect("backup Price Schedule"),
+    ])
+    .expect("fallback Price Schedule book")
+}
+
+enum FallbackFixtureOutcome {
+    Unavailable(ProviderUnavailableStage),
+    Complete,
+}
+
+struct FallbackFixtureProvider {
+    model: &'static str,
+    outcome: FallbackFixtureOutcome,
+    runs: usize,
+}
+
+impl FallbackFixtureProvider {
+    const fn unavailable(model: &'static str) -> Self {
+        Self {
+            model,
+            outcome: FallbackFixtureOutcome::Unavailable(
+                ProviderUnavailableStage::BeforeFirstEvent,
+            ),
+            runs: 0,
+        }
+    }
+
+    const fn unavailable_at(model: &'static str, stage: ProviderUnavailableStage) -> Self {
+        Self {
+            model,
+            outcome: FallbackFixtureOutcome::Unavailable(stage),
+            runs: 0,
+        }
+    }
+
+    const fn complete(model: &'static str) -> Self {
+        Self {
+            model,
+            outcome: FallbackFixtureOutcome::Complete,
+            runs: 0,
+        }
+    }
+
+    const fn runs(&self) -> usize {
+        self.runs
+    }
+}
+
+impl ProviderRuntime for FallbackFixtureProvider {
+    fn run(&mut self, request: &ProviderRequest) -> Result<Vec<ProviderEvent>, ProviderError> {
+        self.runs += 1;
+        assert_eq!(request.provider.model(), self.model);
+        match self.outcome {
+            FallbackFixtureOutcome::Unavailable(stage) => Err(ProviderError::unavailable_during(
+                stage,
+                "private primary failure",
+            )),
+            FallbackFixtureOutcome::Complete => Ok(vec![
+                ProviderEvent::TextDelta("backup response".to_owned()),
+                ProviderEvent::Completed(UsageRecord::new(
+                    Some(100),
+                    Some(0),
+                    Some(0),
+                    Some(0),
+                    Some(0),
+                    Some(100),
+                    None,
+                )?),
+            ]),
+        }
+    }
+}
 
 impl ProviderRuntime for UnavailableProvider {
     fn run(&mut self, _request: &ProviderRequest) -> Result<Vec<ProviderEvent>, ProviderError> {
