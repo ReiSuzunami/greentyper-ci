@@ -150,21 +150,25 @@ putting secret material in arguments, Config, or Ledgers. Windows stores values
 in the current user's Credential Manager; other platforms currently fail
 closed. The same stream has read-only `runtime.status`, bounded `runtime.stats`,
 redacted `agent.list`, and redacted `tool.status` operations. Missing state does
-not create files; inspection never repairs a partial Ledger tail. Four bounded
-control operations reuse the existing Kernel and ProductDriver authority:
-`runtime.delivery` retrieves one exact prepared output,
-`runtime.acknowledge` durably closes it, `tool.reconcile` records an externally
-observed terminal result without executing the Tool, and `tool.decide` uses a
+not create files; inspection never repairs a partial Ledger tail. Bounded
+control operations reuse the existing Kernel and ProductDriver authority.
+`runtime.cancel` terminalizes one exact Provider-origin blocked Turn,
+`runtime.retry` durably rearms only an explicitly retryable initial Provider
+failure without contacting a Provider, and `runtime.resume` reconstructs the
+frozen Provider and recovered Active Agent Session for that exact
+`resume-required` Turn. Resume may resolve an origin-bound credential, contact
+the Provider, append Usage/cost facts, and affect quota or billing. Completed
+output remains unacknowledged: `runtime.delivery` retrieves it and
+`runtime.acknowledge` durably closes it. `tool.reconcile` records an externally
+observed terminal result without executing the Tool, while `tool.decide` uses a
 same-stream review/confirmation handshake for only the exact pending fixed
-`local.echo` call. Review returns the canonical arguments and resources plus
-their confirmation hashes; approve or deny must echo both hashes. Review and
-the confirmed decision each reconstruct and revalidate the frozen Provider
-request under the recovered Active Agent Session, so each may contact the
-Provider and origin-bound credential vault, append Usage/cost facts, and affect
-quota or billing. Approval leaves prepared output unacknowledged for explicit
-retrieval and acknowledgement. Mutating control opens existing Ledgers under an
-exclusive lock and rejects incomplete tails without repair; it never admits a
-root Agent or converts a numeric Agent ID into authority.
+`local.echo` call. Review returns canonical arguments and resources plus their
+confirmation hashes; approve or deny must echo both hashes. Review and the
+confirmed decision each reconstruct and revalidate the frozen Provider request,
+so they carry the same credential, Usage, quota, and billing warning. Mutating
+control opens existing Ledgers under an exclusive lock and rejects incomplete
+tails without repair; it never admits a root Agent or converts a numeric Agent
+ID into authority.
 Tool call identity, argument hashing, approval binding, independent
 authority checks, and ambiguous-effect reconciliation are durable core policy.
 The product has a private `local.echo` process tracer: it launches only a fixed
@@ -446,7 +450,8 @@ automatic retry policy or partial-stream reconnect, OpenCode Go Messages executi
 Messages reasoning blocks, Preset context/fallback execution, broader multi-Tool approval
 presentation, broader Provider and Tool adapters,
 Workspace, project/new-Agent Preset defaults, richer cache distributions,
-Agent lifecycle actions, App Server Runtime resume and general control, and
+Agent lifecycle actions, general App Server Runtime control beyond the exact
+cancel/retry/resume recovery flow, and
 remote App Server transport remain. The loopback Provider tracer remains
 an internal harness; `local.echo` is intentionally a fixed opt-in command rather
 than a general process runner. The file Ledger remains

@@ -103,11 +103,17 @@ frame, return status only, and never acquire Provider or Agent authority.
 Its read-only Runtime status/Usage, Agent Team, and Tool status operations call
 existing strict inspection adapters and then apply narrow wire projections.
 They never create or repair Ledgers or return Runtime/Team/Tool text payloads.
-The same module exposes bounded `runtime.delivery`, `runtime.acknowledge`,
-`tool.reconcile`, and fixed `local.echo` `tool.decide` operations. It delegates
-mutation and recovered Active Agent Session authority to ProductDriver and the
-Kernel. Mutating paths strictly open existing Ledgers under exclusive locks and
-reject incomplete tails without repair. `tool.decide` binds a same-stream review
+The same module exposes bounded `runtime.cancel`, `runtime.retry`,
+`runtime.resume`, `runtime.delivery`, `runtime.acknowledge`, `tool.reconcile`,
+and fixed `local.echo` `tool.decide` operations. It delegates mutation and
+recovered Active Agent Session authority to ProductDriver and the Kernel.
+Cancel and retry operate only on typed Provider recovery state; retry merely
+commits a durable rearm and performs no Provider, credential, Tool, delivery, or
+acknowledgement work. Resume reconstructs the frozen Provider and exact recovered
+Session, may append Usage/cost facts and affect billing, and leaves resulting
+output pending explicit acknowledgement. Mutating paths strictly open existing
+Ledgers under exclusive locks and reject incomplete tails without repair.
+`tool.decide` binds a same-stream review
 of exact arguments/resources to hash-confirmed approve or deny, then reconstructs
 and revalidates the Provider request before resolution. Numeric IDs only select
 an existing delivery/call and never become authority; empty Team state is not
@@ -123,7 +129,8 @@ Provider authority path.
 Section-filtered typed remove
 routes render exact Config Object deletion confirmations; secret storage stays
 behind the credential adapter. Broader multi-Tool policy, general App Server
-Runtime resume/control and remote transport, and an audited Windows ConPTY
+Runtime control beyond exact Provider recovery and remote transport, and an
+audited Windows ConPTY
 wrapper remain pending. Platform wrappers for process, credential, transport,
 and eventually terminal facilities remain private to
 this package unless a second real caller proves a smaller shared package is

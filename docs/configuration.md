@@ -293,8 +293,8 @@ Generic effective-value reads also reject credential-reference fields; editor
 views expose only whether the target and effective layers are bound.
 
 `greentyper app-server --stdio [--ledger PATH]` exposes the Config Runtime,
-local credential vault, operational projections, and four bounded recovery
-controls through a bounded
+local credential vault, operational projections, and bounded Runtime and Tool
+recovery controls through a bounded
 newline-delimited JSON stream. Each request carries an
 unsigned `id`, an `operation`, and optional object `params`; each flushed
 response carries the same `id` and exactly one `result` or `error`. A request
@@ -322,6 +322,9 @@ The current operations are:
 | `credential.bind` / `replace` | Store a new or replacement origin-bound secret and return only `bound` or `replaced` status |
 | `credential.test` / `credential.forget` | Return only `available`, `forgotten`, or `not_found`; `test` checks vault presence and performs no Provider request |
 | `runtime.status` | Inspect the Runtime Ledger and return its head, recovery status, blocked-Turn retryability, numeric Turn/delivery/thread facts, item count, pending-selection presence, and incomplete-tail byte count without returning item text, block reasons, or selection contents |
+| `runtime.cancel` | Terminalize the exact typed Provider-origin blocked Turn; an exact repeat is idempotent, and no Provider or Tool runs |
+| `runtime.retry` | Durably rearm only an explicitly retryable initial Provider failure as `resume_required`; perform no Provider request, credential lookup, Tool execution, or output delivery |
+| `runtime.resume` | Resume only the exact `resume_required` Turn under its frozen Provider Epoch and recovered Active Agent Session; return prepared output or `tool_approval_required` without acknowledging either |
 | `runtime.delivery` | Return the exact canonical text for the requested delivery only while that output is prepared and awaiting acknowledgement; never mutate a Ledger |
 | `runtime.acknowledge` | Durably acknowledge the exact prepared delivery; repeated acknowledgement is idempotent and a wrong delivery does not write |
 | `runtime.stats` | Return the revision-bound Usage summary; optional `limit` and `cursor` expose a bounded Attempt page, and optional `as_of_unix_ms` pins the reporting instant |
@@ -363,7 +366,18 @@ Control operations also use only the server's startup Ledger path. A read-only
 preflight supplies bounded public errors. Each mutating path then opens the
 existing Runtime Ledger and, for Tool control, the complete Team/Tool sidecar
 pair under exclusive locks; that strict open rejects an incomplete tail without
-repair even if it appeared after preflight. `runtime.delivery` remains read-only.
+repair even if it appeared after preflight. `runtime.cancel` accepts only the
+exact typed Provider-origin blocked Turn and is idempotent after completion.
+`runtime.retry` accepts only the exact retryable initial Provider block and
+appends the durable rearm transaction without constructing a Provider, reading
+a credential, executing a Tool, or creating output. A later `runtime.resume`
+must name that same `resume_required` Turn. It reconstructs the frozen Provider
+Epoch and, for product state, rebinds the single recovered Active Agent Session;
+the numeric Turn identifies state but grants no authority. Resume may resolve an
+origin-bound credential, contact the Provider, append Usage Attempt and cost
+facts, and repeat remote work or billing. It returns either prepared output or
+the exact pending Tool approval and never acknowledges either. Clients recover
+a lost prepared response through `runtime.delivery`, which remains read-only.
 `runtime.acknowledge` accepts the exact prepared delivery, makes repeats
 idempotent, and rejects a
 different or unavailable delivery without an append. `tool.reconcile` rebinds
@@ -385,8 +399,8 @@ transaction, invokes only the fixed executor once, and returns canonical
 prepared output that remains pending until `runtime.acknowledge`.
 `runtime.delivery` can recover that output if the prior JSON response was lost.
 No operation admits an Agent, accepts an Agent ID as authority, or exposes
-general Runtime resume, arbitrary Tool execution, Provider selection, Team
-lifecycle, or filesystem path control.
+general Runtime control beyond the exact recovery states above, arbitrary Tool
+execution, Provider selection, Team lifecycle, or filesystem path control.
 
 `runtime.stats` defaults to summary-only. `limit` must use the core bounded page
 range and is required when `cursor` is present. A follow-up page must reuse the

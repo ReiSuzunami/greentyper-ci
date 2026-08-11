@@ -9,8 +9,11 @@ use greentyper_core::agent_team::{
     Capability, CapabilitySnapshot, CommandOutcome, MessageRecipient, ResourceBudget, TaskScope,
     TaskSpec, TeamCommand, TeamOperationAcknowledgeOutcome,
 };
-use greentyper_core::config::ConfigLayers;
-use greentyper_core::provider::DeterministicProvider;
+use greentyper_core::config::{ConfigDocument, ConfigLayers, ConfigPaths, ConfigRuntime};
+use greentyper_core::provider::{
+    DeterministicProvider, ProviderDialect, ProviderError, ProviderEvent, ProviderProfileSnapshot,
+    ProviderRequest, ProviderRuntime, ProviderUnavailableStage,
+};
 use greentyper_core::runtime::{RecoveryStatus, RuntimeKernel};
 use greentyper_core::tool_runtime::{
     ApprovalDecision, AuthorizedToolCall, ToolArguments, ToolCallOutcome, ToolEffectExecutor,
@@ -32,6 +35,37 @@ impl ToolEffectExecutor for AmbiguousExecutor {
         ToolExecution::Ambiguous {
             reason: "private ambiguous App Server Tool result".into(),
         }
+    }
+}
+
+struct UnavailableProvider {
+    stage: ProviderUnavailableStage,
+}
+
+struct PanicProfileProvider {
+    profile: ProviderProfileSnapshot,
+}
+
+impl ProviderRuntime for PanicProfileProvider {
+    fn profile_snapshot(&self) -> Option<&ProviderProfileSnapshot> {
+        Some(&self.profile)
+    }
+
+    fn dialect(&self) -> Option<ProviderDialect> {
+        Some(ProviderDialect::Responses)
+    }
+
+    fn run(&mut self, _request: &ProviderRequest) -> Result<Vec<ProviderEvent>, ProviderError> {
+        panic!("injected App Server Provider crash after admission")
+    }
+}
+
+impl ProviderRuntime for UnavailableProvider {
+    fn run(&mut self, _request: &ProviderRequest) -> Result<Vec<ProviderEvent>, ProviderError> {
+        Err(ProviderError::unavailable_during(
+            self.stage,
+            "private App Server Provider failure",
+        ))
     }
 }
 
@@ -268,6 +302,124 @@ impl TempTree {
         output.delivery().get()
     }
 
+    fn create_blocked_runtime(&self, stage: ProviderUnavailableStage) -> u64 {
+        let mut runtime =
+            RuntimeKernel::open(self.runtime_ledger()).expect("open blocked Runtime fixture");
+        let mut provider = UnavailableProvider { stage };
+        assert!(matches!(
+            runtime.execute(
+                &ConfigLayers::default(),
+                "private App Server blocked input",
+                &mut provider,
+            ),
+            Err(greentyper_core::runtime::RuntimeError::Provider(
+                ProviderError::Unavailable { .. }
+            ))
+        ));
+        let RecoveryStatus::Blocked { turn, .. } = runtime.snapshot().status else {
+            panic!("Provider failure did not block the Runtime fixture")
+        };
+        turn.get()
+    }
+
+    fn create_blocked_product_runtime(&self, stage: ProviderUnavailableStage) -> u64 {
+        let (mut kernel, recovery) = RuntimeKernel::open_with_team_and_tools(
+            self.runtime_ledger(),
+            self.team_ledger(),
+            self.tool_ledger(),
+            1,
+        )
+        .expect("open blocked Product fixture");
+        assert!(recovery.into_sessions().is_empty());
+        let admission = kernel
+            .dispatch_team(TeamCommand::AdmitRoot {
+                task: TaskSpec::new(
+                    "private Provider recovery task",
+                    TaskScope::from_labels(["private-provider-recovery-scope"]),
+                ),
+                budget: ResourceBudget::new(1_000, 1),
+                capabilities: CapabilitySnapshot::from_capabilities([Capability::Process]),
+            })
+            .expect("admit Provider recovery owner");
+        kernel
+            .acknowledge_team_operation(admission.operation)
+            .expect("acknowledge Provider recovery owner");
+        let root = match admission.commit.outcome {
+            CommandOutcome::RootAdmitted { session, .. } => session,
+            other => panic!("unexpected Provider recovery admission: {other:?}"),
+        };
+        let mut provider = UnavailableProvider { stage };
+        assert!(matches!(
+            kernel.execute_provider_turn(
+                root,
+                &ConfigLayers::default(),
+                "private Product Provider blocked input",
+                &mut provider,
+                |_| Ok(ToolResources::default()),
+            ),
+            Err(greentyper_core::runtime::RuntimeError::Provider(
+                ProviderError::Unavailable { .. }
+            ))
+        ));
+        let RecoveryStatus::Blocked { turn, .. } = kernel.snapshot().status else {
+            panic!("Provider failure did not block the Product fixture")
+        };
+        turn.get()
+    }
+
+    fn create_external_resume_required_runtime(&self) -> u64 {
+        let document = ConfigDocument::parse(
+            r#"
+schema_version = 1
+
+[provider]
+profile = "recovery-profile"
+model = "fixture-model"
+
+[providers.recovery-profile]
+template = "openai-compatible"
+credential = "private-recovery-credential"
+base_url = "https://private-recovery.invalid"
+dialects = ["responses"]
+
+[providers.recovery-profile.routes]
+responses = "/v1/responses"
+
+[providers.recovery-profile.pricing]
+source = "unknown"
+"#,
+        )
+        .expect("parse external Provider recovery Config");
+        let config = ConfigRuntime::open(
+            ConfigPaths::new(self.user_config(), self.project_config()),
+            document,
+        )
+        .expect("open external Provider recovery Config");
+        let layers = config
+            .config_layers()
+            .expect("external Provider recovery layers")
+            .clone();
+        let profile = config
+            .selected_provider_profile()
+            .expect("resolve external Provider recovery profile")
+            .expect("external Provider recovery profile");
+        let mut runtime =
+            RuntimeKernel::open(self.runtime_ledger()).expect("open external recovery Runtime");
+        let crashed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut provider = PanicProfileProvider { profile };
+            let _ = runtime.execute(
+                &layers,
+                "private external Provider recovery input",
+                &mut provider,
+            );
+        }));
+        assert!(crashed.is_err());
+        let RecoveryStatus::ResumeRequired { turn } = runtime.snapshot().status else {
+            panic!("crashed external Provider Turn was not resumable")
+        };
+        turn.get()
+    }
+
     fn create_reconciliation_tool_state(&self) -> u64 {
         let (mut kernel, recovery) = RuntimeKernel::open_with_team_and_tools(
             self.runtime_ledger(),
@@ -502,6 +654,480 @@ fn app_server_runtime_status_inspects_missing_state_without_creating_it() {
     assert!(!temp.runtime_ledger().exists());
     assert!(!temp.user_config().exists());
     assert!(!temp.project_config().exists());
+}
+
+#[test]
+fn app_server_cancels_provider_blocks_strictly_without_cross_ledger_mutation() {
+    let missing = TempTree::new();
+    let missing_output = missing.run(
+        concat!(
+            "{\"id\":1,\"operation\":\"runtime.cancel\",\"params\":{\"turn\":1}}\n",
+            "{\"id\":2,\"operation\":\"runtime.cancel\",\"params\":{\"turn\":0}}\n",
+        )
+        .as_bytes(),
+    );
+    let missing_results = responses(&missing_output);
+    assert_eq!(
+        missing_results[0]["error"]["category"],
+        "runtime_unavailable"
+    );
+    assert_eq!(missing_results[1]["error"]["category"], "invalid_value");
+    assert!(!missing.runtime_ledger().exists());
+
+    let ordinary = TempTree::new();
+    let turn = ordinary.create_blocked_runtime(ProviderUnavailableStage::BeforeFirstEvent);
+    let blocked_bytes = fs::read(ordinary.runtime_ledger()).expect("read blocked Runtime Ledger");
+    let mut server = ordinary.spawn();
+    let unknown = server.request(&format!(
+        "{{\"id\":3,\"operation\":\"runtime.cancel\",\"params\":{{\"turn\":{}}}}}",
+        turn + 1
+    ));
+    assert_eq!(unknown["error"]["category"], "unknown_turn");
+    assert_eq!(
+        fs::read(ordinary.runtime_ledger()).expect("read Runtime after unknown cancellation"),
+        blocked_bytes
+    );
+    let cancelled = server.request(&format!(
+        "{{\"id\":4,\"operation\":\"runtime.cancel\",\"params\":{{\"turn\":{turn}}}}}"
+    ));
+    assert_eq!(cancelled["result"]["status"], "cancelled");
+    assert_eq!(cancelled["result"]["turn"], turn);
+    let cancelled_bytes =
+        fs::read(ordinary.runtime_ledger()).expect("read cancelled Runtime Ledger");
+    assert_ne!(cancelled_bytes, blocked_bytes);
+    let repeated = server.request(&format!(
+        "{{\"id\":5,\"operation\":\"runtime.cancel\",\"params\":{{\"turn\":{turn}}}}}"
+    ));
+    assert_eq!(repeated["result"]["status"], "already_cancelled");
+    assert_eq!(repeated["result"]["ledger"], cancelled["result"]["ledger"]);
+    assert_eq!(
+        fs::read(ordinary.runtime_ledger()).expect("read Runtime after repeated cancellation"),
+        cancelled_bytes
+    );
+    server.finish();
+    assert_eq!(
+        RuntimeKernel::inspect(ordinary.runtime_ledger())
+            .expect("inspect cancelled Runtime")
+            .status,
+        RecoveryStatus::Ready
+    );
+
+    let product = TempTree::new();
+    let product_turn =
+        product.create_blocked_product_runtime(ProviderUnavailableStage::BeforeResponse);
+    let product_runtime_before =
+        fs::read(product.runtime_ledger()).expect("read Product Runtime Ledger");
+    let team_before = fs::read(product.team_ledger()).expect("read Product Team Ledger");
+    let tool_before = fs::read(product.tool_ledger()).expect("read Product Tool Ledger");
+    let product_output = product.run(
+        format!(
+            "{{\"id\":6,\"operation\":\"runtime.cancel\",\"params\":{{\"turn\":{product_turn}}}}}\n"
+        )
+        .as_bytes(),
+    );
+    let product_result = responses(&product_output);
+    assert_eq!(product_result[0]["result"]["status"], "cancelled");
+    assert_ne!(
+        fs::read(product.runtime_ledger()).expect("read cancelled Product Runtime Ledger"),
+        product_runtime_before
+    );
+    assert_eq!(
+        fs::read(product.team_ledger()).expect("reread Product Team Ledger"),
+        team_before
+    );
+    assert_eq!(
+        fs::read(product.tool_ledger()).expect("reread Product Tool Ledger"),
+        tool_before
+    );
+
+    let torn = TempTree::new();
+    let torn_turn = torn.create_blocked_runtime(ProviderUnavailableStage::BeforeResponse);
+    let mut torn_bytes = fs::read(torn.runtime_ledger()).expect("read Runtime before torn tail");
+    torn_bytes.extend_from_slice(b"bad");
+    fs::write(torn.runtime_ledger(), &torn_bytes).expect("append torn cancellation tail");
+    let torn_output = torn.run(
+        format!(
+            "{{\"id\":7,\"operation\":\"runtime.cancel\",\"params\":{{\"turn\":{torn_turn}}}}}\n"
+        )
+        .as_bytes(),
+    );
+    assert_eq!(
+        responses(&torn_output)[0]["error"]["category"],
+        "runtime_unavailable"
+    );
+    assert_eq!(
+        fs::read(torn.runtime_ledger()).expect("read unmodified torn Runtime Ledger"),
+        torn_bytes
+    );
+}
+
+#[test]
+fn app_server_rearms_retryable_provider_blocks_without_running_the_provider() {
+    let missing = TempTree::new();
+    let missing_output = missing.run(
+        concat!(
+            "{\"id\":1,\"operation\":\"runtime.retry\",\"params\":{\"turn\":1}}\n",
+            "{\"id\":2,\"operation\":\"runtime.retry\",\"params\":{\"turn\":0}}\n",
+        )
+        .as_bytes(),
+    );
+    let missing_results = responses(&missing_output);
+    assert_eq!(
+        missing_results[0]["error"]["category"],
+        "runtime_unavailable"
+    );
+    assert_eq!(missing_results[1]["error"]["category"], "invalid_value");
+    assert!(!missing.runtime_ledger().exists());
+
+    let partial = TempTree::new();
+    let partial_turn = partial.create_blocked_runtime(ProviderUnavailableStage::AfterFirstEvent);
+    let partial_before =
+        fs::read(partial.runtime_ledger()).expect("read non-retryable Runtime Ledger");
+    let partial_output = partial.run(
+        format!(
+            "{{\"id\":3,\"operation\":\"runtime.retry\",\"params\":{{\"turn\":{partial_turn}}}}}\n"
+        )
+        .as_bytes(),
+    );
+    assert_eq!(
+        responses(&partial_output)[0]["error"]["category"],
+        "turn_not_retryable"
+    );
+    assert_eq!(
+        fs::read(partial.runtime_ledger()).expect("reread non-retryable Runtime Ledger"),
+        partial_before
+    );
+
+    let ordinary = TempTree::new();
+    let turn = ordinary.create_blocked_runtime(ProviderUnavailableStage::BeforeFirstEvent);
+    let blocked_bytes = fs::read(ordinary.runtime_ledger()).expect("read retryable Runtime Ledger");
+    let mut server = ordinary.spawn();
+    let unknown = server.request(&format!(
+        "{{\"id\":4,\"operation\":\"runtime.retry\",\"params\":{{\"turn\":{}}}}}",
+        turn + 1
+    ));
+    assert_eq!(unknown["error"]["category"], "unknown_turn");
+    assert_eq!(
+        fs::read(ordinary.runtime_ledger()).expect("read Runtime after unknown retry"),
+        blocked_bytes
+    );
+    let rearmed = server.request(&format!(
+        "{{\"id\":5,\"operation\":\"runtime.retry\",\"params\":{{\"turn\":{turn}}}}}"
+    ));
+    assert_eq!(rearmed["result"]["status"], "resume_required");
+    assert_eq!(rearmed["result"]["turn"], turn);
+    let rearmed_bytes = fs::read(ordinary.runtime_ledger()).expect("read rearmed Runtime Ledger");
+    assert_ne!(rearmed_bytes, blocked_bytes);
+    let repeated = server.request(&format!(
+        "{{\"id\":6,\"operation\":\"runtime.retry\",\"params\":{{\"turn\":{turn}}}}}"
+    ));
+    assert_eq!(repeated["error"]["category"], "turn_not_retryable");
+    assert_eq!(
+        fs::read(ordinary.runtime_ledger()).expect("read Runtime after repeated retry"),
+        rearmed_bytes
+    );
+    let status = server.request(r#"{"id":7,"operation":"runtime.status"}"#);
+    assert_eq!(status["result"]["status"], "resume_required");
+    assert_eq!(status["result"]["turn"], turn);
+    server.finish();
+
+    let product = TempTree::new();
+    let product_turn =
+        product.create_blocked_product_runtime(ProviderUnavailableStage::BeforeResponse);
+    let runtime_before = fs::read(product.runtime_ledger()).expect("read Product Runtime Ledger");
+    let team_before = fs::read(product.team_ledger()).expect("read Product Team Ledger");
+    let tool_before = fs::read(product.tool_ledger()).expect("read Product Tool Ledger");
+    let product_output = product.run(
+        format!(
+            "{{\"id\":8,\"operation\":\"runtime.retry\",\"params\":{{\"turn\":{product_turn}}}}}\n"
+        )
+        .as_bytes(),
+    );
+    assert_eq!(
+        responses(&product_output)[0]["result"]["status"],
+        "resume_required"
+    );
+    assert_ne!(
+        fs::read(product.runtime_ledger()).expect("read rearmed Product Runtime Ledger"),
+        runtime_before
+    );
+    assert_eq!(
+        fs::read(product.team_ledger()).expect("reread Product Team Ledger"),
+        team_before
+    );
+    assert_eq!(
+        fs::read(product.tool_ledger()).expect("reread Product Tool Ledger"),
+        tool_before
+    );
+
+    let torn = TempTree::new();
+    let torn_turn = torn.create_blocked_runtime(ProviderUnavailableStage::BeforeResponse);
+    let mut torn_bytes = fs::read(torn.runtime_ledger()).expect("read Runtime before torn retry");
+    torn_bytes.extend_from_slice(b"bad");
+    fs::write(torn.runtime_ledger(), &torn_bytes).expect("append torn retry tail");
+    let torn_output = torn.run(
+        format!(
+            "{{\"id\":9,\"operation\":\"runtime.retry\",\"params\":{{\"turn\":{torn_turn}}}}}\n"
+        )
+        .as_bytes(),
+    );
+    assert_eq!(
+        responses(&torn_output)[0]["error"]["category"],
+        "runtime_unavailable"
+    );
+    assert_eq!(
+        fs::read(torn.runtime_ledger()).expect("read unmodified torn retry Ledger"),
+        torn_bytes
+    );
+}
+
+#[test]
+fn app_server_resumes_the_exact_turn_and_leaves_output_pending_until_acknowledged() {
+    let missing = TempTree::new();
+    let missing_output = missing.run(
+        concat!(
+            "{\"id\":1,\"operation\":\"runtime.resume\",\"params\":{\"turn\":1}}\n",
+            "{\"id\":2,\"operation\":\"runtime.resume\",\"params\":{\"turn\":0}}\n",
+        )
+        .as_bytes(),
+    );
+    let missing_results = responses(&missing_output);
+    assert_eq!(
+        missing_results[0]["error"]["category"],
+        "runtime_unavailable"
+    );
+    assert_eq!(missing_results[1]["error"]["category"], "invalid_value");
+    assert!(!missing.runtime_ledger().exists());
+
+    let ordinary = TempTree::new();
+    let turn = ordinary.create_blocked_runtime(ProviderUnavailableStage::BeforeFirstEvent);
+    let mut server = ordinary.spawn();
+    let rearmed = server.request(&format!(
+        "{{\"id\":3,\"operation\":\"runtime.retry\",\"params\":{{\"turn\":{turn}}}}}"
+    ));
+    assert_eq!(rearmed["result"]["status"], "resume_required");
+    let before_wrong =
+        fs::read(ordinary.runtime_ledger()).expect("read Runtime before wrong resume");
+    let wrong = server.request(&format!(
+        "{{\"id\":4,\"operation\":\"runtime.resume\",\"params\":{{\"turn\":{}}}}}",
+        turn + 1
+    ));
+    assert_eq!(wrong["error"]["category"], "turn_not_resumable");
+    assert_eq!(
+        fs::read(ordinary.runtime_ledger()).expect("read Runtime after wrong resume"),
+        before_wrong
+    );
+    let resumed = server.request(&format!(
+        "{{\"id\":5,\"operation\":\"runtime.resume\",\"params\":{{\"turn\":{turn}}}}}"
+    ));
+    assert_eq!(resumed["result"]["status"], "prepared");
+    assert_eq!(resumed["result"]["turn"], turn);
+    assert_eq!(
+        resumed["result"]["text"],
+        "simulated: private App Server blocked input"
+    );
+    assert_eq!(resumed["result"]["usage_record_count"], 1);
+    let delivery = resumed["result"]["delivery"]
+        .as_u64()
+        .expect("prepared delivery ID");
+    let prepared_bytes = fs::read(ordinary.runtime_ledger()).expect("read prepared Runtime Ledger");
+    let status = server.request(r#"{"id":6,"operation":"runtime.status"}"#);
+    assert_eq!(status["result"]["status"], "reconciliation_required");
+    assert_eq!(status["result"]["delivery"], delivery);
+    let repeated = server.request(&format!(
+        "{{\"id\":7,\"operation\":\"runtime.resume\",\"params\":{{\"turn\":{turn}}}}}"
+    ));
+    assert_eq!(repeated["error"]["category"], "turn_not_resumable");
+    assert_eq!(
+        fs::read(ordinary.runtime_ledger()).expect("read Runtime after repeated resume"),
+        prepared_bytes
+    );
+    let recovered = server.request(&format!(
+        "{{\"id\":8,\"operation\":\"runtime.delivery\",\"params\":{{\"delivery\":{delivery}}}}}"
+    ));
+    assert_eq!(recovered["result"]["text"], resumed["result"]["text"]);
+    assert_eq!(
+        fs::read(ordinary.runtime_ledger()).expect("read Runtime after delivery recovery"),
+        prepared_bytes
+    );
+    let acknowledged = server.request(&format!(
+        "{{\"id\":9,\"operation\":\"runtime.acknowledge\",\"params\":{{\"delivery\":{delivery}}}}}"
+    ));
+    assert_eq!(acknowledged["result"]["status"], "acknowledged");
+    let ready = server.request(r#"{"id":10,"operation":"runtime.status"}"#);
+    assert_eq!(ready["result"]["status"], "ready");
+    server.finish();
+
+    let product = TempTree::new();
+    let product_turn =
+        product.create_blocked_product_runtime(ProviderUnavailableStage::BeforeResponse);
+    let team_before = fs::read(product.team_ledger()).expect("read Team before Product resume");
+    let tool_before = fs::read(product.tool_ledger()).expect("read Tool before Product resume");
+    let mut product_server = product.spawn();
+    let product_retry = product_server.request(&format!(
+        "{{\"id\":11,\"operation\":\"runtime.retry\",\"params\":{{\"turn\":{product_turn}}}}}"
+    ));
+    assert_eq!(product_retry["result"]["status"], "resume_required");
+    let product_resume = product_server.request(&format!(
+        "{{\"id\":12,\"operation\":\"runtime.resume\",\"params\":{{\"turn\":{product_turn}}}}}"
+    ));
+    assert_eq!(product_resume["result"]["status"], "prepared");
+    assert_eq!(
+        product_resume["result"]["text"],
+        "simulated: private Product Provider blocked input"
+    );
+    let product_delivery = product_resume["result"]["delivery"]
+        .as_u64()
+        .expect("Product delivery ID");
+    let product_status = product_server.request(r#"{"id":13,"operation":"runtime.status"}"#);
+    assert_eq!(
+        product_status["result"]["status"],
+        "reconciliation_required"
+    );
+    let product_recovered = product_server.request(&format!(
+        "{{\"id\":14,\"operation\":\"runtime.delivery\",\"params\":{{\"delivery\":{product_delivery}}}}}"
+    ));
+    assert_eq!(
+        product_recovered["result"]["text"],
+        product_resume["result"]["text"]
+    );
+    let product_acknowledged = product_server.request(&format!(
+        "{{\"id\":15,\"operation\":\"runtime.acknowledge\",\"params\":{{\"delivery\":{product_delivery}}}}}"
+    ));
+    assert_eq!(product_acknowledged["result"]["status"], "acknowledged");
+    let product_ready = product_server.request(r#"{"id":16,"operation":"runtime.status"}"#);
+    assert_eq!(product_ready["result"]["status"], "ready");
+    product_server.finish();
+    assert_eq!(
+        fs::read(product.team_ledger()).expect("reread Team after Product resume"),
+        team_before
+    );
+    assert_eq!(
+        fs::read(product.tool_ledger()).expect("reread Tool after Product resume"),
+        tool_before
+    );
+    let product_stdout = [
+        product_retry,
+        product_resume,
+        product_status,
+        product_recovered,
+        product_acknowledged,
+        product_ready,
+    ]
+    .into_iter()
+    .map(|response| response.to_string())
+    .collect::<String>();
+    assert!(!product_stdout.contains("private Provider recovery task"));
+    assert!(!product_stdout.contains("private-provider-recovery-scope"));
+
+    let credential = TempTree::new();
+    let credential_turn = credential.create_external_resume_required_runtime();
+    let credential_runtime_before =
+        fs::read(credential.runtime_ledger()).expect("read credential Runtime Ledger");
+    let credential_output = credential.run(
+        format!(
+            concat!(
+                "{{\"id\":17,\"operation\":\"runtime.resume\",\"params\":{{\"turn\":{0}}}}}\n",
+                "{{\"id\":18,\"operation\":\"runtime.status\"}}\n",
+            ),
+            credential_turn,
+        )
+        .as_bytes(),
+    );
+    let credential_results = responses(&credential_output);
+    assert_eq!(
+        credential_results[0]["error"]["category"],
+        "provider_unavailable"
+    );
+    assert_eq!(credential_results[1]["result"]["status"], "resume_required");
+    assert_eq!(
+        fs::read(credential.runtime_ledger()).expect("reread credential Runtime Ledger"),
+        credential_runtime_before
+    );
+    let credential_stdout =
+        String::from_utf8(credential_output.stdout).expect("UTF-8 credential recovery output");
+    for private in [
+        "private-recovery-credential",
+        "private-recovery.invalid",
+        "private external Provider recovery input",
+    ] {
+        assert!(!credential_stdout.contains(private));
+    }
+    assert!(!credential.user_config().exists());
+    assert!(!credential.project_config().exists());
+
+    let torn = TempTree::new();
+    let torn_turn = torn.create_blocked_runtime(ProviderUnavailableStage::BeforeResponse);
+    let retry_output = torn.run(
+        format!(
+            "{{\"id\":14,\"operation\":\"runtime.retry\",\"params\":{{\"turn\":{torn_turn}}}}}\n"
+        )
+        .as_bytes(),
+    );
+    assert_eq!(
+        responses(&retry_output)[0]["result"]["status"],
+        "resume_required"
+    );
+    let mut torn_bytes = fs::read(torn.runtime_ledger()).expect("read Runtime before torn resume");
+    torn_bytes.extend_from_slice(b"bad");
+    fs::write(torn.runtime_ledger(), &torn_bytes).expect("append torn resume tail");
+    let torn_output = torn.run(
+        format!(
+            "{{\"id\":15,\"operation\":\"runtime.resume\",\"params\":{{\"turn\":{torn_turn}}}}}\n"
+        )
+        .as_bytes(),
+    );
+    assert_eq!(
+        responses(&torn_output)[0]["error"]["category"],
+        "runtime_unavailable"
+    );
+    assert_eq!(
+        fs::read(torn.runtime_ledger()).expect("read unmodified torn resume Ledger"),
+        torn_bytes
+    );
+
+    let sidecar = TempTree::new();
+    let sidecar_turn =
+        sidecar.create_blocked_product_runtime(ProviderUnavailableStage::BeforeResponse);
+    let sidecar_retry = sidecar.run(
+        format!(
+            "{{\"id\":19,\"operation\":\"runtime.retry\",\"params\":{{\"turn\":{sidecar_turn}}}}}\n"
+        )
+        .as_bytes(),
+    );
+    assert_eq!(
+        responses(&sidecar_retry)[0]["result"]["status"],
+        "resume_required"
+    );
+    let runtime_before_sidecar_failure =
+        fs::read(sidecar.runtime_ledger()).expect("read Runtime before sidecar failure");
+    let tool_before_sidecar_failure =
+        fs::read(sidecar.tool_ledger()).expect("read Tool before sidecar failure");
+    let mut torn_team = fs::read(sidecar.team_ledger()).expect("read Team before torn tail");
+    torn_team.extend_from_slice(b"bad");
+    fs::write(sidecar.team_ledger(), &torn_team).expect("append torn Team tail");
+    let sidecar_output = sidecar.run(
+        format!(
+            "{{\"id\":20,\"operation\":\"runtime.resume\",\"params\":{{\"turn\":{sidecar_turn}}}}}\n"
+        )
+        .as_bytes(),
+    );
+    assert_eq!(
+        responses(&sidecar_output)[0]["error"]["category"],
+        "runtime_unavailable"
+    );
+    assert_eq!(
+        fs::read(sidecar.runtime_ledger()).expect("reread Runtime after sidecar failure"),
+        runtime_before_sidecar_failure
+    );
+    assert_eq!(
+        fs::read(sidecar.team_ledger()).expect("reread torn Team Ledger"),
+        torn_team
+    );
+    assert_eq!(
+        fs::read(sidecar.tool_ledger()).expect("reread Tool after sidecar failure"),
+        tool_before_sidecar_failure
+    );
 }
 
 #[test]

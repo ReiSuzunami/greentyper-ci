@@ -9,9 +9,10 @@ use greentyper_core::config::{
     CONFIG_FILE_SCHEMA_VERSION, ConfigCommit, ConfigDraft, ConfigErrorCategory, ConfigRuntime,
     ConfigRuntimeError, ConfigScope, ConfigValue, MAX_CONFIG_STRING_BYTES, config_schema,
 };
-use greentyper_core::model::{DeliveryId, ItemRole};
+use greentyper_core::model::{DeliveryId, ItemRole, TurnId};
 use greentyper_core::runtime::{
-    AcknowledgeOutcome, ProviderToolApproval, RecoveryStatus, RuntimeError, RuntimeKernel,
+    AcknowledgeOutcome, CancelTurnOutcome, PreparedOutput, ProviderToolApproval, RecoveryStatus,
+    RuntimeError, RuntimeKernel,
 };
 use greentyper_core::tool_runtime::{
     AuthorizedToolCall, ToolCallRecord, ToolCallStatus, ToolEffectExecutor, ToolExecution,
@@ -30,8 +31,9 @@ use crate::local_process::LocalProcessExecutor;
 use crate::presentation::AgentCenterView;
 use crate::product_driver::{
     ProductDriver, ProductDriverError, ProductInteraction, ProductToolDecision,
-    ProductToolDecisionOutcome, has_product_driver_state, inspect_product_team,
-    inspect_product_tools, reconcile_product_tool,
+    ProductToolDecisionOutcome, cancel_product_provider_turn, has_product_driver_state,
+    inspect_product_team, inspect_product_tools, reconcile_product_tool,
+    request_product_provider_turn_retry,
 };
 use crate::provider_http::ConfiguredProvider;
 
@@ -180,6 +182,238 @@ where
                 },
                 Err(()) => invalid_params(request.id),
             },
+            "runtime.cancel" => {
+                let params = match parse_params::<RuntimeTurnParams>(request.params) {
+                    Ok(params) => params,
+                    Err(()) => return invalid_params(request.id),
+                };
+                let turn = match TurnId::new(params.turn) {
+                    Ok(turn) => turn,
+                    Err(_) => return invalid_turn(request.id),
+                };
+                let target = match runtime_control_target(&self.runtime_path) {
+                    Some(target) => target,
+                    None => return runtime_control_error(request.id),
+                };
+                let outcome = match target {
+                    RuntimeControlTarget::Runtime => {
+                        let mut runtime =
+                            match RuntimeKernel::open_existing_strict(&self.runtime_path) {
+                                Ok(runtime) => runtime,
+                                Err(_) => return runtime_control_error(request.id),
+                            };
+                        match runtime.cancel_blocked_turn(turn) {
+                            Ok(outcome) => outcome,
+                            Err(error) => {
+                                return runtime_cancel_error(request.id, error);
+                            }
+                        }
+                    }
+                    RuntimeControlTarget::Product => {
+                        match cancel_product_provider_turn(&self.runtime_path, turn) {
+                            Ok(outcome) => outcome,
+                            Err(ProductDriverError::Runtime(error)) => {
+                                return runtime_cancel_error(request.id, error);
+                            }
+                            Err(_) => return runtime_control_error(request.id),
+                        }
+                    }
+                };
+                let snapshot = match RuntimeKernel::inspect(&self.runtime_path) {
+                    Ok(snapshot) if snapshot.recovered_tail_bytes == 0 => snapshot,
+                    Ok(_) | Err(_) => return runtime_inspection_error(request.id),
+                };
+                success_response(
+                    request.id,
+                    json!({
+                        "status": match outcome {
+                            CancelTurnOutcome::Durable(_) => "cancelled",
+                            CancelTurnOutcome::AlreadyCancelled => "already_cancelled",
+                        },
+                        "turn": turn.get(),
+                        "ledger": {
+                            "transaction": snapshot.head.transaction,
+                            "sequence": snapshot.head.sequence,
+                        },
+                    }),
+                )
+            }
+            "runtime.retry" => {
+                let params = match parse_params::<RuntimeTurnParams>(request.params) {
+                    Ok(params) => params,
+                    Err(()) => return invalid_params(request.id),
+                };
+                let turn = match TurnId::new(params.turn) {
+                    Ok(turn) => turn,
+                    Err(_) => return invalid_turn(request.id),
+                };
+                let target = match runtime_control_target(&self.runtime_path) {
+                    Some(target) => target,
+                    None => return runtime_control_error(request.id),
+                };
+                match target {
+                    RuntimeControlTarget::Runtime => {
+                        let mut runtime =
+                            match RuntimeKernel::open_existing_strict(&self.runtime_path) {
+                                Ok(runtime) => runtime,
+                                Err(_) => return runtime_control_error(request.id),
+                            };
+                        if let Err(error) = runtime.request_blocked_turn_retry(turn) {
+                            return runtime_retry_error(request.id, error);
+                        }
+                    }
+                    RuntimeControlTarget::Product => {
+                        match request_product_provider_turn_retry(&self.runtime_path, turn) {
+                            Ok(_) => {}
+                            Err(ProductDriverError::Runtime(error)) => {
+                                return runtime_retry_error(request.id, error);
+                            }
+                            Err(_) => return runtime_control_error(request.id),
+                        }
+                    }
+                }
+                let snapshot = match RuntimeKernel::inspect(&self.runtime_path) {
+                    Ok(snapshot)
+                        if snapshot.recovered_tail_bytes == 0
+                            && matches!(
+                                snapshot.status,
+                                RecoveryStatus::ResumeRequired { turn: actual } if actual == turn
+                            ) =>
+                    {
+                        snapshot
+                    }
+                    Ok(_) | Err(_) => return runtime_inspection_error(request.id),
+                };
+                success_response(
+                    request.id,
+                    json!({
+                        "status": "resume_required",
+                        "turn": turn.get(),
+                        "ledger": {
+                            "transaction": snapshot.head.transaction,
+                            "sequence": snapshot.head.sequence,
+                        },
+                    }),
+                )
+            }
+            "runtime.resume" => {
+                let params = match parse_params::<RuntimeTurnParams>(request.params) {
+                    Ok(params) => params,
+                    Err(()) => return invalid_params(request.id),
+                };
+                let turn = match TurnId::new(params.turn) {
+                    Ok(turn) => turn,
+                    Err(_) => return invalid_turn(request.id),
+                };
+                let target = match runtime_control_target(&self.runtime_path) {
+                    Some(target) => target,
+                    None => return runtime_control_error(request.id),
+                };
+                let snapshot = match RuntimeKernel::inspect(&self.runtime_path) {
+                    Ok(snapshot)
+                        if snapshot.recovered_tail_bytes == 0
+                            && matches!(
+                                snapshot.status,
+                                RecoveryStatus::ResumeRequired { turn: actual } if actual == turn
+                            ) =>
+                    {
+                        snapshot
+                    }
+                    Ok(_) | Err(_) => return turn_not_resumable(request.id),
+                };
+                debug_assert!(matches!(
+                    snapshot.status,
+                    RecoveryStatus::ResumeRequired { turn: actual } if actual == turn
+                ));
+                match target {
+                    RuntimeControlTarget::Runtime => {
+                        let mut runtime =
+                            match RuntimeKernel::open_existing_strict(&self.runtime_path) {
+                                Ok(runtime)
+                                    if matches!(
+                                        runtime.snapshot().status,
+                                        RecoveryStatus::ResumeRequired { turn: actual }
+                                            if actual == turn
+                                    ) =>
+                                {
+                                    runtime
+                                }
+                                Ok(_) => return turn_not_resumable(request.id),
+                                Err(_) => return runtime_control_error(request.id),
+                            };
+                        let mut provider = match runtime.pending_provider_epoch() {
+                            Some(epoch) => match ConfiguredProvider::from_epoch(
+                                epoch,
+                                BorrowedCredentialVault(&mut *self.vault),
+                            ) {
+                                Ok(provider) => provider,
+                                Err(_) => return provider_control_error(request.id),
+                            },
+                            None => return runtime_control_error(request.id),
+                        };
+                        match runtime.resume(&mut provider) {
+                            Ok(output) => prepared_runtime_response(request.id, &output),
+                            Err(error) => runtime_resume_error(request.id, error),
+                        }
+                    }
+                    RuntimeControlTarget::Product => {
+                        let mut driver = match ProductDriver::open_existing_for_provider_recovery(
+                            &self.runtime_path,
+                            turn,
+                            BoxedToolExecutor(Box::new(ReviewOnlyExecutor)),
+                        ) {
+                            Ok(driver) => driver,
+                            Err(ProductDriverError::Runtime(RuntimeError::Busy(_))) => {
+                                return turn_not_resumable(request.id);
+                            }
+                            Err(_) => return runtime_control_error(request.id),
+                        };
+                        let mut provider = match driver.pending_provider_epoch() {
+                            Some(epoch) => match ConfiguredProvider::from_epoch(
+                                epoch,
+                                BorrowedCredentialVault(&mut *self.vault),
+                            ) {
+                                Ok(provider) => provider,
+                                Err(_) => return provider_control_error(request.id),
+                            },
+                            None => return runtime_control_error(request.id),
+                        };
+                        provider.enable_local_echo();
+                        let mut interaction = AppServerProductInteraction;
+                        let result = driver.resume(&mut provider, &mut interaction);
+                        drop(provider);
+                        drop(driver);
+                        match result {
+                            Ok(output) => prepared_runtime_response(request.id, &output),
+                            Err(ProductDriverError::Interaction(_)) => {
+                                let call = inspect_product_tools(&self.runtime_path)
+                                    .ok()
+                                    .filter(|tools| tools.recovered_tail_bytes == 0)
+                                    .and_then(|tools| {
+                                        tools.calls.into_iter().find(|record| {
+                                            record.status == ToolCallStatus::AwaitingApproval
+                                        })
+                                    });
+                                match call {
+                                    Some(call) => success_response(
+                                        request.id,
+                                        json!({
+                                            "status": "tool_approval_required",
+                                            "turn": turn.get(),
+                                            "call": call.call.get(),
+                                        }),
+                                    ),
+                                    None => runtime_control_error(request.id),
+                                }
+                            }
+                            Err(ProductDriverError::Runtime(error)) => {
+                                runtime_resume_error(request.id, error)
+                            }
+                            Err(_) => runtime_control_error(request.id),
+                        }
+                    }
+                }
+            }
             "runtime.delivery" => {
                 let params = match parse_params::<RuntimeDeliveryParams>(request.params) {
                     Ok(params) => params,
@@ -901,6 +1135,97 @@ fn runtime_control_error(id: u64) -> Value {
     )
 }
 
+#[derive(Clone, Copy)]
+enum RuntimeControlTarget {
+    Runtime,
+    Product,
+}
+
+fn runtime_control_target(runtime_path: &PathBuf) -> Option<RuntimeControlTarget> {
+    if fs::symlink_metadata(runtime_path).is_err()
+        || !RuntimeKernel::inspect(runtime_path)
+            .is_ok_and(|snapshot| snapshot.recovered_tail_bytes == 0)
+    {
+        return None;
+    }
+    match has_product_driver_state(runtime_path) {
+        Ok(false) => Some(RuntimeControlTarget::Runtime),
+        Ok(true) if product_control_ready(runtime_path) => Some(RuntimeControlTarget::Product),
+        Ok(true) | Err(_) => None,
+    }
+}
+
+fn runtime_cancel_error(id: u64, error: RuntimeError) -> Value {
+    match error {
+        RuntimeError::UnknownTurn(_) => {
+            error_response(Some(id), "unknown_turn", "Runtime Turn is unknown", None)
+        }
+        RuntimeError::TurnCancellationNotAllowed(_) => error_response(
+            Some(id),
+            "turn_not_cancellable",
+            "Runtime Turn cannot be cancelled",
+            None,
+        ),
+        _ => runtime_control_error(id),
+    }
+}
+
+fn runtime_retry_error(id: u64, error: RuntimeError) -> Value {
+    match error {
+        RuntimeError::UnknownTurn(_) => {
+            error_response(Some(id), "unknown_turn", "Runtime Turn is unknown", None)
+        }
+        RuntimeError::TurnRetryNotAllowed(_) => error_response(
+            Some(id),
+            "turn_not_retryable",
+            "Runtime Turn cannot be retried",
+            None,
+        ),
+        _ => runtime_control_error(id),
+    }
+}
+
+fn runtime_resume_error(id: u64, error: RuntimeError) -> Value {
+    match error {
+        RuntimeError::Busy(_) | RuntimeError::UnknownTurn(_) => turn_not_resumable(id),
+        RuntimeError::Provider(_) | RuntimeError::InvalidProviderOutput(_) => {
+            provider_control_error(id)
+        }
+        _ => runtime_control_error(id),
+    }
+}
+
+fn turn_not_resumable(id: u64) -> Value {
+    error_response(
+        Some(id),
+        "turn_not_resumable",
+        "Runtime Turn is not awaiting resume",
+        None,
+    )
+}
+
+fn prepared_runtime_response(id: u64, output: &PreparedOutput) -> Value {
+    success_response(
+        id,
+        json!({
+            "status": "prepared",
+            "delivery": output.delivery().get(),
+            "turn": output.turn().get(),
+            "text": output.text(),
+            "usage_record_count": output.usage_records().len(),
+        }),
+    )
+}
+
+fn invalid_turn(id: u64) -> Value {
+    error_response(
+        Some(id),
+        "invalid_value",
+        "turn must be a positive identifier",
+        None,
+    )
+}
+
 fn tool_review_binding(approval: &ProviderToolApproval) -> ToolReviewBinding {
     ToolReviewBinding {
         call: approval.call().get(),
@@ -1192,6 +1517,12 @@ struct RuntimeAcknowledgeParams {
 #[serde(deny_unknown_fields)]
 struct RuntimeDeliveryParams {
     delivery: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RuntimeTurnParams {
+    turn: u64,
 }
 
 #[derive(Deserialize)]

@@ -146,6 +146,16 @@ Tool approval or reconciliation, and historical schema-9-or-earlier blocks
 remain on their original fail-closed recovery path. Product retry and
 cancellation require the recovered Active Agent Session that owns the Turn and
 do not modify Team or Tool state. Cancellation does not call a Provider or Tool.
+The local stdio App Server exposes the same exact-turn boundary through
+`runtime.cancel`, `runtime.retry`, and `runtime.resume`. Cancel and retry perform
+no Provider request, credential lookup, Tool execution, output delivery, or
+acknowledgement. Retry only commits `TurnRetryRequested`; resume is a separate
+request that reconstructs the frozen Provider Epoch and, for product state, the
+single recovered Active Agent Session. Resume may repeat remote work or billing,
+records ordinary Usage/cost facts, and returns prepared output or an exact Tool
+approval without acknowledging it. Wrong, stale, non-retryable, non-resumable,
+incomplete-tail, or missing state fails before mutation; product recovery also
+leaves Team and Tool Ledgers byte-identical.
 
 Agent Team recovery is separate from Turn output recovery. `open_with_team`
 holds both dedicated writers, validates the Team replay, and returns one
@@ -378,8 +388,11 @@ charges still require a future dedicated authority path.
   Prepared Provider output remains visible until durable delivery
   acknowledgement succeeds. Failed recovery or resolution returns to blocker
   inspection; failed acknowledgement keeps the same output live for retry. The
-  local stdio App Server exposes the same narrow authority through four explicit
-  operations. `runtime.delivery` reads exact prepared output and
+  local stdio App Server exposes the same narrow authority through explicit
+  recovery operations. `runtime.cancel` closes one exact Provider-origin block,
+  `runtime.retry` only rearms an explicitly retryable Turn, and `runtime.resume`
+  resumes that exact Turn under the frozen Provider Epoch and recovered Active
+  Agent Session. `runtime.delivery` reads exact prepared output and
   `runtime.acknowledge` closes it durably. `tool.reconcile` records an observed
   digest or fixed failure without invoking the executor. `tool.decide` first
   reviews the exact pending `local.echo` request, returning canonical arguments,
@@ -391,8 +404,8 @@ charges still require a future dedicated authority path.
   credential, append Usage/cost records, and affect quota or billing. Every
   mutation strictly opens existing Ledgers under exclusive locks and rejects an
   incomplete tail without repair. These operations neither admit an Agent nor
-  expose Agent-ID-to-session conversion, general Runtime resume, or arbitrary
-  Tool execution. The
+  expose Agent-ID-to-session conversion, general Runtime control beyond the
+  exact recovery states, or arbitrary Tool execution. The
   Config surface gives every schema field a rendered user-scope interaction, supports all four
   Config Object creation flows, and renders typed target-layer deletion
   confirmations. Credential fields expose only an opaque reference and never

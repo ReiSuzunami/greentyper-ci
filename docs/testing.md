@@ -530,7 +530,20 @@ product sidecar returns a fixed error, preserves its bytes, creates no missing
 files, and the next request on the same stream succeeds. These tests do not
 prove a cross-Ledger transactional snapshot.
 
-Four bounded App Server control tests cover the fixed recovery flow.
+Bounded App Server control tests cover the fixed recovery flow.
+`runtime.cancel` rejects missing, wrong, non-Provider, and incomplete-tail state
+without mutation, closes one exact Provider-origin block, remains idempotent,
+and changes only the Runtime Ledger when product sidecars are present.
+`runtime.retry` rejects non-retryable and wrong Turns, then durably rearms the
+exact early Provider failure without constructing a Provider, resolving a
+credential, executing a Tool, or changing Team/Tool bytes. `runtime.resume`
+requires that exact `resume-required` Turn, reconstructs the frozen Provider and
+product Session, and returns prepared output without acknowledging it. Ordinary
+and product tests recover that output through `runtime.delivery`, acknowledge
+it, and reopen Ready. A frozen external Provider with an unavailable credential
+returns a fixed error without exposing its reference, origin, or input and
+leaves the retry transaction recoverable. Runtime and Team incomplete-tail
+fixtures prove resume does not repair or change any Ledger.
 `runtime.delivery` retrieves exact persisted Assistant text for the matching
 prepared delivery without changing Runtime bytes, rejects missing or wrong
 deliveries, and rejects an incomplete tail without repair.
@@ -554,7 +567,8 @@ errors omit secret, call identity, Provider details, and private failure reasons
 only the explicit review result exposes the exact Tool material being approved.
 A clean zero-session Team cannot be auto-admitted by a failed review, and all
 three Ledgers remain byte-identical. These tests do not prove remote transport,
-general Runtime resume, Agent lifecycle mutation, arbitrary Tool
+general Runtime control beyond the exact cancel/retry/resume flow, Agent
+lifecycle mutation, arbitrary Tool
 approval/execution, or multi-client authentication.
 Context Pressure tests freeze exact 65%/90% threshold transitions, estimated and
 missing-fact propagation, invalid policy/limit and arithmetic failure, and the

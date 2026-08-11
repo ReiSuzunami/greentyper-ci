@@ -22,7 +22,7 @@ use greentyper_core::provider::{ProviderEpoch, ProviderRuntime};
 use greentyper_core::runtime::RuntimeSnapshot;
 use greentyper_core::runtime::{
     AcknowledgeOutcome, CancelTurnOutcome, KernelTeamSnapshot, ModelSelection, PreparedOutput,
-    ProviderToolApproval, ProviderTurnOutcome, RuntimeError, RuntimeKernel,
+    ProviderToolApproval, ProviderTurnOutcome, RecoveryStatus, RuntimeError, RuntimeKernel,
 };
 use greentyper_core::tool_runtime::{
     ApprovalDecision, ToolCallRecord, ToolCallStatus, ToolEffectExecutor,
@@ -147,6 +147,10 @@ impl<E: ToolEffectExecutor> ProductDriver<E> {
             tool_path,
             1,
         )?;
+        let status = kernel.snapshot().status;
+        if status != (RecoveryStatus::ResumeRequired { turn }) {
+            return Err(ProductDriverError::Runtime(RuntimeError::Busy(status)));
+        }
         if let Some(record) =
             recovery.snapshot().operations.iter().find(|record| {
                 record.status == TeamOperationStatus::CommittedAwaitingAcknowledgement
@@ -259,15 +263,6 @@ impl<E: ToolEffectExecutor> ProductDriver<E> {
             self.kernel
                 .resume_provider_turn(self.session, provider, local_echo_resources)?;
         self.finish(outcome, provider, interaction)
-    }
-
-    pub(crate) fn request_blocked_provider_turn_retry(
-        &mut self,
-        turn: TurnId,
-    ) -> Result<DurabilityReceipt, ProductDriverError> {
-        self.kernel
-            .request_blocked_provider_turn_retry(self.session, turn)
-            .map_err(ProductDriverError::Runtime)
     }
 
     pub(crate) fn recover_pending_tool_approval(
@@ -465,6 +460,34 @@ pub(crate) fn cancel_product_provider_turn(
     };
     kernel
         .cancel_blocked_provider_turn(session, turn)
+        .map_err(ProductDriverError::Runtime)
+}
+
+pub(crate) fn request_product_provider_turn_retry(
+    runtime_path: &Path,
+    turn: TurnId,
+) -> Result<DurabilityReceipt, ProductDriverError> {
+    if !path_entry_exists(runtime_path)? || !has_product_driver_state(runtime_path)? {
+        return Err(ProductDriverError::ProviderTurnStateUnavailable);
+    }
+    let team_path = sidecar_path(runtime_path, "team");
+    let tool_path = sidecar_path(runtime_path, "tool");
+    let (mut kernel, recovery) = RuntimeKernel::open_with_team_and_tools_existing_strict(
+        runtime_path,
+        team_path,
+        tool_path,
+        1,
+    )?;
+    let mut sessions = recovery.into_sessions();
+    let session = match sessions.len() {
+        1 => sessions
+            .pop()
+            .ok_or(ProductDriverError::UnexpectedRecovery)?,
+        0 => return Err(ProductDriverError::ProviderTurnOwnerUnavailable(turn.get())),
+        _ => return Err(ProductDriverError::UnexpectedRecovery),
+    };
+    kernel
+        .request_blocked_provider_turn_retry(session, turn)
         .map_err(ProductDriverError::Runtime)
 }
 

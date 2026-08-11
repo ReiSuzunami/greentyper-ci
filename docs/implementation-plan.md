@@ -504,10 +504,23 @@ review mismatch, approve, deny, and restart paths; exact Ledger bytes and
 executor counts pin no-repair and no-reexecution behavior. Review and confirmed
 decision may each use credentials, append Usage/cost records, and affect quota
 or billing.
+A fifth contiguous App Server batch completes three bounded Provider Recovery
+slices. The cancel slice terminalizes one exact typed Provider-origin blocked
+Turn and remains idempotent. The retry slice accepts only the early retryable
+Provider failure and durably moves that same Turn to `resume-required` without
+contacting a Provider, resolving a credential, executing a Tool, or delivering
+output. The resume slice then requires the exact Turn, frozen Provider Epoch,
+and, for product state, the recovered Active Agent Session. It returns prepared
+output or the exact Tool approval without acknowledgement; ordinary delivery
+and acknowledgement remain explicit. Tests cover ordinary and product Ledgers,
+missing/wrong/non-retryable state, repeat safety, credential failure, Runtime and
+Team incomplete tails, restart recovery, cross-Ledger byte identity, output
+retrieval, and final acknowledgement. Resume may contact the Provider, append
+Usage/cost records, and repeat quota or billing; cancel and retry cannot.
 
 This does not complete Phase 3. Audited Windows ConPTY behavior, broader
-multi-Tool/App Server policy, general Runtime resume/control, remote App Server
-transport,
+multi-Tool/App Server policy, general App Server Runtime control beyond the
+exact cancel/retry/resume recovery flow, remote App Server transport,
 automatic/background snapshot refresh, rendered secret binding,
 custom-template and automatic starter-offer/update workflow, live catalog
 discovery and Recent evidence, automatic Context View/token-source

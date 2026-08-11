@@ -5619,8 +5619,15 @@ source = "unknown"
             .expect("TLS server config");
         let listener = TcpListener::bind(("127.0.0.1", 0)).expect("TLS listener");
         let address = listener.local_addr().unwrap();
+        let timeout = Duration::from_secs(10);
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().expect("TLS accept");
+            stream
+                .set_read_timeout(Some(timeout))
+                .expect("TLS read timeout");
+            stream
+                .set_write_timeout(Some(timeout))
+                .expect("TLS write timeout");
             let connection =
                 ServerConnection::new(std::sync::Arc::new(server_config)).expect("TLS connection");
             let mut stream = StreamOwned::new(connection, stream);
@@ -5649,13 +5656,9 @@ source = "unknown"
             .bind(&scope, SecretValue::new(SYNTHETIC_SECRET.to_vec()).unwrap())
             .expect("bind HTTPS credential");
         let root = reqwest::Certificate::from_der(certificate.as_ref()).expect("client root");
-        let mut provider = ResponsesHttpProvider::with_timeout_and_root(
-            profile.clone(),
-            vault,
-            Duration::from_secs(2),
-            root,
-        )
-        .expect("HTTPS Responses provider");
+        let mut provider =
+            ResponsesHttpProvider::with_timeout_and_root(profile.clone(), vault, timeout, root)
+                .expect("HTTPS Responses provider");
         let request = provider_request(profile, "verified https");
         let events = provider.run(&request).expect("verified HTTPS response");
 
