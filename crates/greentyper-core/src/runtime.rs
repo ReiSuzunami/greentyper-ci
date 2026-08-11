@@ -134,6 +134,30 @@ pub struct ContextCheckpoint {
     view: ReducedContextView,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContextInspection {
+    head: LedgerHead,
+    checkpoint: Option<ContextCheckpoint>,
+    recovered_tail_bytes: u64,
+}
+
+impl ContextInspection {
+    #[must_use]
+    pub const fn head(&self) -> LedgerHead {
+        self.head
+    }
+
+    #[must_use]
+    pub const fn checkpoint(&self) -> Option<&ContextCheckpoint> {
+        self.checkpoint.as_ref()
+    }
+
+    #[must_use]
+    pub const fn recovered_tail_bytes(&self) -> u64 {
+        self.recovered_tail_bytes
+    }
+}
+
 impl ContextCheckpoint {
     #[must_use]
     pub const fn source(&self) -> ContextEventRange {
@@ -666,6 +690,26 @@ impl RuntimeKernel {
         })
     }
 
+    pub fn inspect_context(path: impl AsRef<Path>) -> Result<ContextInspection, RuntimeError> {
+        let report = match FileLedger::inspect(path) {
+            Ok(report) => report,
+            Err(LedgerError::Io(source)) if source.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(ContextInspection {
+                    head: LedgerHead::default(),
+                    checkpoint: None,
+                    recovered_tail_bytes: 0,
+                });
+            }
+            Err(source) => return Err(RuntimeError::Ledger(source)),
+        };
+        let state = replay_runtime(&report.events)?;
+        Ok(ContextInspection {
+            head: report.head,
+            checkpoint: state.context_checkpoint,
+            recovered_tail_bytes: report.truncated_tail_bytes,
+        })
+    }
+
     pub fn inspect_usage(
         path: impl AsRef<Path>,
         as_of: UsageTimestamp,
@@ -945,8 +989,9 @@ impl RuntimeKernel {
     /// Executes one Turn with an immutable Context Pressure projection.
     ///
     /// A hard projection stops before admission or Provider execution. Soft
-    /// and unknown projections preserve the existing path; reduction and
-    /// compaction are separate Context Engine work.
+    /// pressure publishes a bounded checkpoint at the current Safe Barrier
+    /// before admission. Unknown pressure preserves the existing path without
+    /// inventing Context facts.
     pub fn execute_with_context_pressure(
         &mut self,
         layers: &ConfigLayers,
@@ -954,13 +999,19 @@ impl RuntimeKernel {
         input: impl Into<String>,
         provider: &mut impl ProviderRuntime,
     ) -> Result<PreparedOutput, RuntimeError> {
+        let input = input.into();
+        if pressure.admission() == ContextAdmissionDecision::Reduce {
+            validate_input(&input)?;
+            let checkpoint = self.prepare_context_checkpoint(ContextReductionPolicy::default())?;
+            self.publish_context_checkpoint(checkpoint)?;
+        }
         self.admit_turn(
             layers,
             TurnAdmission {
                 usage_windows: Vec::new(),
                 price_schedules: PriceScheduleBook::default(),
                 context_pressure: Some(pressure),
-                input: input.into(),
+                input,
                 provider_snapshot: provider.profile_snapshot().cloned(),
                 provider_dialect: provider.dialect(),
                 agent: None,
@@ -1248,6 +1299,15 @@ impl RuntimeKernel {
     fn require_context_safe_barrier(&self) -> Result<(), RuntimeError> {
         self.require_ready()?;
         self.require_no_tool_reconciliation()?;
+        if self.tools.as_ref().is_some_and(|tools| {
+            tools
+                .snapshot()
+                .calls
+                .iter()
+                .any(|record| record.status == ToolCallStatus::AwaitingApproval)
+        }) {
+            return Err(RuntimeError::ContextCheckpointNotAtSafeBarrier);
+        }
         if let Some(team) = &self.team {
             team.require_ready()?;
         }
@@ -4517,6 +4577,7 @@ pub enum RuntimeError {
     Provider(ProviderError),
     Usage(UsageError),
     Context(ContextViewError),
+    ContextCheckpointNotAtSafeBarrier,
     ContextAdmissionBlocked {
         pressure: ContextPressureSnapshot,
     },
@@ -4563,6 +4624,9 @@ impl fmt::Display for RuntimeError {
             Self::Provider(source) => write!(formatter, "{source}"),
             Self::Usage(source) => write!(formatter, "{source}"),
             Self::Context(source) => write!(formatter, "{source}"),
+            Self::ContextCheckpointNotAtSafeBarrier => {
+                write!(formatter, "Context checkpoint requires a Safe Barrier")
+            }
             Self::ContextAdmissionBlocked { pressure } => write!(
                 formatter,
                 "Context Pressure stopped Turn admission at {}%",

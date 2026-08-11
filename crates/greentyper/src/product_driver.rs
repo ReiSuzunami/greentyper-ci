@@ -534,6 +534,25 @@ pub(crate) fn inspect_product_team(
     }))
 }
 
+pub(crate) fn open_product_context_runtime(
+    runtime_path: &Path,
+) -> Result<RuntimeKernel, ProductDriverError> {
+    if !has_product_driver_state(runtime_path)? {
+        return RuntimeKernel::open_existing_strict(runtime_path)
+            .map_err(ProductDriverError::Runtime);
+    }
+    if !path_entry_exists(runtime_path)? {
+        return Err(ProductDriverError::IncompleteState);
+    }
+    let (kernel, _recovery) = RuntimeKernel::open_with_team_and_tools_existing_strict(
+        runtime_path,
+        sidecar_path(runtime_path, "team"),
+        sidecar_path(runtime_path, "tool"),
+        1,
+    )?;
+    Ok(kernel)
+}
+
 pub(crate) fn reconcile_product_tool(
     runtime_path: &Path,
     call: u64,

@@ -18,6 +18,8 @@ pub const DEFAULT_SOFT_CONTEXT_PRESSURE_PERCENT: u8 = 65;
 pub const DEFAULT_HARD_CONTEXT_PRESSURE_PERCENT: u8 = 90;
 pub const MAX_CONTEXT_VIEW_BYTES: usize = 512 * 1024;
 pub const MAX_CONTEXT_VIEW_ITEMS: usize = 4096;
+pub const DEFAULT_CONTEXT_RAW_TAIL_BYTES: usize = 64 * 1024;
+pub const DEFAULT_CONTEXT_RAW_TAIL_ITEMS: usize = 32;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -488,6 +490,15 @@ impl ContextReductionPolicy {
     #[must_use]
     pub const fn max_raw_items(self) -> usize {
         self.max_raw_items
+    }
+}
+
+impl Default for ContextReductionPolicy {
+    fn default() -> Self {
+        Self {
+            max_raw_bytes: DEFAULT_CONTEXT_RAW_TAIL_BYTES,
+            max_raw_items: DEFAULT_CONTEXT_RAW_TAIL_ITEMS,
+        }
     }
 }
 

@@ -17,8 +17,8 @@ use crate::presentation::PresentationSmokeError;
 use crate::product_driver::{
     ProductDriver, ProductDriverError, ProductInteraction, ProductToolDecision,
     apply_model_preset_to_next_turn, cancel_product_provider_turn, freeze_model_selection,
-    has_product_driver_state, inspect_product_tools, reconcile_product_tool,
-    request_product_provider_turn_retry,
+    has_product_driver_state, inspect_product_tools, open_product_context_runtime,
+    reconcile_product_tool, request_product_provider_turn_retry,
 };
 use crate::provider_connection::{ModelsHttpConnectionTester, ProviderConnectionTester};
 use crate::provider_discovery_catalog::{
@@ -33,14 +33,15 @@ use greentyper_core::config::{
     CONFIG_FILE_SCHEMA_VERSION, ConfigDocument, ConfigDraft, ConfigPaths, ConfigRuntime,
     ConfigRuntimeError, ConfigScope, config_schema,
 };
+use greentyper_core::context::ContextReductionPolicy;
 use greentyper_core::model::{DeliveryId, TurnId};
 use greentyper_core::pricing::PriceScheduleBook;
 use greentyper_core::provider::{ProviderDialect, ProviderError};
 use greentyper_core::provider_catalog::ProviderCatalog;
 use greentyper_core::provider_discovery::{ProviderDiscoveryError, ProviderDiscoveryState};
 use greentyper_core::runtime::{
-    AcknowledgeOutcome, CancelTurnOutcome, PreparedOutput, ProviderToolApproval, RecoveryStatus,
-    RuntimeKernel,
+    AcknowledgeOutcome, CancelTurnOutcome, ContextCheckpoint, ContextInspection, PreparedOutput,
+    ProviderToolApproval, RecoveryStatus, RuntimeKernel,
 };
 use greentyper_core::tool_runtime::{
     ToolCallRecord, ToolCallStatus, ToolEffectExecutor, ToolReconciliationDecision, ToolSnapshot,
@@ -199,6 +200,23 @@ pub fn run(arguments: impl Iterator<Item = String>) -> Result<(), CliError> {
                 }
             }
         }
+        Command::Context(command) => match command {
+            ContextCommand::Status { ledger } => {
+                let inspection = RuntimeKernel::inspect_context(&ledger)?;
+                write_context_inspection(&inspection)
+            }
+            ContextCommand::Reduce { ledger, policy } => {
+                let mut runtime = open_product_context_runtime(&ledger)?;
+                let checkpoint = runtime.prepare_context_checkpoint(policy)?;
+                runtime.publish_context_checkpoint(checkpoint)?;
+                let snapshot = runtime.snapshot();
+                write_context_state(
+                    snapshot.head,
+                    runtime.context_checkpoint(),
+                    snapshot.recovered_tail_bytes,
+                )
+            }
+        },
         Command::Cancel { ledger, turn } => {
             let outcome = if has_product_driver_state(&ledger)? {
                 cancel_product_provider_turn(&ledger, turn)?
@@ -773,6 +791,42 @@ fn write_stdout_line(value: &str) -> Result<(), CliError> {
     Ok(())
 }
 
+fn write_context_inspection(inspection: &ContextInspection) -> Result<(), CliError> {
+    write_context_state(
+        inspection.head(),
+        inspection.checkpoint(),
+        inspection.recovered_tail_bytes(),
+    )
+}
+
+fn write_context_state(
+    head: greentyper_core::ledger::LedgerHead,
+    checkpoint: Option<&ContextCheckpoint>,
+    recovered_tail_bytes: u64,
+) -> Result<(), CliError> {
+    let checkpoint = checkpoint.map(|checkpoint| {
+        let source = checkpoint.source().head();
+        serde_json::json!({
+            "source": {
+                "transaction": source.transaction,
+                "sequence": source.sequence,
+            },
+            "artifact_count": checkpoint.view().artifacts().len(),
+            "recent_item_count": checkpoint.view().recent_items().len(),
+            "raw_bytes": checkpoint.view().raw_bytes(),
+            "estimated_tokens": checkpoint.view().estimated_tokens(),
+        })
+    });
+    write_json(&serde_json::json!({
+        "head": {
+            "transaction": head.transaction,
+            "sequence": head.sequence,
+        },
+        "recovered_tail_bytes": recovered_tail_bytes,
+        "checkpoint": checkpoint,
+    }))
+}
+
 fn open_runtime(path: &Path) -> Result<RuntimeKernel, CliError> {
     if let Some(parent) = path
         .parent()
@@ -810,6 +864,7 @@ enum Command {
         at: Option<UsageTimestamp>,
         query: Option<RuntimeUsageQuery>,
     },
+    Context(ContextCommand),
     Cancel {
         ledger: PathBuf,
         turn: TurnId,
@@ -842,6 +897,17 @@ enum Command {
         query: String,
     },
     Help,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum ContextCommand {
+    Status {
+        ledger: PathBuf,
+    },
+    Reduce {
+        ledger: PathBuf,
+        policy: ContextReductionPolicy,
+    },
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -991,6 +1057,9 @@ fn parse(mut arguments: impl Iterator<Item = String>) -> Result<Command, CliErro
     }
     if command == "tool" {
         return parse_tool(arguments).map(Command::Tool);
+    }
+    if command == "context" {
+        return parse_context(arguments).map(Command::Context);
     }
     if command == "app-server" {
         return parse_app_server(arguments);
@@ -1262,6 +1331,73 @@ fn parse_provider_dialect(value: &str) -> Result<ProviderDialect, CliError> {
         _ => Err(CliError::Usage(
             "--dialect must be responses, chat_completions, or messages",
         )),
+    }
+}
+
+fn parse_context(mut arguments: impl Iterator<Item = String>) -> Result<ContextCommand, CliError> {
+    let action = arguments
+        .next()
+        .ok_or(CliError::Usage("context requires status or reduce"))?;
+    let mut ledger = None;
+    let mut max_raw_bytes = None;
+    let mut max_raw_items = None;
+    while let Some(argument) = arguments.next() {
+        let slot = match argument.as_str() {
+            "--ledger" => &mut ledger,
+            "--max-raw-bytes" => &mut max_raw_bytes,
+            "--max-raw-items" => &mut max_raw_items,
+            _ => return Err(CliError::Usage("unknown context option")),
+        };
+        if slot.is_some() {
+            return Err(CliError::Usage("duplicate context option"));
+        }
+        let value = arguments
+            .next()
+            .ok_or(CliError::Usage("context option is missing its value"))?;
+        if value.starts_with('-') {
+            return Err(CliError::Usage("context option is missing its value"));
+        }
+        *slot = Some(value);
+    }
+    let ledger = match ledger {
+        Some(path) if path.is_empty() => {
+            return Err(CliError::Usage("ledger path cannot be empty"));
+        }
+        Some(path) => PathBuf::from(path),
+        None => default_ledger_path()?,
+    };
+    match action.as_str() {
+        "status" => {
+            if max_raw_bytes.is_some() || max_raw_items.is_some() {
+                return Err(CliError::Usage(
+                    "Context reduction limits require context reduce",
+                ));
+            }
+            Ok(ContextCommand::Status { ledger })
+        }
+        "reduce" => {
+            let defaults = ContextReductionPolicy::default();
+            let max_raw_bytes = max_raw_bytes
+                .map(|value| {
+                    value
+                        .parse::<usize>()
+                        .map_err(|_| CliError::Usage("--max-raw-bytes must be a positive integer"))
+                })
+                .transpose()?
+                .unwrap_or(defaults.max_raw_bytes());
+            let max_raw_items = max_raw_items
+                .map(|value| {
+                    value
+                        .parse::<usize>()
+                        .map_err(|_| CliError::Usage("--max-raw-items must be a positive integer"))
+                })
+                .transpose()?
+                .unwrap_or(defaults.max_raw_items());
+            let policy = ContextReductionPolicy::new(max_raw_bytes, max_raw_items)
+                .map_err(|_| CliError::Usage("Context reduction limits are invalid"))?;
+            Ok(ContextCommand::Reduce { ledger, policy })
+        }
+        _ => Err(CliError::Usage("context requires status or reduce")),
     }
 }
 
@@ -2073,6 +2209,8 @@ Usage:\n\
   greentyper resume [--ledger PATH] [--tool local.echo]\n\
   greentyper status [--ledger PATH]\n\
   greentyper stats [--ledger PATH] [--at UNIX_MS] [--summary-only | --limit N [--cursor CURSOR]]\n\
+  greentyper context status [--ledger PATH]\n\
+  greentyper context reduce [--ledger PATH] [--max-raw-bytes N] [--max-raw-items N]\n\
   greentyper cancel [--ledger PATH] --turn ID\n\
   greentyper retry [--ledger PATH] --turn ID\n\
   greentyper reconcile [--ledger PATH] --delivery ID\n\

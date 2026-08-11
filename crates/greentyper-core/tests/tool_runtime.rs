@@ -8,6 +8,7 @@ use greentyper_core::agent_team::{
     MessageRecipient, ResourceBudget, TaskScope, TaskSpec, TeamCommand, TeamError,
     TeamOperationAcknowledgeOutcome,
 };
+use greentyper_core::context::ContextReductionPolicy;
 use greentyper_core::runtime::{RuntimeError, RuntimeKernel};
 use greentyper_core::tool_runtime::{
     ApprovalDecision, AuthorizedToolCall, ToolArguments, ToolCallOutcome, ToolCallStatus,
@@ -66,6 +67,54 @@ fn admit_root(kernel: &mut RuntimeKernel, capabilities: CapabilitySnapshot) -> A
         TeamOperationAcknowledgeOutcome::Durable(_)
     ));
     root_session(operation.commit)
+}
+
+#[test]
+fn context_checkpoint_rejects_an_unresolved_tool_approval_without_writes() {
+    let runtime_path = temp_path("context-barrier", "runtime");
+    let team_path = temp_path("context-barrier", "team");
+    let tool_path = temp_path("context-barrier", "tool");
+    let (mut kernel, recovery) =
+        RuntimeKernel::open_with_team_and_tools(&runtime_path, &team_path, &tool_path, 1)
+            .expect("open Tool Runtime Kernel");
+    assert!(recovery.into_sessions().is_empty());
+    let root = admit_root(&mut kernel, root_capabilities([Capability::Process]));
+    let request = kernel
+        .request_tool_call(
+            root,
+            intent(
+                "context-barrier-call",
+                "hello",
+                ToolResources::default().with_process("local.echo"),
+            ),
+        )
+        .expect("request Tool call");
+    assert!(matches!(request, ToolRequestOutcome::ApprovalRequired(_)));
+    let runtime_before = fs::read(&runtime_path).expect("read Runtime Ledger");
+    let team_before = fs::read(&team_path).expect("read Team Ledger");
+    let tool_before = fs::read(&tool_path).expect("read Tool Ledger");
+
+    assert!(matches!(
+        kernel.prepare_context_checkpoint(ContextReductionPolicy::default()),
+        Err(RuntimeError::ContextCheckpointNotAtSafeBarrier)
+    ));
+    assert_eq!(
+        fs::read(&runtime_path).expect("reread Runtime Ledger"),
+        runtime_before
+    );
+    assert_eq!(
+        fs::read(&team_path).expect("reread Team Ledger"),
+        team_before
+    );
+    assert_eq!(
+        fs::read(&tool_path).expect("reread Tool Ledger"),
+        tool_before
+    );
+
+    drop(kernel);
+    fs::remove_file(runtime_path).expect("cleanup Runtime Ledger");
+    fs::remove_file(team_path).expect("cleanup Team Ledger");
+    fs::remove_file(tool_path).expect("cleanup Tool Ledger");
 }
 
 fn intent(identity: &str, message: &str, resources: ToolResources) -> ToolIntent {

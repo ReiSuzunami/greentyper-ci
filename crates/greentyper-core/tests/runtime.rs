@@ -210,44 +210,80 @@ fn hard_context_pressure_stops_admission_before_ledger_or_provider_effects() {
 }
 
 #[test]
-fn soft_and_unknown_context_pressure_preserve_existing_admission() {
-    let projections = [
-        ContextPressure::project(
-            ContextPressureInput::known(1_000, 550, 100, ContextPressureAccuracy::Exact),
-            ContextPressurePolicy::default(),
-        )
-        .expect("soft Context Pressure"),
-        ContextPressure::project(
-            ContextPressureInput::new(
-                None,
-                Some(550),
-                Some(100),
-                Some(ContextPressureAccuracy::Estimated),
-            ),
-            ContextPressurePolicy::default(),
-        )
-        .expect("unknown Context Pressure"),
-    ];
+fn soft_context_pressure_publishes_a_checkpoint_before_the_next_turn() {
+    let path = temp_path("context-pressure-soft");
+    let mut runtime = RuntimeKernel::open(&path).expect("open Runtime");
+    let mut provider = CountingProvider::default();
+    let first = runtime
+        .execute(&ConfigLayers::default(), "first", &mut provider)
+        .expect("prepare first output");
+    runtime
+        .acknowledge(first.delivery())
+        .expect("complete first Turn");
+    let source_head = runtime.snapshot().head;
+    let pressure = ContextPressure::project(
+        ContextPressureInput::known(1_000, 550, 100, ContextPressureAccuracy::Exact),
+        ContextPressurePolicy::default(),
+    )
+    .expect("soft Context Pressure");
 
-    for (index, pressure) in projections.into_iter().enumerate() {
-        let path = temp_path(&format!("context-pressure-admit-{index}"));
-        let mut runtime = RuntimeKernel::open(&path).expect("open Runtime");
-        let mut provider = CountingProvider::default();
-        let output = runtime
-            .execute_with_context_pressure(
-                &ConfigLayers::default(),
-                pressure,
-                "admitted",
-                &mut provider,
-            )
-            .expect("soft and unknown pressure preserve admission");
-        assert_eq!(provider.calls, 1);
-        runtime
-            .acknowledge(output.delivery())
-            .expect("acknowledge output");
-        drop(runtime);
-        fs::remove_file(path).expect("cleanup Runtime ledger");
-    }
+    let second = runtime
+        .execute_with_context_pressure(&ConfigLayers::default(), pressure, "second", &mut provider)
+        .expect("reduce then admit second Turn");
+    let checkpoint = runtime.context_checkpoint().expect("soft checkpoint");
+    assert_eq!(checkpoint.source().head(), source_head);
+    assert_eq!(checkpoint.view().artifacts().len(), 0);
+    assert_eq!(checkpoint.view().recent_items().len(), 2);
+    assert_eq!(provider.calls, 2);
+    runtime
+        .acknowledge(second.delivery())
+        .expect("complete second Turn");
+    drop(runtime);
+
+    let recovered = RuntimeKernel::open(&path).expect("reopen Runtime");
+    assert_eq!(
+        recovered
+            .context_checkpoint()
+            .expect("replayed checkpoint")
+            .source()
+            .head(),
+        source_head
+    );
+    drop(recovered);
+    fs::remove_file(path).expect("cleanup Runtime ledger");
+}
+
+#[test]
+fn unknown_context_pressure_preserves_admission_without_inventing_a_checkpoint() {
+    let path = temp_path("context-pressure-unknown");
+    let mut runtime = RuntimeKernel::open(&path).expect("open Runtime");
+    let pressure = ContextPressure::project(
+        ContextPressureInput::new(
+            None,
+            Some(550),
+            Some(100),
+            Some(ContextPressureAccuracy::Estimated),
+        ),
+        ContextPressurePolicy::default(),
+    )
+    .expect("unknown Context Pressure");
+    let mut provider = CountingProvider::default();
+
+    let output = runtime
+        .execute_with_context_pressure(
+            &ConfigLayers::default(),
+            pressure,
+            "admitted",
+            &mut provider,
+        )
+        .expect("unknown pressure preserves admission");
+    assert!(runtime.context_checkpoint().is_none());
+    assert_eq!(provider.calls, 1);
+    runtime
+        .acknowledge(output.delivery())
+        .expect("acknowledge output");
+    drop(runtime);
+    fs::remove_file(path).expect("cleanup Runtime ledger");
 }
 
 #[test]
