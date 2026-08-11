@@ -246,7 +246,8 @@ root/nested command separation, schema-route completeness, invalid-value
 recovery, revision races, credential non-read-back, unknown facts, blocker
 visibility, and a read-only smoke path. A terminal-neutral interaction controller
 now routes the Slash Panel into existing-object Config Center sections, focused
-revision-bound editors, the configured-preset selector, Stats, and Agent views.
+revision-bound editors, the configured-preset selector, Stats, Agent, and
+Blocker views.
 It refuses to discard dirty drafts implicitly and retains the editor after
 validation or revision-conflict failure. Its deterministic row layout freezes
 Unicode-safe text fitting, prioritized compact status segments, a wide detail
@@ -415,6 +416,24 @@ three Ledgers remain byte-identical to the external writer's state. The refresh
 performs no Provider discovery, credential lookup, mutation, or background
 polling.
 
+The next contiguous terminal slice closes the fixed `local.echo` approval flow.
+The root `/blockers` route lists Runtime, Team, Task, Tool, and Config blockers
+from local projections without exposing raw Tool material. The first Enter on a
+pending Tool approval shows a local recovery warning. A second Enter explicitly
+reopens ProductDriver state, authenticates the rebound Active Agent Session,
+reconstructs the configured Provider from the frozen Epoch, and resumes the
+request to recover the exact ephemeral arguments and resources. That confirmed
+recovery may use credentials, append Usage Attempt and cost records, and affect
+Provider quota or billing. The terminal renders every detail row before its
+Approve and Deny actions. Escape drops only that in-memory context; denial executes nothing; a
+grant crosses the existing prepared-effect boundary and the fixed process
+executor once. Prepared Provider output cannot be escaped or quit past and is
+durably acknowledged only after terminal rendering; acknowledgement failure
+keeps the output live for retry. Targeted tests cover read-only blocker
+inspection, exact detail navigation, approve, deny, cancel, resolution failure
+followed by a fresh recovery, acknowledgement retry, restart-bound AgentSession
+recovery, and no duplicate executor call.
+
 The first App Server product slice is also complete. `greentyper app-server
 --stdio` owns a 64 KiB newline-delimited JSON request boundary and exposes
 `config.schema`, `config.get`, plus process-local `config.draft.begin`, `set`,
@@ -435,8 +454,8 @@ request frame is scrubbed, responses are status-only, and non-Windows platform
 vaults fail closed. Credential operations add no Provider request or Runtime,
 Team, Tool, Agent, or approval authority.
 
-This does not complete Phase 3. Audited Windows ConPTY behavior, approval
-interaction, automatic/background snapshot refresh, rendered secret binding,
+This does not complete Phase 3. Audited Windows ConPTY behavior, broader
+multi-Tool/App Server approval interaction, automatic/background snapshot refresh, rendered secret binding,
 custom-template/starter-preset workflow, live catalog discovery and Recent
 evidence, automatic Context View/token-source
 projection, provider-reported

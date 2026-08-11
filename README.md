@@ -365,19 +365,37 @@ incomplete final frame is reported as recovery required without truncation or
 repair, while corruption and incomplete Product sidecars fail closed. Browsing
 does not acknowledge Team operations or mutate Runtime, Team, Tool, or Config
 state.
+`/blockers` now lists the latest Runtime, Team, Task, Tool, and Config blockers.
+The list and its non-Tool details come from local snapshots. Enter on a Tool
+approval first shows a local recovery warning. A second Enter explicitly
+recovers the current Active Agent Session and frozen Provider Epoch, resumes
+the pending Provider request, and renders the exact canonical arguments plus
+filesystem, process, and network resources before a decision is available.
+This confirmed recovery may perform a Provider request and credential lookup,
+append Usage Attempt and cost records, and affect Provider quota or billing;
+raw arguments and resources remain ephemeral and are not added to a Ledger.
+Up/Down traverses every rendered detail row before the
+Approve and Deny choices. Escape drops the in-memory approval context and leaves
+the durable call awaiting approval. Denial never invokes the executor. Approval
+uses the existing bound call identity, argument hash, resources, capability, and
+Agent Session checks, then runs only the fixed `local.echo` effect. Prepared
+Provider output remains on screen until its delivery acknowledgement succeeds;
+failed recovery or resolution returns to blocker inspection, while failed
+acknowledgement keeps the same output visible and retryable.
 Config commits do not automatically rebuild the running TUI projection. From the
-Slash Panel, `/model`, `/stats`, or `/agent`, F6 or Ctrl-R reads a new local
+Slash Panel, `/model`, `/stats`, `/agent`, or `/blockers`, F6 or Ctrl-R reads a new local
 Config/statusline, Model, Usage, and Team snapshot, then replaces the prior view
 only after every read succeeds. A failed refresh keeps the previous complete
 view and remains retryable; refresh never performs a
 Provider request, credential lookup, Config/Ledger write, or Team action. There
 is no background polling or automatic refresh. Runtime, Team, and Tool Ledgers
 are inspected independently, so one refresh is not a cross-Ledger transactional
-snapshot. The tracer is not an approval
+snapshot. The terminal approval surface is limited to the exact pending
+`local.echo` call; it is not a general Tool policy editor, App Server approval
 surface, audited ConPTY integration, secret-entry/bind surface, starter-preset
 workflow, or persistent live catalog discovery. Live inference conformance,
 reconnect/retry, OpenCode Go Messages execution,
-Messages reasoning blocks, Preset context/fallback execution, richer approval
+Messages reasoning blocks, Preset context/fallback execution, broader multi-Tool approval
 presentation, broader Provider and Tool adapters,
 Workspace, project/new-Agent Preset defaults, richer cache distributions,
 Agent lifecycle actions, and App Server Runtime and

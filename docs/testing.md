@@ -291,7 +291,7 @@ Fuzz failures become minimized regression fixtures.
 
 ### UI and Command Tests
 
-Current pure tests freeze the four root Command Paths, nested Config routes,
+Current pure tests freeze the five root Command Paths, nested Config routes,
 token-prefix/fuzzy resolution, raw query limits, schema-to-editor-route
 completeness, and credential binding-status-only readback. Terminal-neutral
 presentation tests cover bounded Slash results, configured-preset and release
@@ -408,6 +408,24 @@ and does not rewrite checksum corruption; Product tests prove missing and
 incomplete sidecar handling. These tests do not prove lifecycle mutation,
 Team-operation acknowledgement, Workspace coordination, or
 real ConPTY behavior.
+A read-only real-key `/blockers` loop projects a pending Tool approval from the
+three Product Ledgers, keeps canonical arguments out of the list, survives
+resize, renders the Provider/credential/usage/cost/quota warning, and proves the
+first Enter does not start recovery while Runtime, Team, Tool, and Config bytes
+remain unchanged. Separate
+action loops recover an exact in-memory approval view, render its identity,
+canonical arguments, and filesystem/process/network resources, traverse every
+detail row, and route Approve or Deny only from the final choices. They prove
+denial has no acknowledgement, Escape drops the in-memory approval while all
+Ledgers remain unchanged, resizing preserves an already selected Approve or
+Deny action, failed resolution returns to blocker inspection and
+requires a fresh recovery, and failed Provider-output acknowledgement keeps the
+same delivery live for retry. ProductDriver tests independently use a rebound
+Active Agent Session after reopen, compare the exact recovered arguments and
+resources, execute an approved effect once, execute a denied effect zero times,
+acknowledge prepared output, and reopen the Runtime as ready. The VT action tests
+inject their Product action adapter; they do not prove live remote Provider
+availability, a general Tool policy UI, App Server approval, or real ConPTY.
 A second set of real-key loops proves manual snapshot refresh. One loop adds a
 configured Preset and selected model externally, then verifies `/model` and the
 statusline update without credential disclosure or Config/Ledger writes. Another
@@ -488,8 +506,8 @@ local path or credential reference.
 
 Remaining terminal-backend evidence covers real terminal/ConPTY resize and input,
 project/new-Agent Preset defaults, richer cache distributions, Agent Center
-lifecycle actions, background refresh, approval/blocker
-actions, panic-abort cleanup, final host cell
+lifecycle actions, background refresh, broader multi-Tool/App Server approval,
+panic-abort cleanup, final host cell
 geometry, and input-ready/idle resource budgets.
 
 Tests assert that `/config pro url` resolves through Provider selection to the

@@ -232,6 +232,41 @@ pub(crate) enum BlockerView {
     },
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ToolApprovalAction {
+    Approve,
+    Deny,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum BlockerEntryAction {
+    DetailChanged,
+    LoadToolApproval { call: u64 },
+    None,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ToolApprovalEntryAction {
+    Resolve {
+        call: u64,
+        decision: ToolApprovalAction,
+    },
+    None,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub(crate) struct ProductToolApprovalView {
+    pub(crate) call: u64,
+    pub(crate) agent: u64,
+    pub(crate) tool: String,
+    pub(crate) identity: String,
+    pub(crate) arguments: String,
+    pub(crate) filesystem_reads: Vec<String>,
+    pub(crate) filesystem_writes: Vec<String>,
+    pub(crate) process: Option<String>,
+    pub(crate) network_targets: Vec<String>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(tag = "source", rename_all = "snake_case")]
 pub(crate) enum ModelSelectorChoiceView {
@@ -834,6 +869,16 @@ enum PresentationState {
         selected: usize,
         detail: bool,
     },
+    BlockerCenter {
+        selected: usize,
+        detail: bool,
+    },
+    ToolApproval {
+        selected: usize,
+    },
+    ProductOutput {
+        selected: usize,
+    },
 }
 
 struct ActiveConfigObjectCreate {
@@ -850,6 +895,11 @@ struct ActiveConfigEditor {
     connection: ProviderConnectionTestStatus,
 }
 
+struct PendingProductOutput {
+    delivery: u64,
+    text: String,
+}
+
 pub(crate) struct PresentationController {
     state: PresentationState,
     slash_query: String,
@@ -857,6 +907,8 @@ pub(crate) struct PresentationController {
     selected: usize,
     object_create: Option<ActiveConfigObjectCreate>,
     editor: Option<ActiveConfigEditor>,
+    tool_approval: Option<ProductToolApprovalView>,
+    product_output: Option<PendingProductOutput>,
 }
 
 impl Default for PresentationController {
@@ -876,6 +928,8 @@ impl PresentationController {
             selected: 0,
             object_create: None,
             editor: None,
+            tool_approval: None,
+            product_output: None,
         }
     }
 
@@ -897,6 +951,18 @@ impl PresentationController {
 
     pub(crate) const fn is_agent_center(&self) -> bool {
         matches!(self.state, PresentationState::AgentCenter { .. })
+    }
+
+    pub(crate) const fn is_blocker_center(&self) -> bool {
+        matches!(self.state, PresentationState::BlockerCenter { .. })
+    }
+
+    pub(crate) const fn is_tool_approval(&self) -> bool {
+        matches!(self.state, PresentationState::ToolApproval { .. })
+    }
+
+    pub(crate) const fn is_product_output(&self) -> bool {
+        matches!(self.state, PresentationState::ProductOutput { .. })
     }
 
     pub(crate) fn slash_query(&self) -> &str {
@@ -1159,6 +1225,142 @@ impl PresentationController {
         }
     }
 
+    pub(crate) fn move_blocker_selection(&mut self, blockers: &[BlockerView], offset: isize) {
+        let PresentationState::BlockerCenter { selected, detail } = &mut self.state else {
+            return;
+        };
+        if blockers.is_empty() {
+            *selected = 0;
+        } else {
+            *selected = selected
+                .saturating_add_signed(offset)
+                .min(blockers.len() - 1);
+        }
+        *detail = false;
+    }
+
+    pub(crate) fn activate_blocker(&mut self, blockers: &[BlockerView]) -> BlockerEntryAction {
+        let PresentationState::BlockerCenter { selected, detail } = &mut self.state else {
+            return BlockerEntryAction::None;
+        };
+        let Some(blocker) = blockers.get(*selected) else {
+            return BlockerEntryAction::None;
+        };
+        if let BlockerView::ToolApproval { call, .. } = blocker {
+            if *detail {
+                return BlockerEntryAction::LoadToolApproval { call: *call };
+            }
+            *detail = true;
+            return BlockerEntryAction::DetailChanged;
+        }
+        *detail = !*detail;
+        BlockerEntryAction::DetailChanged
+    }
+
+    pub(crate) fn show_tool_approval(&mut self, approval: ProductToolApprovalView) {
+        self.tool_approval = Some(approval);
+        self.state = PresentationState::ToolApproval { selected: 0 };
+    }
+
+    pub(crate) fn move_tool_approval_selection(&mut self, offset: isize, width: usize) {
+        let PresentationState::ToolApproval { selected } = &mut self.state else {
+            return;
+        };
+        let Some(approval) = self.tool_approval.as_ref() else {
+            return;
+        };
+        let entry_count = tool_approval_detail_lines(approval, width)
+            .len()
+            .saturating_add(2);
+        *selected = selected
+            .saturating_add_signed(offset)
+            .min(entry_count.saturating_sub(1));
+    }
+
+    pub(crate) fn activate_tool_approval(&self, width: usize) -> ToolApprovalEntryAction {
+        let PresentationState::ToolApproval { selected } = self.state else {
+            return ToolApprovalEntryAction::None;
+        };
+        let Some(approval) = self.tool_approval.as_ref() else {
+            return ToolApprovalEntryAction::None;
+        };
+        let approve_index = tool_approval_detail_lines(approval, width).len();
+        match selected {
+            index if index == approve_index => ToolApprovalEntryAction::Resolve {
+                call: approval.call,
+                decision: ToolApprovalAction::Approve,
+            },
+            index if index == approve_index.saturating_add(1) => ToolApprovalEntryAction::Resolve {
+                call: approval.call,
+                decision: ToolApprovalAction::Deny,
+            },
+            _ => ToolApprovalEntryAction::None,
+        }
+    }
+
+    pub(crate) fn reflow_tool_approval_selection(&mut self, old_width: usize, new_width: usize) {
+        let PresentationState::ToolApproval { selected } = &mut self.state else {
+            return;
+        };
+        let Some(approval) = self.tool_approval.as_ref() else {
+            *selected = 0;
+            return;
+        };
+        let old_approve = tool_approval_detail_lines(approval, old_width).len();
+        let new_approve = tool_approval_detail_lines(approval, new_width).len();
+        *selected = if *selected == old_approve {
+            new_approve
+        } else if *selected == old_approve.saturating_add(1) {
+            new_approve.saturating_add(1)
+        } else {
+            (*selected).min(new_approve.saturating_add(1))
+        };
+    }
+
+    pub(crate) fn cancel_tool_approval(&mut self) {
+        self.tool_approval = None;
+        self.state = PresentationState::BlockerCenter {
+            selected: 0,
+            detail: false,
+        };
+    }
+
+    pub(crate) fn show_product_output(&mut self, delivery: u64, text: String) {
+        self.tool_approval = None;
+        self.product_output = Some(PendingProductOutput { delivery, text });
+        self.state = PresentationState::ProductOutput { selected: 0 };
+    }
+
+    pub(crate) fn move_product_output_selection(&mut self, offset: isize) {
+        let PresentationState::ProductOutput { selected } = &mut self.state else {
+            return;
+        };
+        let Some(output) = self.product_output.as_ref() else {
+            return;
+        };
+        let entry_count = product_output_line_count(&output.text).saturating_add(1);
+        *selected = selected
+            .saturating_add_signed(offset)
+            .min(entry_count.saturating_sub(1));
+    }
+
+    pub(crate) fn selected_product_delivery(&self) -> Option<u64> {
+        let PresentationState::ProductOutput { selected } = &self.state else {
+            return None;
+        };
+        let output = self.product_output.as_ref()?;
+        (*selected == product_output_line_count(&output.text)).then_some(output.delivery)
+    }
+
+    pub(crate) fn finish_product_output(&mut self) {
+        self.tool_approval = None;
+        self.product_output = None;
+        self.state = PresentationState::BlockerCenter {
+            selected: 0,
+            detail: false,
+        };
+    }
+
     pub(crate) fn reconcile_snapshot(&mut self, view: &TuiViewModel) {
         let model_query = self.model_query.clone();
         match &mut self.state {
@@ -1214,6 +1416,17 @@ impl PresentationController {
                     *detail = false;
                 }
             }
+            PresentationState::BlockerCenter { selected, detail } => {
+                if view.blockers.is_empty() {
+                    *selected = 0;
+                    *detail = false;
+                } else if *selected >= view.blockers.len() {
+                    *selected = view.blockers.len() - 1;
+                    *detail = false;
+                }
+            }
+            PresentationState::ToolApproval { .. } => {}
+            PresentationState::ProductOutput { .. } => {}
             PresentationState::SlashPanel
             | PresentationState::ConfigObjectCreate
             | PresentationState::ConfigCenter { .. }
@@ -1371,6 +1584,12 @@ impl PresentationController {
                     detail: false,
                 };
             }
+            CommandTarget::BlockerCenter => {
+                self.state = PresentationState::BlockerCenter {
+                    selected: 0,
+                    detail: false,
+                };
+            }
         }
         Ok(())
     }
@@ -1465,9 +1684,14 @@ impl PresentationController {
     }
 
     pub(crate) fn back(&mut self) -> Result<(), PresentationControllerError> {
+        if self.is_tool_approval() {
+            self.cancel_tool_approval();
+            return Ok(());
+        }
         if let PresentationState::ModelSelector { detail, .. }
         | PresentationState::Stats { detail, .. }
-        | PresentationState::AgentCenter { detail, .. } = &mut self.state
+        | PresentationState::AgentCenter { detail, .. }
+        | PresentationState::BlockerCenter { detail, .. } = &mut self.state
             && *detail
         {
             *detail = false;
@@ -1702,6 +1926,30 @@ impl PresentationController {
             PresentationState::AgentCenter { selected, detail } => {
                 Ok(PresentationScreenView::AgentCenter { selected, detail })
             }
+            PresentationState::BlockerCenter { selected, detail } => {
+                Ok(PresentationScreenView::BlockerCenter { selected, detail })
+            }
+            PresentationState::ToolApproval { selected } => {
+                let approval = self
+                    .tool_approval
+                    .as_ref()
+                    .ok_or(PresentationControllerError::ToolApprovalUnavailable)?;
+                Ok(PresentationScreenView::ToolApproval {
+                    approval: approval.clone(),
+                    selected,
+                })
+            }
+            PresentationState::ProductOutput { selected } => {
+                let output = self
+                    .product_output
+                    .as_ref()
+                    .ok_or(PresentationControllerError::ProductOutputUnavailable)?;
+                Ok(PresentationScreenView::ProductOutput {
+                    delivery: output.delivery,
+                    text: output.text.clone(),
+                    selected,
+                })
+            }
         }
     }
 
@@ -1715,13 +1963,16 @@ impl PresentationController {
         let statusline =
             StatuslineLayoutView::build(&view.statusline, viewport.width, viewport.height);
         let body_capacity = usize::from(viewport.height).saturating_sub(statusline.rows.len());
-        let mut body = screen_rows(&screen, view);
+        let mut body = screen_rows(&screen, view, usize::from(viewport.width));
         if matches!(
             screen,
             PresentationScreenView::ConfigCenter { .. }
                 | PresentationScreenView::ModelSelector { detail: false, .. }
                 | PresentationScreenView::Stats { detail: false, .. }
                 | PresentationScreenView::AgentCenter { detail: false, .. }
+                | PresentationScreenView::BlockerCenter { detail: false, .. }
+                | PresentationScreenView::ToolApproval { .. }
+                | PresentationScreenView::ProductOutput { .. }
         ) {
             truncate_rows_keeping_selection(&mut body, body_capacity);
         } else {
@@ -1815,6 +2066,19 @@ pub(crate) enum PresentationScreenView {
     AgentCenter {
         selected: usize,
         detail: bool,
+    },
+    BlockerCenter {
+        selected: usize,
+        detail: bool,
+    },
+    ToolApproval {
+        approval: ProductToolApprovalView,
+        selected: usize,
+    },
+    ProductOutput {
+        delivery: u64,
+        text: String,
+        selected: usize,
     },
 }
 
@@ -2151,7 +2415,11 @@ fn format_cost(units: u64, decimal_places: u8) -> String {
     )
 }
 
-fn screen_rows(screen: &PresentationScreenView, view: &TuiViewModel) -> Vec<LayoutRowView> {
+fn screen_rows(
+    screen: &PresentationScreenView,
+    view: &TuiViewModel,
+    width: usize,
+) -> Vec<LayoutRowView> {
     match screen {
         PresentationScreenView::SlashPanel(panel) => {
             let mut rows = vec![LayoutRowView::new("Commands", false)];
@@ -2240,7 +2508,293 @@ fn screen_rows(screen: &PresentationScreenView, view: &TuiViewModel) -> Vec<Layo
         PresentationScreenView::AgentCenter { selected, detail } => {
             agent_center_rows(&view.agents, *selected, *detail)
         }
+        PresentationScreenView::BlockerCenter { selected, detail } => {
+            blocker_center_rows(&view.blockers, *selected, *detail)
+        }
+        PresentationScreenView::ToolApproval { approval, selected } => {
+            tool_approval_rows(approval, *selected, width)
+        }
+        PresentationScreenView::ProductOutput {
+            delivery,
+            text,
+            selected,
+        } => product_output_rows(*delivery, text, *selected),
     }
+}
+
+fn blocker_center_rows(
+    blockers: &[BlockerView],
+    selected: usize,
+    detail: bool,
+) -> Vec<LayoutRowView> {
+    let Some(blocker) = blockers.get(selected) else {
+        return vec![
+            LayoutRowView::new("Blockers", false),
+            LayoutRowView::new("No blockers", false),
+        ];
+    };
+    if detail {
+        let mut rows = vec![LayoutRowView::new("Blockers / Detail", false)];
+        rows.extend(blocker_detail_rows(blocker));
+        return rows;
+    }
+    let mut rows = vec![LayoutRowView::new("Blockers", false)];
+    rows.extend(blockers.iter().enumerate().map(|(index, blocker)| {
+        let is_selected = index == selected;
+        LayoutRowView::new(
+            format!(
+                "{} {}",
+                if is_selected { '>' } else { ' ' },
+                blocker_label(blocker)
+            ),
+            is_selected,
+        )
+    }));
+    rows
+}
+
+fn tool_approval_rows(
+    approval: &ProductToolApprovalView,
+    selected: usize,
+    width: usize,
+) -> Vec<LayoutRowView> {
+    let detail = tool_approval_detail_lines(approval, width);
+    let selected = selected.min(detail.len().saturating_add(1));
+    let mut rows = vec![LayoutRowView::new("Tool Approval", false)];
+    rows.extend(detail.into_iter().enumerate().map(|(index, line)| {
+        LayoutRowView::new(
+            format!("{} {line}", if index == selected { '>' } else { ' ' }),
+            index == selected,
+        )
+    }));
+    let approve_index = rows.len().saturating_sub(1);
+    rows.push(LayoutRowView::new(
+        format!(
+            "{} Approve",
+            if selected == approve_index { '>' } else { ' ' }
+        ),
+        selected == approve_index,
+    ));
+    let deny_index = approve_index.saturating_add(1);
+    rows.push(LayoutRowView::new(
+        format!("{} Deny", if selected == deny_index { '>' } else { ' ' }),
+        selected == deny_index,
+    ));
+    rows
+}
+
+fn tool_approval_detail_lines(approval: &ProductToolApprovalView, width: usize) -> Vec<String> {
+    let fields = [
+        ("call", approval.call.to_string()),
+        ("agent", approval.agent.to_string()),
+        ("tool", approval.tool.clone()),
+        ("identity", approval.identity.clone()),
+        ("arguments", approval.arguments.clone()),
+    ];
+    let mut lines = fields
+        .into_iter()
+        .flat_map(|(label, value)| wrap_approval_field(label, &value, width))
+        .collect::<Vec<_>>();
+    append_approval_resources(
+        &mut lines,
+        "filesystem read",
+        &approval.filesystem_reads,
+        width,
+    );
+    append_approval_resources(
+        &mut lines,
+        "filesystem write",
+        &approval.filesystem_writes,
+        width,
+    );
+    lines.extend(wrap_approval_field(
+        "process",
+        approval.process.as_deref().unwrap_or("none"),
+        width,
+    ));
+    append_approval_resources(
+        &mut lines,
+        "network target",
+        &approval.network_targets,
+        width,
+    );
+    lines
+}
+
+fn append_approval_resources(
+    lines: &mut Vec<String>,
+    label: &str,
+    resources: &[String],
+    width: usize,
+) {
+    if resources.is_empty() {
+        lines.extend(wrap_approval_field(label, "none", width));
+        return;
+    }
+    for resource in resources {
+        lines.extend(wrap_approval_field(label, resource, width));
+    }
+}
+
+fn wrap_approval_field(label: &str, value: &str, width: usize) -> Vec<String> {
+    let max_width = width.saturating_sub(2).max(1);
+    let value = sanitize_controls(&format!("{label} {value}")).into_owned();
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    for grapheme in UnicodeSegmentation::graphemes(value.as_str(), true) {
+        if !line.is_empty()
+            && display_width(&line).saturating_add(display_width(grapheme)) > max_width
+        {
+            lines.push(line);
+            line = String::new();
+        }
+        line.push_str(grapheme);
+    }
+    if !line.is_empty() {
+        lines.push(line);
+    }
+    if lines.is_empty() {
+        lines.push(label.to_owned());
+    }
+    lines
+}
+
+fn product_output_line_count(text: &str) -> usize {
+    text.lines().count().max(1)
+}
+
+fn product_output_rows(delivery: u64, text: &str, selected: usize) -> Vec<LayoutRowView> {
+    let mut lines = text.lines().collect::<Vec<_>>();
+    if lines.is_empty() {
+        lines.push("");
+    }
+    let mut rows = vec![LayoutRowView::new("Provider Output", false)];
+    rows.extend(lines.into_iter().enumerate().map(|(index, line)| {
+        LayoutRowView::new(
+            format!("{} {line}", if index == selected { '>' } else { ' ' }),
+            index == selected,
+        )
+    }));
+    let acknowledge_index = product_output_line_count(text);
+    rows.push(LayoutRowView::new(
+        format!(
+            "{} Acknowledge delivery {delivery}",
+            if selected == acknowledge_index {
+                '>'
+            } else {
+                ' '
+            }
+        ),
+        selected == acknowledge_index,
+    ));
+    rows
+}
+
+fn blocker_label(blocker: &BlockerView) -> String {
+    match blocker {
+        BlockerView::RuntimeResume { turn } => format!("runtime turn {turn} | resume required"),
+        BlockerView::RuntimeReconciliation { turn, delivery } => {
+            format!("runtime turn {turn} | delivery {delivery} pending")
+        }
+        BlockerView::RuntimeBlocked { turn, .. } => format!("runtime turn {turn} | blocked"),
+        BlockerView::TeamOperationAwaitingAcknowledgement { operation } => {
+            format!("team operation {operation} | acknowledgement pending")
+        }
+        BlockerView::TaskBlocked { task, blocked_by } => {
+            format!("task {task} | blocked by {blocked_by}")
+        }
+        BlockerView::TaskFailed { task, .. } => format!("task {task} | failed"),
+        BlockerView::TaskCancelled { task, .. } => format!("task {task} | cancelled"),
+        BlockerView::ToolApproval { call, tool, .. } => {
+            format!("tool call {call} | {tool} | approval required")
+        }
+        BlockerView::ToolReconciliation { call, tool, .. } => {
+            format!("tool call {call} | {tool} | reconciliation required")
+        }
+        BlockerView::ConfigRepair {
+            scope, category, ..
+        } => format!("config {scope:?} | {category:?} | repair required"),
+    }
+}
+
+fn blocker_detail_rows(blocker: &BlockerView) -> Vec<LayoutRowView> {
+    let lines = match blocker {
+        BlockerView::RuntimeResume { turn } => {
+            vec![format!("turn {turn}"), "status resume required".to_owned()]
+        }
+        BlockerView::RuntimeReconciliation { turn, delivery } => vec![
+            format!("turn {turn}"),
+            format!("delivery {delivery}"),
+            "status acknowledgement required".to_owned(),
+        ],
+        BlockerView::RuntimeBlocked { turn, reason } => vec![
+            format!("turn {turn}"),
+            "status blocked".to_owned(),
+            format!("reason {reason}"),
+        ],
+        BlockerView::TeamOperationAwaitingAcknowledgement { operation } => vec![
+            format!("operation {operation}"),
+            "status acknowledgement required".to_owned(),
+        ],
+        BlockerView::TaskBlocked { task, blocked_by } => {
+            vec![format!("task {task}"), format!("blocked by {blocked_by}")]
+        }
+        BlockerView::TaskFailed { task, reason } => vec![
+            format!("task {task}"),
+            "status failed".to_owned(),
+            format!("reason {reason}"),
+        ],
+        BlockerView::TaskCancelled { task, reason } => vec![
+            format!("task {task}"),
+            "status cancelled".to_owned(),
+            format!("reason {reason}"),
+        ],
+        BlockerView::ToolApproval {
+            call,
+            agent,
+            tool,
+            expires_at_unix_ms,
+        } => vec![
+            format!("call {call}"),
+            format!("agent {agent}"),
+            format!("tool {tool}"),
+            "status awaiting approval".to_owned(),
+            format!(
+                "approval expiry {}",
+                expires_at_unix_ms
+                    .map_or_else(|| "not granted".to_owned(), |value| value.to_string())
+            ),
+            "Enter again to recover the exact request".to_owned(),
+            "warning contacts the Provider and may use credentials".to_owned(),
+            "warning appends usage and cost records".to_owned(),
+            "warning may affect Provider quota or billing".to_owned(),
+        ],
+        BlockerView::ToolReconciliation {
+            call,
+            agent,
+            tool,
+            reason,
+        } => vec![
+            format!("call {call}"),
+            format!("agent {agent}"),
+            format!("tool {tool}"),
+            "status reconciliation required".to_owned(),
+            format!("reason {}", reason.as_deref().unwrap_or("unknown")),
+        ],
+        BlockerView::ConfigRepair {
+            scope,
+            category,
+            backup_available,
+        } => vec![
+            format!("scope {scope:?}"),
+            format!("category {category:?}"),
+            format!("backup available {backup_available}"),
+        ],
+    };
+    lines
+        .into_iter()
+        .map(|line| LayoutRowView::new(line, false))
+        .collect()
 }
 
 fn agent_center_rows(
@@ -3516,6 +4070,8 @@ pub(crate) enum PresentationControllerError {
     UnsavedConfigDraft,
     NoConfigObjectSelection,
     ConfigObjectRouteUnavailable,
+    ToolApprovalUnavailable,
+    ProductOutputUnavailable,
 }
 
 impl fmt::Display for PresentationControllerError {
@@ -3544,6 +4100,8 @@ impl fmt::Display for PresentationControllerError {
             Self::ConfigObjectRouteUnavailable => {
                 formatter.write_str("Config Object has no rendered editor route")
             }
+            Self::ToolApprovalUnavailable => formatter.write_str("Tool approval is unavailable"),
+            Self::ProductOutputUnavailable => formatter.write_str("Provider output is unavailable"),
         }
     }
 }
@@ -3563,7 +4121,9 @@ impl Error for PresentationControllerError {
             | Self::ConfigRuntimeRequired
             | Self::UnsavedConfigDraft
             | Self::NoConfigObjectSelection
-            | Self::ConfigObjectRouteUnavailable => None,
+            | Self::ConfigObjectRouteUnavailable
+            | Self::ToolApprovalUnavailable
+            | Self::ProductOutputUnavailable => None,
         }
     }
 }
@@ -3853,11 +4413,12 @@ mod tests {
     use super::{
         Availability, BlockerView, CostQuantityView, ModelEntryAction, ModelSelectorGroup,
         ModelSelectorView, PresentationController, PresentationControllerError,
-        PresentationScreenView, PresentationSources, PresentationState, RecoveryBadge,
-        SlashPanelView, StatsGroup, StatusSegmentKind, TuiViewModel, UsageQuantityView,
-        UsageSummaryView, Viewport, cost_label, display_width, fit_text, model_detail_rows,
+        PresentationScreenView, PresentationSources, PresentationState, ProductToolApprovalView,
+        RecoveryBadge, SlashPanelView, StatsGroup, StatusSegmentKind, ToolApprovalAction,
+        ToolApprovalEntryAction, TuiViewModel, UsageQuantityView, UsageSummaryView, Viewport,
+        blocker_center_rows, cost_label, display_width, fit_text, model_detail_rows,
         model_selector_rows, stats_attempt_quantity_label, stats_rows, status_segments,
-        usage_accuracy_label,
+        tool_approval_detail_lines, usage_accuracy_label,
     };
 
     static NEXT_TEMP: AtomicU64 = AtomicU64::new(1);
@@ -3928,8 +4489,8 @@ source = "unknown"
     #[test]
     fn slash_panel_is_bounded_ranked_and_clamps_selection() {
         let root = SlashPanelView::build("", 99).expect("root slash panel");
-        assert_eq!(root.entries.len(), 4);
-        assert_eq!(root.selected, Some(3));
+        assert_eq!(root.entries.len(), 5);
+        assert_eq!(root.selected, Some(4));
         assert!(root.entries.iter().all(|entry| entry.root_visible));
 
         let url = SlashPanelView::build("/config pro url", 0).expect("URL route");
@@ -3942,6 +4503,90 @@ source = "unknown"
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn tool_approval_resize_preserves_the_selected_decision() {
+        let approval = ProductToolApprovalView {
+            call: 1,
+            agent: 1,
+            tool: "local.echo".to_owned(),
+            identity: "provider-turn-1-call-product-echo-1".to_owned(),
+            arguments: r#"{"message":"a deliberately long approval message"}"#.to_owned(),
+            filesystem_reads: Vec::new(),
+            filesystem_writes: Vec::new(),
+            process: Some("greentyper.local.echo.v1".to_owned()),
+            network_targets: Vec::new(),
+        };
+        let narrow_width = 24;
+        let wide_width = 100;
+        let narrow_approve = tool_approval_detail_lines(&approval, narrow_width).len();
+        assert_ne!(
+            narrow_approve,
+            tool_approval_detail_lines(&approval, wide_width).len()
+        );
+        let mut controller = PresentationController::new();
+        controller.show_tool_approval(approval);
+        controller.move_tool_approval_selection(narrow_approve as isize, narrow_width);
+        assert!(matches!(
+            controller.activate_tool_approval(narrow_width),
+            ToolApprovalEntryAction::Resolve {
+                decision: ToolApprovalAction::Approve,
+                ..
+            }
+        ));
+
+        controller.reflow_tool_approval_selection(narrow_width, wide_width);
+        assert!(matches!(
+            controller.activate_tool_approval(wide_width),
+            ToolApprovalEntryAction::Resolve {
+                decision: ToolApprovalAction::Approve,
+                ..
+            }
+        ));
+        controller.move_tool_approval_selection(1, wide_width);
+        controller.reflow_tool_approval_selection(wide_width, narrow_width);
+        assert!(matches!(
+            controller.activate_tool_approval(narrow_width),
+            ToolApprovalEntryAction::Resolve {
+                decision: ToolApprovalAction::Deny,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn tool_approval_requires_a_local_risk_review_before_recovery() {
+        let blockers = vec![BlockerView::ToolApproval {
+            call: 7,
+            agent: 1,
+            tool: "local.echo".to_owned(),
+            expires_at_unix_ms: None,
+        }];
+        let mut controller = PresentationController::new();
+        controller.state = PresentationState::BlockerCenter {
+            selected: 0,
+            detail: false,
+        };
+
+        assert_eq!(
+            controller.activate_blocker(&blockers),
+            super::BlockerEntryAction::DetailChanged
+        );
+        let rows = blocker_center_rows(&blockers, 0, true);
+        let text = rows
+            .iter()
+            .map(|row| row.text())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("Enter again to recover the exact request"));
+        assert!(text.contains("contacts the Provider and may use credentials"));
+        assert!(text.contains("appends usage and cost records"));
+        assert!(text.contains("may affect Provider quota or billing"));
+        assert_eq!(
+            controller.activate_blocker(&blockers),
+            super::BlockerEntryAction::LoadToolApproval { call: 7 }
+        );
     }
 
     #[test]

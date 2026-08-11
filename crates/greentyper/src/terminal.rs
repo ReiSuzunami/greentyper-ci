@@ -10,24 +10,178 @@ use crossterm::terminal as crossterm_terminal;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
+use greentyper_core::agent_team::TeamOperationRecord;
 use greentyper_core::config::{
     ConfigEditorError, ConfigError, ConfigFieldContents, ConfigFieldInteraction, ConfigRuntime,
     ConfigRuntimeError, ConfigScope, ConfigValue, ConfigValueKind, MAX_COMMAND_QUERY_BYTES,
     MAX_CONFIG_ID_BYTES, ModelPresetView,
 };
-use greentyper_core::runtime::{KernelTeamSnapshot, RuntimeError, RuntimeKernel, RuntimeSnapshot};
+use greentyper_core::model::DeliveryId;
+use greentyper_core::provider::ProviderError;
+use greentyper_core::runtime::{
+    KernelTeamSnapshot, ProviderToolApproval, RuntimeError, RuntimeKernel, RuntimeSnapshot,
+};
+use greentyper_core::tool_runtime::{ToolCallStatus, ToolSnapshot};
 use greentyper_core::usage::{RuntimeUsageSnapshot, UsageError, UsageTimestamp};
 
 use crate::credential_vault::PlatformCredentialVault;
+use crate::local_process::{LocalProcessError, LocalProcessExecutor};
 use crate::presentation::{
-    ModelEntryAction, PresentationController, PresentationControllerError, PresentationError,
-    PresentationLayoutView, PresentationSources, TuiViewModel, Viewport, ViewportError,
+    BlockerEntryAction, ModelEntryAction, PresentationController, PresentationControllerError,
+    PresentationError, PresentationLayoutView, PresentationSources, ProductToolApprovalView,
+    ToolApprovalAction, ToolApprovalEntryAction, TuiViewModel, Viewport, ViewportError,
 };
 use crate::product_driver::{
-    ProductDriverError, apply_model_preset_to_next_turn, freeze_model_selection,
-    inspect_product_team, stage_product_model_selection,
+    ProductDriver, ProductDriverError, ProductInteraction, ProductToolDecision,
+    ProductToolDecisionOutcome, apply_model_preset_to_next_turn, freeze_model_selection,
+    inspect_product_team, inspect_product_tools, stage_product_model_selection,
 };
 use crate::provider_connection::{ModelsHttpConnectionTester, ProviderConnectionTester};
+use crate::provider_http::ConfiguredProvider;
+
+enum TerminalToolResolution {
+    Prepared { delivery: u64, text: String },
+    Denied,
+}
+
+trait TerminalProductActions {
+    fn load_tool_approval(&mut self, call: u64) -> Result<ProductToolApprovalView, TerminalError>;
+
+    fn resolve_tool_approval(
+        &mut self,
+        call: u64,
+        decision: ProductToolDecision,
+    ) -> Result<TerminalToolResolution, TerminalError>;
+
+    fn cancel_tool_approval(&mut self);
+
+    fn acknowledge_output(&mut self, delivery: u64) -> Result<(), TerminalError>;
+}
+
+struct LedgerTerminalProductActions<'a> {
+    ledger: &'a Path,
+    pending: Option<LedgerPendingToolApproval>,
+}
+
+struct LedgerPendingToolApproval {
+    call: u64,
+    driver: ProductDriver<LocalProcessExecutor>,
+    provider: ConfiguredProvider<PlatformCredentialVault>,
+    approval: Box<ProviderToolApproval>,
+}
+
+struct TerminalApprovalInteraction;
+
+impl ProductInteraction for TerminalApprovalInteraction {
+    fn present_team_operation(&mut self, _record: TeamOperationRecord) -> io::Result<()> {
+        Err(io::Error::other(
+            "pending Team operation must be acknowledged separately",
+        ))
+    }
+
+    fn decide_tool(&mut self, _approval: &ProviderToolApproval) -> io::Result<ProductToolDecision> {
+        Err(io::Error::other(
+            "Tool approval requires the rendered terminal decision",
+        ))
+    }
+}
+
+impl TerminalProductActions for LedgerTerminalProductActions<'_> {
+    fn load_tool_approval(&mut self, call: u64) -> Result<ProductToolApprovalView, TerminalError> {
+        self.pending = None;
+        let tools = inspect_product_tools(self.ledger)?;
+        let agent = tools
+            .calls
+            .iter()
+            .find(|record| {
+                record.call.get() == call && record.status == ToolCallStatus::AwaitingApproval
+            })
+            .map(|record| record.agent.get())
+            .ok_or(TerminalError::ToolApprovalUnavailable)?;
+        let mut interaction = TerminalApprovalInteraction;
+        let executor = LocalProcessExecutor::current()?;
+        let mut driver =
+            ProductDriver::open_with_executor(self.ledger, executor, &mut interaction)?;
+        let mut provider = ConfiguredProvider::from_epoch(
+            driver
+                .pending_provider_epoch()
+                .ok_or(TerminalError::PendingProviderEpochRequired)?,
+            PlatformCredentialVault,
+        )?;
+        provider.enable_local_echo();
+        let approval = driver.recover_pending_tool_approval(call, &mut provider)?;
+        let view = ProductToolApprovalView {
+            call,
+            agent,
+            tool: approval.tool().to_owned(),
+            identity: approval.identity().to_owned(),
+            arguments: approval.arguments().canonical_json().to_owned(),
+            filesystem_reads: approval
+                .resources()
+                .filesystem_reads()
+                .map(str::to_owned)
+                .collect(),
+            filesystem_writes: approval
+                .resources()
+                .filesystem_writes()
+                .map(str::to_owned)
+                .collect(),
+            process: approval.resources().process().map(str::to_owned),
+            network_targets: approval
+                .resources()
+                .network_targets()
+                .map(str::to_owned)
+                .collect(),
+        };
+        self.pending = Some(LedgerPendingToolApproval {
+            call,
+            driver,
+            provider,
+            approval,
+        });
+        Ok(view)
+    }
+
+    fn resolve_tool_approval(
+        &mut self,
+        call: u64,
+        decision: ProductToolDecision,
+    ) -> Result<TerminalToolResolution, TerminalError> {
+        let pending = self
+            .pending
+            .take()
+            .filter(|pending| pending.call == call)
+            .ok_or(TerminalError::ToolApprovalUnavailable)?;
+        let LedgerPendingToolApproval {
+            mut driver,
+            mut provider,
+            approval,
+            ..
+        } = pending;
+        match driver.resolve_recovered_tool_approval(approval, decision, &mut provider)? {
+            ProductToolDecisionOutcome::Prepared(output) => Ok(TerminalToolResolution::Prepared {
+                delivery: output.delivery().get(),
+                text: output.text().to_owned(),
+            }),
+            ProductToolDecisionOutcome::Denied => Ok(TerminalToolResolution::Denied),
+        }
+    }
+
+    fn cancel_tool_approval(&mut self) {
+        self.pending = None;
+    }
+
+    fn acknowledge_output(&mut self, delivery: u64) -> Result<(), TerminalError> {
+        self.pending = None;
+        let mut interaction = TerminalApprovalInteraction;
+        let executor = LocalProcessExecutor::current()?;
+        let mut driver =
+            ProductDriver::open_with_executor(self.ledger, executor, &mut interaction)?;
+        let delivery = DeliveryId::new(delivery).map_err(RuntimeError::Model)?;
+        driver.acknowledge(delivery)?;
+        Ok(())
+    }
+}
 
 pub(crate) fn require_interactive() -> Result<(), TerminalError> {
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
@@ -61,7 +215,8 @@ fn build_terminal_view(
     let runtime = RuntimeKernel::inspect(ledger)?;
     let usage = RuntimeKernel::inspect_usage(ledger, UsageTimestamp::now()?)?;
     let team = inspect_product_team(ledger)?;
-    build_terminal_view_from_sources(config, query, &runtime, &usage, team.as_ref())
+    let tools = inspect_product_tools(ledger)?;
+    build_terminal_view_from_sources(config, query, &runtime, &usage, team.as_ref(), &tools)
 }
 
 fn refresh_terminal_view(
@@ -72,8 +227,10 @@ fn refresh_terminal_view(
     let runtime = RuntimeKernel::inspect(ledger)?;
     let usage = RuntimeKernel::inspect_usage(ledger, UsageTimestamp::now()?)?;
     let team = inspect_product_team(ledger)?;
+    let tools = inspect_product_tools(ledger)?;
     let config = config.reload_candidate()?;
-    let view = build_terminal_view_from_sources(&config, query, &runtime, &usage, team.as_ref())?;
+    let view =
+        build_terminal_view_from_sources(&config, query, &runtime, &usage, team.as_ref(), &tools)?;
     Ok(RefreshedTerminalSnapshot { config, view })
 }
 
@@ -106,6 +263,7 @@ fn build_terminal_view_from_sources(
     runtime: &RuntimeSnapshot,
     usage: &RuntimeUsageSnapshot,
     team: Option<&KernelTeamSnapshot>,
+    tools: &ToolSnapshot,
 ) -> Result<TuiViewModel, TerminalError> {
     let status = config.status();
     let resolved = config.config_layers()?.resolve()?;
@@ -119,7 +277,7 @@ fn build_terminal_view_from_sources(
             runtime,
             usage: Some(usage),
             team,
-            tools: None,
+            tools: Some(tools),
             config: &status,
             provider_profile: Some(resolved.provider_profile().value()),
             model: Some(resolved.provider_model().value()),
@@ -530,6 +688,13 @@ enum TerminalIntent {
     ToggleStatsDetail,
     MoveAgentSelection(isize),
     ToggleAgentDetail,
+    MoveBlockerSelection(isize),
+    ActivateBlocker,
+    MoveToolApprovalSelection(isize),
+    ActivateToolApproval,
+    CancelToolApproval,
+    MoveProductOutputSelection(isize),
+    AcknowledgeProductOutput,
     RefreshSnapshot,
     EditConfigObjectId(char),
     BackspaceConfigObjectId,
@@ -561,6 +726,9 @@ enum TerminalInputContext {
     ModelSelector,
     Stats,
     AgentCenter,
+    BlockerCenter,
+    ToolApproval,
+    ProductOutput,
     ConfigObjectId,
     ConfigObject,
     ConfigChoice,
@@ -601,6 +769,7 @@ impl TerminalInputState {
                         | TerminalInputContext::ModelSelector
                         | TerminalInputContext::Stats
                         | TerminalInputContext::AgentCenter
+                        | TerminalInputContext::BlockerCenter
                 ) =>
             {
                 TerminalIntent::RefreshSnapshot
@@ -683,6 +852,33 @@ impl TerminalInputState {
             }
             TerminalInputEvent::Enter if context == TerminalInputContext::AgentCenter => {
                 TerminalIntent::ToggleAgentDetail
+            }
+            TerminalInputEvent::Up if context == TerminalInputContext::BlockerCenter => {
+                TerminalIntent::MoveBlockerSelection(-1)
+            }
+            TerminalInputEvent::Down if context == TerminalInputContext::BlockerCenter => {
+                TerminalIntent::MoveBlockerSelection(1)
+            }
+            TerminalInputEvent::Enter if context == TerminalInputContext::BlockerCenter => {
+                TerminalIntent::ActivateBlocker
+            }
+            TerminalInputEvent::Up if context == TerminalInputContext::ToolApproval => {
+                TerminalIntent::MoveToolApprovalSelection(-1)
+            }
+            TerminalInputEvent::Down if context == TerminalInputContext::ToolApproval => {
+                TerminalIntent::MoveToolApprovalSelection(1)
+            }
+            TerminalInputEvent::Enter if context == TerminalInputContext::ToolApproval => {
+                TerminalIntent::ActivateToolApproval
+            }
+            TerminalInputEvent::Up if context == TerminalInputContext::ProductOutput => {
+                TerminalIntent::MoveProductOutputSelection(-1)
+            }
+            TerminalInputEvent::Down if context == TerminalInputContext::ProductOutput => {
+                TerminalIntent::MoveProductOutputSelection(1)
+            }
+            TerminalInputEvent::Enter if context == TerminalInputContext::ProductOutput => {
+                TerminalIntent::AcknowledgeProductOutput
             }
             TerminalInputEvent::Character(character)
                 if context == TerminalInputContext::ConfigObjectId && !character.is_control() =>
@@ -794,6 +990,9 @@ impl TerminalInputState {
             {
                 TerminalIntent::DiscardConfig
             }
+            TerminalInputEvent::Escape if context == TerminalInputContext::ToolApproval => {
+                TerminalIntent::CancelToolApproval
+            }
             TerminalInputEvent::Escape if context == TerminalInputContext::SlashPanel => {
                 TerminalIntent::Quit
             }
@@ -820,6 +1019,10 @@ enum TerminalLoopOutcome {
     Resize(u16, u16),
     RefreshSnapshot,
     ApplyModelSelection,
+    LoadToolApproval(u64),
+    ResolveToolApproval,
+    CancelToolApproval,
+    AcknowledgeProductOutput(u64),
     Quit,
     Noop,
 }
@@ -833,6 +1036,7 @@ struct TerminalSession {
     validated_config_text: Option<String>,
     confirming_discard: bool,
     pending_model_selection: Option<ModelPresetView>,
+    pending_tool_action: Option<(u64, ProductToolDecision)>,
     notice: Option<String>,
 }
 
@@ -855,6 +1059,7 @@ impl TerminalSession {
             validated_config_text: None,
             confirming_discard: false,
             pending_model_selection: None,
+            pending_tool_action: None,
             notice: None,
         })
     }
@@ -991,6 +1196,62 @@ impl TerminalSession {
                 self.notice = None;
                 Ok(TerminalLoopOutcome::Redraw)
             }
+            TerminalIntent::MoveBlockerSelection(offset) => {
+                let view = view.ok_or(TerminalError::ViewModelRequired)?;
+                self.controller
+                    .move_blocker_selection(&view.blockers, offset);
+                self.notice = None;
+                Ok(TerminalLoopOutcome::Redraw)
+            }
+            TerminalIntent::ActivateBlocker => {
+                let view = view.ok_or(TerminalError::ViewModelRequired)?;
+                match self.controller.activate_blocker(&view.blockers) {
+                    BlockerEntryAction::DetailChanged => {
+                        self.notice = None;
+                        Ok(TerminalLoopOutcome::Redraw)
+                    }
+                    BlockerEntryAction::LoadToolApproval { call } => {
+                        Ok(TerminalLoopOutcome::LoadToolApproval(call))
+                    }
+                    BlockerEntryAction::None => Ok(TerminalLoopOutcome::Noop),
+                }
+            }
+            TerminalIntent::MoveToolApprovalSelection(offset) => {
+                self.controller
+                    .move_tool_approval_selection(offset, usize::from(self.viewport.width()));
+                self.notice = None;
+                Ok(TerminalLoopOutcome::Redraw)
+            }
+            TerminalIntent::ActivateToolApproval => {
+                match self
+                    .controller
+                    .activate_tool_approval(usize::from(self.viewport.width()))
+                {
+                    ToolApprovalEntryAction::Resolve { call, decision } => {
+                        self.pending_tool_action = Some((
+                            call,
+                            match decision {
+                                ToolApprovalAction::Approve => ProductToolDecision::Approve,
+                                ToolApprovalAction::Deny => ProductToolDecision::Deny,
+                            },
+                        ));
+                        Ok(TerminalLoopOutcome::ResolveToolApproval)
+                    }
+                    ToolApprovalEntryAction::None => Ok(TerminalLoopOutcome::Noop),
+                }
+            }
+            TerminalIntent::CancelToolApproval => Ok(TerminalLoopOutcome::CancelToolApproval),
+            TerminalIntent::MoveProductOutputSelection(offset) => {
+                self.controller.move_product_output_selection(offset);
+                self.notice = None;
+                Ok(TerminalLoopOutcome::Redraw)
+            }
+            TerminalIntent::AcknowledgeProductOutput => self
+                .controller
+                .selected_product_delivery()
+                .map_or(Ok(TerminalLoopOutcome::Noop), |delivery| {
+                    Ok(TerminalLoopOutcome::AcknowledgeProductOutput(delivery))
+                }),
             TerminalIntent::RefreshSnapshot => {
                 self.notice = None;
                 Ok(TerminalLoopOutcome::RefreshSnapshot)
@@ -1175,6 +1436,10 @@ impl TerminalSession {
                 Ok(TerminalLoopOutcome::Redraw)
             }
             TerminalIntent::Back => {
+                if self.controller.is_product_output() {
+                    self.notice = Some("Provider output must be acknowledged".to_owned());
+                    return Ok(TerminalLoopOutcome::Redraw);
+                }
                 if self.config_text.is_some() && self.has_unsaved_config_input() {
                     self.confirming_discard = true;
                     self.notice = Some("Discard Config draft?".to_owned());
@@ -1195,8 +1460,15 @@ impl TerminalSession {
                 Ok(TerminalLoopOutcome::Redraw)
             }
             TerminalIntent::Resize(width, height) => {
+                let old_width = usize::from(self.viewport.width());
                 self.viewport = Viewport::new(width, height)?;
+                self.controller
+                    .reflow_tool_approval_selection(old_width, usize::from(width));
                 Ok(TerminalLoopOutcome::Resize(width, height))
+            }
+            TerminalIntent::Quit if self.controller.is_product_output() => {
+                self.notice = Some("Provider output must be acknowledged".to_owned());
+                Ok(TerminalLoopOutcome::Redraw)
             }
             TerminalIntent::Quit if self.has_unsaved_config_input() => {
                 self.notice = Some("Config draft must be committed or discarded".to_owned());
@@ -1211,6 +1483,15 @@ impl TerminalSession {
         self.pending_model_selection.take()
     }
 
+    fn take_tool_action(&mut self) -> Option<(u64, ProductToolDecision)> {
+        self.pending_tool_action.take()
+    }
+
+    fn show_product_output(&mut self, delivery: u64, text: String) {
+        self.controller.show_product_output(delivery, text);
+        self.notice = Some("Provider output prepared".to_owned());
+    }
+
     fn input_context(&self) -> TerminalInputContext {
         if self.confirming_discard {
             TerminalInputContext::DiscardConfirmation
@@ -1222,6 +1503,12 @@ impl TerminalSession {
             TerminalInputContext::Stats
         } else if self.controller.is_agent_center() {
             TerminalInputContext::AgentCenter
+        } else if self.controller.is_blocker_center() {
+            TerminalInputContext::BlockerCenter
+        } else if self.controller.is_tool_approval() {
+            TerminalInputContext::ToolApproval
+        } else if self.controller.is_product_output() {
+            TerminalInputContext::ProductOutput
         } else if self.controller.is_config_object_create() {
             TerminalInputContext::ConfigObjectId
         } else if self.controller.is_config_object_selector() {
@@ -1606,6 +1893,12 @@ fn presentation_notice(source: &PresentationControllerError) -> String {
         PresentationControllerError::ConfigObjectRouteUnavailable => {
             "Config Object editor is not available in the terminal".to_owned()
         }
+        PresentationControllerError::ToolApprovalUnavailable => {
+            "Tool approval is unavailable".to_owned()
+        }
+        PresentationControllerError::ProductOutputUnavailable => {
+            "Provider output is unavailable".to_owned()
+        }
         PresentationControllerError::Command(_) | PresentationControllerError::ConfigEditor(_) => {
             "Config action failed".to_owned()
         }
@@ -1660,9 +1953,10 @@ where
         TerminalSnapshotSource {
             initial: view,
             refresh_ledger: None,
+            viewport,
         },
-        viewport,
         &mut tester,
+        None,
         read_event,
     )
 }
@@ -1683,6 +1977,10 @@ where
 {
     let vault = PlatformCredentialVault;
     let mut tester = ModelsHttpConnectionTester::new(&vault);
+    let mut product = LedgerTerminalProductActions {
+        ledger,
+        pending: None,
+    };
     run_terminal_loop_core(
         writer,
         mode,
@@ -1690,9 +1988,10 @@ where
         TerminalSnapshotSource {
             initial: view,
             refresh_ledger: Some(ledger),
+            viewport,
         },
-        viewport,
         &mut tester,
+        Some(&mut product),
         read_event,
     )
 }
@@ -1720,9 +2019,38 @@ where
         TerminalSnapshotSource {
             initial: view,
             refresh_ledger: None,
+            viewport,
         },
-        viewport,
         tester,
+        None,
+        read_event,
+    )
+}
+
+#[cfg(test)]
+fn run_terminal_loop_with_product_actions<W, M, P, F>(
+    writer: W,
+    mode: M,
+    config: &mut ConfigRuntime,
+    snapshot: TerminalSnapshotSource<'_>,
+    product: &mut P,
+    read_event: F,
+) -> Result<W, TerminalError>
+where
+    W: Write,
+    M: TerminalMode,
+    P: TerminalProductActions,
+    F: FnMut() -> io::Result<Event>,
+{
+    let vault = PlatformCredentialVault;
+    let mut tester = ModelsHttpConnectionTester::new(&vault);
+    run_terminal_loop_core(
+        writer,
+        mode,
+        config,
+        snapshot,
+        &mut tester,
+        Some(product),
         read_event,
     )
 }
@@ -1730,6 +2058,7 @@ where
 struct TerminalSnapshotSource<'a> {
     initial: &'a TuiViewModel,
     refresh_ledger: Option<&'a Path>,
+    viewport: Viewport,
 }
 
 fn run_terminal_loop_core<W, M, T, F>(
@@ -1737,8 +2066,8 @@ fn run_terminal_loop_core<W, M, T, F>(
     mode: M,
     config: &mut ConfigRuntime,
     snapshot: TerminalSnapshotSource<'_>,
-    viewport: Viewport,
     tester: &mut T,
+    mut product: Option<&mut dyn TerminalProductActions>,
     mut read_event: F,
 ) -> Result<W, TerminalError>
 where
@@ -1747,8 +2076,8 @@ where
     T: ProviderConnectionTester,
     F: FnMut() -> io::Result<Event>,
 {
-    let width = viewport.width();
-    let height = viewport.height();
+    let width = snapshot.viewport.width();
+    let height = snapshot.viewport.height();
     let mut surface = TerminalSurface::enter(writer, mode)?;
     let mut renderer = DirectVtRenderer::new(width, height)?;
     let mut session = TerminalSession::new("/", width, height)?;
@@ -1764,7 +2093,14 @@ where
             Some(&view),
             Some(tester),
         )? {
-            TerminalLoopOutcome::Quit => break,
+            TerminalLoopOutcome::Quit => {
+                if session.controller.is_tool_approval()
+                    && let Some(product) = product.as_deref_mut()
+                {
+                    product.cancel_tool_approval();
+                }
+                break;
+            }
             TerminalLoopOutcome::Resize(width, height) => {
                 surface.write_frame(&renderer.resize(width, height)?)?;
                 let frame = session.frame(Some(config), &view)?;
@@ -1831,6 +2167,139 @@ where
                 let frame = session.frame(Some(config), &view)?;
                 surface.write_frame(&renderer.draw(&frame)?)?;
             }
+            TerminalLoopOutcome::LoadToolApproval(call) => {
+                if let Some(product) = product.as_deref_mut() {
+                    match product.load_tool_approval(call) {
+                        Ok(approval) => {
+                            session.controller.show_tool_approval(approval);
+                            session.notice = Some("Review the exact Tool request".to_owned());
+                        }
+                        Err(_) => {
+                            product.cancel_tool_approval();
+                            if let Some(ledger) = snapshot.refresh_ledger
+                                && let Ok(refreshed) = refresh_terminal_view(
+                                    ledger,
+                                    config,
+                                    session.controller.slash_query(),
+                                )
+                            {
+                                session.controller.reconcile_snapshot(&refreshed.view);
+                                *config = refreshed.config;
+                                view = refreshed.view;
+                            }
+                            session.notice = Some(
+                                "Tool approval details are unavailable; inspect current blockers"
+                                    .to_owned(),
+                            );
+                        }
+                    }
+                } else {
+                    session.notice = Some("Tool approval unavailable".to_owned());
+                }
+                let frame = session.frame(Some(config), &view)?;
+                surface.write_frame(&renderer.draw(&frame)?)?;
+            }
+            TerminalLoopOutcome::ResolveToolApproval => {
+                let (call, decision) = session
+                    .take_tool_action()
+                    .ok_or(TerminalError::ViewModelRequired)?;
+                if let Some(product) = product.as_deref_mut() {
+                    match product.resolve_tool_approval(call, decision) {
+                        Ok(TerminalToolResolution::Prepared { delivery, text }) => {
+                            if let Some(ledger) = snapshot.refresh_ledger
+                                && let Ok(refreshed) = refresh_terminal_view(
+                                    ledger,
+                                    config,
+                                    session.controller.slash_query(),
+                                )
+                            {
+                                *config = refreshed.config;
+                                view = refreshed.view;
+                            }
+                            session.show_product_output(delivery, text);
+                        }
+                        Ok(TerminalToolResolution::Denied) => {
+                            session.controller.finish_product_output();
+                            if let Some(ledger) = snapshot.refresh_ledger
+                                && let Ok(refreshed) = refresh_terminal_view(
+                                    ledger,
+                                    config,
+                                    session.controller.slash_query(),
+                                )
+                            {
+                                session.controller.reconcile_snapshot(&refreshed.view);
+                                *config = refreshed.config;
+                                view = refreshed.view;
+                            }
+                            session.notice = Some("Tool call denied; Turn blocked".to_owned());
+                        }
+                        Err(_) => {
+                            product.cancel_tool_approval();
+                            session.controller.cancel_tool_approval();
+                            if let Some(ledger) = snapshot.refresh_ledger
+                                && let Ok(refreshed) = refresh_terminal_view(
+                                    ledger,
+                                    config,
+                                    session.controller.slash_query(),
+                                )
+                            {
+                                session.controller.reconcile_snapshot(&refreshed.view);
+                                *config = refreshed.config;
+                                view = refreshed.view;
+                            }
+                            session.notice = Some(
+                                "Tool approval did not complete; inspect current blockers"
+                                    .to_owned(),
+                            );
+                        }
+                    }
+                } else {
+                    session.controller.cancel_tool_approval();
+                    session.notice = Some("Tool approval unavailable".to_owned());
+                }
+                let frame = session.frame(Some(config), &view)?;
+                surface.write_frame(&renderer.draw(&frame)?)?;
+            }
+            TerminalLoopOutcome::CancelToolApproval => {
+                if let Some(product) = product.as_deref_mut() {
+                    product.cancel_tool_approval();
+                }
+                session.controller.cancel_tool_approval();
+                session.notice = Some("Tool approval left pending".to_owned());
+                let frame = session.frame(Some(config), &view)?;
+                surface.write_frame(&renderer.draw(&frame)?)?;
+            }
+            TerminalLoopOutcome::AcknowledgeProductOutput(delivery) => {
+                if let Some(product) = product.as_deref_mut() {
+                    match product.acknowledge_output(delivery) {
+                        Ok(()) => {
+                            session.controller.finish_product_output();
+                            if let Some(ledger) = snapshot.refresh_ledger
+                                && let Ok(refreshed) = refresh_terminal_view(
+                                    ledger,
+                                    config,
+                                    session.controller.slash_query(),
+                                )
+                            {
+                                session.controller.reconcile_snapshot(&refreshed.view);
+                                *config = refreshed.config;
+                                view = refreshed.view;
+                            }
+                            session.notice = Some("Provider output acknowledged".to_owned());
+                        }
+                        Err(_) => {
+                            session.notice = Some(
+                                "Output acknowledgement failed; delivery remains pending"
+                                    .to_owned(),
+                            );
+                        }
+                    }
+                } else {
+                    session.notice = Some("Output acknowledgement unavailable".to_owned());
+                }
+                let frame = session.frame(Some(config), &view)?;
+                surface.write_frame(&renderer.draw(&frame)?)?;
+            }
             TerminalLoopOutcome::Redraw => {
                 let frame = session.frame(Some(config), &view)?;
                 surface.write_frame(&renderer.draw(&frame)?)?;
@@ -1851,6 +2320,8 @@ pub(crate) enum TerminalError {
     InvalidQuery,
     ConfigRuntimeRequired,
     ViewModelRequired,
+    ToolApprovalUnavailable,
+    PendingProviderEpochRequired,
     Presentation(PresentationControllerError),
     PresentationModel(PresentationError),
     Viewport(ViewportError),
@@ -1859,6 +2330,8 @@ pub(crate) enum TerminalError {
     Runtime(RuntimeError),
     Usage(UsageError),
     ProductDriver(ProductDriverError),
+    Provider(ProviderError),
+    LocalProcess(LocalProcessError),
     Io(std::io::Error),
 }
 
@@ -1880,6 +2353,12 @@ impl fmt::Display for TerminalError {
             Self::ViewModelRequired => {
                 formatter.write_str("terminal action requires its frozen snapshot")
             }
+            Self::ToolApprovalUnavailable => {
+                formatter.write_str("selected Tool approval is unavailable")
+            }
+            Self::PendingProviderEpochRequired => {
+                formatter.write_str("Tool approval requires a pending Provider Epoch")
+            }
             Self::Presentation(source) => write!(formatter, "{source}"),
             Self::PresentationModel(source) => write!(formatter, "{source}"),
             Self::Viewport(source) => write!(formatter, "{source}"),
@@ -1888,6 +2367,8 @@ impl fmt::Display for TerminalError {
             Self::Runtime(source) => write!(formatter, "{source}"),
             Self::Usage(source) => write!(formatter, "{source}"),
             Self::ProductDriver(source) => write!(formatter, "{source}"),
+            Self::Provider(source) => write!(formatter, "{source}"),
+            Self::LocalProcess(source) => write!(formatter, "{source}"),
             Self::Io(source) => write!(formatter, "terminal I/O failed: {source}"),
         }
     }
@@ -1905,12 +2386,16 @@ impl Error for TerminalError {
             Self::Runtime(source) => Some(source),
             Self::Usage(source) => Some(source),
             Self::ProductDriver(source) => Some(source),
+            Self::Provider(source) => Some(source),
+            Self::LocalProcess(source) => Some(source),
             Self::InvalidDimensions
             | Self::DimensionMismatch
             | Self::UnsupportedCellWidth
             | Self::InvalidQuery
             | Self::ConfigRuntimeRequired
             | Self::ViewModelRequired
+            | Self::ToolApprovalUnavailable
+            | Self::PendingProviderEpochRequired
             | Self::NonInteractive => None,
         }
     }
@@ -1964,13 +2449,25 @@ impl From<ProductDriverError> for TerminalError {
     }
 }
 
+impl From<ProviderError> for TerminalError {
+    fn from(source: ProviderError) -> Self {
+        Self::Provider(source)
+    }
+}
+
+impl From<LocalProcessError> for TerminalError {
+    fn from(source: LocalProcessError) -> Self {
+        Self::LocalProcess(source)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::cell::{Cell, RefCell};
     use std::collections::VecDeque;
     use std::ffi::OsString;
     use std::fs::OpenOptions;
-    use std::io::Write as _;
+    use std::io::{self, Write as _};
     use std::path::{Path, PathBuf};
     use std::rc::Rc;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -1978,7 +2475,7 @@ mod tests {
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
     use greentyper_core::agent_team::{
         Capability, CapabilitySnapshot, CommandOutcome, ResourceBudget, TaskScope, TaskSpec,
-        TeamCommand,
+        TeamCommand, TeamOperationRecord,
     };
     use greentyper_core::config::{
         ConfigDocument, ConfigEditorSession, ConfigFieldContents, ConfigLayers, ConfigObjectKind,
@@ -1990,23 +2487,143 @@ mod tests {
         ProviderDialect, ProviderError, ProviderEvent, ProviderPricingSource,
         ProviderProfileSnapshot, ProviderRequest, ProviderRuntime, UsageRecord,
     };
-    use greentyper_core::runtime::{ProviderTurnOutcome, RuntimeKernel};
+    use greentyper_core::runtime::{ProviderToolApproval, ProviderTurnOutcome, RuntimeKernel};
     use greentyper_core::usage::{UsageWeekday, UsageWindow};
 
-    use crate::presentation::{PresentationScreenView, build_smoke_view};
+    use crate::local_process::LocalProcessExecutor;
+    use crate::presentation::{PresentationScreenView, ProductToolApprovalView, build_smoke_view};
+    use crate::product_driver::{ProductDriver, ProductInteraction, ProductToolDecision};
     use crate::provider_connection::{
         ProviderConnectionFailureCategory, ProviderConnectionTestStatus, ProviderConnectionTester,
     };
 
     use super::{
-        DirectVtRenderer, ENTER_TERMINAL, LEAVE_TERMINAL, TerminalFrame, TerminalInputContext,
-        TerminalInputEvent, TerminalInputState, TerminalIntent, TerminalLoopOutcome, TerminalMode,
-        TerminalSession, TerminalSurface, Viewport, build_terminal_view, map_crossterm_event,
-        refresh_terminal_view, run_terminal_loop, run_terminal_loop_with_connection_tester,
+        DirectVtRenderer, ENTER_TERMINAL, LEAVE_TERMINAL, TerminalError, TerminalFrame,
+        TerminalInputContext, TerminalInputEvent, TerminalInputState, TerminalIntent,
+        TerminalLoopOutcome, TerminalMode, TerminalProductActions, TerminalSession,
+        TerminalSnapshotSource, TerminalSurface, TerminalToolResolution, Viewport,
+        build_terminal_view, map_crossterm_event, refresh_terminal_view, run_terminal_loop,
+        run_terminal_loop_with_connection_tester, run_terminal_loop_with_product_actions,
         run_terminal_loop_with_snapshot_refresh,
     };
 
     struct CompleteStatsUsageProvider;
+
+    struct PendingApprovalProvider;
+
+    impl ProviderRuntime for PendingApprovalProvider {
+        fn run(&mut self, _request: &ProviderRequest) -> Result<Vec<ProviderEvent>, ProviderError> {
+            Ok(vec![
+                ProviderEvent::FunctionCall(greentyper_core::provider::ProviderToolCall::new(
+                    "terminal-approval-call",
+                    "local.echo",
+                    r#"{"message":"private-terminal-approval"}"#,
+                )?),
+                ProviderEvent::Completed(UsageRecord::default()),
+            ])
+        }
+    }
+
+    struct InterruptToolApproval;
+
+    impl ProductInteraction for InterruptToolApproval {
+        fn present_team_operation(&mut self, _record: TeamOperationRecord) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn decide_tool(
+            &mut self,
+            _approval: &ProviderToolApproval,
+        ) -> io::Result<ProductToolDecision> {
+            Err(io::Error::other("approval interrupted"))
+        }
+    }
+
+    struct RecordingTerminalProductActions {
+        outcomes: VecDeque<Result<TerminalToolResolution, TerminalError>>,
+        loads: Vec<u64>,
+        loaded_call: Option<u64>,
+        decisions: Vec<(u64, ProductToolDecision)>,
+        cancellations: usize,
+        acknowledgements: Vec<u64>,
+        acknowledgement_failures: usize,
+    }
+
+    impl RecordingTerminalProductActions {
+        fn new(outcomes: impl IntoIterator<Item = TerminalToolResolution>) -> Self {
+            Self {
+                outcomes: outcomes.into_iter().map(Ok).collect(),
+                loads: Vec::new(),
+                loaded_call: None,
+                decisions: Vec::new(),
+                cancellations: 0,
+                acknowledgements: Vec::new(),
+                acknowledgement_failures: 0,
+            }
+        }
+
+        fn fail_acknowledgement_once(mut self) -> Self {
+            self.acknowledgement_failures = 1;
+            self
+        }
+
+        fn fail_resolution_once(mut self) -> Self {
+            self.outcomes
+                .push_front(Err(TerminalError::ToolApprovalUnavailable));
+            self
+        }
+    }
+
+    impl TerminalProductActions for RecordingTerminalProductActions {
+        fn load_tool_approval(
+            &mut self,
+            call: u64,
+        ) -> Result<ProductToolApprovalView, TerminalError> {
+            self.loads.push(call);
+            self.loaded_call = Some(call);
+            Ok(ProductToolApprovalView {
+                call,
+                agent: 1,
+                tool: "local.echo".to_owned(),
+                identity: "terminal-approval-call".to_owned(),
+                arguments: r#"{"message":"private-terminal-approval"}"#.to_owned(),
+                filesystem_reads: Vec::new(),
+                filesystem_writes: Vec::new(),
+                process: Some("local.echo".to_owned()),
+                network_targets: Vec::new(),
+            })
+        }
+
+        fn resolve_tool_approval(
+            &mut self,
+            call: u64,
+            decision: ProductToolDecision,
+        ) -> Result<TerminalToolResolution, TerminalError> {
+            if self.loaded_call.take() != Some(call) {
+                return Err(TerminalError::ToolApprovalUnavailable);
+            }
+            self.decisions.push((call, decision));
+            self.outcomes
+                .pop_front()
+                .unwrap_or(Err(TerminalError::ToolApprovalUnavailable))
+        }
+
+        fn cancel_tool_approval(&mut self) {
+            self.loaded_call = None;
+            self.cancellations = self.cancellations.saturating_add(1);
+        }
+
+        fn acknowledge_output(&mut self, delivery: u64) -> Result<(), TerminalError> {
+            self.acknowledgements.push(delivery);
+            if self.acknowledgement_failures > 0 {
+                self.acknowledgement_failures -= 1;
+                return Err(TerminalError::Io(io::Error::other(
+                    "injected acknowledgement failure",
+                )));
+            }
+            Ok(())
+        }
+    }
 
     impl ProviderRuntime for CompleteStatsUsageProvider {
         fn run(&mut self, _request: &ProviderRequest) -> Result<Vec<ProviderEvent>, ProviderError> {
@@ -3233,9 +3850,7 @@ favorite = true
         events.extend([
             Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
             Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
-            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
             Event::Resize(80, 24),
-            Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
             Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
             Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL)),
         ]);
@@ -3246,7 +3861,6 @@ favorite = true
         .expect("agent browser loop");
         let output = String::from_utf8(output).expect("agent browser VT output");
 
-        assert!(output.contains("Agents / Agent"));
         assert!(output.contains("agent 2"));
         assert!(output.contains("dormant"));
         assert!(output.contains("task 2"));
@@ -3272,6 +3886,461 @@ favorite = true
         assert!(!paths.user().exists());
         assert!(!paths.project().exists());
         std::fs::remove_dir_all(root).expect("remove agent browser fixture");
+    }
+
+    #[test]
+    fn terminal_loop_browses_pending_tool_approval_without_mutating_ledgers() {
+        let root = terminal_test_root("tool-approval-browser");
+        let ledger = root.join("runtime.ledger");
+        let team_ledger = terminal_sidecar_path(&ledger, "team");
+        let tool_ledger = terminal_sidecar_path(&ledger, "tool");
+        let paths = ConfigPaths::new(root.join("user.toml"), root.join("project.toml"));
+        std::fs::create_dir_all(&root).expect("create Tool approval browser directory");
+        let mut interaction = InterruptToolApproval;
+        let mut driver = ProductDriver::open_with_executor(
+            &ledger,
+            LocalProcessExecutor::current().expect("local process executor"),
+            &mut interaction,
+        )
+        .expect("open Product driver");
+        assert!(
+            driver
+                .execute(
+                    &ConfigLayers::default(),
+                    "request Tool approval",
+                    &mut PendingApprovalProvider,
+                    &mut interaction,
+                )
+                .is_err()
+        );
+        drop(driver);
+
+        let runtime_before = std::fs::read(&ledger).expect("read Runtime Ledger");
+        let team_before = std::fs::read(&team_ledger).expect("read Team Ledger");
+        let tool_before = std::fs::read(&tool_ledger).expect("read Tool Ledger");
+        let mut config =
+            ConfigRuntime::open(paths.clone(), ConfigDocument::empty()).expect("config runtime");
+        let view = build_terminal_view(&ledger, &config, "/").expect("Tool approval browser view");
+        let mode = FakeTerminalMode::default();
+        let mut events = "blockers"
+            .chars()
+            .map(|character| {
+                Event::Key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
+            })
+            .collect::<VecDeque<_>>();
+        events.extend([
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Resize(80, 24),
+            Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL)),
+        ]);
+
+        let mut product =
+            RecordingTerminalProductActions::new(std::iter::empty::<TerminalToolResolution>());
+        let output = run_terminal_loop_with_product_actions(
+            Vec::new(),
+            mode,
+            &mut config,
+            TerminalSnapshotSource {
+                initial: &view,
+                refresh_ledger: Some(&ledger),
+                viewport: Viewport::new(80, 24).expect("viewport"),
+            },
+            &mut product,
+            move || {
+                Ok(events
+                    .pop_front()
+                    .expect("bounded Tool approval browser events"))
+            },
+        )
+        .expect("Tool approval browser loop");
+        let output = String::from_utf8(output).expect("Tool approval browser VT output");
+
+        assert!(product.loads.is_empty());
+        assert!(output.contains("Blockers"));
+        assert!(output.contains("tool call 1"));
+        assert!(output.contains("local.echo"));
+        assert!(output.contains("required"));
+        assert!(output.contains("approval"));
+        assert!(output.contains("recover"));
+        assert!(output.contains("credentials"));
+        assert!(output.contains("cost"));
+        assert!(output.contains("billing"));
+        assert!(!output.contains("private-terminal-approval"));
+        assert_eq!(
+            std::fs::read(&ledger).expect("reread Runtime Ledger"),
+            runtime_before
+        );
+        assert_eq!(
+            std::fs::read(&team_ledger).expect("reread Team Ledger"),
+            team_before
+        );
+        assert_eq!(
+            std::fs::read(&tool_ledger).expect("reread Tool Ledger"),
+            tool_before
+        );
+        assert!(!paths.user().exists());
+        assert!(!paths.project().exists());
+        std::fs::remove_dir_all(root).expect("remove Tool approval browser fixture");
+    }
+
+    #[test]
+    fn terminal_loop_approves_or_denies_the_selected_tool_call() {
+        for (label, choose_deny) in [("approve", false), ("deny", true)] {
+            let root = terminal_test_root(&format!("tool-approval-{label}"));
+            let ledger = root.join("runtime.ledger");
+            let team_ledger = terminal_sidecar_path(&ledger, "team");
+            let tool_ledger = terminal_sidecar_path(&ledger, "tool");
+            let paths = ConfigPaths::new(root.join("user.toml"), root.join("project.toml"));
+            std::fs::create_dir_all(&root).expect("create Tool approval action directory");
+            let mut interaction = InterruptToolApproval;
+            let mut driver = ProductDriver::open_with_executor(
+                &ledger,
+                LocalProcessExecutor::current().expect("local process executor"),
+                &mut interaction,
+            )
+            .expect("open Product driver");
+            assert!(
+                driver
+                    .execute(
+                        &ConfigLayers::default(),
+                        "request Tool approval",
+                        &mut PendingApprovalProvider,
+                        &mut interaction,
+                    )
+                    .is_err()
+            );
+            drop(driver);
+            let runtime_before = std::fs::read(&ledger).expect("read Runtime Ledger");
+            let team_before = std::fs::read(&team_ledger).expect("read Team Ledger");
+            let tool_before = std::fs::read(&tool_ledger).expect("read Tool Ledger");
+            let mut config = ConfigRuntime::open(paths.clone(), ConfigDocument::empty())
+                .expect("config runtime");
+            let view =
+                build_terminal_view(&ledger, &config, "/").expect("Tool approval action view");
+            let mode = FakeTerminalMode::default();
+            let mut events = "blockers"
+                .chars()
+                .map(|character| {
+                    Event::Key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
+                })
+                .collect::<VecDeque<_>>();
+            events.extend([
+                Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+                Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+                Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+                Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            ]);
+            for _ in 0..9 {
+                events.push_back(Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)));
+            }
+            if choose_deny {
+                events.push_back(Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)));
+            }
+            events.push_back(Event::Key(KeyEvent::new(
+                KeyCode::Enter,
+                KeyModifiers::NONE,
+            )));
+            if !choose_deny {
+                events.extend([
+                    Event::Resize(80, 24),
+                    Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+                    Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+                    Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+                ]);
+            }
+            events.push_back(Event::Key(KeyEvent::new(
+                KeyCode::Char('q'),
+                KeyModifiers::CONTROL,
+            )));
+            let mut product = if choose_deny {
+                RecordingTerminalProductActions::new([TerminalToolResolution::Denied])
+            } else {
+                RecordingTerminalProductActions::new([TerminalToolResolution::Prepared {
+                    delivery: 42,
+                    text: "Echoed: approved terminal result".to_owned(),
+                }])
+                .fail_acknowledgement_once()
+            };
+
+            let output = run_terminal_loop_with_product_actions(
+                Vec::new(),
+                mode,
+                &mut config,
+                TerminalSnapshotSource {
+                    initial: &view,
+                    refresh_ledger: Some(&ledger),
+                    viewport: Viewport::new(80, 24).expect("viewport"),
+                },
+                &mut product,
+                move || {
+                    Ok(events
+                        .pop_front()
+                        .expect("bounded Tool approval action events"))
+                },
+            )
+            .expect("Tool approval action loop");
+            let output = String::from_utf8(output).expect("Tool approval action VT output");
+
+            assert_eq!(product.loads, [1]);
+            assert_eq!(
+                product.decisions,
+                [(
+                    1,
+                    if choose_deny {
+                        ProductToolDecision::Deny
+                    } else {
+                        ProductToolDecision::Approve
+                    }
+                )]
+            );
+            assert!(output.contains("Review the exact Tool request"));
+            assert!(output.contains("terminal-approval-call"));
+            assert!(output.contains(r#"{"message":"private-terminal-approval"}"#));
+            assert!(output.contains("filesystem read none"));
+            assert!(output.contains("process local.echo"));
+            if choose_deny {
+                assert!(output.contains("Tool call denied; Turn blocked"));
+                assert!(product.acknowledgements.is_empty());
+            } else {
+                assert!(output.contains("Provider Output"));
+                assert!(output.contains("approved terminal result"));
+                assert!(output.contains("Acknowledge delivery 42"));
+                assert!(output.contains("Output acknowledgement failed; delivery remains pending"));
+                assert!(output.contains("Provider output acknowledged"));
+                assert_eq!(product.acknowledgements, [42, 42]);
+            }
+            assert_eq!(
+                std::fs::read(&ledger).expect("reread Runtime Ledger"),
+                runtime_before
+            );
+            assert_eq!(
+                std::fs::read(&team_ledger).expect("reread Team Ledger"),
+                team_before
+            );
+            assert_eq!(
+                std::fs::read(&tool_ledger).expect("reread Tool Ledger"),
+                tool_before
+            );
+            assert!(!paths.user().exists());
+            assert!(!paths.project().exists());
+            std::fs::remove_dir_all(root).expect("remove Tool approval action fixture");
+        }
+    }
+
+    #[test]
+    fn terminal_loop_cancels_a_rendered_tool_approval_without_mutating_state() {
+        let root = terminal_test_root("tool-approval-cancel");
+        let ledger = root.join("runtime.ledger");
+        let team_ledger = terminal_sidecar_path(&ledger, "team");
+        let tool_ledger = terminal_sidecar_path(&ledger, "tool");
+        let paths = ConfigPaths::new(root.join("user.toml"), root.join("project.toml"));
+        std::fs::create_dir_all(&root).expect("create Tool approval cancel directory");
+        let mut interaction = InterruptToolApproval;
+        let mut driver = ProductDriver::open_with_executor(
+            &ledger,
+            LocalProcessExecutor::current().expect("local process executor"),
+            &mut interaction,
+        )
+        .expect("open Product driver");
+        assert!(
+            driver
+                .execute(
+                    &ConfigLayers::default(),
+                    "request cancellable Tool approval",
+                    &mut PendingApprovalProvider,
+                    &mut interaction,
+                )
+                .is_err()
+        );
+        drop(driver);
+        let runtime_before = std::fs::read(&ledger).expect("read Runtime Ledger");
+        let team_before = std::fs::read(&team_ledger).expect("read Team Ledger");
+        let tool_before = std::fs::read(&tool_ledger).expect("read Tool Ledger");
+        let mut config =
+            ConfigRuntime::open(paths.clone(), ConfigDocument::empty()).expect("config runtime");
+        let view = build_terminal_view(&ledger, &config, "/").expect("Tool approval cancel view");
+        let mode = FakeTerminalMode::default();
+        let mut events = "blockers"
+            .chars()
+            .map(|character| {
+                Event::Key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
+            })
+            .collect::<VecDeque<_>>();
+        events.extend([
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL)),
+        ]);
+        let mut product =
+            RecordingTerminalProductActions::new(std::iter::empty::<TerminalToolResolution>());
+
+        let output = run_terminal_loop_with_product_actions(
+            Vec::new(),
+            mode,
+            &mut config,
+            TerminalSnapshotSource {
+                initial: &view,
+                refresh_ledger: Some(&ledger),
+                viewport: Viewport::new(80, 24).expect("viewport"),
+            },
+            &mut product,
+            move || {
+                Ok(events
+                    .pop_front()
+                    .expect("bounded Tool approval cancel events"))
+            },
+        )
+        .expect("Tool approval cancel loop");
+        let output = String::from_utf8(output).expect("Tool approval cancel VT output");
+
+        assert_eq!(product.loads, [1]);
+        assert_eq!(product.cancellations, 1);
+        assert!(product.decisions.is_empty());
+        assert!(product.acknowledgements.is_empty());
+        assert!(output.contains(r#"{"message":"private-terminal-approval"}"#));
+        assert!(output.contains("Tool approval left pending"));
+        assert_eq!(
+            std::fs::read(&ledger).expect("reread Runtime Ledger"),
+            runtime_before
+        );
+        assert_eq!(
+            std::fs::read(&team_ledger).expect("reread Team Ledger"),
+            team_before
+        );
+        assert_eq!(
+            std::fs::read(&tool_ledger).expect("reread Tool Ledger"),
+            tool_before
+        );
+        assert!(!paths.user().exists());
+        assert!(!paths.project().exists());
+        std::fs::remove_dir_all(root).expect("remove Tool approval cancel fixture");
+    }
+
+    #[test]
+    fn terminal_loop_keeps_failed_tool_approval_recoverable() {
+        let root = terminal_test_root("tool-approval-retry");
+        let ledger = root.join("runtime.ledger");
+        let team_ledger = terminal_sidecar_path(&ledger, "team");
+        let tool_ledger = terminal_sidecar_path(&ledger, "tool");
+        let paths = ConfigPaths::new(root.join("user.toml"), root.join("project.toml"));
+        std::fs::create_dir_all(&root).expect("create Tool approval retry directory");
+        let mut interaction = InterruptToolApproval;
+        let mut driver = ProductDriver::open_with_executor(
+            &ledger,
+            LocalProcessExecutor::current().expect("local process executor"),
+            &mut interaction,
+        )
+        .expect("open Product driver");
+        assert!(
+            driver
+                .execute(
+                    &ConfigLayers::default(),
+                    "request retryable Tool approval",
+                    &mut PendingApprovalProvider,
+                    &mut interaction,
+                )
+                .is_err()
+        );
+        drop(driver);
+        let runtime_before = std::fs::read(&ledger).expect("read Runtime Ledger");
+        let team_before = std::fs::read(&team_ledger).expect("read Team Ledger");
+        let tool_before = std::fs::read(&tool_ledger).expect("read Tool Ledger");
+        let mut config =
+            ConfigRuntime::open(paths.clone(), ConfigDocument::empty()).expect("config runtime");
+        let view = build_terminal_view(&ledger, &config, "/").expect("Tool approval retry view");
+        let mode = FakeTerminalMode::default();
+        let mut events = "blockers"
+            .chars()
+            .map(|character| {
+                Event::Key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
+            })
+            .collect::<VecDeque<_>>();
+        events.extend([
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        ]);
+        for _ in 0..9 {
+            events.push_back(Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)));
+        }
+        events.extend([
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        ]);
+        for _ in 0..9 {
+            events.push_back(Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)));
+        }
+        events.extend([
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Resize(80, 24),
+            Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL)),
+        ]);
+        let mut product =
+            RecordingTerminalProductActions::new([TerminalToolResolution::Prepared {
+                delivery: 77,
+                text: "Recovered Provider output".to_owned(),
+            }])
+            .fail_resolution_once();
+
+        let output = run_terminal_loop_with_product_actions(
+            Vec::new(),
+            mode,
+            &mut config,
+            TerminalSnapshotSource {
+                initial: &view,
+                refresh_ledger: Some(&ledger),
+                viewport: Viewport::new(80, 24).expect("viewport"),
+            },
+            &mut product,
+            move || {
+                Ok(events
+                    .pop_front()
+                    .expect("bounded Tool approval retry events"))
+            },
+        )
+        .expect("Tool approval retry loop");
+        let output = String::from_utf8(output).expect("Tool approval retry VT output");
+
+        assert!(output.contains("Tool approval did not complete; inspect current blockers"));
+        assert!(output.contains("Recovered Provider output"));
+        assert!(output.contains("Provider output acknowledged"));
+        assert_eq!(product.loads, [1, 1]);
+        assert_eq!(product.cancellations, 1);
+        assert_eq!(
+            product.decisions,
+            [
+                (1, ProductToolDecision::Approve),
+                (1, ProductToolDecision::Approve)
+            ]
+        );
+        assert_eq!(product.acknowledgements, [77]);
+        assert_eq!(
+            std::fs::read(&ledger).expect("reread Runtime Ledger"),
+            runtime_before
+        );
+        assert_eq!(
+            std::fs::read(&team_ledger).expect("reread Team Ledger"),
+            team_before
+        );
+        assert_eq!(
+            std::fs::read(&tool_ledger).expect("reread Tool Ledger"),
+            tool_before
+        );
+        assert!(!paths.user().exists());
+        assert!(!paths.project().exists());
+        std::fs::remove_dir_all(root).expect("remove Tool approval retry fixture");
     }
 
     #[test]

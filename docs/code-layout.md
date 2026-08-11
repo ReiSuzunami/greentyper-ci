@@ -64,7 +64,7 @@ until it can be parsed atomically.
 The fourth creates manual Price Schedules across all 17 schema fields while
 keeping partial non-negative-integer input local until it can be parsed
 atomically.
-The same private terminal composition now owns `/model`, `/stats`, and `/agent`
+The same private terminal composition now owns `/model`, `/stats`, `/agent`, and `/blockers`
 browsers over local Config Catalog, Usage, and strict Team-sidecar projections.
 All provide bounded query/group/row/detail navigation. Stats and Agent browsing
 remain read-only. On configured Model detail, a second Enter may stage one
@@ -76,6 +76,14 @@ and fails closed on corruption or incomplete Product sidecars. F6 or Ctrl-R
 replaces the local snapshot only after all independent reads succeed and
 preserves the prior Config runtime and view on failure; it does not claim a
 cross-Ledger transactional instant, and there is no background polling.
+The `/blockers` list is snapshot-backed. Its first Tool-approval Enter shows a
+local warning; the second confirms an explicit ProductDriver action that may
+use credentials, append Usage/cost records, and affect Provider quota or
+billing. It authenticates the rebound Active Agent Session, reconstructs the
+frozen Provider, and keeps exact arguments/resources in one process-local
+approval context until Escape, Approve, or Deny. The
+terminal never converts an Agent ID into authority, and it delegates approval,
+effect ordering, denial, and delivery acknowledgement back to the Kernel.
 The private App Server module owns a bounded newline-delimited JSON stdio loop
 over the existing Config Runtime. It keeps at most 64 connection-local Drafts,
 maps typed values and fixed public errors, rejects secret reads, and delegates
@@ -90,9 +98,8 @@ per-Turn Provider/Model/Dialect/Policy distributions without adding a write or
 Provider authority path.
 Section-filtered typed remove
 routes render exact Config Object deletion confirmations; secret storage stays
-behind the credential adapter. Approval interaction, the App
-Server Runtime-control surface, and an audited Windows ConPTY wrapper remain
-pending. Platform wrappers for process, credential, transport,
+behind the credential adapter. Broader multi-Tool policy, App Server Runtime and
+approval control, and an audited Windows ConPTY wrapper remain pending. Platform wrappers for process, credential, transport,
 and eventually terminal facilities remain private to
 this package unless a second real caller proves a smaller shared package is
 needed.

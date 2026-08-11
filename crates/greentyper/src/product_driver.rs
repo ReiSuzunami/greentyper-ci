@@ -25,8 +25,8 @@ use greentyper_core::runtime::{
     ProviderTurnOutcome, RuntimeError, RuntimeKernel,
 };
 use greentyper_core::tool_runtime::{
-    ApprovalDecision, ToolCallRecord, ToolEffectExecutor, ToolReconciliationDecision,
-    ToolRuntimeError, ToolSnapshot, inspect_tool_ledger,
+    ApprovalDecision, ToolCallRecord, ToolCallStatus, ToolEffectExecutor,
+    ToolReconciliationDecision, ToolRuntimeError, ToolSnapshot, inspect_tool_ledger,
 };
 use greentyper_core::usage::UsageWindow;
 
@@ -45,6 +45,11 @@ pub(crate) trait ProductInteraction {
 pub(crate) enum ProductToolDecision {
     Approve,
     Deny,
+}
+
+pub(crate) enum ProductToolDecisionOutcome {
+    Prepared(PreparedOutput),
+    Denied,
 }
 
 pub(crate) fn apply_model_preset_to_next_turn(
@@ -183,6 +188,76 @@ impl<E: ToolEffectExecutor> ProductDriver<E> {
             self.kernel
                 .resume_provider_turn(self.session, provider, local_echo_resources)?;
         self.finish(outcome, provider, interaction)
+    }
+
+    pub(crate) fn recover_pending_tool_approval(
+        &mut self,
+        expected_call: u64,
+        provider: &mut impl ProviderRuntime,
+    ) -> Result<Box<ProviderToolApproval>, ProductDriverError> {
+        let pending = self
+            .kernel
+            .tool_snapshot()
+            .and_then(|snapshot| {
+                snapshot
+                    .calls
+                    .into_iter()
+                    .find(|record| record.status == ToolCallStatus::AwaitingApproval)
+            })
+            .ok_or(ProductDriverError::ToolApprovalUnavailable(expected_call))?;
+        let actual = pending.call.get();
+        if actual != expected_call {
+            return Err(ProductDriverError::ToolApprovalMismatch {
+                expected: expected_call,
+                actual,
+            });
+        }
+        if pending.agent != self.session.agent() {
+            return Err(ProductDriverError::ToolOwnerUnavailable(expected_call));
+        }
+        let outcome =
+            self.kernel
+                .resume_provider_turn(self.session, provider, local_echo_resources)?;
+        let ProviderTurnOutcome::ApprovalRequired(approval) = outcome else {
+            return Err(ProductDriverError::ToolApprovalUnavailable(expected_call));
+        };
+        if approval.call().get() != expected_call {
+            return Err(ProductDriverError::ToolApprovalMismatch {
+                expected: expected_call,
+                actual: approval.call().get(),
+            });
+        }
+        Ok(approval)
+    }
+
+    pub(crate) fn resolve_recovered_tool_approval(
+        &mut self,
+        approval: Box<ProviderToolApproval>,
+        decision: ProductToolDecision,
+        provider: &mut impl ProviderRuntime,
+    ) -> Result<ProductToolDecisionOutcome, ProductDriverError> {
+        let expected_call = approval.call().get();
+        let decision = match decision {
+            ProductToolDecision::Approve => ApprovalDecision::Grant {
+                expires_at_unix_ms: approval_expiry_unix_ms(),
+            },
+            ProductToolDecision::Deny => ApprovalDecision::Deny {
+                reason: DENIAL_REASON.into(),
+            },
+        };
+        match self.kernel.resolve_provider_tool_call(
+            approval,
+            decision,
+            &mut self.executor,
+            provider,
+        ) {
+            Ok(output) => Ok(ProductToolDecisionOutcome::Prepared(output)),
+            Err(RuntimeError::ProviderToolCallTerminated {
+                call,
+                status: greentyper_core::tool_runtime::ToolCallStatus::Denied,
+            }) if call.get() == expected_call => Ok(ProductToolDecisionOutcome::Denied),
+            Err(source) => Err(ProductDriverError::Runtime(source)),
+        }
     }
 
     pub(crate) fn acknowledge(
@@ -421,6 +496,8 @@ pub(crate) enum ProductDriverError {
     ToolStateUnavailable,
     UnknownToolCall(u64),
     ToolOwnerUnavailable(u64),
+    ToolApprovalUnavailable(u64),
+    ToolApprovalMismatch { expected: u64, actual: u64 },
     UnexpectedRecovery,
 }
 
@@ -448,6 +525,16 @@ impl fmt::Display for ProductDriverError {
             Self::ToolOwnerUnavailable(call) => {
                 write!(formatter, "Tool call {call} has no recoverable Agent owner")
             }
+            Self::ToolApprovalUnavailable(call) => {
+                write!(
+                    formatter,
+                    "Tool call {call} is not awaiting Provider approval"
+                )
+            }
+            Self::ToolApprovalMismatch { expected, actual } => write!(
+                formatter,
+                "selected Tool call {expected} does not match pending call {actual}"
+            ),
             Self::UnexpectedRecovery => {
                 write!(formatter, "Product driver recovery is inconsistent")
             }
@@ -467,6 +554,8 @@ impl Error for ProductDriverError {
             | Self::ToolStateUnavailable
             | Self::UnknownToolCall(_)
             | Self::ToolOwnerUnavailable(_)
+            | Self::ToolApprovalUnavailable(_)
+            | Self::ToolApprovalMismatch { .. }
             | Self::UnexpectedRecovery => None,
         }
     }
@@ -499,6 +588,7 @@ mod tests {
     };
     use greentyper_core::runtime::{ProviderToolApproval, RecoveryStatus};
     use greentyper_core::tool_runtime::{AuthorizedToolCall, ToolEffectExecutor, ToolExecution};
+    use greentyper_core::usage::UsageTimestamp;
 
     use super::*;
     use crate::presentation::{BlockerView, PresentationSources, TuiViewModel};
@@ -871,16 +961,134 @@ source = "unknown"
         )
         .expect("reopen Product driver");
         let mut provider = LocalEchoProvider::default();
+        let usage_attempts_before_recovery = recovered
+            .kernel
+            .usage_snapshot(UsageTimestamp::now().expect("usage instant"))
+            .attempts()
+            .len();
+        assert!(matches!(
+            recovered.recover_pending_tool_approval(2, &mut provider),
+            Err(ProductDriverError::ToolApprovalMismatch {
+                expected: 2,
+                actual: 1,
+            })
+        ));
+        assert_eq!(provider.runs, 0);
+        assert_eq!(
+            recovered
+                .kernel
+                .usage_snapshot(UsageTimestamp::now().expect("usage instant"))
+                .attempts()
+                .len(),
+            usage_attempts_before_recovery
+        );
+        assert_eq!(calls.get(), 0);
+        let approval = recovered
+            .recover_pending_tool_approval(1, &mut provider)
+            .expect("recover exact approval");
+        assert_eq!(provider.runs, 1);
+        assert_eq!(
+            recovered
+                .kernel
+                .usage_snapshot(UsageTimestamp::now().expect("usage instant"))
+                .attempts()
+                .len(),
+            usage_attempts_before_recovery.saturating_add(1)
+        );
+        assert_eq!(approval.call().get(), 1);
+        assert_eq!(approval.tool(), "local.echo");
+        assert!(approval.identity().starts_with("provider-turn-1-"));
+        assert_eq!(
+            approval.arguments().canonical_json(),
+            r#"{"message":"approved message"}"#
+        );
+        assert!(approval.resources().filesystem_reads().next().is_none());
+        assert!(approval.resources().filesystem_writes().next().is_none());
+        assert_eq!(
+            approval.resources().process(),
+            Some("greentyper.local.echo.v1")
+        );
+        assert!(approval.resources().network_targets().next().is_none());
         let output = recovered
-            .resume(&mut provider, &mut interaction)
+            .resolve_recovered_tool_approval(approval, ProductToolDecision::Approve, &mut provider)
             .expect("resume approval");
+        let ProductToolDecisionOutcome::Prepared(output) = output else {
+            panic!("approval must prepare Provider output")
+        };
         assert_eq!(output.text(), "Echoed: approved message");
         assert_eq!(calls.get(), 1);
-        assert_eq!(interaction.approvals.len(), 1);
+        assert!(interaction.approvals.is_empty());
         recovered
             .acknowledge(output.delivery())
             .expect("acknowledge resumed output");
         drop(recovered);
+        assert_eq!(
+            RuntimeKernel::inspect(&ledger)
+                .expect("inspect acknowledged recovery")
+                .status,
+            RecoveryStatus::Ready
+        );
+        cleanup(&ledger);
+    }
+
+    #[test]
+    fn approval_interruption_reopens_and_denies_without_executing() {
+        let ledger = temp_path("approval-denial-recovery");
+        let calls = Rc::new(Cell::new(0));
+        let mut interrupted = RecordingInteraction::fail_approval();
+        let mut driver = ProductDriver::open_with_executor(
+            &ledger,
+            CountingEchoExecutor::new(Rc::clone(&calls)),
+            &mut interrupted,
+        )
+        .expect("open Product driver");
+        let mut provider = LocalEchoProvider::default();
+        assert!(matches!(
+            driver.execute(
+                &ConfigLayers::default(),
+                "deny recovered approval",
+                &mut provider,
+                &mut interrupted,
+            ),
+            Err(ProductDriverError::Interaction(_))
+        ));
+        drop(driver);
+
+        let mut interaction = RecordingInteraction::approve();
+        let mut recovered = ProductDriver::open_with_executor(
+            &ledger,
+            CountingEchoExecutor::new(Rc::clone(&calls)),
+            &mut interaction,
+        )
+        .expect("reopen Product driver");
+        let mut provider = LocalEchoProvider::default();
+        let approval = recovered
+            .recover_pending_tool_approval(1, &mut provider)
+            .expect("recover approval for denial");
+        assert_eq!(
+            approval.arguments().canonical_json(),
+            r#"{"message":"approved message"}"#
+        );
+        let outcome = recovered
+            .resolve_recovered_tool_approval(approval, ProductToolDecision::Deny, &mut provider)
+            .expect("deny recovered approval");
+        assert!(matches!(outcome, ProductToolDecisionOutcome::Denied));
+        assert_eq!(calls.get(), 0);
+        assert!(matches!(
+            recovered.snapshot().status,
+            RecoveryStatus::Blocked { .. }
+        ));
+        assert_eq!(
+            recovered.tool_snapshot().expect("Tool snapshot").calls[0].status,
+            greentyper_core::tool_runtime::ToolCallStatus::Denied
+        );
+        drop(recovered);
+        assert!(matches!(
+            RuntimeKernel::inspect(&ledger)
+                .expect("inspect denied recovery")
+                .status,
+            RecoveryStatus::Blocked { .. }
+        ));
         cleanup(&ledger);
     }
 

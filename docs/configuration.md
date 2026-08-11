@@ -221,6 +221,15 @@ remain detail-only.
 `/agent` browses the latest successful Team sidecar projection. It is an
 inspection surface,
 not a route for lifecycle commands or Agent Session authority.
+`/blockers` lists Runtime, Team, Task, Tool, and Config blockers from the latest
+local projections. The first Enter on a Tool approval shows a local warning;
+the second Enter confirms an explicit recovery action. The product then
+authenticates the recovered current Agent Session, reconstructs the pending
+Provider from its frozen Epoch, resumes the request, and shows exact ephemeral
+arguments and resources before enabling Approve or Deny. Recovery may use the
+origin-bound credential, contact the Provider, append Usage Attempt and cost
+records, and affect Provider quota or billing. It does not edit Config or
+persist raw approval material.
 
 Slash commands navigate and select scope; mutation occurs in a validated
 dialog. The current headless CLI provides `config schema`, `config get`,
@@ -262,7 +271,7 @@ after a failed refresh. The browser offers no dispatch, acknowledgement,
 approval, messaging, or lifecycle action.
 
 F6 or Ctrl-R requests one local snapshot refresh from the Slash Panel,
-`/model`, `/stats`, or `/agent`. Runtime, Usage, Team, Config, statusline, and
+`/model`, `/stats`, `/agent`, or `/blockers`. Runtime, Usage, Team, Config, statusline, and
 Model projections replace the active view only after every read and projection
 succeeds. Failure renders a fixed notice and keeps the prior Config runtime and
 view interactive; another refresh can recover after the underlying state is

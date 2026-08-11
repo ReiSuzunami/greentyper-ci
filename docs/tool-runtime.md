@@ -153,7 +153,21 @@ observed-success digest without a second executor call. Missing state does not
 create Ledgers, incomplete sidecars fail closed, and repeated reconciliation of
 an already-terminal call is idempotent.
 
-Still pending: richer TUI/App Server approval and result presentation,
+The Direct VT `/blockers` route now handles the fixed `local.echo` approval
+slice. It first renders a local warning that recovery contacts the Provider,
+may use credentials, appends Usage Attempt and cost records, and may affect
+quota or billing. A second Enter recovers the exact pending request through the
+ProductDriver's rebound Active Agent Session, then renders canonical arguments and every
+filesystem/process/network resource before Approve or Deny can be selected.
+The recovered request is process-local only. Escape leaves the durable call
+awaiting approval, denial invokes no executor, and a grant still uses the core
+identity/hash/resource/capability/expiry checks before `EffectPrepared` and one
+executor call. Provider output remains pending until an explicit delivery
+acknowledgement succeeds. Recovery or resolution failures return to inspectable
+blocker state; an acknowledgement failure keeps the same output visible for
+retry.
+
+Still pending: broader multi-Tool TUI policy and App Server approval/result presentation,
 caller-selected process policy, complete Windows Job kill-on-close and memory-
 limit evidence on the Target Machine, filesystem/network/MCP adapters,
 credential-vault integration for Tools, multiple Provider Tool calls,

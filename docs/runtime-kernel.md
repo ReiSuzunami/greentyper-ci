@@ -332,12 +332,24 @@ charges still require a future dedicated authority path.
 
 ## Still Pending
 
-- Rich TUI/App Server approval and result presentation beyond the fixed
-  `local.echo` CLI. The current product driver already delivers the persisted
+- Broader multi-Tool TUI approval policy and App Server approval/result
+  presentation beyond fixed `local.echo`. The current product driver delivers the persisted
   operation receipt before acknowledgement and consumes only the complete
   Kernel-rebound Session bundle; it exposes no Agent-ID-to-session conversion.
-  The Direct VT tracer carries no approval authority; its Config surface now
-  gives every schema field a rendered user-scope interaction, supports all four
+  The Direct VT tracer now exposes `/blockers`. The first selection of one
+  pending `local.echo` approval displays a local recovery warning; a second
+  Enter confirms Provider reconstruction from the frozen Provider Epoch and
+  resumes the request under the recovered Active Agent Session,
+  and keeps the resulting exact arguments and resources only in memory while
+  the user traverses them before Approve or Deny. Recovery may use the
+  origin-bound credential, append Usage Attempt and cost records, and affect
+  Provider quota or billing. Escape drops that context and
+  leaves the call pending. A grant still crosses the existing bound approval and
+  prepared-effect transaction before the executor; denial invokes no effect.
+  Prepared Provider output remains visible until durable delivery
+  acknowledgement succeeds. Failed recovery or resolution returns to blocker
+  inspection; failed acknowledgement keeps the same output live for retry. The
+  Config surface gives every schema field a rendered user-scope interaction, supports all four
   Config Object creation flows, and renders typed target-layer deletion
   confirmations. Credential fields expose only an opaque reference and never
   read it back. F5 can run the existing
