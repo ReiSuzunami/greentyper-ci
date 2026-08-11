@@ -3405,8 +3405,8 @@ mod tests {
     use greentyper_core::usage::{UsageWeekday, UsageWindow};
 
     use crate::credential_vault::{
-        CredentialVault, CredentialVaultError, InMemoryCredentialVault, PlatformCredentialVault,
-        ProviderCredentialScope, SecretValue,
+        CredentialVault, CredentialVaultError, InMemoryCredentialVault, ProviderCredentialScope,
+        SecretValue,
     };
     use crate::local_process::LocalProcessExecutor;
     use crate::presentation::{PresentationScreenView, ProductToolApprovalView, build_smoke_view};
@@ -4493,7 +4493,7 @@ mode = "template_and_discovery"
         let first_success_for_events = Rc::clone(&first_success);
         let discovery_for_events = discovery.clone();
         let mut f5_count = 0;
-        let mut credential_vault = PlatformCredentialVault;
+        let mut credential_vault = InMemoryCredentialVault::default();
         let output = super::run_terminal_loop_core(
             Vec::new(),
             FakeTerminalMode::default(),
