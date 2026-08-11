@@ -422,13 +422,25 @@ fn provider_continuation_failure_after_tool_success_is_not_retryable() {
         kernel.tool_snapshot().expect("Tool snapshot").calls[0].status,
         ToolCallStatus::Succeeded
     );
+    let root_agent = root.agent();
+    drop(kernel);
     let runtime_before = fs::read(&runtime_path).expect("read Runtime Ledger before rejection");
     let team_before = fs::read(&team_path).expect("read Team Ledger before rejection");
     let tool_before = fs::read(&tool_path).expect("read Tool Ledger before rejection");
+
+    let (mut recovered, rebound) =
+        RuntimeKernel::open_with_team_and_tools(&runtime_path, &team_path, &tool_path, 1)
+            .expect("reopen Runtime, Team, and Tool Ledgers");
+    let fresh_root = rebound
+        .into_sessions()
+        .into_iter()
+        .find(|session| session.agent() == root_agent)
+        .expect("rebound root Agent Session");
     assert!(matches!(
-        kernel.request_blocked_provider_turn_retry(root, turn),
+        recovered.request_blocked_provider_turn_retry(fresh_root, turn),
         Err(RuntimeError::TurnRetryNotAllowed(actual)) if actual == turn
     ));
+    drop(recovered);
     assert_eq!(
         fs::read(&runtime_path).expect("read Runtime Ledger after rejection"),
         runtime_before
@@ -441,7 +453,6 @@ fn provider_continuation_failure_after_tool_success_is_not_retryable() {
         fs::read(&tool_path).expect("read Tool Ledger after rejection"),
         tool_before
     );
-    drop(kernel);
 
     fs::remove_file(runtime_path).expect("cleanup Runtime Ledger");
     fs::remove_file(team_path).expect("cleanup Team Ledger");
