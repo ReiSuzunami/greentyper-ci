@@ -166,6 +166,11 @@ records ordinary Usage/cost facts, and returns prepared output or an exact Tool
 approval without acknowledging it. Wrong, stale, non-retryable, non-resumable,
 incomplete-tail, or missing state fails before mutation; product recovery also
 leaves Team and Tool Ledgers byte-identical.
+`agent.retry` adds an explicit Agent ID to the same Product retry boundary and
+fails before mutation when the persisted Turn owner differs. It still only
+rearms; resume, delivery, and acknowledgement remain separate. The CLI
+`agent retry --agent ID --turn ID` composes those later steps into one user
+flow. Neither surface retries a terminal Team Agent.
 
 Agent Team recovery is separate from Turn output recovery. `open_with_team`
 holds both dedicated writers, validates the Team replay, and returns one

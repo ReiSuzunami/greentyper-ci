@@ -44,7 +44,8 @@ use crate::product_driver::{
     apply_model_preset_to_next_turn, cancel_product_agent, cancel_product_provider_turn,
     complete_product_agent, delegate_product_agent, fail_product_agent, freeze_model_selection,
     has_product_driver_state, inspect_product_team, inspect_product_tools,
-    message_from_product_agent, reconcile_product_tool, request_product_provider_turn_recovery,
+    message_from_product_agent, reconcile_product_tool,
+    request_product_agent_provider_turn_recovery, request_product_provider_turn_recovery,
     require_context_mode_execution, require_pending_context_mode_execution,
 };
 use crate::provider_http::ConfiguredProvider;
@@ -723,6 +724,59 @@ where
                     }
                     Err(ProductDriverError::Runtime(error)) => {
                         runtime_resume_error(request.id, error)
+                    }
+                    Err(_) => runtime_control_error(request.id),
+                }
+            }
+            "agent.retry" => {
+                let params = match parse_params::<AgentRetryParams>(request.params) {
+                    Ok(params) => params,
+                    Err(()) => return invalid_params(request.id),
+                };
+                let turn = match TurnId::new(params.turn) {
+                    Ok(turn) => turn,
+                    Err(_) => return invalid_turn(request.id),
+                };
+                if let Err(error) = require_pending_context_mode_execution(&self.runtime_path) {
+                    return runtime_retry_error(request.id, error);
+                }
+                match request_product_agent_provider_turn_recovery(
+                    &self.runtime_path,
+                    params.agent,
+                    turn,
+                ) {
+                    Ok(_) => {
+                        let snapshot = match RuntimeKernel::inspect(&self.runtime_path) {
+                            Ok(snapshot)
+                                if snapshot.recovered_tail_bytes == 0
+                                    && matches!(
+                                        snapshot.status,
+                                        RecoveryStatus::ResumeRequired { turn: actual }
+                                            if actual == turn
+                                    ) =>
+                            {
+                                snapshot
+                            }
+                            Ok(_) | Err(_) => return runtime_inspection_error(request.id),
+                        };
+                        success_response(
+                            request.id,
+                            json!({
+                                "status": "resume_required",
+                                "agent": params.agent,
+                                "turn": turn.get(),
+                                "ledger": {
+                                    "transaction": snapshot.head.transaction,
+                                    "sequence": snapshot.head.sequence,
+                                },
+                            }),
+                        )
+                    }
+                    Err(ProductDriverError::Runtime(error)) => {
+                        runtime_retry_error(request.id, error)
+                    }
+                    Err(ProductDriverError::UnknownAgent(_)) => {
+                        error_response(Some(request.id), "unknown_agent", "Agent is unknown", None)
                     }
                     Err(_) => runtime_control_error(request.id),
                 }
@@ -2039,6 +2093,13 @@ struct AgentDelegateParams {
 struct AgentTurnParams {
     agent: u64,
     input: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AgentRetryParams {
+    agent: u64,
+    turn: u64,
 }
 
 #[derive(Deserialize)]

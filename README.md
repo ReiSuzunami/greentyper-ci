@@ -178,6 +178,10 @@ Sessions rebound from strict Team replay; they never mint authority. The
 product permits two Active Agents. Ordinary headless Provider Turns remain
 bound to the root, while `agent.turn` explicitly selects one existing Active
 child and freezes that Turn's Config and Provider Epochs.
+`agent retry --agent ID --turn ID` adds the same owner check to explicit
+Provider recovery, then resumes, delivers, and acknowledges that exact Turn.
+The App Server `agent.retry` operation performs only the owner-bound durable
+rearm; `runtime.resume`, delivery, and acknowledgement remain separate.
 `runtime.cancel` terminalizes one exact Provider-origin blocked Turn,
 `runtime.retry` durably rearms only an explicitly retryable initial Provider
 failure without contacting a Provider, and `runtime.resume` reconstructs the
@@ -580,7 +584,7 @@ before implementation. Live inference conformance,
 automatic transport retry or partial-stream reconnect, Messages reasoning
 blocks, provider-native Context Mode execution, broader multi-Tool approval
 presentation, broader Provider and Tool adapters,
-Workspace, Agent retry, general App Server Runtime control beyond the exact
+Workspace, retrying terminal Team Agents, general App Server Runtime control beyond the exact
 cancel/retry/resume recovery flow, and
 remote App Server transport remain. The loopback Provider tracer remains
 an internal harness; `local.echo` is intentionally a fixed opt-in command rather

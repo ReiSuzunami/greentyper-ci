@@ -615,6 +615,9 @@ it, and reopen Ready. A frozen external Provider with an unavailable credential
 returns a fixed error without exposing its reference, origin, or input and
 leaves the retry transaction recoverable. Runtime and Team incomplete-tail
 fixtures prove resume does not repair or change any Ledger.
+The Agent-scoped retry case additionally proves a mismatched Agent ID changes
+no Runtime, Team, or Tool bytes, while the persisted owner reaches the same
+`resume-required` boundary.
 `runtime.delivery` retrieves exact persisted Assistant text for the matching
 prepared delivery without changing Runtime bytes, rejects missing or wrong
 deliveries, and rejects an incomplete tail without repair.

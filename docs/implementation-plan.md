@@ -784,8 +784,10 @@ CLI exposes the same redacted status, lifecycle, acknowledgement, and exact
 Active-Agent Turn composition through ProductDriver. `/context` adds read-only
 checkpoint inspection and confirmed Safe-Barrier reduction, while `/blockers`
 can durably rearm an explicitly retryable Provider block without automatically
-resuming it. Workspace allocation/leases/read sets/merge and Agent retry remain
-pending.
+resuming it. CLI/App Server now also expose that exact Provider recovery with a
+persisted Agent-owner check; the CLI composes resume, delivery, and
+acknowledgement. Workspace allocation/leases/read sets/merge and retrying a
+terminal Team Agent remain pending.
 
 Exit criteria:
 

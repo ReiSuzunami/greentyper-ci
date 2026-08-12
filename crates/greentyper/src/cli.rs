@@ -23,8 +23,8 @@ use crate::product_driver::{
     fail_product_agent, freeze_model_selection, has_product_driver_state, inspect_product_team,
     inspect_product_tools, message_from_product_agent, open_product_context_runtime,
     preflight_product_context_reduction, reconcile_product_tool,
-    request_product_provider_turn_recovery, require_context_mode_execution,
-    require_pending_context_mode_execution,
+    request_product_agent_provider_turn_recovery, request_product_provider_turn_recovery,
+    require_context_mode_execution, require_pending_context_mode_execution,
 };
 use crate::provider_connection::{ModelsHttpConnectionTester, ProviderConnectionTester};
 use crate::provider_discovery_catalog::{
@@ -707,6 +707,11 @@ fn run_agent(command: AgentCommand) -> Result<(), CliError> {
             input,
             local_echo,
         } => run_agent_turn(&ledger, agent, input, local_echo),
+        AgentCommand::Retry {
+            ledger,
+            agent,
+            turn,
+        } => retry_product_agent_turn(&ledger, agent, turn),
     }
 }
 
@@ -1072,6 +1077,15 @@ fn resume_product_turn(ledger: &Path) -> Result<(), CliError> {
 
 fn retry_product_turn(ledger: &Path, turn: TurnId) -> Result<(), CliError> {
     request_product_provider_turn_recovery(ledger, turn)?;
+    resume_product_turn_after_recovery(ledger, turn)
+}
+
+fn retry_product_agent_turn(ledger: &Path, agent: u64, turn: TurnId) -> Result<(), CliError> {
+    request_product_agent_provider_turn_recovery(ledger, agent, turn)?;
+    resume_product_turn_after_recovery(ledger, turn)
+}
+
+fn resume_product_turn_after_recovery(ledger: &Path, turn: TurnId) -> Result<(), CliError> {
     let stdin = io::stdin();
     let stderr = io::stderr();
     let mut interaction = CliProductInteraction {
@@ -1366,6 +1380,11 @@ enum AgentCommand {
         agent: u64,
         input: String,
         local_echo: bool,
+    },
+    Retry {
+        ledger: PathBuf,
+        agent: u64,
+        turn: TurnId,
     },
 }
 
@@ -1962,6 +1981,7 @@ fn parse_agent(mut arguments: impl Iterator<Item = String>) -> Result<AgentComma
             | "fail"
             | "cancel"
             | "turn"
+            | "retry"
     ) {
         return Err(CliError::Usage("unknown agent action"));
     }
@@ -1973,6 +1993,7 @@ fn parse_agent(mut arguments: impl Iterator<Item = String>) -> Result<AgentComma
     let mut title = None;
     let mut body = None;
     let mut input = None;
+    let mut turn = None;
     let mut outcome = None;
     let mut reason = None;
     let mut scope = None;
@@ -2070,6 +2091,12 @@ fn parse_agent(mut arguments: impl Iterator<Item = String>) -> Result<AgentComma
                 }
                 next_agent_value(&mut arguments, "--input")?
             }
+            "--turn" => {
+                if turn.is_some() {
+                    return Err(CliError::Usage("duplicate --turn"));
+                }
+                next_agent_value(&mut arguments, "--turn")?
+            }
             _ => return Err(CliError::Usage("unknown agent option")),
         };
         match argument.as_str() {
@@ -2086,6 +2113,7 @@ fn parse_agent(mut arguments: impl Iterator<Item = String>) -> Result<AgentComma
             "--token-budget" => token_budget = Some(value),
             "--tool-budget" => tool_budget = Some(value),
             "--input" => input = Some(value),
+            "--turn" => turn = Some(value),
             _ => unreachable!(),
         }
     }
@@ -2128,6 +2156,7 @@ fn parse_agent(mut arguments: impl Iterator<Item = String>) -> Result<AgentComma
                 || scope.is_some()
                 || token_budget.is_some()
                 || tool_budget.is_some()
+                || turn.is_some()
                 || local_echo
             {
                 return Err(CliError::Usage("agent status accepts only --ledger"));
@@ -2146,6 +2175,7 @@ fn parse_agent(mut arguments: impl Iterator<Item = String>) -> Result<AgentComma
                 || scope.is_some()
                 || token_budget.is_some()
                 || tool_budget.is_some()
+                || turn.is_some()
                 || local_echo
             {
                 return Err(CliError::Usage(
@@ -2166,6 +2196,7 @@ fn parse_agent(mut arguments: impl Iterator<Item = String>) -> Result<AgentComma
                 || input.is_some()
                 || outcome.is_some()
                 || reason.is_some()
+                || turn.is_some()
                 || local_echo
             {
                 return Err(CliError::Usage("invalid option for agent delegate"));
@@ -2200,6 +2231,7 @@ fn parse_agent(mut arguments: impl Iterator<Item = String>) -> Result<AgentComma
                 || scope.is_some()
                 || token_budget.is_some()
                 || tool_budget.is_some()
+                || turn.is_some()
                 || local_echo
             {
                 return Err(CliError::Usage("invalid option for agent message"));
@@ -2222,6 +2254,7 @@ fn parse_agent(mut arguments: impl Iterator<Item = String>) -> Result<AgentComma
                 || scope.is_some()
                 || token_budget.is_some()
                 || tool_budget.is_some()
+                || turn.is_some()
                 || local_echo
             {
                 return Err(CliError::Usage("invalid option for agent complete"));
@@ -2243,6 +2276,7 @@ fn parse_agent(mut arguments: impl Iterator<Item = String>) -> Result<AgentComma
                 || scope.is_some()
                 || token_budget.is_some()
                 || tool_budget.is_some()
+                || turn.is_some()
                 || local_echo
             {
                 return Err(CliError::Usage("invalid option for agent fail"));
@@ -2264,6 +2298,7 @@ fn parse_agent(mut arguments: impl Iterator<Item = String>) -> Result<AgentComma
                 || scope.is_some()
                 || token_budget.is_some()
                 || tool_budget.is_some()
+                || turn.is_some()
                 || local_echo
             {
                 return Err(CliError::Usage("invalid option for agent cancel"));
@@ -2285,6 +2320,7 @@ fn parse_agent(mut arguments: impl Iterator<Item = String>) -> Result<AgentComma
                 || scope.is_some()
                 || token_budget.is_some()
                 || tool_budget.is_some()
+                || turn.is_some()
             {
                 return Err(CliError::Usage("invalid option for agent turn"));
             }
@@ -2293,6 +2329,35 @@ fn parse_agent(mut arguments: impl Iterator<Item = String>) -> Result<AgentComma
                 agent: agent.ok_or(CliError::Usage("agent turn requires --agent"))?,
                 input: input.ok_or(CliError::Usage("agent turn requires --input"))?,
                 local_echo,
+            })
+        }
+        "retry" => {
+            if parent.is_some()
+                || recipient.is_some()
+                || operation.is_some()
+                || title.is_some()
+                || body.is_some()
+                || input.is_some()
+                || outcome.is_some()
+                || reason.is_some()
+                || scope.is_some()
+                || token_budget.is_some()
+                || tool_budget.is_some()
+                || local_echo
+            {
+                return Err(CliError::Usage("invalid option for agent retry"));
+            }
+            let agent = agent.ok_or(CliError::Usage("agent retry requires --agent"))?;
+            let turn = turn
+                .ok_or(CliError::Usage("agent retry requires --turn"))?
+                .parse::<u64>()
+                .map_err(|_| CliError::Usage("turn must be a positive integer"))?;
+            let turn = TurnId::new(turn)
+                .map_err(|_| CliError::Usage("turn must be a positive integer"))?;
+            Ok(AgentCommand::Retry {
+                ledger,
+                agent,
+                turn,
             })
         }
         _ => unreachable!("agent action was validated"),
@@ -3058,6 +3123,7 @@ Usage:\n\
   greentyper agent fail [--ledger PATH] [--agent ID] --reason TEXT\n\
   greentyper agent cancel [--ledger PATH] [--agent ID] [--reason TEXT]\n\
   greentyper agent turn [--ledger PATH] [--tool local.echo] --agent ID --input TEXT\n\
+  greentyper agent retry [--ledger PATH] --agent ID --turn ID\n\
   greentyper tool status [--ledger PATH]\n\
   greentyper tool reconcile [--ledger PATH] --call ID (--failed | --succeeded-digest SHA256)\n\
   greentyper config schema\n\
@@ -3254,7 +3320,7 @@ mod tests {
     };
 
     use super::{
-        Command, ConfigCommand, CredentialCommand, CredentialOutcome, ToolCommand,
+        AgentCommand, Command, ConfigCommand, CredentialCommand, CredentialOutcome, ToolCommand,
         begin_discovered_model_preset, build_provider_fallback_plan, deliver_and_ack_to,
         deliver_product_and_ack_to, execute_credential_command, parse, provider_discovery_catalog,
         refresh_provider_discovery,
@@ -3535,6 +3601,44 @@ dialect = "responses"
             assert!(
                 parse(arguments.into_iter().map(str::to_owned)).is_err(),
                 "accepted invalid retry command"
+            );
+        }
+    }
+
+    #[test]
+    fn parser_requires_exact_agent_and_turn_for_agent_retry() {
+        assert!(matches!(
+            parse(
+                [
+                    "agent".to_owned(),
+                    "retry".to_owned(),
+                    "--ledger".to_owned(),
+                    "runtime.ledger".to_owned(),
+                    "--agent".to_owned(),
+                    "2".to_owned(),
+                    "--turn".to_owned(),
+                    "7".to_owned(),
+                ]
+                .into_iter()
+            ),
+            Ok(Command::Agent(AgentCommand::Retry {
+                ledger,
+                agent: 2,
+                turn,
+            })) if ledger == Path::new("runtime.ledger") && turn.get() == 7
+        ));
+        for arguments in [
+            vec!["agent", "retry"],
+            vec!["agent", "retry", "--agent", "2"],
+            vec!["agent", "retry", "--agent", "2", "--turn", "0"],
+            vec![
+                "agent", "retry", "--agent", "2", "--turn", "7", "--input", "x",
+            ],
+            vec!["agent", "complete", "--outcome", "ok", "--turn", "7"],
+        ] {
+            assert!(
+                parse(arguments.into_iter().map(str::to_owned)).is_err(),
+                "accepted invalid Agent retry command"
             );
         }
     }

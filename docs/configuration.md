@@ -274,12 +274,15 @@ paths for tests and controlled automation; normal execution uses the platform
 user path and `.greentyper/config.toml` in the current project.
 
 The same executable exposes `agent status|list`, `acknowledge`, `delegate`,
-`message`, `complete`, `fail`, `cancel`, and `turn`. Status/list is a redacted
+`message`, `complete`, `fail`, `cancel`, `turn`, and owner-bound Provider
+`retry`. Status/list is a redacted
 missing-safe projection. Mutations reuse the ProductDriver Session-rebinding and
 Team-operation acknowledgement boundary. `agent turn --agent ID` runs one Turn
 for that exact existing Active Agent under its inherited Preset and leaves all
 Provider, Tool, delivery, retry, and billing behavior on the ordinary Runtime
-paths.
+paths. `agent retry --agent ID --turn ID` rejects a mismatched owner before
+mutation, then runs the ordinary explicit Provider recovery flow. It does not
+reopen a terminal Team Agent.
 
 The current headless `stats` command reads the immutable Runtime usage
 projection and accepts an optional Unix-millisecond `--at` instant for
@@ -378,6 +381,7 @@ The current operations are:
 | `agent.list` | Return the redacted Agent Center projection plus committed Team operations awaiting acknowledgement: canonical identities, status, Task identity/state, budgets, reservations, bounded counts, Team head/revision, message count, and incomplete-tail bytes; never Task titles, message/capsule contents, labels, reasons, or Sessions |
 | `agent.delegate` | Under a rebound Active parent Session, create one downward-only child Task and Agent with a bounded optional scope, budget, and Capability Snapshot; copy the effective default Preset ID into the child without copying Config or authority; return only stable IDs and the committed Team operation |
 | `agent.turn` | Run one Provider Turn for the exact selected Active child under its inherited Preset ID; freeze the resolved Config/Provider Epochs, return prepared output or `tool_approval_required`, and leave delivery acknowledgement explicit |
+| `agent.retry` | Verify the exact persisted Turn owner, then durably rearm only that Agent's retryable initial Provider failure; perform no Provider request, credential lookup, Tool execution, output delivery, or Team mutation |
 | `agent.message` | Under the rebound selected Active Session, append one bounded direct or Team message; return only Message and operation IDs, never the body |
 | `agent.complete` | Submit one bounded Completion Capsule and terminalize an Active Agent whose children are already terminal; never return capsule contents |
 | `agent.fail` / `agent.cancel` | Record one bounded explicit terminal reason under the rebound Agent Session; never return the reason |

@@ -841,16 +841,37 @@ fn app_server_rearms_retryable_provider_blocks_without_running_the_provider() {
     let runtime_before = fs::read(product.runtime_ledger()).expect("read Product Runtime Ledger");
     let team_before = fs::read(product.team_ledger()).expect("read Product Team Ledger");
     let tool_before = fs::read(product.tool_ledger()).expect("read Product Tool Ledger");
-    let product_output = product.run(
+    let wrong_owner_output = product.run(
         format!(
-            "{{\"id\":8,\"operation\":\"runtime.retry\",\"params\":{{\"turn\":{product_turn}}}}}\n"
+            "{{\"id\":8,\"operation\":\"agent.retry\",\"params\":{{\"agent\":2,\"turn\":{product_turn}}}}}\n"
         )
         .as_bytes(),
     );
     assert_eq!(
-        responses(&product_output)[0]["result"]["status"],
-        "resume_required"
+        responses(&wrong_owner_output)[0]["error"]["category"],
+        "turn_not_retryable"
     );
+    assert_eq!(
+        fs::read(product.runtime_ledger()).expect("reread wrong-owner Runtime Ledger"),
+        runtime_before
+    );
+    assert_eq!(
+        fs::read(product.team_ledger()).expect("reread wrong-owner Team Ledger"),
+        team_before
+    );
+    assert_eq!(
+        fs::read(product.tool_ledger()).expect("reread wrong-owner Tool Ledger"),
+        tool_before
+    );
+    let product_output = product.run(
+        format!(
+            "{{\"id\":9,\"operation\":\"agent.retry\",\"params\":{{\"agent\":1,\"turn\":{product_turn}}}}}\n"
+        )
+        .as_bytes(),
+    );
+    let product_response = responses(&product_output);
+    assert_eq!(product_response[0]["result"]["status"], "resume_required");
+    assert_eq!(product_response[0]["result"]["agent"], 1);
     assert_ne!(
         fs::read(product.runtime_ledger()).expect("read rearmed Product Runtime Ledger"),
         runtime_before

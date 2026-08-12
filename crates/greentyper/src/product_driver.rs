@@ -752,6 +752,41 @@ pub(crate) fn request_product_provider_turn_recovery(
         .map_err(ProductDriverError::Runtime)
 }
 
+/// Rearms a Provider failure only when the caller names the persisted Turn's
+/// Agent owner. The owner check happens before any Runtime append.
+pub(crate) fn request_product_agent_provider_turn_recovery(
+    runtime_path: &Path,
+    agent: u64,
+    turn: TurnId,
+) -> Result<DurabilityReceipt, ProductDriverError> {
+    require_pending_context_mode_execution(runtime_path).map_err(ProductDriverError::Runtime)?;
+    if !path_entry_exists(runtime_path)? || !has_product_driver_state(runtime_path)? {
+        return Err(ProductDriverError::ProviderTurnStateUnavailable);
+    }
+    let team_path = sidecar_path(runtime_path, "team");
+    let tool_path = sidecar_path(runtime_path, "tool");
+    let (mut kernel, recovery) = RuntimeKernel::open_with_team_and_tools_existing_strict(
+        runtime_path,
+        team_path,
+        tool_path,
+        PRODUCT_MAX_ACTIVE_AGENTS,
+    )?;
+    let owner = kernel
+        .provider_turn_agent(turn)
+        .map_err(ProductDriverError::Runtime)?
+        .ok_or(ProductDriverError::ProviderTurnOwnerUnavailable(turn.get()))?;
+    if owner.get() != agent {
+        return Err(ProductDriverError::Runtime(
+            RuntimeError::TurnRetryNotAllowed(turn),
+        ));
+    }
+    let session = agent_session(recovery, owner)
+        .map_err(|_| ProductDriverError::ProviderTurnOwnerUnavailable(turn.get()))?;
+    kernel
+        .request_blocked_provider_turn_recovery(session, turn)
+        .map_err(ProductDriverError::Runtime)
+}
+
 fn path_entry_exists(path: &Path) -> Result<bool, ProductDriverError> {
     match fs::symlink_metadata(path) {
         Ok(_) => Ok(true),
