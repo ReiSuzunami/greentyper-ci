@@ -178,7 +178,17 @@ impl TempTree {
     }
 
     fn run_headless(&self, input: &str) {
-        let output = Command::new(env!("CARGO_BIN_EXE_greentyper"))
+        let output = self.headless_output(input);
+        assert!(
+            output.status.success(),
+            "status={:?}, stderr={}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn headless_output(&self, input: &str) -> std::process::Output {
+        Command::new(env!("CARGO_BIN_EXE_greentyper"))
             .args(["headless", "--ledger"])
             .arg(self.runtime_ledger())
             .args(["--input", input])
@@ -187,13 +197,7 @@ impl TempTree {
             .env("APPDATA", &self.root)
             .env("XDG_CONFIG_HOME", &self.root)
             .output()
-            .expect("run deterministic headless Turn");
-        assert!(
-            output.status.success(),
-            "status={:?}, stderr={}",
-            output.status,
-            String::from_utf8_lossy(&output.stderr)
-        );
+            .expect("run deterministic headless Turn")
     }
 
     fn create_agent_state(&self) {
@@ -1389,6 +1393,376 @@ fn app_server_agent_list_is_read_only_and_redacts_team_content() {
     );
     assert!(!temp.user_config().exists());
     assert!(!temp.project_config().exists());
+}
+
+#[test]
+fn app_server_delegates_and_recovers_the_team_acknowledgement_boundary() {
+    let temp = TempTree::new();
+    temp.create_agent_state();
+    let runtime_before =
+        fs::read(temp.runtime_ledger()).expect("read Runtime Ledger before delegate");
+    let tool_before = fs::read(temp.tool_ledger()).expect("read Tool Ledger before delegate");
+    let private_title = "private delegated App Server task";
+    let first = temp.run(
+        format!(
+            concat!(
+                "{{\"id\":1,\"operation\":\"agent.delegate\",\"params\":{{",
+                "\"title\":\"{private_title}\",\"token_budget\":500,\"tool_budget\":1,",
+                "\"capabilities\":[{{\"kind\":\"workspace_read\"}}]}}}}\n"
+            ),
+            private_title = private_title,
+        )
+        .as_bytes(),
+    );
+    let first_text = String::from_utf8(first.stdout.clone()).expect("UTF-8 delegate response");
+    assert!(!first_text.contains(private_title));
+    let first = responses(&first);
+    assert_eq!(
+        first[0]["result"]["status"],
+        "committed_awaiting_acknowledgement"
+    );
+    assert_eq!(first[0]["result"]["outcome"]["kind"], "delegated");
+    assert_eq!(first[0]["result"]["outcome"]["agent"], 2);
+    let operation = first[0]["result"]["operation"]
+        .as_u64()
+        .expect("Team operation ID");
+
+    let team_pending =
+        fs::read(temp.team_ledger()).expect("read pending Team Ledger before headless open");
+    let headless = temp.headless_output("must not acknowledge a pending lifecycle operation");
+    assert!(!headless.status.success());
+    assert!(String::from_utf8_lossy(&headless.stdout).is_empty());
+    assert!(!String::from_utf8_lossy(&headless.stderr).contains(private_title));
+    assert_eq!(
+        fs::read(temp.team_ledger()).expect("reread pending Team Ledger after headless open"),
+        team_pending
+    );
+
+    let blocked = temp.run(
+        concat!(
+            "{\"id\":2,\"operation\":\"agent.list\"}\n",
+            "{\"id\":3,\"operation\":\"agent.delegate\",\"params\":{",
+            "\"title\":\"blocked private task\",\"token_budget\":100,\"tool_budget\":1}}\n",
+        )
+        .as_bytes(),
+    );
+    let blocked_text = String::from_utf8(blocked.stdout.clone()).expect("UTF-8 blocked response");
+    assert!(!blocked_text.contains(private_title));
+    assert!(!blocked_text.contains("blocked private task"));
+    let blocked = responses(&blocked);
+    assert_eq!(
+        blocked[0]["result"]["pending_operations"][0]["operation"],
+        operation
+    );
+    assert_eq!(
+        blocked[1]["error"]["category"],
+        "team_acknowledgement_required"
+    );
+    assert_eq!(blocked[1]["error"]["operation"], operation);
+
+    let acknowledged = temp.run(
+        format!(
+            "{{\"id\":4,\"operation\":\"agent.acknowledge\",\"params\":{{\"operation\":{operation}}}}}\n"
+        )
+        .as_bytes(),
+    );
+    let acknowledged = responses(&acknowledged);
+    assert_eq!(acknowledged[0]["result"]["status"], "acknowledged");
+
+    let reopened = responses(&temp.run(b"{\"id\":5,\"operation\":\"agent.list\"}\n"));
+    assert_eq!(
+        reopened[0]["result"]["pending_operations"],
+        Value::Array(Vec::new())
+    );
+    let agents = reopened[0]["result"]["team"]["agents"]
+        .as_array()
+        .expect("recovered Agents");
+    assert_eq!(agents.len(), 2);
+    assert_eq!(agents[0]["status"], "active");
+    assert_eq!(agents[1]["status"], "active");
+    assert_eq!(agents[1]["token_budget"], 500);
+    assert_eq!(agents[1]["tool_budget"], 1);
+    assert_eq!(agents[1]["capability_count"], 1);
+    assert_eq!(agents[1]["scope_count"], 1);
+    assert_eq!(
+        fs::read(temp.runtime_ledger()).expect("read Runtime Ledger after delegate"),
+        runtime_before
+    );
+    temp.run_headless("root continues while delegated Agent is active");
+    let runtime_after_root_turn =
+        fs::read(temp.runtime_ledger()).expect("read Runtime Ledger after root Turn");
+
+    let private_message = "private delegated App Server message";
+    let message = temp.run(
+        format!(
+            "{{\"id\":6,\"operation\":\"agent.message\",\"params\":{{\"agent\":2,\"recipient\":1,\"body\":\"{private_message}\"}}}}\n"
+        )
+        .as_bytes(),
+    );
+    let message_text = String::from_utf8(message.stdout.clone()).expect("UTF-8 message response");
+    assert!(!message_text.contains(private_message));
+    let message = responses(&message);
+    assert_eq!(message[0]["result"]["outcome"]["kind"], "message_accepted");
+    let message_operation = message[0]["result"]["operation"]
+        .as_u64()
+        .expect("message Team operation ID");
+    let message_recovery = responses(&temp.run(b"{\"id\":7,\"operation\":\"agent.list\"}\n"));
+    assert_eq!(message_recovery[0]["result"]["team"]["message_count"], 2);
+    assert_eq!(
+        message_recovery[0]["result"]["pending_operations"][0]["operation"],
+        message_operation
+    );
+    let message_ack = responses(&temp.run(
+        format!(
+            "{{\"id\":8,\"operation\":\"agent.acknowledge\",\"params\":{{\"operation\":{message_operation}}}}}\n"
+        )
+        .as_bytes(),
+    ));
+    assert_eq!(message_ack[0]["result"]["status"], "acknowledged");
+
+    let private_child_outcome = "private child completion outcome";
+    let private_child_evidence = "private child completion evidence";
+    let child_complete = temp.run(
+        format!(
+            concat!(
+                "{{\"id\":9,\"operation\":\"agent.complete\",\"params\":{{\"agent\":2,",
+                "\"outcome\":\"{private_child_outcome}\",",
+                "\"evidence\":[\"{private_child_evidence}\"]}}}}\n"
+            ),
+            private_child_outcome = private_child_outcome,
+            private_child_evidence = private_child_evidence,
+        )
+        .as_bytes(),
+    );
+    let child_complete_text =
+        String::from_utf8(child_complete.stdout.clone()).expect("UTF-8 child complete response");
+    assert!(!child_complete_text.contains(private_child_outcome));
+    assert!(!child_complete_text.contains(private_child_evidence));
+    let child_complete = responses(&child_complete);
+    assert_eq!(
+        child_complete[0]["result"]["outcome"]["kind"],
+        "state_changed"
+    );
+    assert_eq!(child_complete[0]["result"]["outcome"]["agent"], 2);
+    let child_complete_operation = child_complete[0]["result"]["operation"]
+        .as_u64()
+        .expect("child complete Team operation ID");
+    let child_complete_ack = responses(&temp.run(
+        format!(
+            "{{\"id\":10,\"operation\":\"agent.acknowledge\",\"params\":{{\"operation\":{child_complete_operation}}}}}\n"
+        )
+        .as_bytes(),
+    ));
+    assert_eq!(child_complete_ack[0]["result"]["status"], "acknowledged");
+
+    let private_outcome = "private root completion outcome";
+    let private_evidence = "private completion evidence";
+    let complete = temp.run(
+        format!(
+            concat!(
+                "{{\"id\":11,\"operation\":\"agent.complete\",\"params\":{{",
+                "\"outcome\":\"{private_outcome}\",\"evidence\":[\"{private_evidence}\"]}}}}\n"
+            ),
+            private_outcome = private_outcome,
+            private_evidence = private_evidence,
+        )
+        .as_bytes(),
+    );
+    let complete_text =
+        String::from_utf8(complete.stdout.clone()).expect("UTF-8 complete response");
+    assert!(!complete_text.contains(private_outcome));
+    assert!(!complete_text.contains(private_evidence));
+    let complete = responses(&complete);
+    assert_eq!(complete[0]["result"]["outcome"]["kind"], "state_changed");
+    assert_eq!(complete[0]["result"]["outcome"]["agent"], 1);
+    let complete_operation = complete[0]["result"]["operation"]
+        .as_u64()
+        .expect("complete Team operation ID");
+    let complete_ack = responses(&temp.run(
+        format!(
+            "{{\"id\":12,\"operation\":\"agent.acknowledge\",\"params\":{{\"operation\":{complete_operation}}}}}\n"
+        )
+        .as_bytes(),
+    ));
+    assert_eq!(complete_ack[0]["result"]["status"], "acknowledged");
+    let terminal = responses(&temp.run(b"{\"id\":13,\"operation\":\"agent.list\"}\n"));
+    let terminal_agents = terminal[0]["result"]["team"]["agents"]
+        .as_array()
+        .expect("terminal Agents");
+    assert_eq!(terminal_agents[0]["status"], "succeeded");
+    assert_eq!(terminal_agents[1]["status"], "succeeded");
+    assert_eq!(
+        terminal[0]["result"]["pending_operations"],
+        Value::Array(Vec::new())
+    );
+    assert_eq!(
+        fs::read(temp.runtime_ledger()).expect("read Runtime Ledger after delegate"),
+        runtime_after_root_turn
+    );
+    assert_eq!(
+        fs::read(temp.tool_ledger()).expect("read Tool Ledger after delegate"),
+        tool_before
+    );
+    assert!(!temp.user_config().exists());
+    assert!(!temp.project_config().exists());
+}
+
+#[test]
+fn app_server_fails_and_cancels_agents_durably_without_echoing_reasons() {
+    let temp = TempTree::new();
+    temp.create_agent_state();
+    let runtime_before = fs::read(temp.runtime_ledger()).expect("read Runtime Ledger before fail");
+    let tool_before = fs::read(temp.tool_ledger()).expect("read Tool Ledger before fail");
+    let private_reason = "private App Server Agent failure reason";
+    let failed = temp.run(
+        format!(
+            "{{\"id\":1,\"operation\":\"agent.fail\",\"params\":{{\"reason\":\"{private_reason}\"}}}}\n"
+        )
+        .as_bytes(),
+    );
+    let failed_text = String::from_utf8(failed.stdout.clone()).expect("UTF-8 fail response");
+    assert!(!failed_text.contains(private_reason));
+    let failed = responses(&failed);
+    assert_eq!(failed[0]["result"]["outcome"]["kind"], "state_changed");
+    let operation = failed[0]["result"]["operation"]
+        .as_u64()
+        .expect("fail Team operation ID");
+    let reopened = responses(&temp.run(b"{\"id\":2,\"operation\":\"agent.list\"}\n"));
+    assert_eq!(
+        reopened[0]["result"]["team"]["agents"][0]["status"],
+        "failed"
+    );
+    assert_eq!(
+        reopened[0]["result"]["pending_operations"][0]["operation"],
+        operation
+    );
+    let ack = responses(&temp.run(
+        format!(
+            "{{\"id\":3,\"operation\":\"agent.acknowledge\",\"params\":{{\"operation\":{operation}}}}}\n"
+        )
+        .as_bytes(),
+    ));
+    assert_eq!(ack[0]["result"]["status"], "acknowledged");
+    assert_eq!(
+        fs::read(temp.runtime_ledger()).expect("read Runtime Ledger after fail"),
+        runtime_before
+    );
+    assert_eq!(
+        fs::read(temp.tool_ledger()).expect("read Tool Ledger after fail"),
+        tool_before
+    );
+    assert!(!temp.user_config().exists());
+    assert!(!temp.project_config().exists());
+
+    let cancelled = TempTree::new();
+    cancelled.create_agent_state();
+    let runtime_before =
+        fs::read(cancelled.runtime_ledger()).expect("read Runtime Ledger before cancel");
+    let tool_before = fs::read(cancelled.tool_ledger()).expect("read Tool Ledger before cancel");
+    let private_reason = "private App Server Agent cancellation reason";
+    let response = cancelled.run(
+        format!(
+            "{{\"id\":4,\"operation\":\"agent.cancel\",\"params\":{{\"reason\":\"{private_reason}\"}}}}\n"
+        )
+        .as_bytes(),
+    );
+    let response_text = String::from_utf8(response.stdout.clone()).expect("UTF-8 cancel response");
+    assert!(!response_text.contains(private_reason));
+    let response = responses(&response);
+    let operation = response[0]["result"]["operation"]
+        .as_u64()
+        .expect("cancel Team operation ID");
+    let reopened = responses(&cancelled.run(b"{\"id\":5,\"operation\":\"agent.list\"}\n"));
+    assert_eq!(
+        reopened[0]["result"]["team"]["agents"][0]["status"],
+        "cancelled"
+    );
+    assert_eq!(
+        reopened[0]["result"]["pending_operations"][0]["operation"],
+        operation
+    );
+    let ack = responses(&cancelled.run(
+        format!(
+            "{{\"id\":6,\"operation\":\"agent.acknowledge\",\"params\":{{\"operation\":{operation}}}}}\n"
+        )
+        .as_bytes(),
+    ));
+    assert_eq!(ack[0]["result"]["status"], "acknowledged");
+    assert_eq!(
+        fs::read(cancelled.runtime_ledger()).expect("read Runtime Ledger after cancel"),
+        runtime_before
+    );
+    assert_eq!(
+        fs::read(cancelled.tool_ledger()).expect("read Tool Ledger after cancel"),
+        tool_before
+    );
+    assert!(!cancelled.user_config().exists());
+    assert!(!cancelled.project_config().exists());
+}
+
+#[test]
+fn app_server_rejects_agent_lifecycle_changes_while_provider_recovery_is_pending() {
+    let temp = TempTree::new();
+    temp.create_blocked_product_runtime(ProviderUnavailableStage::BeforeResponse);
+    let runtime_before = fs::read(temp.runtime_ledger()).expect("read blocked Runtime Ledger");
+    let team_before = fs::read(temp.team_ledger()).expect("read blocked Team Ledger");
+    let tool_before = fs::read(temp.tool_ledger()).expect("read blocked Tool Ledger");
+    let private_reason = "private busy Agent cancellation reason";
+
+    let response = temp.run(
+        format!(
+            "{{\"id\":1,\"operation\":\"agent.cancel\",\"params\":{{\"reason\":\"{private_reason}\"}}}}\n"
+        )
+        .as_bytes(),
+    );
+    let response_text = String::from_utf8(response.stdout.clone()).expect("UTF-8 busy response");
+    assert!(!response_text.contains(private_reason));
+    let response = responses(&response);
+    assert_eq!(response[0]["error"]["category"], "runtime_busy");
+    assert_eq!(
+        fs::read(temp.runtime_ledger()).expect("reread blocked Runtime Ledger"),
+        runtime_before
+    );
+    assert_eq!(
+        fs::read(temp.team_ledger()).expect("reread blocked Team Ledger"),
+        team_before
+    );
+    assert_eq!(
+        fs::read(temp.tool_ledger()).expect("reread blocked Tool Ledger"),
+        tool_before
+    );
+
+    let raced = TempTree::new();
+    raced.create_agent_state();
+    let pending = responses(&raced.run(
+        b"{\"id\":2,\"operation\":\"agent.message\",\"params\":{\"body\":\"private raced message\"}}\n",
+    ));
+    let operation = pending[0]["result"]["operation"]
+        .as_u64()
+        .expect("pending Team operation ID");
+    raced.create_blocked_runtime(ProviderUnavailableStage::BeforeResponse);
+    let runtime_before = fs::read(raced.runtime_ledger()).expect("read raced Runtime Ledger");
+    let team_before = fs::read(raced.team_ledger()).expect("read raced Team Ledger");
+    let tool_before = fs::read(raced.tool_ledger()).expect("read raced Tool Ledger");
+    let response = responses(&raced.run(
+        format!(
+            "{{\"id\":3,\"operation\":\"agent.acknowledge\",\"params\":{{\"operation\":{operation}}}}}\n"
+        )
+        .as_bytes(),
+    ));
+    assert_eq!(response[0]["error"]["category"], "runtime_busy");
+    assert_eq!(
+        fs::read(raced.runtime_ledger()).expect("reread raced Runtime Ledger"),
+        runtime_before
+    );
+    assert_eq!(
+        fs::read(raced.team_ledger()).expect("reread raced Team Ledger"),
+        team_before
+    );
+    assert_eq!(
+        fs::read(raced.tool_ledger()).expect("reread raced Tool Ledger"),
+        tool_before
+    );
 }
 
 #[test]

@@ -454,6 +454,25 @@ fn recovery_rebuilds_the_same_snapshot_and_rejects_partial_transactions() {
 }
 
 #[test]
+fn recovery_accepts_a_higher_active_limit_without_rewriting_old_scheduling() {
+    let mut old = TeamRuntime::new(1).expect("old active limit");
+    let root = admitted_root(&mut old, 1);
+    let child = delegated_child(&mut old, root, "old dormant child", &[]);
+    assert_eq!(
+        old.snapshot()
+            .agent(child.agent())
+            .expect("old child")
+            .status,
+        AgentStatus::Dormant
+    );
+
+    let recovered = TeamRuntime::recover(2, old.event_log().iter().cloned())
+        .expect("higher active limit replays old scheduling");
+    assert_eq!(recovered.max_active_agents(), 2);
+    assert_eq!(recovered.snapshot(), old.snapshot());
+}
+
+#[test]
 fn every_complete_transaction_prefix_replays_deterministically() {
     let mut team = TeamRuntime::new(2).expect("valid active limit");
     let root = admitted_root(&mut team, 2);
