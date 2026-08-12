@@ -42,7 +42,13 @@ use crate::product_driver::{
     inspect_product_team, inspect_product_tools, stage_product_model_selection,
 };
 use crate::provider_connection::{ModelsHttpConnectionTester, ProviderConnectionTester};
-use crate::provider_discovery_catalog::{provider_discovery_catalogs, refresh_provider_discovery};
+use crate::provider_discovery_catalog::{
+    commit_provider_discovery_status, provider_discovery_catalogs, refresh_provider_discovery,
+};
+use crate::provider_discovery_task::{
+    OnDemandProviderDiscoveryTask, ProviderDiscoveryTask, ProviderDiscoveryTaskEvent,
+    ProviderDiscoveryTrigger,
+};
 use crate::provider_http::ConfiguredProvider;
 
 enum TerminalToolResolution {
@@ -201,7 +207,7 @@ pub(crate) fn run(ledger: &Path, config: &mut ConfigRuntime) -> Result<(), Termi
     let (width, height) = crossterm_terminal::size()?;
     let viewport = Viewport::new(width, height)?;
     let stdout = io::stdout();
-    let _writer = run_terminal_loop_with_snapshot_refresh(
+    let _writer = run_terminal_loop_with_discovery_task(
         stdout.lock(),
         CrosstermTerminalMode,
         config,
@@ -326,13 +332,18 @@ fn inspect_terminal_discovery(ledger: &Path) -> Option<ProviderDiscoveryState> {
 }
 
 fn can_refresh_terminal_discovery_on_open(config: &ConfigRuntime) -> bool {
-    let Ok(Some(profile)) = config.selected_provider_profile() else {
-        return false;
-    };
-    matches!(
+    eligible_terminal_discovery_profile(config).is_some()
+}
+
+fn eligible_terminal_discovery_profile(
+    config: &ConfigRuntime,
+) -> Option<greentyper_core::provider::ProviderProfileSnapshot> {
+    let profile = config.selected_provider_profile().ok().flatten()?;
+    (matches!(
         config.provider_catalog_mode(profile.profile()),
         Ok(mode) if mode.includes_discovery()
-    ) && profile.models_endpoint().is_some()
+    ) && profile.models_endpoint().is_some())
+    .then_some(profile)
 }
 
 fn refresh_terminal_discovery<T: ProviderConnectionTester + ?Sized>(
@@ -2670,11 +2681,86 @@ where
             tester: &mut tester,
             credential_vault: &mut credential_vault,
             product: None,
+            discovery_task: None,
         },
         read_event,
     )
 }
 
+fn run_terminal_loop_with_discovery_task<W, M, F>(
+    writer: W,
+    mode: M,
+    config: &mut ConfigRuntime,
+    view: &TuiViewModel,
+    ledger: &Path,
+    viewport: Viewport,
+    read_event: F,
+) -> Result<W, TerminalError>
+where
+    W: Write,
+    M: TerminalMode,
+    F: FnMut() -> io::Result<Event>,
+{
+    let tester_vault = PlatformCredentialVault;
+    let mut tester = ModelsHttpConnectionTester::new(&tester_vault);
+    let mut credential_vault = PlatformCredentialVault;
+    let mut product = LedgerTerminalProductActions {
+        ledger,
+        pending: None,
+    };
+    let mut discovery_task = OnDemandProviderDiscoveryTask::platform();
+    run_terminal_loop_core(
+        writer,
+        mode,
+        config,
+        TerminalSnapshotSource {
+            initial: view,
+            refresh_ledger: Some(ledger),
+            viewport,
+        },
+        TerminalLoopServices {
+            tester: &mut tester,
+            credential_vault: &mut credential_vault,
+            product: Some(&mut product),
+            discovery_task: Some(&mut discovery_task),
+        },
+        read_event,
+    )
+}
+
+#[cfg(test)]
+fn run_terminal_loop_with_discovery_service<W, M, T, F>(
+    writer: W,
+    mode: M,
+    config: &mut ConfigRuntime,
+    snapshot: TerminalSnapshotSource<'_>,
+    tester: &mut T,
+    discovery_task: &mut dyn ProviderDiscoveryTask,
+    read_event: F,
+) -> Result<W, TerminalError>
+where
+    W: Write,
+    M: TerminalMode,
+    T: ProviderConnectionTester,
+    F: FnMut() -> io::Result<Event>,
+{
+    let mut credential_vault = PlatformCredentialVault;
+    run_terminal_loop_core(
+        writer,
+        mode,
+        config,
+        snapshot,
+        TerminalLoopServices {
+            tester,
+            credential_vault: &mut credential_vault,
+            product: None,
+            discovery_task: Some(discovery_task),
+        },
+        read_event,
+    )
+}
+
+#[cfg(test)]
 fn run_terminal_loop_with_snapshot_refresh<W, M, F>(
     writer: W,
     mode: M,
@@ -2709,6 +2795,7 @@ where
             tester: &mut tester,
             credential_vault: &mut credential_vault,
             product: Some(&mut product),
+            discovery_task: None,
         },
         read_event,
     )
@@ -2744,6 +2831,7 @@ where
             tester,
             credential_vault: &mut credential_vault,
             product: None,
+            discovery_task: None,
         },
         read_event,
     )
@@ -2775,6 +2863,7 @@ where
             tester,
             credential_vault,
             product: None,
+            discovery_task: None,
         },
         read_event,
     )
@@ -2807,6 +2896,7 @@ where
             tester: &mut tester,
             credential_vault: &mut credential_vault,
             product: Some(product),
+            discovery_task: None,
         },
         read_event,
     )
@@ -2822,6 +2912,105 @@ struct TerminalLoopServices<'a, T> {
     tester: &'a mut T,
     credential_vault: &'a mut dyn CredentialVault,
     product: Option<&'a mut dyn TerminalProductActions>,
+    discovery_task: Option<&'a mut dyn ProviderDiscoveryTask>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn handle_terminal_discovery_task_event(
+    event: ProviderDiscoveryTaskEvent,
+    ledger: Option<&Path>,
+    config: &ConfigRuntime,
+    discovery_state: &mut Option<ProviderDiscoveryState>,
+    session: &mut TerminalSession,
+    view: &mut TuiViewModel,
+) -> Result<bool, TerminalError> {
+    match event {
+        ProviderDiscoveryTaskEvent::Started(job) => {
+            session.notice = Some(match job.trigger() {
+                ProviderDiscoveryTrigger::OnOpen => {
+                    "Provider discovery checking current Profile".to_owned()
+                }
+                ProviderDiscoveryTrigger::Manual => "Provider discovery refreshing".to_owned(),
+            });
+            Ok(true)
+        }
+        ProviderDiscoveryTaskEvent::Completed { job, status } => {
+            let profile = config
+                .reload_candidate()
+                .ok()
+                .and_then(|candidate| eligible_terminal_discovery_profile(&candidate))
+                .filter(|profile| {
+                    profile.profile() == job.identity().profile()
+                        && profile.template() == job.identity().template()
+                        && profile.fingerprint() == job.identity().fingerprint()
+                });
+            let Some(profile) = profile else {
+                session.notice =
+                    Some("Provider discovery result discarded after Config change".to_owned());
+                return Ok(true);
+            };
+
+            match &status {
+                crate::provider_connection::ProviderConnectionTestStatus::Succeeded { .. } => {
+                    let Some(ledger) = ledger else {
+                        session.notice = Some("Provider discovery refresh unavailable".to_owned());
+                        return Ok(true);
+                    };
+                    let now_unix_ms = UsageTimestamp::now()?.unix_millis();
+                    match commit_provider_discovery_status(
+                        &profile,
+                        &terminal_discovery_path(ledger),
+                        now_unix_ms,
+                        &status,
+                    ) {
+                        Ok(Some(state)) => {
+                            *discovery_state = Some(state);
+                            match build_terminal_view(
+                                ledger,
+                                config,
+                                session.controller.slash_query(),
+                            ) {
+                                Ok(refreshed) => {
+                                    session.controller.reconcile_snapshot(&refreshed);
+                                    *view = refreshed;
+                                    session.notice =
+                                        Some("Provider discovery refreshed".to_owned());
+                                    Ok(true)
+                                }
+                                Err(_) => {
+                                    session.notice = Some(
+                                        "Provider discovery saved; press F6 to refresh the view"
+                                            .to_owned(),
+                                    );
+                                    Ok(true)
+                                }
+                            }
+                        }
+                        Ok(None) | Err(_) => {
+                            session.notice = Some(
+                                "Provider discovery save failed; press F5 to retry".to_owned(),
+                            );
+                            Ok(true)
+                        }
+                    }
+                }
+                crate::provider_connection::ProviderConnectionTestStatus::Failed { .. }
+                | crate::provider_connection::ProviderConnectionTestStatus::Untested => {
+                    session.notice =
+                        Some("Provider discovery failed; press F5 to retry".to_owned());
+                    Ok(true)
+                }
+            }
+        }
+        ProviderDiscoveryTaskEvent::AlreadyRunning => {
+            session.notice = Some("Provider discovery is already running".to_owned());
+            Ok(true)
+        }
+        ProviderDiscoveryTaskEvent::WorkerUnavailable => {
+            session.notice = Some("Provider discovery worker unavailable".to_owned());
+            Ok(true)
+        }
+    }
 }
 
 fn run_terminal_loop_core<W, M, T, F>(
@@ -2842,6 +3031,7 @@ where
         tester,
         credential_vault,
         mut product,
+        mut discovery_task,
     } = services;
     let width = snapshot.viewport.width();
     let height = snapshot.viewport.height();
@@ -2853,9 +3043,12 @@ where
     let frame = session.frame(Some(config), &view)?;
     surface.write_frame(&renderer.draw(&frame)?)?;
 
+    let mut discovery_state = snapshot.refresh_ledger.and_then(inspect_terminal_discovery);
+
     loop {
+        let event = read_event()?;
         match session.handle_with_view_and_connection_tester(
-            map_crossterm_event(read_event()?),
+            map_crossterm_event(event),
             Some(config),
             Some(&view),
             Some(tester),
@@ -2865,6 +3058,9 @@ where
                     && let Some(product) = product.as_deref_mut()
                 {
                     product.cancel_tool_approval();
+                }
+                if let Some(task) = discovery_task.as_deref_mut() {
+                    task.cancel();
                 }
                 break;
             }
@@ -2880,6 +3076,7 @@ where
                             session.controller.reconcile_snapshot(&refreshed.view);
                             *config = refreshed.config;
                             view = refreshed.view;
+                            discovery_state = inspect_terminal_discovery(ledger);
                             session.notice = Some("Snapshot refreshed".to_owned());
                         }
                         Err(_) => {
@@ -2898,6 +3095,53 @@ where
             | TerminalLoopOutcome::RefreshProviderDiscoveryOnOpen) => {
                 let on_open =
                     matches!(outcome, TerminalLoopOutcome::RefreshProviderDiscoveryOnOpen);
+                if let Some(task) = discovery_task.as_deref_mut() {
+                    let Some(profile) = eligible_terminal_discovery_profile(config) else {
+                        if !on_open {
+                            session.notice =
+                                Some("Provider discovery refresh unavailable".to_owned());
+                        }
+                        let frame = session.frame(Some(config), &view)?;
+                        surface.write_frame(&renderer.draw(&frame)?)?;
+                        continue;
+                    };
+                    let event = task.request(
+                        profile,
+                        if on_open {
+                            ProviderDiscoveryTrigger::OnOpen
+                        } else {
+                            ProviderDiscoveryTrigger::Manual
+                        },
+                    );
+                    let started = matches!(event, ProviderDiscoveryTaskEvent::Started(_));
+                    let redraw = handle_terminal_discovery_task_event(
+                        event,
+                        snapshot.refresh_ledger,
+                        config,
+                        &mut discovery_state,
+                        &mut session,
+                        &mut view,
+                    )?;
+                    if redraw {
+                        let frame = session.frame(Some(config), &view)?;
+                        surface.write_frame(&renderer.draw(&frame)?)?;
+                    }
+                    if started && let Some(completed) = task.wait() {
+                        let redraw = handle_terminal_discovery_task_event(
+                            completed,
+                            snapshot.refresh_ledger,
+                            config,
+                            &mut discovery_state,
+                            &mut session,
+                            &mut view,
+                        )?;
+                        if redraw {
+                            let frame = session.frame(Some(config), &view)?;
+                            surface.write_frame(&renderer.draw(&frame)?)?;
+                        }
+                    }
+                    continue;
+                }
                 if let Some(ledger) = snapshot.refresh_ledger {
                     match refresh_terminal_discovery(ledger, config, tester) {
                         Ok(
@@ -3403,6 +3647,7 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::rc::Rc;
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Arc, Mutex};
 
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
     use greentyper_core::agent_team::{
@@ -3436,6 +3681,7 @@ mod tests {
         ObservedProviderModel, ProviderConnectionFailureCategory, ProviderConnectionTestStatus,
         ProviderConnectionTester,
     };
+    use crate::provider_discovery_task::OnDemandProviderDiscoveryTask;
 
     use super::{
         DirectVtRenderer, ENTER_TERMINAL, LEAVE_TERMINAL, TerminalError, TerminalFrame,
@@ -3444,7 +3690,8 @@ mod tests {
         TerminalSnapshotSource, TerminalSurface, TerminalToolResolution, Viewport,
         build_terminal_view, map_crossterm_event, refresh_terminal_view, run_terminal_loop,
         run_terminal_loop_with_connection_tester, run_terminal_loop_with_credential_vault,
-        run_terminal_loop_with_product_actions, run_terminal_loop_with_snapshot_refresh,
+        run_terminal_loop_with_discovery_service, run_terminal_loop_with_product_actions,
+        run_terminal_loop_with_snapshot_refresh,
     };
 
     struct CompleteStatsUsageProvider;
@@ -4526,6 +4773,7 @@ mode = "template_and_discovery"
                 tester: &mut tester,
                 credential_vault: &mut credential_vault,
                 product: None,
+                discovery_task: None,
             },
             move || {
                 Ok(events
@@ -4653,6 +4901,7 @@ dialect = "responses"
                     tester: &mut tester,
                     credential_vault: &mut credential_vault,
                     product: None,
+                    discovery_task: None,
                 },
                 move || {
                     Ok(events
@@ -4763,6 +5012,7 @@ mode = "template_and_discovery"
                 tester: &mut tester,
                 credential_vault: &mut credential_vault,
                 product: None,
+                discovery_task: None,
             },
             move || {
                 let event = events
@@ -4804,6 +5054,272 @@ mode = "template_and_discovery"
         );
         assert!(!ledger.exists());
         std::fs::remove_dir_all(root).expect("remove discovery refresh fixture");
+    }
+
+    #[test]
+    fn terminal_model_discovery_runs_once_and_atomically_refreshes_the_view() {
+        let root = terminal_test_root("model-discovery-on-demand");
+        let ledger = root.join("runtime.ledger");
+        let paths = ConfigPaths::new(root.join("user.toml"), root.join("project.toml"));
+        std::fs::create_dir_all(&root).expect("create on-demand discovery fixture");
+        write_on_demand_discovery_config(
+            paths.user(),
+            "synthetic-on-demand-discovery-reference",
+            "https://provider.invalid/v1",
+        );
+        let config_before = std::fs::read(paths.user()).expect("read on-demand config");
+        let mut config =
+            ConfigRuntime::open(paths.clone(), ConfigDocument::empty()).expect("Config Runtime");
+        let view = build_terminal_view(&ledger, &config, "/").expect("on-demand discovery view");
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let results = Arc::new(Mutex::new(
+            [DiscoveryTestResult::Success("gpt-5.6-on-demand")].into(),
+        ));
+        let probe_calls = Arc::clone(&calls);
+        let probe_results = Arc::clone(&results);
+        let mut discovery_task = OnDemandProviderDiscoveryTask::testing(move |profile| {
+            let mut tester = SharedScriptedDiscoveryTester {
+                results: Arc::clone(&probe_results),
+                calls: Arc::clone(&probe_calls),
+            };
+            tester.test(&profile)
+        });
+        let mut foreground = RecordingConnectionTester { calls: Vec::new() };
+        let mut events = "model"
+            .chars()
+            .map(|character| {
+                Event::Key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
+            })
+            .collect::<VecDeque<_>>();
+        events.push_back(Event::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )));
+        events.push_back(Event::Key(KeyEvent::new(
+            KeyCode::Char('q'),
+            KeyModifiers::CONTROL,
+        )));
+
+        let output = run_terminal_loop_with_discovery_service(
+            Vec::new(),
+            FakeTerminalMode::default(),
+            &mut config,
+            TerminalSnapshotSource {
+                initial: &view,
+                refresh_ledger: Some(&ledger),
+                viewport: Viewport::new(100, 24).expect("on-demand discovery viewport"),
+            },
+            &mut foreground,
+            &mut discovery_task,
+            move || Ok(events.pop_front().expect("bounded on-demand events")),
+        )
+        .expect("on-demand discovery terminal loop");
+        let output = String::from_utf8(output).expect("on-demand discovery VT output");
+
+        assert_eq!(calls.lock().expect("read calls").len(), 1);
+        assert!(foreground.calls.is_empty());
+        assert!(output.contains("Provider discovery checking"), "{output}");
+        assert!(output.contains("refreshed"), "{output}");
+        assert!(output.contains("gpt-5.6-on-demand"), "{output}");
+        assert!(!output.contains("synthetic-on-demand-discovery-reference"));
+        assert_eq!(
+            std::fs::read(paths.user()).expect("reread on-demand config"),
+            config_before
+        );
+        assert!(!ledger.exists());
+        std::fs::remove_dir_all(root).expect("remove on-demand discovery fixture");
+    }
+
+    #[test]
+    fn terminal_model_discovery_discards_result_after_profile_change() {
+        let root = terminal_test_root("model-discovery-stale-task");
+        let ledger = root.join("runtime.ledger");
+        let discovery = ledger.with_file_name("provider-discovery.json");
+        let paths = ConfigPaths::new(root.join("user.toml"), root.join("project.toml"));
+        std::fs::create_dir_all(&root).expect("create stale task fixture");
+        write_on_demand_discovery_config(
+            paths.user(),
+            "synthetic-stale-task-reference",
+            "https://provider.invalid/v1",
+        );
+        let mut config =
+            ConfigRuntime::open(paths.clone(), ConfigDocument::empty()).expect("Config Runtime");
+        let view = build_terminal_view(&ledger, &config, "/").expect("stale task view");
+        let user = paths.user().to_path_buf();
+        let calls = Arc::new(AtomicU64::new(0));
+        let probe_calls = Arc::clone(&calls);
+        let mut discovery_task = OnDemandProviderDiscoveryTask::testing(move |profile| {
+            probe_calls.fetch_add(1, Ordering::Relaxed);
+            write_on_demand_discovery_config(
+                &user,
+                "synthetic-stale-task-reference",
+                "https://changed.invalid/v1",
+            );
+            ProviderConnectionTestStatus::Succeeded {
+                profile: profile.profile().to_owned(),
+                fingerprint: profile.fingerprint(),
+                models: vec![ObservedProviderModel {
+                    id: "gpt-5.6-stale-result".to_owned(),
+                    release_catalog_key: None,
+                }],
+            }
+        });
+        let mut foreground = RecordingConnectionTester { calls: Vec::new() };
+        let mut events = "model"
+            .chars()
+            .map(|character| {
+                Event::Key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
+            })
+            .collect::<VecDeque<_>>();
+        events.extend([
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL)),
+        ]);
+
+        let output = run_terminal_loop_with_discovery_service(
+            Vec::new(),
+            FakeTerminalMode::default(),
+            &mut config,
+            TerminalSnapshotSource {
+                initial: &view,
+                refresh_ledger: Some(&ledger),
+                viewport: Viewport::new(100, 24).expect("stale task viewport"),
+            },
+            &mut foreground,
+            &mut discovery_task,
+            move || Ok(events.pop_front().expect("bounded stale task events")),
+        )
+        .expect("stale task terminal loop");
+        let output = String::from_utf8(output).expect("stale task VT output");
+
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        assert!(foreground.calls.is_empty());
+        assert!(output.contains("result disca"), "{output}");
+        assert!(output.contains("after Config change"), "{output}");
+        assert!(!output.contains("gpt-5.6-stale-result"));
+        assert!(!output.contains("synthetic-stale-task-reference"));
+        assert!(!discovery.exists());
+        assert!(!ledger.exists());
+        std::fs::remove_dir_all(root).expect("remove stale task fixture");
+    }
+
+    #[test]
+    fn terminal_model_discovery_failure_waits_for_f5_then_recovers() {
+        let root = terminal_test_root("model-discovery-explicit-retry");
+        let ledger = root.join("runtime.ledger");
+        let discovery = ledger.with_file_name("provider-discovery.json");
+        let paths = ConfigPaths::new(root.join("user.toml"), root.join("project.toml"));
+        std::fs::create_dir_all(&root).expect("create explicit retry fixture");
+        write_on_demand_discovery_config(
+            paths.user(),
+            "synthetic-explicit-retry-reference",
+            "https://provider.invalid/v1",
+        );
+        let config_before = std::fs::read(paths.user()).expect("read explicit retry config");
+        let mut config =
+            ConfigRuntime::open(paths.clone(), ConfigDocument::empty()).expect("Config Runtime");
+        let profile = config
+            .provider_profile("edge")
+            .expect("resolve retry Profile")
+            .expect("retry Profile");
+        ProviderDiscoveryState::replace_profile(
+            &discovery,
+            ProviderDiscoveryProfile::new(
+                profile.profile(),
+                profile.template(),
+                profile.fingerprint(),
+                1_786_451_200_000,
+                vec![
+                    DiscoveredProviderModel::new("gpt-5.6-last-good", None)
+                        .expect("last good model"),
+                ],
+            )
+            .expect("last good observation"),
+        )
+        .expect("persist last good observation");
+        let discovery_before = std::fs::read(&discovery).expect("read last good observation");
+        let view = build_terminal_view(&ledger, &config, "/").expect("explicit retry view");
+        let calls = Arc::new(AtomicU64::new(0));
+        let results = Arc::new(Mutex::new(
+            [
+                DiscoveryTestResult::Failure,
+                DiscoveryTestResult::Success("gpt-5.6-recovered"),
+            ]
+            .into(),
+        ));
+        let probe_calls = Arc::clone(&calls);
+        let probe_results = Arc::clone(&results);
+        let mut discovery_task = OnDemandProviderDiscoveryTask::testing(move |profile| {
+            probe_calls.fetch_add(1, Ordering::Relaxed);
+            let mut tester = SharedScriptedDiscoveryTester {
+                results: Arc::clone(&probe_results),
+                calls: Arc::new(Mutex::new(Vec::new())),
+            };
+            tester.test(&profile)
+        });
+        let mut foreground = RecordingConnectionTester { calls: Vec::new() };
+        let mut events = "model"
+            .chars()
+            .map(|character| {
+                Event::Key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
+            })
+            .collect::<VecDeque<_>>();
+        events.extend([
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Resize(80, 24),
+            Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::F(5), KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL)),
+        ]);
+        let calls_before_f5 = Arc::clone(&calls);
+        let discovery_before_f5 = discovery_before.clone();
+        let discovery_during_events = discovery.clone();
+
+        let output = run_terminal_loop_with_discovery_service(
+            Vec::new(),
+            FakeTerminalMode::default(),
+            &mut config,
+            TerminalSnapshotSource {
+                initial: &view,
+                refresh_ledger: Some(&ledger),
+                viewport: Viewport::new(100, 24).expect("explicit retry viewport"),
+            },
+            &mut foreground,
+            &mut discovery_task,
+            move || {
+                let event = events.pop_front().expect("bounded explicit retry events");
+                if matches!(&event, Event::Key(key) if key.code == KeyCode::F(5)) {
+                    assert_eq!(calls_before_f5.load(Ordering::Relaxed), 1);
+                    assert_eq!(
+                        std::fs::read(&discovery_during_events)
+                            .expect("observation before explicit retry"),
+                        discovery_before_f5
+                    );
+                }
+                Ok(event)
+            },
+        )
+        .expect("explicit retry terminal loop");
+        let output = String::from_utf8(output).expect("explicit retry VT output");
+
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
+        assert!(foreground.calls.is_empty());
+        assert!(output.contains("failed; press F5 to retry"), "{output}");
+        assert!(output.contains("gpt-5.6-last-good"), "{output}");
+        assert!(output.contains("recovere"), "{output}");
+        assert!(!output.contains("synthetic-explicit-retry-reference"));
+        let final_state =
+            ProviderDiscoveryState::inspect(&discovery).expect("inspect recovered observation");
+        assert_eq!(
+            final_state.profiles()[0].models()[0].id(),
+            "gpt-5.6-recovered"
+        );
+        assert_eq!(
+            std::fs::read(paths.user()).expect("reread explicit retry config"),
+            config_before
+        );
+        assert!(!ledger.exists());
+        std::fs::remove_dir_all(root).expect("remove explicit retry fixture");
     }
 
     #[test]
@@ -6909,6 +7425,40 @@ favorite = true
             self.calls
                 .push((profile.profile().to_owned(), profile.fingerprint()));
             match self.results.pop_front().expect("scripted discovery result") {
+                DiscoveryTestResult::Success(model) => ProviderConnectionTestStatus::Succeeded {
+                    profile: profile.profile().to_owned(),
+                    fingerprint: profile.fingerprint(),
+                    models: vec![ObservedProviderModel {
+                        id: model.to_owned(),
+                        release_catalog_key: None,
+                    }],
+                },
+                DiscoveryTestResult::Failure => ProviderConnectionTestStatus::Failed {
+                    category: ProviderConnectionFailureCategory::Unavailable,
+                    retryable: true,
+                },
+            }
+        }
+    }
+
+    struct SharedScriptedDiscoveryTester {
+        results: Arc<Mutex<VecDeque<DiscoveryTestResult>>>,
+        calls: Arc<Mutex<Vec<(String, u64)>>>,
+    }
+
+    impl ProviderConnectionTester for SharedScriptedDiscoveryTester {
+        fn test(&mut self, profile: &ProviderProfileSnapshot) -> ProviderConnectionTestStatus {
+            self.calls
+                .lock()
+                .expect("lock discovery calls")
+                .push((profile.profile().to_owned(), profile.fingerprint()));
+            match self
+                .results
+                .lock()
+                .expect("lock discovery results")
+                .pop_front()
+                .expect("scripted on-demand discovery result")
+            {
                 DiscoveryTestResult::Success(model) => ProviderConnectionTestStatus::Succeeded {
                     profile: profile.profile().to_owned(),
                     fingerprint: profile.fingerprint(),
@@ -9212,6 +9762,37 @@ timezone = "local"
             std::process::id(),
             NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
         ))
+    }
+
+    fn write_on_demand_discovery_config(path: &Path, credential: &str, base_url: &str) {
+        std::fs::write(
+            path,
+            format!(
+                r#"schema_version = 1
+
+[provider]
+profile = "edge"
+model = "gpt-5.6-sol"
+
+[providers.edge]
+template = "openai"
+credential = "{credential}"
+base_url = "{base_url}"
+dialects = ["responses"]
+
+[providers.edge.routes]
+responses = "/responses"
+models = "/models"
+
+[providers.edge.catalog]
+mode = "template_and_discovery"
+
+[providers.edge.pricing]
+source = "unknown"
+"#
+            ),
+        )
+        .expect("write on-demand discovery Config");
     }
 
     fn type_terminal_config_text(
