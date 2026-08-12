@@ -496,9 +496,11 @@ charges still require a future dedicated authority path.
   final-frame bytes remain visible as recovery required; corruption and partial
   Product sidecars fail closed before terminal entry. Manual read-only snapshot
   refresh is available; all Agent lifecycle actions remain pending.
-- Complete Config Schema default/constraint/normalization/migration metadata,
-  background/periodic Provider discovery, and automatic Provider Profile starter
-  offers and update suggestions. Release Provider Template defaults, seed
+- Complete Config Schema default/constraint/normalization/migration metadata and
+  automatic Provider Profile starter offers and update suggestions.
+  Background/periodic Provider discovery is excluded by the current Performance
+  Contract unless measured evidence supports an approved exception. Release
+  Provider Template defaults, seed
   catalog facts, explicit CLI and Direct VT discovery refresh/merge, durable
   Usage-derived Recent choices, and exact discovered-model or
   compatible-release-to-user-Preset acceptance are present. The

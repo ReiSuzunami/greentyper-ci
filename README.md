@@ -455,8 +455,11 @@ ordinary Draft/CAS flow. The Profile fingerprint, observation timestamp, and
 exact model are revalidated immediately before Draft creation; drift returns to
 the browser without writing Config. Entering `/model` runs one bounded,
 foreground model-list probe when the selected external Profile enables
-discovery and has a `models` route. F5 explicitly retries that same probe.
-Successful observations replace only the separate discovery state and rebuild
+discovery and has a `models` route. F5 explicitly retries that same probe. Each
+action lazily creates one bounded discovery worker, waits for its single result,
+and joins it before the terminal event loop resumes. No discovery worker, timer,
+poll, or retry remains resident while the terminal is idle. Successful
+observations replace only the separate discovery state and rebuild
 the browser; a failed probe preserves the previous file and browser. Profiles
 that disable discovery or lack a model-list route stay entirely local. Typing,
 navigation, resize, and idle time do not probe. F6 or Ctrl-R remains a
@@ -532,8 +535,10 @@ is no background polling or automatic refresh. Runtime, Team, and Tool Ledgers
 are inspected independently, so one refresh is not a cross-Ledger transactional
 snapshot. The terminal and App Server approval surfaces are limited to the exact
 pending `local.echo` call; neither is a general Tool policy editor, audited
-ConPTY integration, automatic starter-update workflow, background/periodic
-Provider discovery, or automatic Provider execution. Live inference conformance,
+ConPTY integration, automatic starter-update workflow, or automatic Provider
+execution. Background/periodic Provider discovery is outside the current
+Performance Contract and requires measured evidence plus an approved exception
+before implementation. Live inference conformance,
 automatic transport retry or partial-stream reconnect, Messages reasoning
 blocks, provider-native Context Mode execution, broader multi-Tool approval
 presentation, broader Provider and Tool adapters,

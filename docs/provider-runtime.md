@@ -468,6 +468,8 @@ from the saved observation, merges release/discovery provenance, derives Recent
 from durable Usage, and runs one bounded foreground probe when an eligible
 selected Profile is opened; F5 explicitly retries it. Ineligible Profiles and
 ordinary browsing perform no network I/O, and there is no background polling.
+The action creates one bounded worker lazily and joins it after the result; no
+worker, timer, or automatic retry survives into idle terminal time.
 A current unknown model still needs an explicit Profile-supported
 dialect. The exact Profile fingerprint, observation timestamp, and model are
 revalidated immediately before an ordinary Config Draft is created; drift
@@ -498,12 +500,14 @@ plus the [OpenCode Go endpoint matrix](https://opencode.ai/docs/go/).
 
 ## Still Pending
 
-- Live inference conformance, background/periodic catalog discovery,
-  automatic Provider Profile starter offers and updates, configurable proxy policy,
+- Live inference conformance, automatic Provider Profile starter offers and
+  updates, configurable proxy policy,
   broader TLS platform evidence, automatic retry policy, and partial-stream
   reconnect. Release Provider
   Template defaults and seed catalog facts are bundled, but the current adapters
   do not reconnect or retry partial streams.
+- Background/periodic catalog discovery is excluded by the current Performance
+  Contract unless measured evidence supports an approved exception.
 - Broader normalization into the eventual provider-neutral canonical Item
   model, including reasoning, refusal, annotations, and hosted Tools.
 - Reasoning, refusal, annotation, hosted-tool, and other Responses event kinds

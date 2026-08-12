@@ -217,7 +217,7 @@ untyped states fail closed.
 
 The remaining slices are still policy, protocol, and fault-adapter work:
 live inference conformance, non-Windows credential backends, configurable proxy
-policy, background/periodic catalog discovery, DeepSeek Chat/Messages reasoning
+policy, DeepSeek Chat/Messages reasoning
 blocks, provider-native Context Mode execution, broader
 canonical Items, multiple
 Tool calls,
@@ -226,6 +226,8 @@ approval/delivery, caller-selected process policy, complete Windows Job
 lifetime/resource evidence, automatic retry policy/partial-stream reconnect behavior, and cross-process crash
 matrices for the remaining Runtime, Provider, Tool, delivery, and product
 acknowledgement boundaries remain pending.
+Background/periodic catalog discovery is excluded by the current Performance
+Contract unless measured evidence supports an approved exception.
 
 Exit criteria:
 
@@ -555,12 +557,14 @@ multi-Tool/App Server policy, general App Server Runtime control beyond the
 exact cancel/retry/resume recovery flow, remote App Server transport,
 automatic/background snapshot refresh,
 custom-template and automatic starter-offer/update workflow,
-background/periodic catalog discovery, automatic Context View/token-source
+automatic Context View/token-source
 projection, provider-reported
 charge and subscription-quota accounting, richer observed Provider metadata,
 new-Agent Preset-default inheritance, Agent lifecycle
 actions, and the P0/P1/P2/P6
 performance evidence remain pending.
+Background/periodic catalog discovery is outside this default plan unless an
+approved Performance Contract exception is added first.
 
 Exit criteria:
 
@@ -573,8 +577,7 @@ Exit criteria:
 ## Phase 4: Provider Portability
 
 Continue the release templates and seed catalog with OpenCode Go adapter
-execution, background/periodic discovery,
-automatic starter updates, provider capability probes, observed availability,
+execution, automatic starter updates, provider capability probes, observed availability,
 and broader provider/model epoch switching. The
 OpenAI/openai-compatible Responses and Chat Completions adapters, official
 DeepSeek Responses, Chat Completions, and Messages pairs, and release-verified
@@ -598,6 +601,16 @@ probe. A current unknown model requires a bounded Preset
 ID plus an explicit trusted Profile dialect; the exact observation is checked
 again before an ordinary Config Draft is created, and CAS conflict remains
 recoverable through discard/reopen.
+
+A four-slice discovery-task settlement now keeps that flow compatible with the
+Performance Contract: the task object is idle until `/model` on-open or F5,
+each action lazily creates one bounded worker, the terminal waits for its single
+result and joins it, and no worker, timer, periodic poll, or automatic retry
+survives into idle time. Before a successful result is committed, a freshly
+loaded Config candidate must still match the exact Profile, template, and
+opaque fingerprint captured at task start. Drift discards the result without
+creating discovery state; probe failure preserves the previous bytes until an
+explicit F5 retry succeeds.
 Their Profile/model/dialect, optional output-token limit, typed reasoning effort,
 and typed service tier resolve through the frozen Config/Provider Epoch boundary.
 OpenAI Responses and Chat map the supported request fields. DeepSeek Responses
@@ -644,8 +657,10 @@ reduction performs the same check before checkpoint publication. Requested
 Context Mode is durable Usage metadata and appears in the per-Turn policy
 distribution without changing token or cost arithmetic.
 
-New-Agent default inheritance, provider-native Context Mode execution, automatic
-starter updates, and background/periodic discovery remain pending.
+New-Agent default inheritance, provider-native Context Mode execution, and
+automatic starter updates remain pending. Background/periodic discovery is
+outside the current Performance Contract unless measured evidence supports an
+approved exception.
 
 Exit criteria:
 

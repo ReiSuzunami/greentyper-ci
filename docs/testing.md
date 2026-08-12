@@ -452,7 +452,7 @@ Provider call or Ledger write, then exact admission consumes one selection and
 freezes the expected Provider Epoch. Headless integration proves automatic
 pending-ID resolution plus credential-preflight and explicit-ID-conflict
 failure preserve all three Ledger byte streams. These tests do not prove
-background/periodic Provider discovery, automatic starter updates, or
+automatic starter updates or
 new-Agent default inheritance. Separate headless and
 Config CLI integration tests now prove project `agent.default_model_preset`
 overrides the user value, an explicit Preset is used when no conflicting
@@ -731,7 +731,13 @@ shared selector merge, durable Recent, foreground on-open discovery with retry
 by re-entry, ineligible-profile no-network behavior, corrupt-state fallback, explicit
 trusted-dialect acceptance, final stale revalidation, and
 Config/discovery/Ledger no-write assertions described above. They do not prove
-background/periodic discovery or live inference conformance.
+background/periodic discovery or live inference conformance. Additional
+one-shot task tests prove an idle task creates no worker, one action joins its
+worker after a single result, external Profile-fingerprint drift discards that
+result without creating discovery state, and a retryable failure remains at one
+probe through ordinary input until explicit F5 performs the second successful
+probe. Background/periodic discovery remains outside the current Performance
+Contract rather than an unmeasured default path.
 
 The official OpenAI template identity is also exercised with an explicit
 loopback origin override through the Responses adapter and models probe. The
@@ -757,8 +763,9 @@ credential-gated tests will verify OpenAI, DeepSeek, and OpenCode Go without
 running on untrusted pull requests or gating local performance. Direct VT now
 consumes the bounded local discovery projection, runs one eligible foreground
 probe on `/model` entry, and supports explicit F5 retry. Tests prove ineligible
-Profiles and ordinary browsing do not probe; background/periodic discovery
-remains future work. The current release seed already freezes its source URL
+Profiles and ordinary browsing do not probe. Background/periodic discovery is
+excluded unless measured evidence supports an approved Performance Contract
+exception. The current release seed already freezes its source URL
 and observation date.
 
 ## Performance Testing

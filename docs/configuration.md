@@ -71,9 +71,11 @@ field-level provenance. Effective Profiles inherit those defaults unless the
 user overrides a field. A custom origin under a template with a bundled,
 versioned release rate card defaults to `template_mirror`; other custom origins
 still require an explicit pricing decision.
-Default/constraint/normalization/migration metadata in Config Schema,
-background/periodic discovery and automatic starter-update workflows remain
-later work. The CLI owns explicit bounded Provider-discovery commands, while
+Default/constraint/normalization/migration metadata in Config Schema and
+automatic starter-update workflows remain later work. Background/periodic
+discovery is excluded by the current Performance Contract unless measured
+evidence supports an approved exception. The CLI owns explicit bounded
+Provider-discovery commands, while
 entering the Direct VT model browser runs one bounded foreground probe for an
 eligible selected Profile and F5 retries it; the App
 Server Config surface is implemented. The product now provides origin-bound
@@ -636,7 +638,10 @@ and has a `models` route; F5 explicitly retries it. Success atomically replaces
 only that Profile's observation and then refreshes the selector. Probe or state
 write failure preserves the prior file and view; if the post-write projection
 cannot rebuild, the prior in-memory view remains and the saved observation is
-available to the next local refresh. No idle or background probe exists.
+available to the next local refresh. Each trigger lazily creates one worker for
+that probe and joins it before returning to the blocking terminal event loop.
+No worker, timer, poll, automatic retry, idle, or background probe exists
+between actions.
 Automatic starter offers and update suggestions remain pending.
 Remote discovery can never add credentials, arbitrary endpoints, instructions,
 or capabilities.
@@ -745,6 +750,8 @@ stale, and discovery-only entries remain visible. F6/Ctrl-R only reloads local
 Config, Usage, release, and discovery projections; it performs no network
 request. One eligible `/model` entry triggers the bounded foreground discovery
 action described above; F5 explicitly retries it. No background polling runs.
+Background/periodic discovery requires a separately approved Performance
+Contract exception and is not a pending default behavior.
 
 After detail opens, a second Enter on a compatible release candidate starts the
 explicit user-owned starter Draft described above; an incompatible release

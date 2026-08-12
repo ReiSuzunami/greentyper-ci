@@ -81,7 +81,9 @@ uses the same shared release/discovery projection and derives Recent from
 durable Usage. Entering `/model` runs one bounded foreground discovery probe
 only for an eligible selected Profile; F5 explicitly retries it. Probe failure
 preserves the prior observation/view, and ordinary input, resize, idle time, and
-F6/Ctrl-R do not probe. Discovery acceptance revalidates the
+F6/Ctrl-R do not probe. Each action lazily creates one worker for that single
+probe and joins it before the blocking event loop resumes; no discovery worker
+or timer remains while idle. Discovery acceptance revalidates the
 exact observation before it opens an ordinary Config Draft. It also owns a
 bounded `context status`/`context reduce` CLI surface. Status delegates to
 read-only Runtime inspection; reduce strictly reopens existing Runtime state,
