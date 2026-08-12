@@ -376,6 +376,51 @@ const CONFIG_SCHEMA: &[ConfigSchemaEntry] = &[
         "preset_list",
     ),
     schema_entry(
+        "model_presets.<id>.starter.catalog_key",
+        "/config model starter-catalog-key",
+        ConfigValueKind::String,
+        FILE_SCOPES,
+        ConfigApplicationTiming::NextConfigEpoch,
+        false,
+        "starter_provenance",
+    ),
+    schema_entry(
+        "model_presets.<id>.starter.seed_revision",
+        "/config model starter-seed-revision",
+        ConfigValueKind::String,
+        FILE_SCOPES,
+        ConfigApplicationTiming::NextConfigEpoch,
+        false,
+        "starter_provenance",
+    ),
+    schema_entry(
+        "model_presets.<id>.starter.provider",
+        "/config model starter-provider",
+        ConfigValueKind::String,
+        FILE_SCOPES,
+        ConfigApplicationTiming::NextConfigEpoch,
+        false,
+        "starter_provenance",
+    ),
+    schema_entry(
+        "model_presets.<id>.starter.model",
+        "/config model starter-model",
+        ConfigValueKind::String,
+        FILE_SCOPES,
+        ConfigApplicationTiming::NextConfigEpoch,
+        false,
+        "starter_provenance",
+    ),
+    schema_entry(
+        "model_presets.<id>.starter.dialect",
+        "/config model starter-dialect",
+        ConfigValueKind::String,
+        FILE_SCOPES,
+        ConfigApplicationTiming::NextConfigEpoch,
+        false,
+        "starter_provenance",
+    ),
+    schema_entry(
         "price_schedules.<id>.version",
         "/config pricing version",
         ConfigValueKind::String,
@@ -920,6 +965,20 @@ pub struct ModelPresetView {
     pub default: bool,
     pub favorite: bool,
     pub fallback: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub starter: Option<ModelStarterProvenance>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub starter_scope: Option<ConfigScope>,
+    pub starter_update_available: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct ModelStarterProvenance {
+    pub catalog_key: String,
+    pub seed_revision: String,
+    pub provider: String,
+    pub model: String,
+    pub dialect: ProviderDialect,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -1294,6 +1353,8 @@ struct ModelPresetLayer {
     favorite: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     fallback: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    starter: Option<ModelStarterLayer>,
 }
 
 impl ModelPresetLayer {
@@ -1307,6 +1368,55 @@ impl ModelPresetLayer {
             && self.context_mode.is_none()
             && self.favorite.is_none()
             && self.fallback.is_none()
+            && self.starter.is_none()
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+struct ModelStarterLayer {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    catalog_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    seed_revision: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provider: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dialect: Option<ProviderDialect>,
+}
+
+impl ModelStarterLayer {
+    fn provenance(&self, preset_id: &str) -> Result<ModelStarterProvenance, ConfigRuntimeError> {
+        let prefix = format!("model_presets.{preset_id}.starter");
+        let required = |field: &str| {
+            invalid(
+                format!("{prefix}.{field}"),
+                "starter provenance must be a complete tuple",
+            )
+        };
+        let catalog_key = self
+            .catalog_key
+            .clone()
+            .ok_or_else(|| required("catalog_key"))?;
+        validate_string(&format!("{prefix}.catalog_key"), &catalog_key)?;
+        let seed_revision = self
+            .seed_revision
+            .clone()
+            .ok_or_else(|| required("seed_revision"))?;
+        validate_string(&format!("{prefix}.seed_revision"), &seed_revision)?;
+        let provider = self.provider.clone().ok_or_else(|| required("provider"))?;
+        validate_id(&format!("{prefix}.provider"), &provider)?;
+        let model = self.model.clone().ok_or_else(|| required("model"))?;
+        validate_string(&format!("{prefix}.model"), &model)?;
+        Ok(ModelStarterProvenance {
+            catalog_key,
+            seed_revision,
+            provider,
+            model,
+            dialect: self.dialect.ok_or_else(|| required("dialect"))?,
+        })
     }
 }
 
@@ -1667,6 +1777,20 @@ impl ConfigRuntime {
                         })
                     })
                     .transpose()?;
+                let starter_scope = if preset.starter.is_some() {
+                    self.model_starter_scope(id)?
+                } else {
+                    None
+                };
+                let starter = preset
+                    .starter
+                    .as_ref()
+                    .map(|starter| starter.provenance(id))
+                    .transpose()?;
+                let starter_update_available = starter.as_ref().is_some_and(|provenance| {
+                    self.release_starter_update(id, starter_scope, provenance)
+                        .is_ok_and(|updated| updated.is_some())
+                });
                 Ok(ModelPresetView {
                     id: id.clone(),
                     provider,
@@ -1679,6 +1803,9 @@ impl ConfigRuntime {
                     default: default == Some(id.as_str()),
                     favorite: preset.favorite.unwrap_or(false),
                     fallback: preset.fallback.clone().unwrap_or_default(),
+                    starter,
+                    starter_scope,
+                    starter_update_available,
                 })
             })
             .collect()
@@ -1690,6 +1817,114 @@ impl ConfigRuntime {
             .into_iter()
             .find(|preset| preset.id == id)
             .ok_or_else(|| ConfigRuntimeError::UnknownObject(format!("model_presets.{id}")))
+    }
+
+    fn model_starter_scope(
+        &self,
+        preset_id: &str,
+    ) -> Result<Option<ConfigScope>, ConfigRuntimeError> {
+        let mut source = None;
+        for suffix in [
+            "provider",
+            "model",
+            "dialect",
+            "starter.catalog_key",
+            "starter.seed_revision",
+            "starter.provider",
+            "starter.model",
+            "starter.dialect",
+        ] {
+            let path = format!("model_presets.{preset_id}.{suffix}");
+            let Some(entry) = self.effective_entry(&path)? else {
+                return Ok(None);
+            };
+            match source {
+                Some(previous) if previous != entry.source => return Ok(None),
+                None => source = Some(entry.source),
+                Some(_) => {}
+            }
+        }
+        Ok(source)
+    }
+
+    fn release_starter_update(
+        &self,
+        preset_id: &str,
+        scope: Option<ConfigScope>,
+        provenance: &ModelStarterProvenance,
+    ) -> Result<Option<ModelStarterProvenance>, ConfigRuntimeError> {
+        let prefix = format!("model_presets.{preset_id}");
+        let scope = scope.ok_or_else(|| {
+            invalid(
+                prefix.clone(),
+                "release starter is overridden outside one scope",
+            )
+        })?;
+        let target = self
+            .target_document(scope)?
+            .model_presets
+            .get(preset_id)
+            .ok_or_else(|| ConfigRuntimeError::UnknownObject(prefix.clone()))?;
+        if target.provider.as_deref() != Some(provenance.provider.as_str())
+            || target.model.as_deref() != Some(provenance.model.as_str())
+            || target.dialect != Some(provenance.dialect)
+        {
+            return Err(invalid(
+                prefix,
+                "release starter was modified after acceptance",
+            ));
+        }
+
+        let catalog = ProviderCatalog::release();
+        let accepted = catalog
+            .release_model_identity(&provenance.seed_revision, &provenance.catalog_key)
+            .ok_or_else(|| {
+                invalid(
+                    format!("{prefix}.starter.seed_revision"),
+                    "release starter seed is not a supported update source",
+                )
+            })?;
+        let profile = self
+            .provider_profile(&provenance.provider)?
+            .ok_or_else(|| {
+                invalid(
+                    format!("{prefix}.starter.provider"),
+                    "release starter references an unknown provider profile",
+                )
+            })?;
+        if profile.template() != accepted.provider_template
+            || provenance.model != accepted.model
+            || provenance.dialect != accepted.dialect
+        {
+            return Err(invalid(
+                format!("{prefix}.starter"),
+                "release starter provenance does not match its catalog record",
+            ));
+        }
+        let current = catalog
+            .release_model_identity(catalog.seed_revision(), &provenance.catalog_key)
+            .ok_or_else(|| {
+                ConfigRuntimeError::UnknownObject(format!(
+                    "catalog.models.{}",
+                    provenance.catalog_key
+                ))
+            })?;
+        if profile.template() != current.provider_template || !profile.supports(current.dialect) {
+            return Err(invalid(
+                format!("{prefix}.dialect"),
+                "updated starter dialect is not supported by the selected provider profile",
+            ));
+        }
+        if provenance.seed_revision == catalog.seed_revision() {
+            return Ok(None);
+        }
+        Ok(Some(ModelStarterProvenance {
+            catalog_key: current.catalog_key.to_owned(),
+            seed_revision: catalog.seed_revision().to_owned(),
+            provider: provenance.provider.clone(),
+            model: current.model.to_owned(),
+            dialect: current.dialect,
+        }))
     }
 
     pub fn default_model_preset(&self) -> Result<Option<&str>, ConfigRuntimeError> {
@@ -1826,6 +2061,94 @@ impl ConfigRuntime {
             &format!("{prefix}.dialect"),
             ConfigValue::String(model.record().primary_dialect().value().as_str().to_owned()),
         )?;
+        draft
+            .document
+            .model_presets
+            .get_mut(preset_id)
+            .expect("starter fields create the preset")
+            .starter = Some(ModelStarterLayer {
+            catalog_key: Some(model.record().key().to_owned()),
+            seed_revision: Some(model.record().seed_revision().to_owned()),
+            provider: Some(provider.to_owned()),
+            model: Some(model.record().model_id().value().to_owned()),
+            dialect: Some(model.record().primary_dialect().value()),
+        });
+        self.validate_draft(&draft)?;
+        Ok(draft)
+    }
+
+    pub fn begin_model_starter_update(
+        &self,
+        scope: ConfigScope,
+        preset_id: &str,
+    ) -> Result<ConfigDraft, ConfigRuntimeError> {
+        validate_id("model_presets.<id>", preset_id)?;
+        let mut draft = self.begin_draft(scope)?;
+        let prefix = format!("model_presets.{preset_id}");
+        let provenance = self
+            .target_document(scope)?
+            .model_presets
+            .get(preset_id)
+            .ok_or_else(|| ConfigRuntimeError::UnknownObject(prefix.clone()))?
+            .starter
+            .as_ref()
+            .ok_or_else(|| {
+                invalid(
+                    format!("{prefix}.starter"),
+                    "model preset is not a release starter",
+                )
+            })?
+            .provenance(preset_id)?;
+        if self.model_starter_scope(preset_id)? != Some(scope) {
+            return Err(invalid(
+                prefix.clone(),
+                "release starter is overridden outside the selected scope",
+            ));
+        }
+        let effective = self.model_preset(preset_id)?;
+        if effective.provider != provenance.provider
+            || effective.model != provenance.model
+            || effective.dialect != provenance.dialect
+            || effective.starter.as_ref() != Some(&provenance)
+        {
+            return Err(invalid(
+                prefix.clone(),
+                "release starter is overridden outside the selected scope",
+            ));
+        }
+        let updated = self
+            .release_starter_update(preset_id, Some(scope), &provenance)?
+            .ok_or_else(|| {
+                invalid(
+                    format!("{prefix}.starter"),
+                    "release starter is already current",
+                )
+            })?;
+
+        draft.set(
+            &format!("{prefix}.provider"),
+            ConfigValue::String(updated.provider.clone()),
+        )?;
+        draft.set(
+            &format!("{prefix}.model"),
+            ConfigValue::String(updated.model.clone()),
+        )?;
+        draft.set(
+            &format!("{prefix}.dialect"),
+            ConfigValue::String(updated.dialect.as_str().to_owned()),
+        )?;
+        draft
+            .document
+            .model_presets
+            .get_mut(preset_id)
+            .expect("starter update target exists")
+            .starter = Some(ModelStarterLayer {
+            catalog_key: Some(updated.catalog_key),
+            seed_revision: Some(updated.seed_revision),
+            provider: Some(updated.provider),
+            model: Some(updated.model),
+            dialect: Some(updated.dialect),
+        });
         self.validate_draft(&draft)?;
         Ok(draft)
     }
@@ -3498,6 +3821,35 @@ fn validate_effective(document: &ConfigDocument) -> Result<(), ConfigRuntimeErro
                 "model preset requires an explicit dialect",
             ));
         }
+        if let Some(starter) = &preset.starter {
+            let provenance = starter.provenance(id)?;
+            let accepted = ProviderCatalog::release()
+                .release_model_identity(&provenance.seed_revision, &provenance.catalog_key)
+                .ok_or_else(|| {
+                    invalid(
+                        format!("{prefix}.starter.seed_revision"),
+                        "release starter seed is not a supported update source",
+                    )
+                })?;
+            let profile = document
+                .providers
+                .get(&provenance.provider)
+                .ok_or_else(|| {
+                    invalid(
+                        format!("{prefix}.starter.provider"),
+                        "release starter references an unknown provider profile",
+                    )
+                })?;
+            if profile.template.as_deref() != Some(accepted.provider_template)
+                || provenance.model != accepted.model
+                || provenance.dialect != accepted.dialect
+            {
+                return Err(invalid(
+                    format!("{prefix}.starter"),
+                    "release starter provenance does not match its catalog record",
+                ));
+            }
+        }
         for fallback in preset.fallback.iter().flatten() {
             if fallback == id {
                 return Err(invalid(
@@ -3903,6 +4255,19 @@ impl ConfigDocument {
                 path: None,
                 detail: source.to_string(),
             })?;
+        if document.schema_version == 1 {
+            if document
+                .model_presets
+                .values()
+                .any(|preset| preset.starter.is_some())
+            {
+                return Err(invalid(
+                    "schema_version",
+                    "starter provenance requires Config schema version 2",
+                ));
+            }
+            document.schema_version = CONFIG_FILE_SCHEMA_VERSION;
+        }
         document.normalize_routes()?;
         document.validate_layer()?;
         Ok(document)
@@ -3982,6 +4347,9 @@ impl ConfigDocument {
     ) -> Result<(), ConfigRuntimeError> {
         let descriptor = require_schema_entry(path)?;
         require_scope(descriptor, scope)?;
+        if descriptor.editor == "starter_provenance" {
+            return Err(ConfigRuntimeError::ReadOnlyScope(scope));
+        }
         if descriptor.value_kind != value.kind() {
             return Err(ConfigRuntimeError::WrongType {
                 path: path.to_owned(),
@@ -4165,6 +4533,9 @@ impl ConfigDocument {
     fn reset(&mut self, scope: ConfigScope, path: &str) -> Result<(), ConfigRuntimeError> {
         let descriptor = require_schema_entry(path)?;
         require_scope(descriptor, scope)?;
+        if descriptor.editor == "starter_provenance" {
+            return Err(ConfigRuntimeError::ReadOnlyScope(scope));
+        }
         let segments = split_path(path)?;
         match segments.as_slice() {
             ["provider", "profile"] => self.provider.profile = None,
@@ -4377,8 +4748,11 @@ impl ConfigDocument {
         for id in self.providers.keys() {
             validate_id("providers.<id>", id)?;
         }
-        for id in self.model_presets.keys() {
+        for (id, preset) in &self.model_presets {
             validate_id("model_presets.<id>", id)?;
+            if let Some(starter) = &preset.starter {
+                starter.provenance(id)?;
+            }
         }
         if let Some(default) = &self.agent.default_model_preset {
             validate_id("agent.default_model_preset", default)?;
@@ -4554,6 +4928,34 @@ impl ConfigDocument {
                     ConfigValue::StringList(value.clone()),
                 );
             }
+            if let Some(starter) = &preset.starter {
+                insert_string(
+                    &mut values,
+                    &format!("{prefix}.starter.catalog_key"),
+                    &starter.catalog_key,
+                );
+                insert_string(
+                    &mut values,
+                    &format!("{prefix}.starter.seed_revision"),
+                    &starter.seed_revision,
+                );
+                insert_string(
+                    &mut values,
+                    &format!("{prefix}.starter.provider"),
+                    &starter.provider,
+                );
+                insert_string(
+                    &mut values,
+                    &format!("{prefix}.starter.model"),
+                    &starter.model,
+                );
+                if let Some(dialect) = starter.dialect {
+                    values.insert(
+                        format!("{prefix}.starter.dialect"),
+                        ConfigValue::String(dialect.as_str().to_owned()),
+                    );
+                }
+            }
         }
         for (id, schedule) in &self.price_schedules {
             let prefix = format!("price_schedules.{id}");
@@ -4725,6 +5127,7 @@ impl ModelPresetLayer {
         merge_option(&mut self.context_mode, &overlay.context_mode);
         merge_option(&mut self.favorite, &overlay.favorite);
         merge_option(&mut self.fallback, &overlay.fallback);
+        merge_option(&mut self.starter, &overlay.starter);
     }
 }
 

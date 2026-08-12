@@ -40,13 +40,13 @@ impl SchemaKind {
     pub const fn current(self) -> SchemaVersion {
         match self {
             Self::AcceptanceEvidence
-            | Self::ConfigFile
             | Self::ConfigEpoch
             | Self::DeterministicFixture
             | Self::LedgerFormat
             | Self::ProviderCatalog
             | Self::ProviderDiscovery
             | Self::ToolEvent => SchemaVersion(1),
+            Self::ConfigFile => SchemaVersion(2),
             Self::RuntimeEvent => SchemaVersion(14),
             Self::TeamEvent => SchemaVersion(2),
             Self::BenchmarkEvidence => SchemaVersion(2),

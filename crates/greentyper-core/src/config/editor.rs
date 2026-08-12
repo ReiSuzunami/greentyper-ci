@@ -97,7 +97,7 @@ impl ConfigEditorSession {
         if draft.contains_object(&object)? {
             return Err(ConfigEditorError::ConfigObjectAlreadyExists);
         }
-        Self::create_with_draft(runtime, draft, object)
+        Self::open_object_draft(runtime, draft, object, ConfigEditorOperation::Create)
     }
 
     pub fn create_model_starter(
@@ -111,7 +111,19 @@ impl ConfigEditorSession {
             return Err(ConfigEditorError::ConfigObjectMismatch);
         }
         let draft = runtime.begin_model_starter(scope, object.id(), provider, catalog_key)?;
-        Self::create_with_draft(runtime, draft, object)
+        Self::open_object_draft(runtime, draft, object, ConfigEditorOperation::Create)
+    }
+
+    pub fn update_model_starter(
+        runtime: &ConfigRuntime,
+        scope: ConfigScope,
+        object: ConfigObjectRef,
+    ) -> Result<Self, ConfigEditorError> {
+        if object.kind() != ConfigObjectKind::ModelPreset {
+            return Err(ConfigEditorError::ConfigObjectMismatch);
+        }
+        let draft = runtime.begin_model_starter_update(scope, object.id())?;
+        Self::open_object_draft(runtime, draft, object, ConfigEditorOperation::Edit)
     }
 
     pub fn create_model_preset(
@@ -126,13 +138,14 @@ impl ConfigEditorSession {
             return Err(ConfigEditorError::ConfigObjectMismatch);
         }
         let draft = runtime.begin_model_preset(scope, object.id(), provider, model, dialect)?;
-        Self::create_with_draft(runtime, draft, object)
+        Self::open_object_draft(runtime, draft, object, ConfigEditorOperation::Create)
     }
 
-    fn create_with_draft(
+    fn open_object_draft(
         runtime: &ConfigRuntime,
         draft: ConfigDraft,
         object: ConfigObjectRef,
+        operation: ConfigEditorOperation,
     ) -> Result<Self, ConfigEditorError> {
         let fields = runtime.draft_object_fields(&draft, object.kind(), object.id())?;
         let field = fields
@@ -149,7 +162,7 @@ impl ConfigEditorSession {
             draft,
             field_path: field.path,
             credential_binding,
-            operation: ConfigEditorOperation::Create,
+            operation,
             object: Some(object),
         })
     }
