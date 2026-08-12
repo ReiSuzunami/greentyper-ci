@@ -593,7 +593,7 @@ fn app_server_schema_get_and_bounded_errors_are_streamed_without_writes() {
     let responses = responses(&output);
     assert_eq!(responses.len(), 7);
     assert_eq!(responses[0]["id"], 1);
-    assert_eq!(responses[0]["result"]["schema_version"], 1);
+    assert_eq!(responses[0]["result"]["schema_version"], 2);
     assert!(
         responses[0]["result"]["entries"]
             .as_array()
@@ -623,7 +623,7 @@ fn app_server_schema_get_and_bounded_errors_are_streamed_without_writes() {
     assert_eq!(responses[5]["id"], Value::Null);
     assert_eq!(responses[5]["error"]["category"], "request_too_large");
     assert_eq!(responses[6]["id"], 5);
-    assert_eq!(responses[6]["result"]["schema_version"], 1);
+    assert_eq!(responses[6]["result"]["schema_version"], 2);
     assert!(!temp.user_config().exists());
     assert!(!temp.project_config().exists());
 }
@@ -650,7 +650,7 @@ fn app_server_runtime_status_inspects_missing_state_without_creating_it() {
     assert_eq!(results[0]["result"]["retryable"], false);
     assert_eq!(results[0]["result"]["pending_model_selection"], false);
     assert_eq!(results[1]["error"]["category"], "invalid_request");
-    assert_eq!(results[2]["result"]["schema_version"], 1);
+    assert_eq!(results[2]["result"]["schema_version"], 2);
     assert!(!temp.runtime_ledger().exists());
     assert!(!temp.user_config().exists());
     assert!(!temp.project_config().exists());
@@ -1842,7 +1842,7 @@ fn app_server_starter_draft_validates_commits_and_survives_reopen() {
     assert_eq!(results[0]["result"]["scope"], "user");
     assert_eq!(
         results[1]["result"]["changes"].as_array().map(Vec::len),
-        Some(3)
+        Some(8)
     );
     assert_eq!(results[2]["result"]["written"], true);
     assert_eq!(results[3]["result"]["entry"]["value"]["value"], "responses");
@@ -1861,6 +1861,129 @@ fn app_server_starter_draft_validates_commits_and_survives_reopen() {
         reopened[0]["result"]["entry"]["value"]["value"],
         "gpt-5.6-sol"
     );
+}
+
+#[test]
+fn app_server_starter_update_draft_validates_commits_and_survives_reopen() {
+    let temp = TempTree::new();
+    fs::create_dir_all(temp.user_config().parent().expect("user Config parent"))
+        .expect("create user Config parent");
+    let before = r#"schema_version = 2
+
+[providers.openai-main]
+template = "openai"
+credential = "private-app-server-update-reference"
+dialects = ["responses", "chat_completions"]
+
+[model_presets.frontier]
+provider = "openai-main"
+model = "gpt-5.6-sol"
+dialect = "responses"
+favorite = true
+
+[model_presets.frontier.starter]
+catalog_key = "openai/gpt-5.6-sol"
+seed_revision = "2026-08-10.1"
+provider = "openai-main"
+model = "gpt-5.6-sol"
+dialect = "responses"
+"#;
+    fs::write(temp.user_config(), before).expect("write old starter");
+    let output = temp.run(
+        concat!(
+            "{\"id\":1,\"operation\":\"config.starter.update.begin\",\"params\":{\"scope\":\"user\",\"preset\":\"frontier\"}}\n",
+            "{\"id\":2,\"operation\":\"config.draft.validate\",\"params\":{\"draft_id\":1}}\n",
+            "{\"id\":3,\"operation\":\"config.draft.commit\",\"params\":{\"draft_id\":1}}\n",
+            "{\"id\":4,\"operation\":\"config.get\",\"params\":{\"path\":\"model_presets.frontier.starter.seed_revision\"}}\n",
+            "{\"id\":5,\"operation\":\"config.get\",\"params\":{\"path\":\"model_presets.frontier.favorite\"}}\n",
+            "{\"id\":6,\"operation\":\"config.get\",\"params\":{\"path\":\"model_presets.frontier.starter.catalog_key\"}}\n",
+        )
+        .as_bytes(),
+    );
+    let results = responses(&output);
+    assert_eq!(results[0]["result"]["draft_id"], 1);
+    assert_eq!(results[0]["result"]["scope"], "user");
+    assert_eq!(
+        results[1]["result"]["changes"].as_array().map(Vec::len),
+        Some(1)
+    );
+    assert_eq!(results[2]["result"]["written"], true);
+    assert_eq!(
+        results[3]["result"]["entry"]["value"]["value"],
+        "2026-08-10.2"
+    );
+    assert_eq!(results[4]["result"]["entry"]["value"]["value"], true);
+    assert_eq!(
+        results[5]["result"]["entry"]["value"]["value"],
+        "openai/gpt-5.6-sol"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(!stdout.contains("private-app-server-update-reference"));
+    assert!(output.stderr.is_empty(), "{output:?}");
+    assert!(!temp.runtime_ledger().exists());
+    assert!(!temp.team_ledger().exists());
+    assert!(!temp.tool_ledger().exists());
+
+    let reopened = temp.run(
+        b"{\"id\":5,\"operation\":\"config.get\",\"params\":{\"path\":\"model_presets.frontier.model\"}}\n",
+    );
+    let reopened = responses(&reopened);
+    assert_eq!(
+        reopened[0]["result"]["entry"]["value"]["value"],
+        "gpt-5.6-sol"
+    );
+}
+
+#[test]
+fn app_server_starter_update_conflict_retains_stale_draft_without_overwriting_winner() {
+    let temp = TempTree::new();
+    fs::create_dir_all(temp.user_config().parent().expect("user Config parent"))
+        .expect("create user Config parent");
+    fs::write(
+        temp.user_config(),
+        r#"schema_version = 2
+[providers.openai-main]
+template = "openai"
+dialects = ["responses", "chat_completions"]
+[model_presets.frontier]
+provider = "openai-main"
+model = "gpt-5.6-sol"
+dialect = "responses"
+[model_presets.frontier.starter]
+catalog_key = "openai/gpt-5.6-sol"
+seed_revision = "2026-08-10.1"
+provider = "openai-main"
+model = "gpt-5.6-sol"
+dialect = "responses"
+"#,
+    )
+    .expect("write stale starter");
+    let mut winner = temp.spawn();
+    let mut loser = temp.spawn();
+    let begin = r#"{"id":1,"operation":"config.starter.update.begin","params":{"scope":"user","preset":"frontier"}}"#;
+    let winner_begin = winner.request(begin);
+    let loser_begin = loser.request(begin);
+    assert_eq!(
+        winner_begin["result"]["base_revision"],
+        loser_begin["result"]["base_revision"]
+    );
+    let committed =
+        winner.request(r#"{"id":2,"operation":"config.draft.commit","params":{"draft_id":1}}"#);
+    assert_eq!(committed["result"]["written"], true);
+    let winner_bytes = fs::read(temp.user_config()).expect("winner bytes");
+
+    let conflict =
+        loser.request(r#"{"id":2,"operation":"config.draft.commit","params":{"draft_id":1}}"#);
+    assert_eq!(conflict["error"]["category"], "revision_conflict");
+    let retained =
+        loser.request(r#"{"id":3,"operation":"config.draft.validate","params":{"draft_id":1}}"#);
+    assert_eq!(retained["error"]["category"], "revision_conflict");
+    assert_eq!(
+        fs::read(temp.user_config()).expect("bytes after conflict"),
+        winner_bytes
+    );
+    winner.finish();
+    loser.finish();
 }
 
 #[test]

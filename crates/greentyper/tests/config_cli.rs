@@ -123,7 +123,7 @@ fn config_cli_dry_run_commit_get_repair_and_headless_gate_are_wired() {
         .expect("run config schema");
     assert_success(&schema);
     let schema = json(&schema.stdout);
-    assert_eq!(schema["schema_version"], 1);
+    assert_eq!(schema["schema_version"], 2);
     assert!(
         schema["entries"]
             .as_array()
@@ -584,7 +584,7 @@ fn config_cli_accepts_a_release_starter_with_preview_commit_and_reopen() {
     let commit = json(&committed.stdout);
     assert_eq!(commit["written"], true);
     assert_eq!(commit["scope"], "user");
-    assert_eq!(commit["changes"].as_array().map(Vec::len), Some(3));
+    assert_eq!(commit["changes"].as_array().map(Vec::len), Some(8));
 
     let reopened = temp
         .config_command("get")
@@ -606,6 +606,101 @@ fn config_cli_accepts_a_release_starter_with_preview_commit_and_reopen() {
     assert!(preview.stderr.is_empty(), "{preview:?}");
     assert!(committed.stderr.is_empty(), "{committed:?}");
     assert!(reopened.stderr.is_empty(), "{reopened:?}");
+}
+
+#[test]
+fn config_cli_updates_a_release_starter_only_after_preview_and_preserves_recovery() {
+    let temp = TempTree::new();
+    fs::create_dir_all(temp.user_config().parent().expect("user Config parent"))
+        .expect("create user Config parent");
+    let before = br#"schema_version = 2
+
+[providers.openai-main]
+template = "openai"
+credential = "private-update-reference"
+dialects = ["responses", "chat_completions"]
+
+[model_presets.frontier]
+provider = "openai-main"
+model = "gpt-5.6-sol"
+dialect = "responses"
+favorite = true
+
+[model_presets.frontier.starter]
+catalog_key = "openai/gpt-5.6-sol"
+seed_revision = "2026-08-10.1"
+provider = "openai-main"
+model = "gpt-5.6-sol"
+dialect = "responses"
+"#;
+    fs::write(temp.user_config(), before).expect("write old starter");
+
+    let preview = temp
+        .config_command("update-starter")
+        .args(["frontier", "--scope", "user", "--dry-run"])
+        .output()
+        .expect("preview starter update");
+    assert_success(&preview);
+    let preview_json = json(&preview.stdout);
+    assert_eq!(preview_json["written"], false);
+    assert_eq!(preview_json["changes"].as_array().map(Vec::len), Some(1));
+    assert_eq!(fs::read(temp.user_config()).expect("preview bytes"), before);
+    assert!(!lock_path(&temp.user_config()).exists());
+
+    let committed = temp
+        .config_command("update-starter")
+        .args(["frontier", "--scope", "user"])
+        .output()
+        .expect("commit starter update");
+    assert_success(&committed);
+    assert_eq!(json(&committed.stdout)["written"], true);
+    let winner = fs::read(temp.user_config()).expect("winner bytes");
+
+    for (path, expected) in [
+        ("model_presets.frontier.model", "gpt-5.6-sol"),
+        ("model_presets.frontier.favorite", "true"),
+        (
+            "model_presets.frontier.starter.catalog_key",
+            "openai/gpt-5.6-sol",
+        ),
+        (
+            "model_presets.frontier.starter.seed_revision",
+            "2026-08-10.2",
+        ),
+    ] {
+        let get = temp
+            .config_command("get")
+            .arg(path)
+            .output()
+            .expect("get updated field");
+        assert_success(&get);
+        let value = &json(&get.stdout)["entry"]["value"]["value"];
+        if expected == "true" {
+            assert_eq!(value, true);
+        } else {
+            assert_eq!(value, expected);
+        }
+    }
+    let repeated = temp
+        .config_command("update-starter")
+        .args(["frontier", "--scope", "user"])
+        .output()
+        .expect("reject repeated update");
+    assert!(!repeated.status.success(), "{repeated:?}");
+    assert!(repeated.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&repeated.stderr).contains("already current"));
+    assert_eq!(
+        fs::read(temp.user_config()).expect("bytes after repeat"),
+        winner
+    );
+    let all_output = format!(
+        "{}{}{}",
+        String::from_utf8_lossy(&preview.stdout),
+        String::from_utf8_lossy(&committed.stdout),
+        String::from_utf8_lossy(&repeated.stderr)
+    );
+    assert!(!all_output.contains("private-update-reference"));
+    assert!(!temp.root.join("runtime.ledger").exists());
 }
 
 #[test]
