@@ -207,11 +207,14 @@ fn canonical_context_mode_replays_history_without_a_checkpoint() {
 #[test]
 fn provider_native_context_rejects_before_admission_or_provider_effects() {
     let path = temp_path("provider-native-context");
-    let mut runtime = RuntimeKernel::open(&path).expect("open Runtime");
+    let runtime = RuntimeKernel::open(&path).expect("open Runtime");
     let mut layers = ConfigLayers::default();
     layers.cli.context_mode = Some(ContextMode::ProviderNative);
     let before = runtime.snapshot();
+    drop(runtime);
     let bytes_before = fs::read(&path).expect("read Runtime Ledger");
+    let mut runtime = RuntimeKernel::open(&path).expect("reopen Runtime");
+    assert_eq!(runtime.snapshot(), before);
     let mut provider = CountingProvider::default();
 
     assert!(matches!(
@@ -222,12 +225,12 @@ fn provider_native_context_rejects_before_admission_or_provider_effects() {
     ));
     assert_eq!(provider.calls, 0);
     assert_eq!(runtime.snapshot(), before);
+    drop(runtime);
     assert_eq!(
         fs::read(&path).expect("reread Runtime Ledger"),
         bytes_before
     );
 
-    drop(runtime);
     fs::remove_file(path).expect("cleanup Runtime ledger");
 }
 
@@ -566,7 +569,10 @@ fn provider_native_soft_pressure_rejects_before_checkpoint_mutation() {
     let mut layers = ConfigLayers::default();
     layers.cli.context_mode = Some(ContextMode::ProviderNative);
     let before = runtime.snapshot();
+    drop(runtime);
     let bytes_before = fs::read(&path).expect("read Runtime Ledger before soft pressure");
+    let mut runtime = RuntimeKernel::open(&path).expect("reopen Runtime");
+    assert_eq!(runtime.snapshot(), before);
 
     assert!(matches!(
         runtime.execute_with_context_pressure(
@@ -1049,9 +1055,12 @@ fn provider_fallback_preflights_every_context_mode_before_admission() {
         ),
     ];
     let mut providers = [CountingProvider::default(), CountingProvider::default()];
-    let mut runtime = RuntimeKernel::open(&path).expect("open Runtime");
+    let runtime = RuntimeKernel::open(&path).expect("open Runtime");
     let before = runtime.snapshot();
+    drop(runtime);
     let bytes_before = fs::read(&path).expect("read Runtime Ledger");
+    let mut runtime = RuntimeKernel::open(&path).expect("reopen Runtime");
+    assert_eq!(runtime.snapshot(), before);
 
     assert!(matches!(
         runtime.execute_with_provider_fallbacks(
@@ -1068,12 +1077,12 @@ fn provider_fallback_preflights_every_context_mode_before_admission() {
     assert_eq!(providers[0].calls, 0);
     assert_eq!(providers[1].calls, 0);
     assert_eq!(runtime.snapshot(), before);
+    drop(runtime);
     assert_eq!(
         fs::read(&path).expect("reread Runtime Ledger"),
         bytes_before
     );
 
-    drop(runtime);
     fs::remove_file(path).expect("cleanup Runtime ledger");
 }
 
