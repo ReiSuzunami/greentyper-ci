@@ -17,7 +17,9 @@ use greentyper_core::context::{ContextPressureAccuracy, ContextPressureSnapshot}
 use greentyper_core::ledger::LedgerHead;
 use greentyper_core::provider::{ProviderProfileSnapshot, UsageAccuracy};
 use greentyper_core::provider_catalog::{CatalogAvailability, ModelCapability};
-use greentyper_core::runtime::{KernelTeamSnapshot, RecoveryStatus, RuntimeSnapshot};
+use greentyper_core::runtime::{
+    ContextInspection, KernelTeamSnapshot, RecoveryStatus, RuntimeSnapshot,
+};
 use greentyper_core::tool_runtime::{ToolCallStatus, ToolSnapshot};
 use greentyper_core::usage::{
     CostQuantity, RuntimeUsageSnapshot, UsageAttempt, UsageAttemptOutcome, UsageDistribution,
@@ -227,6 +229,7 @@ pub(crate) enum BlockerView {
     RuntimeBlocked {
         turn: u64,
         reason: String,
+        retryable: bool,
     },
     TeamOperationAwaitingAcknowledgement {
         operation: u64,
@@ -272,6 +275,7 @@ pub(crate) enum ToolApprovalAction {
 pub(crate) enum BlockerEntryAction {
     DetailChanged,
     LoadToolApproval { call: u64 },
+    RetryProvider { turn: u64 },
     None,
 }
 
@@ -984,11 +988,51 @@ impl From<&KernelTeamSnapshot> for AgentCenterView {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct AgentActionTarget {
     pub(crate) agent: u64,
+    pub(crate) active: bool,
     pub(crate) cancellable: bool,
     pub(crate) pending_operation: Option<u64>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+pub(crate) struct ContextInspectionView {
+    ledger_transaction: u64,
+    ledger_sequence: u64,
+    recovered_tail_bytes: u64,
+    checkpoint: Option<ContextCheckpointView>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+struct ContextCheckpointView {
+    source_transaction: u64,
+    source_sequence: u64,
+    artifact_count: usize,
+    recent_item_count: usize,
+    raw_bytes: u64,
+    estimated_tokens: u64,
+}
+
+impl From<&ContextInspection> for ContextInspectionView {
+    fn from(inspection: &ContextInspection) -> Self {
+        Self {
+            ledger_transaction: inspection.head().transaction,
+            ledger_sequence: inspection.head().sequence,
+            recovered_tail_bytes: inspection.recovered_tail_bytes(),
+            checkpoint: inspection.checkpoint().map(|checkpoint| {
+                let source = checkpoint.source().head();
+                ContextCheckpointView {
+                    source_transaction: source.transaction,
+                    source_sequence: source.sequence,
+                    artifact_count: checkpoint.view().artifacts().len(),
+                    recent_item_count: checkpoint.view().recent_items().len(),
+                    raw_bytes: checkpoint.view().raw_bytes(),
+                    estimated_tokens: checkpoint.view().estimated_tokens(),
+                }
+            }),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -999,6 +1043,7 @@ pub(crate) struct TuiViewModel {
     pub(crate) models: ModelSelectorView,
     pub(crate) stats: Availability<RuntimeUsageSnapshot>,
     pub(crate) agents: Availability<AgentCenterView>,
+    pub(crate) context: ContextInspectionView,
 }
 
 impl TuiViewModel {
@@ -1066,7 +1111,13 @@ impl TuiViewModel {
             models,
             stats,
             agents,
+            context: ContextInspectionView::default(),
         })
+    }
+
+    pub(crate) fn with_context(mut self, inspection: &ContextInspection) -> Self {
+        self.context = inspection.into();
+        self
     }
 }
 
@@ -1141,6 +1192,7 @@ enum PresentationState {
         selected: usize,
         detail: bool,
     },
+    Context,
     BlockerCenter {
         selected: usize,
         detail: bool,
@@ -1237,6 +1289,10 @@ impl PresentationController {
 
     pub(crate) const fn is_agent_center(&self) -> bool {
         matches!(self.state, PresentationState::AgentCenter { .. })
+    }
+
+    pub(crate) const fn is_context(&self) -> bool {
+        matches!(self.state, PresentationState::Context)
     }
 
     pub(crate) const fn is_blocker_center(&self) -> bool {
@@ -1579,10 +1635,11 @@ impl PresentationController {
         };
         let agent = agents.agents.get(selected)?;
         let pending_operation = agents.pending_operation_ids.first().copied();
+        let active = !matches!(agent.status, "succeeded" | "failed" | "cancelled");
         Some(AgentActionTarget {
             agent: agent.id,
-            cancellable: pending_operation.is_none()
-                && !matches!(agent.status, "succeeded" | "failed" | "cancelled"),
+            active,
+            cancellable: pending_operation.is_none() && active,
             pending_operation,
         })
     }
@@ -1608,6 +1665,18 @@ impl PresentationController {
         let Some(blocker) = blockers.get(*selected) else {
             return BlockerEntryAction::None;
         };
+        if let BlockerView::RuntimeBlocked {
+            turn,
+            retryable: true,
+            ..
+        } = blocker
+        {
+            if *detail {
+                return BlockerEntryAction::RetryProvider { turn: *turn };
+            }
+            *detail = true;
+            return BlockerEntryAction::DetailChanged;
+        }
         if let BlockerView::ToolApproval { call, .. } = blocker {
             if *detail {
                 return BlockerEntryAction::LoadToolApproval { call: *call };
@@ -1789,6 +1858,7 @@ impl PresentationController {
             }
             PresentationState::ToolApproval { .. } => {}
             PresentationState::ProductOutput { .. } => {}
+            PresentationState::Context => {}
             PresentationState::SlashPanel
             | PresentationState::ConfigObjectCreate
             | PresentationState::ModelDiscoveryDialect { .. }
@@ -1947,6 +2017,9 @@ impl PresentationController {
                     selected: 0,
                     detail: false,
                 };
+            }
+            CommandTarget::Context => {
+                self.state = PresentationState::Context;
             }
             CommandTarget::BlockerCenter => {
                 self.state = PresentationState::BlockerCenter {
@@ -2454,6 +2527,7 @@ impl PresentationController {
             PresentationState::AgentCenter { selected, detail } => {
                 Ok(PresentationScreenView::AgentCenter { selected, detail })
             }
+            PresentationState::Context => Ok(PresentationScreenView::Context),
             PresentationState::BlockerCenter { selected, detail } => {
                 Ok(PresentationScreenView::BlockerCenter { selected, detail })
             }
@@ -2602,6 +2676,7 @@ pub(crate) enum PresentationScreenView {
         selected: usize,
         detail: bool,
     },
+    Context,
     BlockerCenter {
         selected: usize,
         detail: bool,
@@ -2704,6 +2779,7 @@ pub(crate) enum CredentialFlowView {
 pub(crate) enum AgentLifecycleFlowView {
     Actions {
         agent: u64,
+        active: bool,
         cancellable: bool,
         pending_operation: Option<u64>,
         selected: usize,
@@ -2713,6 +2789,11 @@ pub(crate) enum AgentLifecycleFlowView {
     },
     ConfirmAcknowledgement {
         operation: u64,
+    },
+    Text {
+        agent: u64,
+        action: &'static str,
+        byte_len: usize,
     },
 }
 
@@ -2798,6 +2879,7 @@ impl PresentationLayoutView {
         let mut body = match flow {
             AgentLifecycleFlowView::Actions {
                 agent,
+                active,
                 cancellable,
                 pending_operation,
                 selected,
@@ -2818,6 +2900,17 @@ impl PresentationLayoutView {
                         selected == index,
                     ));
                     index += 1;
+                }
+                if pending_operation.is_none() && active {
+                    for label in [
+                        "Delegate Agent",
+                        "Message Agent",
+                        "Complete Agent",
+                        "Fail Agent",
+                    ] {
+                        rows.push(LayoutRowView::new(format!("> {label}"), selected == index));
+                        index += 1;
+                    }
                 }
                 rows.push(LayoutRowView::new("> Return", selected == index));
                 rows.push(LayoutRowView::new("Enter selects; Escape returns", false));
@@ -2849,7 +2942,42 @@ impl PresentationLayoutView {
                     false,
                 ),
             ],
+            AgentLifecycleFlowView::Text {
+                agent,
+                action,
+                byte_len,
+            } => vec![
+                LayoutRowView::new(format!("Agents / Agent {agent} / {action}"), false),
+                LayoutRowView::new(format!("> text {byte_len} bytes"), true),
+                LayoutRowView::new("Enter commits; Escape returns", false),
+                LayoutRowView::new(
+                    "input is bounded; operation remains pending until acknowledged",
+                    false,
+                ),
+            ],
         };
+        let capacity = usize::from(self.viewport.height).saturating_sub(self.statusline.rows.len());
+        truncate_rows_keeping_selection(&mut body, capacity);
+        for row in &mut body {
+            row.text = fit_text(&row.text, usize::from(self.viewport.width));
+        }
+        self.body = body;
+    }
+
+    pub(crate) fn show_context_reduce_confirmation(&mut self, context: &ContextInspectionView) {
+        let mut body = vec![
+            LayoutRowView::new("Context / Reduce", false),
+            LayoutRowView::new(
+                format!(
+                    "source tx {} | seq {}",
+                    context.ledger_transaction, context.ledger_sequence
+                ),
+                false,
+            ),
+            LayoutRowView::new("> Confirm checkpoint reduction", true),
+            LayoutRowView::new("Enter reduces; Escape returns", false),
+            LayoutRowView::new("requires a safe Runtime, Team, and Tool barrier", false),
+        ];
         let capacity = usize::from(self.viewport.height).saturating_sub(self.statusline.rows.len());
         truncate_rows_keeping_selection(&mut body, capacity);
         for row in &mut body {
@@ -3252,6 +3380,7 @@ fn screen_rows(
         PresentationScreenView::AgentCenter { selected, detail } => {
             agent_center_rows(&view.agents, *selected, *detail)
         }
+        PresentationScreenView::Context => context_rows(&view.context),
         PresentationScreenView::BlockerCenter { selected, detail } => {
             blocker_center_rows(&view.blockers, *selected, *detail)
         }
@@ -3264,6 +3393,55 @@ fn screen_rows(
             selected,
         } => product_output_rows(*delivery, text, *selected),
     }
+}
+
+fn context_rows(context: &ContextInspectionView) -> Vec<LayoutRowView> {
+    let mut rows = vec![
+        LayoutRowView::new("Context", false),
+        LayoutRowView::new(
+            format!(
+                "ledger tx {} | seq {}",
+                context.ledger_transaction, context.ledger_sequence
+            ),
+            false,
+        ),
+        LayoutRowView::new(
+            format!("recovered tail {}B", context.recovered_tail_bytes),
+            false,
+        ),
+    ];
+    if let Some(checkpoint) = &context.checkpoint {
+        rows.extend([
+            LayoutRowView::new(
+                format!(
+                    "checkpoint source tx {} | seq {}",
+                    checkpoint.source_transaction, checkpoint.source_sequence
+                ),
+                false,
+            ),
+            LayoutRowView::new(
+                format!(
+                    "artifacts {} | recent items {}",
+                    checkpoint.artifact_count, checkpoint.recent_item_count
+                ),
+                false,
+            ),
+            LayoutRowView::new(
+                format!(
+                    "raw {}B | estimated tokens {}",
+                    checkpoint.raw_bytes, checkpoint.estimated_tokens
+                ),
+                false,
+            ),
+        ]);
+    } else {
+        rows.push(LayoutRowView::new("checkpoint none", false));
+    }
+    rows.extend([
+        LayoutRowView::new("> R reduce Context checkpoint", true),
+        LayoutRowView::new("F6 refresh | Esc back", false),
+    ]);
+    rows
 }
 
 fn blocker_center_rows(
@@ -3440,7 +3618,12 @@ fn blocker_label(blocker: &BlockerView) -> String {
         BlockerView::RuntimeReconciliation { turn, delivery } => {
             format!("runtime turn {turn} | delivery {delivery} pending")
         }
-        BlockerView::RuntimeBlocked { turn, .. } => format!("runtime turn {turn} | blocked"),
+        BlockerView::RuntimeBlocked {
+            turn, retryable, ..
+        } => format!(
+            "runtime turn {turn} | blocked{}",
+            if *retryable { " | retryable" } else { "" }
+        ),
         BlockerView::TeamOperationAwaitingAcknowledgement { operation } => {
             format!("team operation {operation} | acknowledgement pending")
         }
@@ -3471,10 +3654,20 @@ fn blocker_detail_rows(blocker: &BlockerView) -> Vec<LayoutRowView> {
             format!("delivery {delivery}"),
             "status acknowledgement required".to_owned(),
         ],
-        BlockerView::RuntimeBlocked { turn, reason } => vec![
+        BlockerView::RuntimeBlocked {
+            turn,
+            reason,
+            retryable,
+        } => vec![
             format!("turn {turn}"),
             "status blocked".to_owned(),
+            format!("retryable {retryable}"),
             format!("reason {reason}"),
+            if *retryable {
+                "Enter again retries Provider; resume remains explicit".to_owned()
+            } else {
+                "Provider retry unavailable for this blocker".to_owned()
+            },
         ],
         BlockerView::TeamOperationAwaitingAcknowledgement { operation } => vec![
             format!("operation {operation}"),
@@ -5191,10 +5384,15 @@ fn build_blockers(sources: &PresentationSources<'_>) -> Vec<BlockerView> {
                 delivery: delivery.get(),
             });
         }
-        RecoveryStatus::Blocked { turn, reason, .. } => {
+        RecoveryStatus::Blocked {
+            turn,
+            reason,
+            retryable,
+        } => {
             blockers.push(BlockerView::RuntimeBlocked {
                 turn: turn.get(),
                 reason: reason.clone(),
+                retryable: *retryable,
             });
         }
     }
@@ -5458,8 +5656,8 @@ source = "unknown"
     #[test]
     fn slash_panel_is_bounded_ranked_and_clamps_selection() {
         let root = SlashPanelView::build("", 99).expect("root slash panel");
-        assert_eq!(root.entries.len(), 5);
-        assert_eq!(root.selected, Some(4));
+        assert_eq!(root.entries.len(), 6);
+        assert_eq!(root.selected, Some(5));
         assert!(root.entries.iter().all(|entry| entry.root_visible));
 
         let url = SlashPanelView::build("/config pro url", 0).expect("URL route");
@@ -5555,6 +5753,37 @@ source = "unknown"
         assert_eq!(
             controller.activate_blocker(&blockers),
             super::BlockerEntryAction::LoadToolApproval { call: 7 }
+        );
+    }
+
+    #[test]
+    fn retryable_runtime_blocker_requires_detail_before_rearm() {
+        let blockers = vec![BlockerView::RuntimeBlocked {
+            turn: 7,
+            reason: "provider unavailable before response".to_owned(),
+            retryable: true,
+        }];
+        let mut controller = PresentationController::new();
+        controller.state = PresentationState::BlockerCenter {
+            selected: 0,
+            detail: false,
+        };
+
+        assert_eq!(
+            controller.activate_blocker(&blockers),
+            super::BlockerEntryAction::DetailChanged
+        );
+        let rows = blocker_center_rows(&blockers, 0, true);
+        let text = rows
+            .iter()
+            .map(|row| row.text())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("retryable true"));
+        assert!(text.contains("Enter again retries Provider"));
+        assert_eq!(
+            controller.activate_blocker(&blockers),
+            super::BlockerEntryAction::RetryProvider { turn: 7 }
         );
     }
 

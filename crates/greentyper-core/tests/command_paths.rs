@@ -14,7 +14,14 @@ fn root_panel_is_curated_and_nested_commands_stay_nested() {
         .collect::<Vec<_>>();
     assert_eq!(
         canonical,
-        ["/config", "/model", "/stats", "/agent", "/blockers"]
+        [
+            "/config",
+            "/model",
+            "/stats",
+            "/agent",
+            "/context",
+            "/blockers"
+        ]
     );
     assert!(
         command_paths()
@@ -24,7 +31,7 @@ fn root_panel_is_curated_and_nested_commands_stay_nested() {
     );
 
     let root = match_command_paths("/").expect("root command panel");
-    assert_eq!(root.len(), 5);
+    assert_eq!(root.len(), 6);
     assert!(root.iter().all(|entry| entry.path().root_visible()));
 }
 
@@ -62,6 +69,7 @@ fn root_actions_and_config_sections_remain_semantically_distinct() {
         ("/model", CommandTarget::ModelSelector),
         ("/stats", CommandTarget::Stats),
         ("/agent", CommandTarget::AgentCenter),
+        ("/context", CommandTarget::Context),
         ("/blockers", CommandTarget::BlockerCenter),
     ];
     for (query, target) in roots {

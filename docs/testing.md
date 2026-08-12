@@ -645,9 +645,11 @@ blocks another Team mutation, reopens through `agent.list`, never echoes Task
 titles/message bodies/capsule contents/reasons, preserves Config and
 Runtime/Tool bytes, rejects dispatch or acknowledgement without any Ledger write
 while Provider recovery is pending, and leaves ordinary headless Provider Turns
-bound to the root while a child is Active. These tests do not prove remote transport,
-general Runtime control beyond the exact cancel/retry/resume flow, Workspace
-coordination, TUI Agent lifecycle actions beyond cancel/acknowledge, arbitrary Tool
+bound to the root while a child is Active. Direct VT tests additionally drive
+delegation, messaging, completion, failure, cancellation, pending-operation
+acknowledgement, and retryable Provider rearm through real key events. These
+tests do not prove remote transport, general Runtime control beyond the exact
+cancel/retry/resume flow, Workspace coordination, arbitrary Tool
 approval/execution, or multi-client authentication.
 Child-Preset integration additionally proves Delegation persists only the
 effective default Preset ID, Team schema-2 replay yields no inherited ID, and

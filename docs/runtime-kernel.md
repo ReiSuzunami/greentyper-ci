@@ -308,6 +308,14 @@ greentyper context status [--ledger PATH]
 greentyper context reduce [--ledger PATH]
   [--max-raw-bytes N] [--max-raw-items N]
 greentyper reconcile [--ledger PATH] --delivery ID
+greentyper agent status [--ledger PATH]
+greentyper agent acknowledge [--ledger PATH] --operation ID
+greentyper agent delegate [--ledger PATH] [--parent ID] --title TEXT
+greentyper agent message [--ledger PATH] [--agent ID] [--recipient ID] --body TEXT
+greentyper agent complete [--ledger PATH] [--agent ID] --outcome TEXT
+greentyper agent fail [--ledger PATH] [--agent ID] --reason TEXT
+greentyper agent cancel [--ledger PATH] [--agent ID] [--reason TEXT]
+greentyper agent turn [--ledger PATH] [--tool local.echo] --agent ID --input TEXT
 greentyper tool status [--ledger PATH]
 greentyper tool reconcile [--ledger PATH] --call ID
   (--failed | --succeeded-digest SHA256)

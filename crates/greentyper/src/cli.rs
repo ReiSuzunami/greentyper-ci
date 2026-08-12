@@ -5,6 +5,8 @@ use std::fs;
 use std::io::{self, BufRead, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 
+use serde_json::Value;
+
 use crate::credential_vault::{
     CredentialVault, CredentialVaultError, MAX_SECRET_BYTES, PlatformCredentialVault,
     ProviderCredentialScope, SecretValue,
@@ -13,12 +15,15 @@ use crate::local_process::{
     LOCAL_ECHO_TOOL, LocalProcessChildMode, LocalProcessError, LocalProcessExecutor,
     LocalProcessSmokeOutcome, LocalProcessSmokeScenario,
 };
-use crate::presentation::PresentationSmokeError;
+use crate::presentation::{AgentCenterView, PresentationSmokeError};
 use crate::product_driver::{
     ProductDriver, ProductDriverError, ProductInteraction, ProductToolDecision,
-    apply_model_preset_to_next_turn, cancel_product_provider_turn, freeze_model_selection,
-    has_product_driver_state, inspect_product_tools, open_product_context_runtime,
-    reconcile_product_tool, request_product_provider_turn_recovery, require_context_mode_execution,
+    acknowledge_product_team_operation, apply_model_preset_to_next_turn, cancel_product_agent,
+    cancel_product_provider_turn, complete_product_agent, delegate_product_agent,
+    fail_product_agent, freeze_model_selection, has_product_driver_state, inspect_product_team,
+    inspect_product_tools, message_from_product_agent, open_product_context_runtime,
+    preflight_product_context_reduction, reconcile_product_tool,
+    request_product_provider_turn_recovery, require_context_mode_execution,
     require_pending_context_mode_execution,
 };
 use crate::provider_connection::{ModelsHttpConnectionTester, ProviderConnectionTester};
@@ -29,7 +34,10 @@ use crate::provider_discovery_catalog::{
 use crate::provider_http::{
     ConfiguredProvider, ProviderHttpError, ProviderHttpSmokeOutcome, ProviderHttpSmokeScenario,
 };
-use greentyper_core::agent_team::TeamOperationRecord;
+use greentyper_core::agent_team::{
+    CapabilitySnapshot, CommandOutcome, CompletionCapsule, ResourceBudget, TaskScope,
+    TeamOperationAcknowledgeOutcome, TeamOperationCommit, TeamOperationRecord, TeamOperationStatus,
+};
 use greentyper_core::config::{
     CONFIG_FILE_SCHEMA_VERSION, ConfigDocument, ConfigDraft, ConfigLayers, ConfigPaths,
     ConfigRuntime, ConfigRuntimeError, ConfigScope, ModelPresetView, config_schema,
@@ -44,7 +52,7 @@ use greentyper_core::provider_catalog::ProviderCatalog;
 use greentyper_core::provider_discovery::{ProviderDiscoveryError, ProviderDiscoveryState};
 use greentyper_core::runtime::{
     AcknowledgeOutcome, CancelTurnOutcome, ContextCheckpoint, ContextInspection, PreparedOutput,
-    ProviderFallbackCandidate, ProviderToolApproval, RecoveryStatus, RuntimeError, RuntimeKernel,
+    ProviderFallbackCandidate, ProviderToolApproval, RecoveryStatus, RuntimeKernel,
 };
 use greentyper_core::tool_runtime::{
     ToolCallRecord, ToolCallStatus, ToolEffectExecutor, ToolReconciliationDecision, ToolSnapshot,
@@ -59,53 +67,8 @@ struct ConfiguredProviderFallbackPlan<P> {
 }
 
 fn preflight_context_reduction(ledger: &Path) -> Result<(), CliError> {
-    let pending_selection = RuntimeKernel::inspect(ledger)?.pending_model_selection;
     let config = open_config_runtime(default_config_paths()?)?;
-    let base_layers = config.config_layers()?.clone();
-    let preset_id = pending_selection
-        .as_ref()
-        .map(|pending| pending.selection().preset_id().to_owned())
-        .or(config.default_model_preset()?.map(str::to_owned));
-    let preset_chain = preset_id
-        .as_deref()
-        .map(|id| config.model_preset_chain(id))
-        .transpose()?;
-    let mut layers = base_layers.clone();
-    if let Some(presets) = &preset_chain {
-        for preset in presets {
-            let mut candidate_layers = base_layers.clone();
-            apply_model_preset_to_next_turn(&mut candidate_layers, preset);
-            require_context_mode_execution(&candidate_layers)?;
-        }
-        apply_model_preset_to_next_turn(
-            &mut layers,
-            presets
-                .first()
-                .expect("a resolved Model Preset chain is not empty"),
-        );
-    } else {
-        require_context_mode_execution(&layers)?;
-    }
-    if let Some(pending) = pending_selection.as_ref() {
-        let usage_windows = config.resolved_usage_windows()?;
-        let price_schedules = config.resolved_price_schedules()?;
-        let applied = freeze_model_selection(
-            &layers,
-            &usage_windows,
-            &price_schedules,
-            preset_chain
-                .as_ref()
-                .and_then(|presets| presets.first())
-                .expect("pending selection chose a Model Preset"),
-        )?;
-        if &applied != pending.selection() {
-            return Err(RuntimeError::InvalidModelSelection(
-                "pending Preset changed before Context reduction",
-            )
-            .into());
-        }
-    }
-    Ok(())
+    preflight_product_context_reduction(ledger, &config).map_err(Into::into)
 }
 
 fn build_provider_fallback_plan<P>(
@@ -441,6 +404,7 @@ pub fn run(arguments: impl Iterator<Item = String>) -> Result<(), CliError> {
                 write_json(&tool_record_json(&record))
             }
         },
+        Command::Agent(command) => run_agent(command),
         Command::Config(command) => run_config(command),
         Command::Credential(command) => {
             let mut vault = PlatformCredentialVault;
@@ -636,6 +600,228 @@ fn run_config(command: ConfigCommand) -> Result<(), CliError> {
             write_json(&tester.test(&profile))
         }
     }
+}
+
+fn run_agent(command: AgentCommand) -> Result<(), CliError> {
+    match command {
+        AgentCommand::Status { ledger } => {
+            let team = inspect_product_team(&ledger)?;
+            match team {
+                Some(team) => {
+                    let pending_operations = team
+                        .operations
+                        .iter()
+                        .filter(|record| {
+                            record.status == TeamOperationStatus::CommittedAwaitingAcknowledgement
+                        })
+                        .map(team_operation_json_record)
+                        .collect::<Vec<_>>();
+                    write_json(&serde_json::json!({
+                        "available": true,
+                        "team": AgentCenterView::from(&team),
+                        "pending_operations": pending_operations,
+                    }))
+                }
+                None => write_json(&serde_json::json!({
+                    "available": false,
+                    "team": Value::Null,
+                    "pending_operations": [],
+                })),
+            }
+        }
+        AgentCommand::Acknowledge { ledger, operation } => {
+            if operation == 0 {
+                return Err(CliError::Usage(
+                    "Agent operation must be a positive integer",
+                ));
+            }
+            let outcome = acknowledge_product_team_operation(&ledger, operation)?;
+            let status = match outcome {
+                TeamOperationAcknowledgeOutcome::Durable(_) => "acknowledged",
+                TeamOperationAcknowledgeOutcome::AlreadyAcknowledged => "already-acknowledged",
+            };
+            write_json(&serde_json::json!({ "status": status, "operation": operation }))
+        }
+        AgentCommand::Delegate {
+            ledger,
+            parent,
+            title,
+            scope,
+            token_budget,
+            tool_budget,
+        } => {
+            let config = open_config_runtime(default_config_paths()?)?;
+            let inherited_model_preset = config.default_model_preset()?.map(str::to_owned);
+            let scope = if scope.is_empty() {
+                None
+            } else {
+                Some(TaskScope::from_labels(scope))
+            };
+            let commit = delegate_product_agent(
+                &ledger,
+                parent,
+                title,
+                scope,
+                ResourceBudget::new(token_budget, tool_budget),
+                CapabilitySnapshot::empty(),
+                inherited_model_preset.as_deref(),
+            )?;
+            write_json(&team_operation_json(&commit))
+        }
+        AgentCommand::Message {
+            ledger,
+            agent,
+            recipient,
+            body,
+        } => {
+            let commit = message_from_product_agent(&ledger, agent, recipient, body)?;
+            write_json(&team_operation_json(&commit))
+        }
+        AgentCommand::Complete {
+            ledger,
+            agent,
+            outcome,
+        } => {
+            let commit = complete_product_agent(&ledger, agent, CompletionCapsule::new(outcome))?;
+            write_json(&team_operation_json(&commit))
+        }
+        AgentCommand::Fail {
+            ledger,
+            agent,
+            reason,
+        } => {
+            let commit = fail_product_agent(&ledger, agent, reason)?;
+            write_json(&team_operation_json(&commit))
+        }
+        AgentCommand::Cancel {
+            ledger,
+            agent,
+            reason,
+        } => {
+            let commit = cancel_product_agent(&ledger, agent, reason)?;
+            write_json(&team_operation_json(&commit))
+        }
+        AgentCommand::Turn {
+            ledger,
+            agent,
+            input,
+            local_echo,
+        } => run_agent_turn(&ledger, agent, input, local_echo),
+    }
+}
+
+fn run_agent_turn(
+    ledger: &Path,
+    agent: u64,
+    input: String,
+    local_echo: bool,
+) -> Result<(), CliError> {
+    let config = open_config_runtime(default_config_paths()?)?;
+    let mut driver =
+        ProductDriver::open_existing_for_agent(ledger, agent, LocalProcessExecutor::current()?)?;
+    let preset_id = driver
+        .inherited_model_preset()
+        .map(str::to_owned)
+        .or(config.default_model_preset()?.map(str::to_owned))
+        .ok_or(CliError::Usage("Agent has no inherited Model Preset"))?;
+    let base_layers = config.config_layers()?.clone();
+    let presets = config.model_preset_chain(&preset_id)?;
+    let usage_windows = config.resolved_usage_windows()?;
+    let price_schedules = config.resolved_price_schedules()?;
+    let mut providers = Vec::with_capacity(presets.len());
+    let mut candidates = Vec::with_capacity(presets.len());
+    for preset in &presets {
+        let mut layers = base_layers.clone();
+        apply_model_preset_to_next_turn(&mut layers, preset);
+        require_context_mode_execution(&layers)?;
+        let model = layers
+            .resolve()
+            .map_err(|_| {
+                ProviderError::InvalidConfiguration(
+                    "selected Provider model configuration is invalid",
+                )
+            })?
+            .provider_model()
+            .value()
+            .clone();
+        let profile = config.provider_profile(&preset.provider)?;
+        let mut provider = match profile {
+            Some(profile) => ConfiguredProvider::for_new_turn_with_preferred_dialect(
+                profile,
+                &model,
+                preset.dialect,
+                PlatformCredentialVault,
+            )?,
+            None => ConfiguredProvider::for_new_turn(None, PlatformCredentialVault)?,
+        };
+        if local_echo {
+            provider.enable_local_echo();
+        }
+        let selection = freeze_model_selection(&layers, &usage_windows, &price_schedules, preset)?;
+        candidates.push(ProviderFallbackCandidate::new(
+            selection,
+            layers,
+            provider.profile_snapshot().cloned(),
+            provider.dialect(),
+        )?);
+        providers.push(provider);
+    }
+    let stdin = io::stdin();
+    let stderr = io::stderr();
+    let mut interaction = CliProductInteraction {
+        input: stdin.lock(),
+        output: stderr.lock(),
+    };
+    let output = driver.execute_with_provider_fallbacks(
+        &candidates,
+        usage_windows,
+        price_schedules,
+        input,
+        &mut providers,
+        &mut interaction,
+    )?;
+    deliver_product_and_ack(&mut driver, output)
+}
+
+fn team_operation_json(operation: &TeamOperationCommit) -> serde_json::Value {
+    let outcome = match &operation.commit.outcome {
+        CommandOutcome::RootAdmitted { task, agent, .. } => serde_json::json!({
+            "kind": "root_admitted", "task": task.get(), "agent": agent.get()
+        }),
+        CommandOutcome::Delegated { task, agent, .. } => serde_json::json!({
+            "kind": "delegated", "task": task.get(), "agent": agent.get()
+        }),
+        CommandOutcome::MessageAccepted { message } => serde_json::json!({
+            "kind": "message_accepted", "message": message.get()
+        }),
+        CommandOutcome::StateChanged { task, agent } => serde_json::json!({
+            "kind": "state_changed", "task": task.get(), "agent": agent.get()
+        }),
+    };
+    serde_json::json!({
+        "status": "committed_awaiting_acknowledgement",
+        "operation": operation.operation.get(),
+        "ledger": {
+            "transaction": operation.commit.transaction.get(),
+            "sequence": operation.commit.revision.get(),
+            "event_count": operation.commit.events.len(),
+        },
+        "outcome": outcome,
+    })
+}
+
+fn team_operation_json_record(record: &TeamOperationRecord) -> serde_json::Value {
+    serde_json::json!({
+        "operation": record.operation.get(),
+        "transaction": record.transaction.get(),
+        "first_sequence": record.first_sequence.get(),
+        "last_sequence": record.last_sequence.get(),
+        "event_count": record.event_count,
+        "status": match record.status {
+            TeamOperationStatus::CommittedAwaitingAcknowledgement => "pending",
+            TeamOperationStatus::Acknowledged => "acknowledged",
+        },
+    })
 }
 
 fn refresh_provider_discovery<T: ProviderConnectionTester + ?Sized>(
@@ -1092,6 +1278,7 @@ enum Command {
         delivery: DeliveryId,
     },
     Tool(ToolCommand),
+    Agent(AgentCommand),
     Config(ConfigCommand),
     Credential(CredentialCommand),
     LocalProcessChild {
@@ -1133,6 +1320,52 @@ enum ToolCommand {
         ledger: PathBuf,
         call: u64,
         decision: ToolReconciliationDecision,
+    },
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum AgentCommand {
+    Status {
+        ledger: PathBuf,
+    },
+    Acknowledge {
+        ledger: PathBuf,
+        operation: u64,
+    },
+    Delegate {
+        ledger: PathBuf,
+        parent: Option<u64>,
+        title: String,
+        scope: Vec<String>,
+        token_budget: u64,
+        tool_budget: u32,
+    },
+    Message {
+        ledger: PathBuf,
+        agent: Option<u64>,
+        recipient: Option<u64>,
+        body: String,
+    },
+    Complete {
+        ledger: PathBuf,
+        agent: Option<u64>,
+        outcome: String,
+    },
+    Fail {
+        ledger: PathBuf,
+        agent: Option<u64>,
+        reason: String,
+    },
+    Cancel {
+        ledger: PathBuf,
+        agent: Option<u64>,
+        reason: String,
+    },
+    Turn {
+        ledger: PathBuf,
+        agent: u64,
+        input: String,
+        local_echo: bool,
     },
 }
 
@@ -1277,6 +1510,9 @@ fn parse(mut arguments: impl Iterator<Item = String>) -> Result<Command, CliErro
     }
     if command == "tool" {
         return parse_tool(arguments).map(Command::Tool);
+    }
+    if command == "agent" {
+        return parse_agent(arguments).map(Command::Agent);
     }
     if command == "context" {
         return parse_context(arguments).map(Command::Context);
@@ -1709,6 +1945,374 @@ fn parse_tool(mut arguments: impl Iterator<Item = String>) -> Result<ToolCommand
         }
         _ => unreachable!("tool action was validated"),
     }
+}
+
+fn parse_agent(mut arguments: impl Iterator<Item = String>) -> Result<AgentCommand, CliError> {
+    let action = arguments
+        .next()
+        .ok_or(CliError::Usage("agent requires an action"))?;
+    if !matches!(
+        action.as_str(),
+        "status"
+            | "list"
+            | "acknowledge"
+            | "delegate"
+            | "message"
+            | "complete"
+            | "fail"
+            | "cancel"
+            | "turn"
+    ) {
+        return Err(CliError::Usage("unknown agent action"));
+    }
+    let mut ledger = None;
+    let mut operation = None;
+    let mut parent = None;
+    let mut agent = None;
+    let mut recipient = None;
+    let mut title = None;
+    let mut body = None;
+    let mut input = None;
+    let mut outcome = None;
+    let mut reason = None;
+    let mut scope = None;
+    let mut token_budget = None;
+    let mut tool_budget = None;
+    let mut local_echo = false;
+    while let Some(argument) = arguments.next() {
+        if argument == "--tool" {
+            if local_echo {
+                return Err(CliError::Usage("duplicate --tool"));
+            }
+            let tool = next_agent_value(&mut arguments, "--tool")?;
+            if tool != LOCAL_ECHO_TOOL {
+                return Err(CliError::Usage("--tool must be local.echo"));
+            }
+            local_echo = true;
+            continue;
+        }
+        let value = match argument.as_str() {
+            "--ledger" => {
+                if ledger.is_some() {
+                    return Err(CliError::Usage("duplicate --ledger"));
+                }
+                next_agent_value(&mut arguments, "--ledger")?
+            }
+            "--operation" => {
+                if operation.is_some() {
+                    return Err(CliError::Usage("duplicate --operation"));
+                }
+                next_agent_value(&mut arguments, "--operation")?
+            }
+            "--parent" => {
+                if parent.is_some() {
+                    return Err(CliError::Usage("duplicate --parent"));
+                }
+                next_agent_value(&mut arguments, "--parent")?
+            }
+            "--agent" => {
+                if agent.is_some() {
+                    return Err(CliError::Usage("duplicate --agent"));
+                }
+                next_agent_value(&mut arguments, "--agent")?
+            }
+            "--recipient" => {
+                if recipient.is_some() {
+                    return Err(CliError::Usage("duplicate --recipient"));
+                }
+                next_agent_value(&mut arguments, "--recipient")?
+            }
+            "--title" => {
+                if title.is_some() {
+                    return Err(CliError::Usage("duplicate --title"));
+                }
+                next_agent_value(&mut arguments, "--title")?
+            }
+            "--body" => {
+                if body.is_some() {
+                    return Err(CliError::Usage("duplicate --body"));
+                }
+                next_agent_value(&mut arguments, "--body")?
+            }
+            "--outcome" => {
+                if outcome.is_some() {
+                    return Err(CliError::Usage("duplicate --outcome"));
+                }
+                next_agent_value(&mut arguments, "--outcome")?
+            }
+            "--reason" => {
+                if reason.is_some() {
+                    return Err(CliError::Usage("duplicate --reason"));
+                }
+                next_agent_value(&mut arguments, "--reason")?
+            }
+            "--scope" => {
+                if scope.is_some() {
+                    return Err(CliError::Usage("duplicate --scope"));
+                }
+                next_agent_value(&mut arguments, "--scope")?
+            }
+            "--token-budget" => {
+                if token_budget.is_some() {
+                    return Err(CliError::Usage("duplicate --token-budget"));
+                }
+                next_agent_value(&mut arguments, "--token-budget")?
+            }
+            "--tool-budget" => {
+                if tool_budget.is_some() {
+                    return Err(CliError::Usage("duplicate --tool-budget"));
+                }
+                next_agent_value(&mut arguments, "--tool-budget")?
+            }
+            "--input" => {
+                if input.is_some() {
+                    return Err(CliError::Usage("duplicate --input"));
+                }
+                next_agent_value(&mut arguments, "--input")?
+            }
+            _ => return Err(CliError::Usage("unknown agent option")),
+        };
+        match argument.as_str() {
+            "--ledger" => ledger = Some(value),
+            "--operation" => operation = Some(value),
+            "--parent" => parent = Some(value),
+            "--agent" => agent = Some(value),
+            "--recipient" => recipient = Some(value),
+            "--title" => title = Some(value),
+            "--body" => body = Some(value),
+            "--outcome" => outcome = Some(value),
+            "--reason" => reason = Some(value),
+            "--scope" => scope = Some(value),
+            "--token-budget" => token_budget = Some(value),
+            "--tool-budget" => tool_budget = Some(value),
+            "--input" => input = Some(value),
+            _ => unreachable!(),
+        }
+    }
+    let ledger = match ledger {
+        Some(path) if path.is_empty() => {
+            return Err(CliError::Usage("ledger path cannot be empty"));
+        }
+        Some(path) => PathBuf::from(path),
+        None => default_ledger_path()?,
+    };
+    let parse_id = |value: Option<String>, message| {
+        value
+            .map(|value| value.parse::<u64>().map_err(|_| CliError::Usage(message)))
+            .transpose()
+    };
+    let parent = parse_id(parent, "parent must be a positive integer")?;
+    let agent = parse_id(agent, "agent must be a positive integer")?;
+    let recipient = parse_id(recipient, "recipient must be a positive integer")?;
+    let operation = parse_id(operation, "operation must be a positive integer")?;
+    if [parent, agent, recipient, operation]
+        .iter()
+        .flatten()
+        .any(|id| *id == 0)
+    {
+        return Err(CliError::Usage(
+            "Agent identifiers must be positive integers",
+        ));
+    }
+    match action.as_str() {
+        "status" | "list" => {
+            if parent.is_some()
+                || agent.is_some()
+                || recipient.is_some()
+                || operation.is_some()
+                || title.is_some()
+                || body.is_some()
+                || input.is_some()
+                || outcome.is_some()
+                || reason.is_some()
+                || scope.is_some()
+                || token_budget.is_some()
+                || tool_budget.is_some()
+                || local_echo
+            {
+                return Err(CliError::Usage("agent status accepts only --ledger"));
+            }
+            Ok(AgentCommand::Status { ledger })
+        }
+        "acknowledge" => {
+            if parent.is_some()
+                || agent.is_some()
+                || recipient.is_some()
+                || title.is_some()
+                || body.is_some()
+                || input.is_some()
+                || outcome.is_some()
+                || reason.is_some()
+                || scope.is_some()
+                || token_budget.is_some()
+                || tool_budget.is_some()
+                || local_echo
+            {
+                return Err(CliError::Usage(
+                    "agent acknowledge accepts only --ledger and --operation",
+                ));
+            }
+            Ok(AgentCommand::Acknowledge {
+                ledger,
+                operation: operation
+                    .ok_or(CliError::Usage("agent acknowledge requires --operation"))?,
+            })
+        }
+        "delegate" => {
+            if agent.is_some()
+                || recipient.is_some()
+                || operation.is_some()
+                || body.is_some()
+                || input.is_some()
+                || outcome.is_some()
+                || reason.is_some()
+                || local_echo
+            {
+                return Err(CliError::Usage("invalid option for agent delegate"));
+            }
+            Ok(AgentCommand::Delegate {
+                ledger,
+                parent,
+                title: title.ok_or(CliError::Usage("agent delegate requires --title"))?,
+                scope: scope
+                    .unwrap_or_default()
+                    .split(',')
+                    .filter(|label| !label.is_empty())
+                    .map(str::to_owned)
+                    .collect(),
+                token_budget: token_budget
+                    .unwrap_or_else(|| "500".to_owned())
+                    .parse()
+                    .map_err(|_| CliError::Usage("token budget must be a nonnegative integer"))?,
+                tool_budget: tool_budget
+                    .unwrap_or_else(|| "1".to_owned())
+                    .parse()
+                    .map_err(|_| CliError::Usage("tool budget must be a nonnegative integer"))?,
+            })
+        }
+        "message" => {
+            if parent.is_some()
+                || operation.is_some()
+                || title.is_some()
+                || input.is_some()
+                || outcome.is_some()
+                || reason.is_some()
+                || scope.is_some()
+                || token_budget.is_some()
+                || tool_budget.is_some()
+                || local_echo
+            {
+                return Err(CliError::Usage("invalid option for agent message"));
+            }
+            Ok(AgentCommand::Message {
+                ledger,
+                agent,
+                recipient,
+                body: body.ok_or(CliError::Usage("agent message requires --body"))?,
+            })
+        }
+        "complete" => {
+            if parent.is_some()
+                || recipient.is_some()
+                || operation.is_some()
+                || title.is_some()
+                || body.is_some()
+                || input.is_some()
+                || reason.is_some()
+                || scope.is_some()
+                || token_budget.is_some()
+                || tool_budget.is_some()
+                || local_echo
+            {
+                return Err(CliError::Usage("invalid option for agent complete"));
+            }
+            Ok(AgentCommand::Complete {
+                ledger,
+                agent,
+                outcome: outcome.ok_or(CliError::Usage("agent complete requires --outcome"))?,
+            })
+        }
+        "fail" => {
+            if parent.is_some()
+                || recipient.is_some()
+                || operation.is_some()
+                || title.is_some()
+                || body.is_some()
+                || input.is_some()
+                || outcome.is_some()
+                || scope.is_some()
+                || token_budget.is_some()
+                || tool_budget.is_some()
+                || local_echo
+            {
+                return Err(CliError::Usage("invalid option for agent fail"));
+            }
+            Ok(AgentCommand::Fail {
+                ledger,
+                agent,
+                reason: reason.ok_or(CliError::Usage("agent fail requires --reason"))?,
+            })
+        }
+        "cancel" => {
+            if parent.is_some()
+                || recipient.is_some()
+                || operation.is_some()
+                || title.is_some()
+                || body.is_some()
+                || input.is_some()
+                || outcome.is_some()
+                || scope.is_some()
+                || token_budget.is_some()
+                || tool_budget.is_some()
+                || local_echo
+            {
+                return Err(CliError::Usage("invalid option for agent cancel"));
+            }
+            Ok(AgentCommand::Cancel {
+                ledger,
+                agent,
+                reason: reason.unwrap_or_else(|| "user cancelled Agent".to_owned()),
+            })
+        }
+        "turn" => {
+            if parent.is_some()
+                || recipient.is_some()
+                || operation.is_some()
+                || title.is_some()
+                || body.is_some()
+                || outcome.is_some()
+                || reason.is_some()
+                || scope.is_some()
+                || token_budget.is_some()
+                || tool_budget.is_some()
+            {
+                return Err(CliError::Usage("invalid option for agent turn"));
+            }
+            Ok(AgentCommand::Turn {
+                ledger,
+                agent: agent.ok_or(CliError::Usage("agent turn requires --agent"))?,
+                input: input.ok_or(CliError::Usage("agent turn requires --input"))?,
+                local_echo,
+            })
+        }
+        _ => unreachable!("agent action was validated"),
+    }
+}
+
+fn next_agent_value(
+    arguments: &mut impl Iterator<Item = String>,
+    option: &'static str,
+) -> Result<String, CliError> {
+    let value = arguments
+        .next()
+        .ok_or(CliError::Usage("agent option is missing its value"))?;
+    if value.starts_with('-') {
+        return Err(CliError::Usage(match option {
+            "--ledger" => "--ledger is missing its value",
+            _ => "agent option is missing its value",
+        }));
+    }
+    Ok(value)
 }
 
 fn next_tool_option_value(
@@ -2446,6 +3050,14 @@ Usage:\n\
   greentyper cancel [--ledger PATH] --turn ID\n\
   greentyper retry [--ledger PATH] --turn ID\n\
   greentyper reconcile [--ledger PATH] --delivery ID\n\
+  greentyper agent status [--ledger PATH]\n\
+  greentyper agent acknowledge [--ledger PATH] --operation ID\n\
+  greentyper agent delegate [--ledger PATH] [--parent ID] --title TEXT [--scope LABELS] [--token-budget N] [--tool-budget N]\n\
+  greentyper agent message [--ledger PATH] [--agent ID] [--recipient ID] --body TEXT\n\
+  greentyper agent complete [--ledger PATH] [--agent ID] --outcome TEXT\n\
+  greentyper agent fail [--ledger PATH] [--agent ID] --reason TEXT\n\
+  greentyper agent cancel [--ledger PATH] [--agent ID] [--reason TEXT]\n\
+  greentyper agent turn [--ledger PATH] [--tool local.echo] --agent ID --input TEXT\n\
   greentyper tool status [--ledger PATH]\n\
   greentyper tool reconcile [--ledger PATH] --call ID (--failed | --succeeded-digest SHA256)\n\
   greentyper config schema\n\

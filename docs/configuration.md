@@ -241,13 +241,20 @@ Likewise, `/model` browses configured Presets and release candidates while
 detail opens a user-scope starter Draft; after preview and commit, the resulting
 configured Preset can be selected for the current Agent's next Turn.
 `/agent` browses the latest successful Team sidecar projection. Browsing is
-read-only; `A` may explicitly cancel the selected non-terminal Agent. When a
-Team operation is pending, the same key instead opens a Team-level action to
-acknowledge that exact operation. The numeric Agent and operation
+read-only; `A` opens bounded selected-Agent actions for delegation, messaging,
+completion, failure, and cancellation. Every mutation uses a rebound Active
+Session and commits only Team state. When a Team operation is pending, the same
+key instead opens a Team-level action to acknowledge that exact operation. The numeric Agent and operation
 IDs are selectors only: every mutation still requires a Session rebound from
 validated Product recovery.
+`/context` inspects the exact-head Context checkpoint projection. `R` opens a
+confirmation for one bounded Safe-Barrier reduction; publication changes only
+the Runtime Ledger and rejects stale, busy, or incomplete Product state.
 `/blockers` lists Runtime, Team, Task, Tool, and Config blockers from the latest
-local projections. The first Enter on a Tool approval shows a local warning;
+local projections. A retryable blocked Provider Turn requires one Enter for
+detail and a second Enter to durably rearm the exact Turn as `resume-required`;
+this action performs no Provider request, credential lookup, Tool execution, or
+automatic resume. The first Enter on a Tool approval shows a local warning;
 the second Enter confirms an explicit recovery action. The product then
 authenticates the recovered current Agent Session, reconstructs the pending
 Provider from its frozen Epoch, resumes the request, and shows exact ephemeral
@@ -265,6 +272,14 @@ Config Drafts, and accept `--dry-run` to return the normalized diff without
 committing. `--user-config` and `--project-config` select explicit absolute
 paths for tests and controlled automation; normal execution uses the platform
 user path and `.greentyper/config.toml` in the current project.
+
+The same executable exposes `agent status|list`, `acknowledge`, `delegate`,
+`message`, `complete`, `fail`, `cancel`, and `turn`. Status/list is a redacted
+missing-safe projection. Mutations reuse the ProductDriver Session-rebinding and
+Team-operation acknowledgement boundary. `agent turn --agent ID` runs one Turn
+for that exact existing Active Agent under its inherited Preset and leaves all
+Provider, Tool, delivery, retry, and billing behavior on the ordinary Runtime
+paths.
 
 The current headless `stats` command reads the immutable Runtime usage
 projection and accepts an optional Unix-millisecond `--at` instant for

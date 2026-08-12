@@ -14,7 +14,9 @@ use greentyper_core::agent_team::{
     TaskScope, TaskSpec, TeamCommand, TeamOperationAcknowledgeOutcome, TeamOperationCommit,
     TeamOperationKind, TeamOperationRecord, TeamOperationStatus,
 };
-use greentyper_core::config::{ConfigEpoch, ConfigLayers, ModelPresetView};
+use greentyper_core::config::{
+    ConfigEpoch, ConfigLayers, ConfigRuntime, ConfigRuntimeError, ModelPresetView,
+};
 use greentyper_core::ledger::{DurabilityReceipt, LedgerHead};
 use greentyper_core::model::{ConfigEpochId, DeliveryId, TurnId};
 use greentyper_core::pricing::PriceScheduleBook;
@@ -85,6 +87,58 @@ pub(crate) fn require_pending_context_mode_execution(
         return Ok(());
     };
     require_frozen_context_mode_execution(mode)
+}
+
+pub(crate) fn preflight_product_context_reduction(
+    runtime_path: &Path,
+    config: &ConfigRuntime,
+) -> Result<(), ProductDriverError> {
+    let pending_selection = RuntimeKernel::inspect(runtime_path)?.pending_model_selection;
+    let base_layers = config.config_layers()?.clone();
+    let preset_id = pending_selection
+        .as_ref()
+        .map(|pending| pending.selection().preset_id().to_owned())
+        .or(config.default_model_preset()?.map(str::to_owned));
+    let preset_chain = preset_id
+        .as_deref()
+        .map(|id| config.model_preset_chain(id))
+        .transpose()?;
+    let mut layers = base_layers.clone();
+    if let Some(presets) = &preset_chain {
+        for preset in presets {
+            let mut candidate_layers = base_layers.clone();
+            apply_model_preset_to_next_turn(&mut candidate_layers, preset);
+            require_context_mode_execution(&candidate_layers)?;
+        }
+        apply_model_preset_to_next_turn(
+            &mut layers,
+            presets
+                .first()
+                .expect("a resolved Model Preset chain is not empty"),
+        );
+    } else {
+        require_context_mode_execution(&layers)?;
+    }
+    if let Some(pending) = pending_selection.as_ref() {
+        let usage_windows = config.resolved_usage_windows()?;
+        let price_schedules = config.resolved_price_schedules()?;
+        let applied = freeze_model_selection(
+            &layers,
+            &usage_windows,
+            &price_schedules,
+            preset_chain
+                .as_ref()
+                .and_then(|presets| presets.first())
+                .expect("pending selection chose a Model Preset"),
+        )?;
+        if &applied != pending.selection() {
+            return Err(RuntimeError::InvalidModelSelection(
+                "pending Preset changed before Context reduction",
+            )
+            .into());
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn freeze_model_selection(
@@ -1067,6 +1121,7 @@ pub(crate) enum ProductDriverError {
     Io(io::Error),
     Interaction(io::Error),
     Runtime(RuntimeError),
+    Config(ConfigRuntimeError),
     Team(DurableTeamError),
     Tool(ToolRuntimeError),
     IncompleteState,
@@ -1090,6 +1145,7 @@ impl fmt::Display for ProductDriverError {
             Self::Io(source) => write!(formatter, "Product driver I/O failed: {source}"),
             Self::Interaction(source) => write!(formatter, "Product interaction failed: {source}"),
             Self::Runtime(source) => write!(formatter, "{source}"),
+            Self::Config(source) => write!(formatter, "{source}"),
             Self::Team(source) => write!(formatter, "{source}"),
             Self::Tool(source) => write!(formatter, "{source}"),
             Self::IncompleteState => {
@@ -1146,6 +1202,7 @@ impl Error for ProductDriverError {
         match self {
             Self::Io(source) | Self::Interaction(source) => Some(source),
             Self::Runtime(source) => Some(source),
+            Self::Config(source) => Some(source),
             Self::Team(source) => Some(source),
             Self::Tool(source) => Some(source),
             Self::IncompleteState
@@ -1168,6 +1225,12 @@ impl Error for ProductDriverError {
 impl From<RuntimeError> for ProductDriverError {
     fn from(source: RuntimeError) -> Self {
         Self::Runtime(source)
+    }
+}
+
+impl From<ConfigRuntimeError> for ProductDriverError {
+    fn from(source: ConfigRuntimeError) -> Self {
+        Self::Config(source)
     }
 }
 

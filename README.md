@@ -536,14 +536,18 @@ process-local Agent Session
 authority. Missing Team state stays unavailable without creating files; an
 incomplete final frame is reported as recovery required without truncation or
 repair, while corruption and incomplete Product sidecars fail closed. Browsing
-itself writes nothing. `A` opens a bounded action menu for the selected Agent;
-an explicit confirmation can cancel one non-terminal Agent through its rebound
-Session. The committed Team operation remains pending until a separate
+itself writes nothing. `A` opens a bounded action menu. Under the selected
+rebound Active Agent Session it can delegate one child, append one bounded
+message, submit a Completion Capsule, record failure, or explicitly cancel.
+Each mutation commits only Team state and remains pending until a separate
 confirmation acknowledges its exact operation ID. Restart re-exposes that
 pending acknowledgement, and a failed acknowledgement leaves it retryable.
 These actions never write Runtime, Tool, or Config state.
 `/blockers` now lists the latest Runtime, Team, Task, Tool, and Config blockers.
-The list and its non-Tool details come from local snapshots. Enter on a Tool
+The list and its non-Tool details come from local snapshots. A retryable blocked
+Provider Turn opens bounded detail on the first Enter; the second Enter durably
+rearms that exact Turn as `resume-required` without constructing a Provider,
+reading a credential, executing a Tool, or resuming automatically. Enter on a Tool
 approval first shows a local recovery warning. A second Enter explicitly
 recovers the current Active Agent Session and frozen Provider Epoch, resumes
 the pending Provider request, and renders the exact canonical arguments plus
@@ -560,7 +564,7 @@ Provider output remains on screen until its delivery acknowledgement succeeds;
 failed recovery or resolution returns to blocker inspection, while failed
 acknowledgement keeps the same output visible and retryable.
 Config commits do not automatically rebuild the running TUI projection. From the
-Slash Panel, `/model`, `/stats`, `/agent`, or `/blockers`, F6 or Ctrl-R reads a new local
+Slash Panel, `/model`, `/stats`, `/agent`, `/context`, or `/blockers`, F6 or Ctrl-R reads a new local
 Config/statusline, Model, Usage, and Team snapshot, then replaces the prior view
 only after every read succeeds. A failed refresh keeps the previous complete
 view and remains retryable; refresh never performs a
@@ -576,8 +580,7 @@ before implementation. Live inference conformance,
 automatic transport retry or partial-stream reconnect, Messages reasoning
 blocks, provider-native Context Mode execution, broader multi-Tool approval
 presentation, broader Provider and Tool adapters,
-Workspace, Agent retry,
-TUI delegation, messaging, completion, and failure actions, general App Server Runtime control beyond the exact
+Workspace, Agent retry, general App Server Runtime control beyond the exact
 cancel/retry/resume recovery flow, and
 remote App Server transport remain. The loopback Provider tracer remains
 an internal harness; `local.echo` is intentionally a fixed opt-in command rather

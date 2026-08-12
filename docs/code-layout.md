@@ -106,13 +106,14 @@ until it can be parsed atomically.
 The fourth creates manual Price Schedules across all 17 schema fields while
 keeping partial non-negative-integer input local until it can be parsed
 atomically.
-The same private terminal composition now owns `/model`, `/stats`, `/agent`, and `/blockers`
+The same private terminal composition now owns `/model`, `/stats`, `/agent`, `/context`, and `/blockers`
 browsers over local Config Catalog, Usage, and strict Team-sidecar projections.
-All provide bounded query/group/row/detail navigation. Stats and Agent browsing
-remain read-only. The Agent Center additionally owns a bounded `A` action flow:
-selected-Agent cancellation and exact pending-operation acknowledgement both
-require confirmation and delegate authority to ProductDriver; restart and
-failure preserve the pending operation for retry. On compatible release detail, a second Enter creates an
+All provide bounded query/group/row/detail navigation. Stats and ordinary Agent
+browsing remain read-only. The Agent Center additionally owns a bounded `A`
+action flow: delegation, messaging, completion, failure, cancellation, and
+exact pending-operation acknowledgement delegate authority to ProductDriver;
+restart and failure preserve the pending operation for retry. The Context screen
+exposes exact-head inspection plus confirmed Safe-Barrier reduction. On compatible release detail, a second Enter creates an
 ordinary revision-bound user-scope Preset Draft through the core Config Runtime;
 CLI and App Server entry points reuse the same operation. On configured Model
 detail, a second Enter may stage one bounded Runtime selection for the
@@ -132,6 +133,9 @@ frozen Provider, and keeps exact arguments/resources in one process-local
 approval context until Escape, Approve, or Deny. The
 terminal never converts an Agent ID into authority, and it delegates approval,
 effect ordering, denial, and delivery acknowledgement back to the Kernel.
+A retryable Runtime blocker instead rearms only the exact persisted Turn and
+returns to `resume-required`; it performs no Provider, credential, Tool, or
+delivery work.
 The private App Server module owns a bounded newline-delimited JSON stdio loop
 over the existing Config Runtime and fixed startup Runtime Ledger path. It keeps
 at most 64 connection-local Drafts,

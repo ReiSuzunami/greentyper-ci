@@ -778,9 +778,14 @@ Session authority. Delegation now freezes the effective default Preset ID into
 the child, and the App Server can execute and recover one exact Active-child
 Provider Turn under that inherited ID without copying Config, credentials, or
 parent authority. The Direct VT Agent Center now adds explicit selected-Agent
-cancellation and separate pending-operation acknowledgement with restart and
-retry recovery. Workspace allocation/leases/read sets/merge, Agent retry, and
-TUI delegation, messaging, completion, and failure actions remain pending.
+cancellation, delegation, messaging, completion, failure, and separate
+pending-operation acknowledgement with restart and retry recovery. The public
+CLI exposes the same redacted status, lifecycle, acknowledgement, and exact
+Active-Agent Turn composition through ProductDriver. `/context` adds read-only
+checkpoint inspection and confirmed Safe-Barrier reduction, while `/blockers`
+can durably rearm an explicitly retryable Provider block without automatically
+resuming it. Workspace allocation/leases/read sets/merge and Agent retry remain
+pending.
 
 Exit criteria:
 

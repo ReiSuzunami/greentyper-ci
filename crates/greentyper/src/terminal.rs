@@ -10,13 +10,16 @@ use crossterm::terminal as crossterm_terminal;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-use greentyper_core::agent_team::TeamOperationRecord;
+use greentyper_core::agent_team::{
+    CapabilitySnapshot, CompletionCapsule, ResourceBudget, TeamOperationRecord,
+};
 use greentyper_core::config::{
     ConfigEditorError, ConfigError, ConfigFieldContents, ConfigFieldInteraction, ConfigRuntime,
     ConfigRuntimeError, ConfigScope, ConfigValue, ConfigValueKind, MAX_COMMAND_QUERY_BYTES,
     MAX_CONFIG_ID_BYTES, ModelPresetView,
 };
-use greentyper_core::model::DeliveryId;
+use greentyper_core::context::ContextReductionPolicy;
+use greentyper_core::model::{DeliveryId, TurnId};
 use greentyper_core::provider::ProviderError;
 use greentyper_core::provider_discovery::{ProviderDiscoveryError, ProviderDiscoveryState};
 use greentyper_core::runtime::{
@@ -39,8 +42,11 @@ use crate::presentation::{
 use crate::product_driver::{
     ProductDriver, ProductDriverError, ProductInteraction, ProductToolDecision,
     ProductToolDecisionOutcome, acknowledge_product_team_operation,
-    apply_model_preset_to_next_turn, cancel_product_agent, freeze_model_selection,
-    inspect_product_team, inspect_product_tools, stage_product_model_selection,
+    apply_model_preset_to_next_turn, cancel_product_agent, complete_product_agent,
+    delegate_product_agent, fail_product_agent, freeze_model_selection, has_product_driver_state,
+    inspect_product_team, inspect_product_tools, message_from_product_agent,
+    open_product_context_runtime, preflight_product_context_reduction,
+    request_product_provider_turn_recovery, stage_product_model_selection,
 };
 use crate::provider_connection::{ModelsHttpConnectionTester, ProviderConnectionTester};
 use crate::provider_discovery_catalog::{
@@ -51,6 +57,8 @@ use crate::provider_discovery_task::{
     ProviderDiscoveryTrigger,
 };
 use crate::provider_http::ConfiguredProvider;
+
+const MAX_AGENT_TEXT_BYTES: usize = 4096;
 
 enum TerminalToolResolution {
     Prepared { delivery: u64, text: String },
@@ -72,7 +80,17 @@ trait TerminalProductActions {
 
     fn cancel_agent(&mut self, agent: u64) -> Result<u64, TerminalError>;
 
+    fn delegate_agent(&mut self, parent: u64, title: String) -> Result<u64, TerminalError>;
+
+    fn message_agent(&mut self, agent: u64, body: String) -> Result<u64, TerminalError>;
+
+    fn complete_agent(&mut self, agent: u64, outcome: String) -> Result<u64, TerminalError>;
+
+    fn fail_agent(&mut self, agent: u64, reason: String) -> Result<u64, TerminalError>;
+
     fn acknowledge_team_operation(&mut self, operation: u64) -> Result<(), TerminalError>;
+
+    fn retry_provider(&mut self, turn: u64) -> Result<(), TerminalError>;
 }
 
 struct LedgerTerminalProductActions<'a> {
@@ -208,8 +226,48 @@ impl TerminalProductActions for LedgerTerminalProductActions<'_> {
         Ok(operation.operation.get())
     }
 
+    fn delegate_agent(&mut self, parent: u64, title: String) -> Result<u64, TerminalError> {
+        let operation = delegate_product_agent(
+            self.ledger,
+            Some(parent),
+            title,
+            None,
+            ResourceBudget::new(500, 1),
+            CapabilitySnapshot::default(),
+            None,
+        )?;
+        Ok(operation.operation.get())
+    }
+
+    fn message_agent(&mut self, agent: u64, body: String) -> Result<u64, TerminalError> {
+        let operation = message_from_product_agent(self.ledger, Some(agent), None, body)?;
+        Ok(operation.operation.get())
+    }
+
+    fn complete_agent(&mut self, agent: u64, outcome: String) -> Result<u64, TerminalError> {
+        let operation =
+            complete_product_agent(self.ledger, Some(agent), CompletionCapsule::new(outcome))?;
+        Ok(operation.operation.get())
+    }
+
+    fn fail_agent(&mut self, agent: u64, reason: String) -> Result<u64, TerminalError> {
+        let operation = fail_product_agent(self.ledger, Some(agent), reason)?;
+        Ok(operation.operation.get())
+    }
+
     fn acknowledge_team_operation(&mut self, operation: u64) -> Result<(), TerminalError> {
         acknowledge_product_team_operation(self.ledger, operation)?;
+        Ok(())
+    }
+
+    fn retry_provider(&mut self, turn: u64) -> Result<(), TerminalError> {
+        let turn = greentyper_core::model::TurnId::new(turn).map_err(RuntimeError::Model)?;
+        if has_product_driver_state(self.ledger)? {
+            request_product_provider_turn_recovery(self.ledger, turn)?;
+        } else {
+            let mut runtime = RuntimeKernel::open_existing_strict(self.ledger)?;
+            runtime.request_blocked_turn_recovery(turn)?;
+        }
         Ok(())
     }
 }
@@ -244,6 +302,7 @@ fn build_terminal_view(
     query: &str,
 ) -> Result<TuiViewModel, TerminalError> {
     let runtime = RuntimeKernel::inspect(ledger)?;
+    let context = RuntimeKernel::inspect_context(ledger)?;
     let usage = RuntimeKernel::inspect_usage(ledger, UsageTimestamp::now()?)?;
     let team = inspect_product_team(ledger)?;
     let tools = inspect_product_tools(ledger)?;
@@ -252,6 +311,7 @@ fn build_terminal_view(
         config,
         query,
         &runtime,
+        &context,
         &usage,
         team.as_ref(),
         &tools,
@@ -265,6 +325,7 @@ fn refresh_terminal_view(
     query: &str,
 ) -> Result<RefreshedTerminalSnapshot, TerminalError> {
     let runtime = RuntimeKernel::inspect(ledger)?;
+    let context = RuntimeKernel::inspect_context(ledger)?;
     let usage = RuntimeKernel::inspect_usage(ledger, UsageTimestamp::now()?)?;
     let team = inspect_product_team(ledger)?;
     let tools = inspect_product_tools(ledger)?;
@@ -274,6 +335,7 @@ fn refresh_terminal_view(
         &config,
         query,
         &runtime,
+        &context,
         &usage,
         team.as_ref(),
         &tools,
@@ -309,6 +371,7 @@ fn build_terminal_view_from_sources(
     config: &ConfigRuntime,
     query: &str,
     runtime: &RuntimeSnapshot,
+    context: &greentyper_core::runtime::ContextInspection,
     usage: &RuntimeUsageSnapshot,
     team: Option<&KernelTeamSnapshot>,
     tools: &ToolSnapshot,
@@ -339,6 +402,7 @@ fn build_terminal_view_from_sources(
             discovery_catalogs: discovery_catalogs.as_deref(),
         },
     )
+    .map(|view| view.with_context(context))
     .map_err(TerminalError::PresentationModel)
 }
 
@@ -839,8 +903,15 @@ enum TerminalIntent {
     OpenAgentActions,
     MoveAgentAction(isize),
     ActivateAgentAction,
+    EditAgentText(char),
+    BackspaceAgentText,
+    ClearAgentText,
+    SubmitAgentText,
     ConfirmAgentAction,
     CancelAgentFlow,
+    ConfirmContextReduce,
+    ReduceContext,
+    CancelContextReduce,
     MoveBlockerSelection(isize),
     ActivateBlocker,
     MoveToolApprovalSelection(isize),
@@ -889,7 +960,10 @@ enum TerminalInputContext {
     ModelDiscoveryDialect,
     Stats,
     AgentCenter,
+    Context,
+    ContextConfirmation,
     AgentActions,
+    AgentText,
     AgentConfirmation,
     BlockerCenter,
     ToolApproval,
@@ -937,6 +1011,7 @@ impl TerminalInputState {
                         | TerminalInputContext::ModelSelector
                         | TerminalInputContext::Stats
                         | TerminalInputContext::AgentCenter
+                        | TerminalInputContext::Context
                         | TerminalInputContext::BlockerCenter
                 ) =>
             {
@@ -1087,6 +1162,17 @@ impl TerminalInputState {
             TerminalInputEvent::Enter if context == TerminalInputContext::AgentCenter => {
                 TerminalIntent::ToggleAgentDetail
             }
+            TerminalInputEvent::Character('r' | 'R')
+                if context == TerminalInputContext::Context =>
+            {
+                TerminalIntent::ConfirmContextReduce
+            }
+            TerminalInputEvent::Enter if context == TerminalInputContext::ContextConfirmation => {
+                TerminalIntent::ReduceContext
+            }
+            TerminalInputEvent::Escape if context == TerminalInputContext::ContextConfirmation => {
+                TerminalIntent::CancelContextReduce
+            }
             TerminalInputEvent::Character('a') if context == TerminalInputContext::AgentCenter => {
                 TerminalIntent::OpenAgentActions
             }
@@ -1102,13 +1188,29 @@ impl TerminalInputState {
             TerminalInputEvent::Enter if context == TerminalInputContext::AgentActions => {
                 TerminalIntent::ActivateAgentAction
             }
+            TerminalInputEvent::Character(character)
+                if context == TerminalInputContext::AgentText && !character.is_control() =>
+            {
+                TerminalIntent::EditAgentText(character)
+            }
+            TerminalInputEvent::Backspace if context == TerminalInputContext::AgentText => {
+                TerminalIntent::BackspaceAgentText
+            }
+            TerminalInputEvent::Delete if context == TerminalInputContext::AgentText => {
+                TerminalIntent::ClearAgentText
+            }
+            TerminalInputEvent::Enter if context == TerminalInputContext::AgentText => {
+                TerminalIntent::SubmitAgentText
+            }
             TerminalInputEvent::Enter if context == TerminalInputContext::AgentConfirmation => {
                 TerminalIntent::ConfirmAgentAction
             }
             TerminalInputEvent::Escape
                 if matches!(
                     context,
-                    TerminalInputContext::AgentActions | TerminalInputContext::AgentConfirmation
+                    TerminalInputContext::AgentActions
+                        | TerminalInputContext::AgentConfirmation
+                        | TerminalInputContext::AgentText
                 ) =>
             {
                 TerminalIntent::CancelAgentFlow
@@ -1280,6 +1382,7 @@ enum TerminalLoopOutcome {
     Redraw,
     Resize(u16, u16),
     RefreshSnapshot,
+    ReduceContext,
     RefreshProviderDiscovery,
     RefreshProviderDiscoveryOnOpen,
     BeginDiscoveryAcceptance,
@@ -1287,6 +1390,8 @@ enum TerminalLoopOutcome {
     ApplyModelSelection,
     CancelAgent(u64),
     AcknowledgeTeamOperation(u64),
+    RetryProvider(u64),
+    SubmitAgentText,
     LoadToolApproval(u64),
     ResolveToolApproval,
     CancelToolApproval,
@@ -1331,6 +1436,7 @@ enum CredentialFlow {
 enum AgentLifecycleFlow {
     Actions {
         agent: u64,
+        active: bool,
         cancellable: bool,
         pending_operation: Option<u64>,
         selected: usize,
@@ -1341,6 +1447,36 @@ enum AgentLifecycleFlow {
     ConfirmAcknowledgement {
         operation: u64,
     },
+    Text {
+        agent: u64,
+        action: AgentTextAction,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AgentTextAction {
+    Delegate,
+    Message,
+    Complete,
+    Fail,
+}
+
+impl AgentTextAction {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Delegate => "Delegate",
+            Self::Message => "Message",
+            Self::Complete => "Complete",
+            Self::Fail => "Fail",
+        }
+    }
+}
+
+enum AgentTextCommand {
+    Delegate { agent: u64, title: String },
+    Message { agent: u64, body: String },
+    Complete { agent: u64, outcome: String },
+    Fail { agent: u64, reason: String },
 }
 
 struct CredentialSecretInput {
@@ -1444,12 +1580,15 @@ struct TerminalSession {
     config_text: Option<ConfigTextInput>,
     validated_config_text: Option<String>,
     confirming_discard: bool,
+    confirming_context_reduce: bool,
     pending_model_selection: Option<ModelPresetView>,
     pending_discovery_acceptance: Option<DiscoveredModelAcceptance>,
     pending_tool_action: Option<(u64, ProductToolDecision)>,
     credential_flow: Option<CredentialFlow>,
     pending_credential_command: Option<CredentialCommand>,
     agent_flow: Option<AgentLifecycleFlow>,
+    agent_text: Option<String>,
+    pending_agent_command: Option<AgentTextCommand>,
     notice: Option<String>,
 }
 
@@ -1471,12 +1610,15 @@ impl TerminalSession {
             config_text: None,
             validated_config_text: None,
             confirming_discard: false,
+            confirming_context_reduce: false,
             pending_model_selection: None,
             pending_discovery_acceptance: None,
             pending_tool_action: None,
             credential_flow: None,
             pending_credential_command: None,
             agent_flow: None,
+            agent_text: None,
+            pending_agent_command: None,
             notice: None,
         })
     }
@@ -1672,6 +1814,7 @@ impl TerminalSession {
                 if let Some(target) = target {
                     self.agent_flow = Some(AgentLifecycleFlow::Actions {
                         agent: target.agent,
+                        active: target.active,
                         cancellable: target.cancellable,
                         pending_operation: target.pending_operation,
                         selected: 0,
@@ -1684,6 +1827,7 @@ impl TerminalSession {
             }
             TerminalIntent::MoveAgentAction(offset) => {
                 if let Some(AgentLifecycleFlow::Actions {
+                    active,
                     cancellable,
                     pending_operation,
                     selected,
@@ -1692,6 +1836,11 @@ impl TerminalSession {
                 {
                     let count = usize::from(*cancellable)
                         .saturating_add(usize::from(pending_operation.is_some()))
+                        .saturating_add(if *active && pending_operation.is_none() {
+                            4
+                        } else {
+                            0
+                        })
                         .saturating_add(1);
                     *selected = selected.saturating_add_signed(offset).min(count - 1);
                 }
@@ -1701,6 +1850,7 @@ impl TerminalSession {
             TerminalIntent::ActivateAgentAction => {
                 let Some(AgentLifecycleFlow::Actions {
                     agent,
+                    active,
                     cancellable,
                     pending_operation,
                     selected,
@@ -1723,8 +1873,79 @@ impl TerminalSession {
                         Some(AgentLifecycleFlow::ConfirmAcknowledgement { operation });
                     return Ok(TerminalLoopOutcome::Redraw);
                 }
+                if active && pending_operation.is_none() {
+                    let action = match selected.saturating_sub(index) {
+                        0 => AgentTextAction::Delegate,
+                        1 => AgentTextAction::Message,
+                        2 => AgentTextAction::Complete,
+                        3 => AgentTextAction::Fail,
+                        _ => {
+                            self.agent_flow = None;
+                            return Ok(TerminalLoopOutcome::Redraw);
+                        }
+                    };
+                    self.agent_text = Some(String::new());
+                    self.agent_flow = Some(AgentLifecycleFlow::Text { agent, action });
+                    return Ok(TerminalLoopOutcome::Redraw);
+                }
                 self.agent_flow = None;
                 Ok(TerminalLoopOutcome::Redraw)
+            }
+            TerminalIntent::EditAgentText(character) => {
+                if let Some(value) = self.agent_text.as_mut() {
+                    if value.len().saturating_add(character.len_utf8()) <= MAX_AGENT_TEXT_BYTES {
+                        value.push(character);
+                        self.notice = None;
+                    } else {
+                        self.notice = Some("Agent input exceeds its limit".to_owned());
+                    }
+                }
+                Ok(TerminalLoopOutcome::Redraw)
+            }
+            TerminalIntent::BackspaceAgentText => {
+                if let Some(value) = self.agent_text.as_mut() {
+                    let end = UnicodeSegmentation::grapheme_indices(value.as_str(), true)
+                        .next_back()
+                        .map_or(0, |(index, _)| index);
+                    value.truncate(end);
+                }
+                self.notice = None;
+                Ok(TerminalLoopOutcome::Redraw)
+            }
+            TerminalIntent::ClearAgentText => {
+                if let Some(value) = self.agent_text.as_mut() {
+                    value.clear();
+                }
+                self.notice = None;
+                Ok(TerminalLoopOutcome::Redraw)
+            }
+            TerminalIntent::SubmitAgentText => {
+                let Some(AgentLifecycleFlow::Text { agent, action }) = self.agent_flow else {
+                    return Ok(TerminalLoopOutcome::Noop);
+                };
+                let value = self.agent_text.take().unwrap_or_default();
+                if value.trim().is_empty() {
+                    self.agent_text = Some(value);
+                    self.notice = Some("Agent input cannot be empty".to_owned());
+                    return Ok(TerminalLoopOutcome::Redraw);
+                }
+                self.pending_agent_command = Some(match action {
+                    AgentTextAction::Delegate => AgentTextCommand::Delegate {
+                        agent,
+                        title: value,
+                    },
+                    AgentTextAction::Message => AgentTextCommand::Message { agent, body: value },
+                    AgentTextAction::Complete => AgentTextCommand::Complete {
+                        agent,
+                        outcome: value,
+                    },
+                    AgentTextAction::Fail => AgentTextCommand::Fail {
+                        agent,
+                        reason: value,
+                    },
+                });
+                self.agent_flow = None;
+                Ok(TerminalLoopOutcome::SubmitAgentText)
             }
             TerminalIntent::ConfirmAgentAction => match self.agent_flow.take() {
                 Some(AgentLifecycleFlow::ConfirmCancel { agent }) => {
@@ -1737,6 +1958,23 @@ impl TerminalSession {
             },
             TerminalIntent::CancelAgentFlow => {
                 self.agent_flow = None;
+                self.agent_text = None;
+                self.notice = None;
+                Ok(TerminalLoopOutcome::Redraw)
+            }
+            TerminalIntent::ConfirmContextReduce => {
+                self.confirming_context_reduce = true;
+                self.notice =
+                    Some("Reduce Context checkpoint? Enter confirms; Escape returns".to_owned());
+                Ok(TerminalLoopOutcome::Redraw)
+            }
+            TerminalIntent::ReduceContext => {
+                self.confirming_context_reduce = false;
+                self.notice = None;
+                Ok(TerminalLoopOutcome::ReduceContext)
+            }
+            TerminalIntent::CancelContextReduce => {
+                self.confirming_context_reduce = false;
                 self.notice = None;
                 Ok(TerminalLoopOutcome::Redraw)
             }
@@ -1756,6 +1994,9 @@ impl TerminalSession {
                     }
                     BlockerEntryAction::LoadToolApproval { call } => {
                         Ok(TerminalLoopOutcome::LoadToolApproval(call))
+                    }
+                    BlockerEntryAction::RetryProvider { turn } => {
+                        Ok(TerminalLoopOutcome::RetryProvider(turn))
                     }
                     BlockerEntryAction::None => Ok(TerminalLoopOutcome::Noop),
                 }
@@ -2364,6 +2605,8 @@ impl TerminalSession {
             )
         ) {
             TerminalInputContext::AgentConfirmation
+        } else if matches!(self.agent_flow, Some(AgentLifecycleFlow::Text { .. })) {
+            TerminalInputContext::AgentText
         } else if matches!(self.credential_flow, Some(CredentialFlow::Actions { .. })) {
             TerminalInputContext::CredentialActions
         } else if matches!(self.credential_flow, Some(CredentialFlow::Secret { .. })) {
@@ -2386,6 +2629,10 @@ impl TerminalSession {
             TerminalInputContext::Stats
         } else if self.controller.is_agent_center() {
             TerminalInputContext::AgentCenter
+        } else if self.confirming_context_reduce {
+            TerminalInputContext::ContextConfirmation
+        } else if self.controller.is_context() {
+            TerminalInputContext::Context
         } else if self.controller.is_blocker_center() {
             TerminalInputContext::BlockerCenter
         } else if self.controller.is_tool_approval() {
@@ -2758,11 +3005,13 @@ impl TerminalSession {
             layout.show_agent_lifecycle_flow(match flow {
                 AgentLifecycleFlow::Actions {
                     agent,
+                    active,
                     cancellable,
                     pending_operation,
                     selected,
                 } => AgentLifecycleFlowView::Actions {
                     agent,
+                    active,
                     cancellable,
                     pending_operation,
                     selected,
@@ -2773,7 +3022,15 @@ impl TerminalSession {
                 AgentLifecycleFlow::ConfirmAcknowledgement { operation } => {
                     AgentLifecycleFlowView::ConfirmAcknowledgement { operation }
                 }
+                AgentLifecycleFlow::Text { agent, action } => AgentLifecycleFlowView::Text {
+                    agent,
+                    action: action.label(),
+                    byte_len: self.agent_text.as_ref().map_or(0, String::len),
+                },
             });
+        }
+        if self.confirming_context_reduce {
+            layout.show_context_reduce_confirmation(&view.context);
         }
         Ok(layout)
     }
@@ -3287,6 +3544,100 @@ where
                 let frame = session.frame(Some(config), &view)?;
                 surface.write_frame(&renderer.draw(&frame)?)?;
             }
+            TerminalLoopOutcome::ReduceContext => {
+                let result = if let Some(ledger) = snapshot.refresh_ledger {
+                    preflight_product_context_reduction(ledger, config).and_then(|()| {
+                        let mut runtime = open_product_context_runtime(ledger)?;
+                        let draft = runtime
+                            .prepare_context_checkpoint(ContextReductionPolicy::default())
+                            .map_err(ProductDriverError::from)?;
+                        runtime
+                            .publish_context_checkpoint(draft)
+                            .map_err(ProductDriverError::from)?;
+                        Ok(())
+                    })
+                } else {
+                    Err(ProductDriverError::IncompleteState)
+                };
+                match result {
+                    Ok(()) => {
+                        if let Some(ledger) = snapshot.refresh_ledger {
+                            match refresh_terminal_view(
+                                ledger,
+                                config,
+                                session.controller.slash_query(),
+                            ) {
+                                Ok(refreshed) => {
+                                    session.controller.reconcile_snapshot(&refreshed.view);
+                                    *config = refreshed.config;
+                                    view = refreshed.view;
+                                    session.notice = Some("Context checkpoint reduced".to_owned());
+                                }
+                                Err(_) => {
+                                    session.notice = Some(
+                                        "Context reduced; refresh failed, showing previous view"
+                                            .to_owned(),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        session.notice =
+                            Some("Context reduction failed; showing previous snapshot".to_owned());
+                    }
+                }
+                let frame = session.frame(Some(config), &view)?;
+                surface.write_frame(&renderer.draw(&frame)?)?;
+            }
+            TerminalLoopOutcome::RetryProvider(turn) => {
+                let result = if let Some(product) = product.as_deref_mut() {
+                    product.retry_provider(turn)
+                } else if let Some(ledger) = snapshot.refresh_ledger {
+                    let turn = TurnId::new(turn).map_err(RuntimeError::Model)?;
+                    let mut runtime = RuntimeKernel::open_existing_strict(ledger)?;
+                    runtime.request_blocked_turn_recovery(turn)?;
+                    Ok(())
+                } else {
+                    Err(TerminalError::ViewModelRequired)
+                };
+                match result {
+                    Ok(()) => {
+                        if let Some(ledger) = snapshot.refresh_ledger {
+                            match refresh_terminal_view(
+                                ledger,
+                                config,
+                                session.controller.slash_query(),
+                            ) {
+                                Ok(refreshed) => {
+                                    session.controller.reconcile_snapshot(&refreshed.view);
+                                    *config = refreshed.config;
+                                    view = refreshed.view;
+                                    session.notice = Some(
+                                        "Provider retry armed; resume remains explicit".to_owned(),
+                                    );
+                                }
+                                Err(_) => {
+                                    session.notice = Some(
+                                        "Provider retry armed; refresh failed, showing previous snapshot"
+                                            .to_owned(),
+                                    );
+                                }
+                            }
+                        } else {
+                            session.notice =
+                                Some("Provider retry armed; resume remains explicit".to_owned());
+                        }
+                    }
+                    Err(_) => {
+                        session.notice = Some(
+                            "Provider retry unavailable; showing previous snapshot".to_owned(),
+                        );
+                    }
+                }
+                let frame = session.frame(Some(config), &view)?;
+                surface.write_frame(&renderer.draw(&frame)?)?;
+            }
             outcome @ (TerminalLoopOutcome::RefreshProviderDiscovery
             | TerminalLoopOutcome::RefreshProviderDiscoveryOnOpen) => {
                 let on_open =
@@ -3561,6 +3912,88 @@ where
                     session.agent_flow =
                         Some(AgentLifecycleFlow::ConfirmAcknowledgement { operation });
                     session.notice = Some("Team operation acknowledgement unavailable".to_owned());
+                }
+                let frame = session.frame(Some(config), &view)?;
+                surface.write_frame(&renderer.draw(&frame)?)?;
+            }
+            TerminalLoopOutcome::SubmitAgentText => {
+                let command = session
+                    .pending_agent_command
+                    .take()
+                    .ok_or(TerminalError::ViewModelRequired)?;
+                let result = if let Some(product) = product.as_deref_mut() {
+                    match &command {
+                        AgentTextCommand::Delegate { agent, title } => {
+                            product.delegate_agent(*agent, title.clone())
+                        }
+                        AgentTextCommand::Message { agent, body } => {
+                            product.message_agent(*agent, body.clone())
+                        }
+                        AgentTextCommand::Complete { agent, outcome } => {
+                            product.complete_agent(*agent, outcome.clone())
+                        }
+                        AgentTextCommand::Fail { agent, reason } => {
+                            product.fail_agent(*agent, reason.clone())
+                        }
+                    }
+                } else {
+                    Err(TerminalError::ProductDriver(
+                        ProductDriverError::CurrentAgentUnavailable,
+                    ))
+                };
+                match result {
+                    Ok(operation) => {
+                        session.agent_text = None;
+                        if let Some(ledger) = snapshot.refresh_ledger
+                            && let Ok(refreshed) = refresh_terminal_view(
+                                ledger,
+                                config,
+                                session.controller.slash_query(),
+                            )
+                        {
+                            session.controller.reconcile_snapshot(&refreshed.view);
+                            *config = refreshed.config;
+                            view = refreshed.view;
+                        }
+                        session.notice = Some(format!(
+                            "Agent operation {operation} committed; acknowledgement pending"
+                        ));
+                    }
+                    Err(_) => {
+                        match command {
+                            AgentTextCommand::Delegate { agent, title } => {
+                                session.agent_text = Some(title);
+                                session.agent_flow = Some(AgentLifecycleFlow::Text {
+                                    agent,
+                                    action: AgentTextAction::Delegate,
+                                });
+                            }
+                            AgentTextCommand::Message { agent, body } => {
+                                session.agent_text = Some(body);
+                                session.agent_flow = Some(AgentLifecycleFlow::Text {
+                                    agent,
+                                    action: AgentTextAction::Message,
+                                });
+                            }
+                            AgentTextCommand::Complete { agent, outcome } => {
+                                session.agent_text = Some(outcome);
+                                session.agent_flow = Some(AgentLifecycleFlow::Text {
+                                    agent,
+                                    action: AgentTextAction::Complete,
+                                });
+                            }
+                            AgentTextCommand::Fail { agent, reason } => {
+                                session.agent_text = Some(reason);
+                                session.agent_flow = Some(AgentLifecycleFlow::Text {
+                                    agent,
+                                    action: AgentTextAction::Fail,
+                                });
+                            }
+                        }
+                        session.notice = Some(
+                            "Agent operation failed; input remains available for retry".to_owned(),
+                        );
+                    }
                 }
                 let frame = session.frame(Some(config), &view)?;
                 surface.write_frame(&renderer.draw(&frame)?)?;
@@ -4022,6 +4455,10 @@ mod tests {
         acknowledgements: Vec<u64>,
         acknowledgement_failures: usize,
         agent_cancellations: Vec<u64>,
+        agent_delegations: Vec<(u64, String)>,
+        agent_messages: Vec<(u64, String)>,
+        agent_completions: Vec<(u64, String)>,
+        agent_failures: Vec<(u64, String)>,
         team_acknowledgements: Vec<u64>,
     }
 
@@ -4036,6 +4473,10 @@ mod tests {
                 acknowledgements: Vec::new(),
                 acknowledgement_failures: 0,
                 agent_cancellations: Vec::new(),
+                agent_delegations: Vec::new(),
+                agent_messages: Vec::new(),
+                agent_completions: Vec::new(),
+                agent_failures: Vec::new(),
                 team_acknowledgements: Vec::new(),
             }
         }
@@ -4107,8 +4548,32 @@ mod tests {
             Ok(91)
         }
 
+        fn delegate_agent(&mut self, parent: u64, title: String) -> Result<u64, TerminalError> {
+            self.agent_delegations.push((parent, title));
+            Ok(92)
+        }
+
+        fn message_agent(&mut self, agent: u64, body: String) -> Result<u64, TerminalError> {
+            self.agent_messages.push((agent, body));
+            Ok(93)
+        }
+
+        fn complete_agent(&mut self, agent: u64, outcome: String) -> Result<u64, TerminalError> {
+            self.agent_completions.push((agent, outcome));
+            Ok(94)
+        }
+
+        fn fail_agent(&mut self, agent: u64, reason: String) -> Result<u64, TerminalError> {
+            self.agent_failures.push((agent, reason));
+            Ok(95)
+        }
+
         fn acknowledge_team_operation(&mut self, operation: u64) -> Result<(), TerminalError> {
             self.team_acknowledgements.push(operation);
+            Ok(())
+        }
+
+        fn retry_provider(&mut self, _turn: u64) -> Result<(), TerminalError> {
             Ok(())
         }
     }
@@ -4369,6 +4834,40 @@ mod tests {
         assert_eq!(
             input.apply(TerminalInputEvent::Enter, TerminalInputContext::Other),
             TerminalIntent::None
+        );
+    }
+
+    #[test]
+    fn terminal_context_reduce_requires_explicit_confirmation() {
+        let mut input = TerminalInputState::new("/context").expect("context input state");
+
+        assert_eq!(
+            input.apply(
+                TerminalInputEvent::Character('r'),
+                TerminalInputContext::Context,
+            ),
+            TerminalIntent::ConfirmContextReduce
+        );
+        assert_eq!(
+            input.apply(
+                TerminalInputEvent::Enter,
+                TerminalInputContext::ContextConfirmation,
+            ),
+            TerminalIntent::ReduceContext
+        );
+        assert_eq!(
+            input.apply(
+                TerminalInputEvent::Escape,
+                TerminalInputContext::ContextConfirmation,
+            ),
+            TerminalIntent::CancelContextReduce
+        );
+        assert_eq!(
+            input.apply(
+                TerminalInputEvent::RefreshSnapshot,
+                TerminalInputContext::Context,
+            ),
+            TerminalIntent::RefreshSnapshot
         );
     }
 
@@ -6939,6 +7438,112 @@ favorite = true
         assert!(!paths.project().exists());
         assert!(!held_team_ledger.exists());
         std::fs::remove_dir_all(root).expect("remove Agent action fixture");
+    }
+
+    #[test]
+    fn terminal_agent_lifecycle_text_actions_reach_product_boundary() {
+        let root = terminal_test_root("agent-lifecycle-text");
+        let ledger = root.join("runtime.ledger");
+        let team_ledger = terminal_sidecar_path(&ledger, "team");
+        let tool_ledger = terminal_sidecar_path(&ledger, "tool");
+        let paths = ConfigPaths::new(root.join("user.toml"), root.join("project.toml"));
+        std::fs::create_dir_all(&root).expect("create Agent lifecycle fixture directory");
+        let (mut runtime, _) =
+            RuntimeKernel::open_with_team_and_tools(&ledger, &team_ledger, &tool_ledger, 1)
+                .expect("open Agent lifecycle runtime");
+        let root_commit = runtime
+            .dispatch_team(TeamCommand::AdmitRoot {
+                task: TaskSpec::new("private-lifecycle-root", TaskScope::default()),
+                budget: ResourceBudget::new(2_000, 8),
+                capabilities: CapabilitySnapshot::default(),
+            })
+            .expect("admit Agent lifecycle root");
+        runtime
+            .acknowledge_team_operation(root_commit.operation)
+            .expect("acknowledge lifecycle root");
+        drop(runtime);
+
+        let mut config =
+            ConfigRuntime::open(paths.clone(), ConfigDocument::empty()).expect("config runtime");
+        let view = build_terminal_view(&ledger, &config, "/").expect("Agent lifecycle view");
+        let mut events = "agent"
+            .chars()
+            .map(|character| {
+                Event::Key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
+            })
+            .collect::<VecDeque<_>>();
+        events.push_back(Event::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )));
+        for (offset, value) in [
+            (1, "private-delegate"),
+            (2, "private-message"),
+            (3, "private-complete"),
+            (4, "private-fail"),
+        ] {
+            events.push_back(Event::Key(KeyEvent::new(
+                KeyCode::Char('a'),
+                KeyModifiers::NONE,
+            )));
+            for _ in 0..offset {
+                events.push_back(Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)));
+            }
+            events.push_back(Event::Key(KeyEvent::new(
+                KeyCode::Enter,
+                KeyModifiers::NONE,
+            )));
+            events.extend(value.chars().map(|character| {
+                Event::Key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
+            }));
+            events.push_back(Event::Key(KeyEvent::new(
+                KeyCode::Enter,
+                KeyModifiers::NONE,
+            )));
+        }
+        events.push_back(Event::Key(KeyEvent::new(
+            KeyCode::Char('q'),
+            KeyModifiers::CONTROL,
+        )));
+
+        let mut product = RecordingTerminalProductActions::new([]);
+        let output = run_terminal_loop_with_product_actions(
+            Vec::new(),
+            FakeTerminalMode::default(),
+            &mut config,
+            TerminalSnapshotSource {
+                initial: &view,
+                refresh_ledger: None,
+                viewport: Viewport::new(80, 24).expect("Agent lifecycle viewport"),
+            },
+            &mut product,
+            move || Ok(events.pop_front().expect("bounded Agent lifecycle events")),
+        )
+        .expect("Agent lifecycle loop");
+        let output = String::from_utf8(output).expect("Agent lifecycle VT output");
+
+        assert_eq!(
+            product.agent_delegations,
+            [(1, "private-delegate".to_owned())]
+        );
+        assert_eq!(product.agent_messages, [(1, "private-message".to_owned())]);
+        assert_eq!(
+            product.agent_completions,
+            [(1, "private-complete".to_owned())]
+        );
+        assert_eq!(product.agent_failures, [(1, "private-fail".to_owned())]);
+        for private in [
+            "private-lifecycle-root",
+            "private-delegate",
+            "private-message",
+            "private-complete",
+            "private-fail",
+        ] {
+            assert!(!output.contains(private));
+        }
+        assert!(!paths.user().exists());
+        assert!(!paths.project().exists());
+        std::fs::remove_dir_all(root).expect("remove Agent lifecycle fixture");
     }
 
     #[test]
@@ -10303,6 +10908,50 @@ timezone = "local"
         );
         assert!(!ledger.exists());
         std::fs::remove_dir_all(root).expect("remove refresh failure fixture");
+    }
+
+    #[test]
+    fn terminal_context_status_and_reduce_failure_are_explicit_and_no_write() {
+        let root = terminal_test_root("context-terminal-failure");
+        let ledger = root.join("runtime.ledger");
+        let paths = ConfigPaths::new(root.join("user.toml"), root.join("project.toml"));
+        let mut config =
+            ConfigRuntime::open(paths.clone(), ConfigDocument::empty()).expect("config runtime");
+        let view = build_terminal_view(&ledger, &config, "/").expect("initial context view");
+        let mut events = "context"
+            .chars()
+            .map(|character| {
+                Event::Key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
+            })
+            .collect::<VecDeque<_>>();
+        events.extend([
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL)),
+        ]);
+
+        let output = run_terminal_loop_with_snapshot_refresh(
+            Vec::new(),
+            FakeTerminalMode::default(),
+            &mut config,
+            &view,
+            &ledger,
+            Viewport::new(100, 24).expect("context viewport"),
+            move || Ok(events.pop_front().expect("bounded context events")),
+        )
+        .expect("context loop");
+        let output = String::from_utf8(output).expect("context VT output");
+
+        assert!(output.contains("Context"), "{output}");
+        assert!(output.contains("Context reduc"), "{output}");
+        assert!(output.contains("failed; showing previous"), "{output}");
+        assert!(!ledger.exists());
+        assert!(!paths.user().exists());
+        assert!(!paths.project().exists());
+        if root.exists() {
+            std::fs::remove_dir_all(root).expect("remove context terminal fixture");
+        }
     }
 
     #[test]

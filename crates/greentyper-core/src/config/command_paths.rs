@@ -52,6 +52,7 @@ pub enum CommandTarget {
     ModelSelector,
     Stats,
     AgentCenter,
+    Context,
     BlockerCenter,
 }
 
@@ -148,13 +149,14 @@ const fn section(canonical: &'static str, section: ConfigSection) -> CommandPath
     nested(canonical, CommandTarget::ConfigSection { section })
 }
 
-const ROOT_COMMAND_COUNT: usize = 5;
+const ROOT_COMMAND_COUNT: usize = 6;
 
 const NAVIGATION_PATHS: &[CommandPath] = &[
     root("/config", CommandTarget::ConfigCenter),
     root("/model", CommandTarget::ModelSelector),
     root("/stats", CommandTarget::Stats),
     root("/agent", CommandTarget::AgentCenter),
+    root("/context", CommandTarget::Context),
     root("/blockers", CommandTarget::BlockerCenter),
     section("/config provider", ConfigSection::Provider),
     nested(
