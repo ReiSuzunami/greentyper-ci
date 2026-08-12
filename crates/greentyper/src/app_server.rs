@@ -509,8 +509,7 @@ where
                     Ok(product_state) => product_state,
                     Err(_) => return runtime_control_error(request.id),
                 };
-                let (status, head) = if product_state && pending_turn.is_some() {
-                    let turn = pending_turn.expect("prepared Product delivery has a Turn");
+                let (status, head) = if let (true, Some(turn)) = (product_state, pending_turn) {
                     let mut driver = match ProductDriver::open_existing_for_delivery(
                         &self.runtime_path,
                         turn,
