@@ -672,7 +672,9 @@ fn now_unix_nanos() -> u128 {
 mod tests {
     use super::*;
     use std::fs;
+    #[cfg(unix)]
     use std::sync::Arc;
+    #[cfg(unix)]
     use std::thread;
 
     fn temp_root(label: &str) -> PathBuf {
