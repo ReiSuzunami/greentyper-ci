@@ -536,8 +536,12 @@ process-local Agent Session
 authority. Missing Team state stays unavailable without creating files; an
 incomplete final frame is reported as recovery required without truncation or
 repair, while corruption and incomplete Product sidecars fail closed. Browsing
-does not acknowledge Team operations or mutate Runtime, Team, Tool, or Config
-state.
+itself writes nothing. `A` opens a bounded action menu for the selected Agent;
+an explicit confirmation can cancel one non-terminal Agent through its rebound
+Session. The committed Team operation remains pending until a separate
+confirmation acknowledges its exact operation ID. Restart re-exposes that
+pending acknowledgement, and a failed acknowledgement leaves it retryable.
+These actions never write Runtime, Tool, or Config state.
 `/blockers` now lists the latest Runtime, Team, Task, Tool, and Config blockers.
 The list and its non-Tool details come from local snapshots. Enter on a Tool
 approval first shows a local recovery warning. A second Enter explicitly
@@ -573,7 +577,7 @@ automatic transport retry or partial-stream reconnect, Messages reasoning
 blocks, provider-native Context Mode execution, broader multi-Tool approval
 presentation, broader Provider and Tool adapters,
 Workspace, Agent retry,
-TUI Agent lifecycle actions, general App Server Runtime control beyond the exact
+TUI delegation, messaging, completion, and failure actions, general App Server Runtime control beyond the exact
 cancel/retry/resume recovery flow, and
 remote App Server transport remain. The loopback Provider tracer remains
 an internal harness; `local.echo` is intentionally a fixed opt-in command rather

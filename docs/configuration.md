@@ -240,9 +240,11 @@ Likewise, `/model` browses configured Presets and release candidates while
 `/config model` edits preset definitions. A second Enter from compatible release
 detail opens a user-scope starter Draft; after preview and commit, the resulting
 configured Preset can be selected for the current Agent's next Turn.
-`/agent` browses the latest successful Team sidecar projection. It is an
-inspection surface,
-not a route for lifecycle commands or Agent Session authority.
+`/agent` browses the latest successful Team sidecar projection. Browsing is
+read-only; `A` may explicitly cancel the selected non-terminal Agent and later
+acknowledge the exact pending Team operation. The numeric Agent and operation
+IDs are selectors only: every mutation still requires a Session rebound from
+validated Product recovery.
 `/blockers` lists Runtime, Team, Task, Tool, and Config blockers from the latest
 local projections. The first Enter on a Tool approval shows a local warning;
 the second Enter confirms an explicit recovery action. The product then
@@ -291,8 +293,15 @@ complete Team prefix followed by an incomplete final frame remains visible with
 an explicit recovery-required byte count and is never repaired by the browser;
 checksum, schema, state, path, lock, or incomplete-sidecar failures stop initial
 terminal entry or fail a later refresh. The prior complete snapshot stays active
-after a failed refresh. The browser offers no dispatch, acknowledgement,
-approval, messaging, or lifecycle action.
+after a failed refresh. Browsing and detail navigation do not dispatch or
+acknowledge anything. `A` opens a local action menu for the selected row. Cancel
+requires confirmation, resolves the selected ID to an existing rebound Session,
+and commits one Team cancellation without touching Runtime, Tool, or Config.
+The resulting operation remains `committed_awaiting_acknowledgement`; a separate
+confirmation acknowledges only that operation ID. Restart preserves this
+recovery path, and acknowledgement failure keeps the confirmation and pending
+operation available for retry. Delegation, messaging, completion, failure,
+retry, and Workspace actions remain outside this TUI surface.
 
 F6 or Ctrl-R requests one local snapshot refresh from the Slash Panel,
 `/model`, `/stats`, `/agent`, or `/blockers`. Runtime, Usage, Team, Config, statusline, and

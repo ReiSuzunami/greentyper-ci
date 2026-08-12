@@ -109,7 +109,10 @@ atomically.
 The same private terminal composition now owns `/model`, `/stats`, `/agent`, and `/blockers`
 browsers over local Config Catalog, Usage, and strict Team-sidecar projections.
 All provide bounded query/group/row/detail navigation. Stats and Agent browsing
-remain read-only. On compatible release detail, a second Enter creates an
+remain read-only. The Agent Center additionally owns a bounded `A` action flow:
+selected-Agent cancellation and exact pending-operation acknowledgement both
+require confirmation and delegate authority to ProductDriver; restart and
+failure preserve the pending operation for retry. On compatible release detail, a second Enter creates an
 ordinary revision-bound user-scope Preset Draft through the core Config Runtime;
 CLI and App Server entry points reuse the same operation. On configured Model
 detail, a second Enter may stage one bounded Runtime selection for the
@@ -166,7 +169,8 @@ retrievable and unacknowledged. The
 three Ledgers are inspected independently, not as a transactional snapshot.
 Project/user Preset defaults are Config-owned and now appear read-only in that
 browser; current-Agent pending selection remains a separate Runtime event.
-New-Agent inheritance and Agent lifecycle actions remain outside that browser
+New-Agent inheritance is handled by Delegation, while Agent Center lifecycle
+actions beyond cancellation/acknowledgement remain outside that browser
 boundary. The local App Server lifecycle surface copies only the effective
 default Preset ID at Delegation and can run one exact Active-child Turn under
 that inherited identity; it reuses rebound Session authority and ordinary

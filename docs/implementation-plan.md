@@ -443,14 +443,19 @@ estimated, missing, internally inconsistent, and overflowed states distinct.
 The adaptive statusline exposes compact 1-hour ratios when width permits.
 Up/Down selects rows and Enter opens bounded detail. Real-key tests prove
 Runtime, Team, and Tool Ledger bytes remain unchanged.
-The root `/agent` route now supplies a read-only browser over a shared-lock Team
-sidecar inspection. It navigates canonical Agent rows and bounded detail without
+The root `/agent` route now supplies a browser over a shared-lock Team sidecar
+inspection. It navigates canonical Agent rows and bounded detail without
 exposing message bodies, capability/scope labels, Completion Capsules, or Agent
 Session authority. Missing state creates nothing; incomplete final-frame bytes
 are reported without repair; corruption and incomplete Product sidecars fail
-closed. Real-key tests prove Runtime, Team, Tool, and Config bytes remain
-unchanged. Lifecycle actions, Team-operation acknowledgement, and Workspace
-presentation remain outside this slice.
+closed. Browsing remains read-only. A bounded `A` flow explicitly cancels the
+selected non-terminal Agent through ProductDriver, leaves the committed Team
+operation pending, and separately acknowledges that exact operation after
+confirmation. Restart recovers the pending operation; injected acknowledgement
+failure preserves the modal and permits retry. Real-key tests prove Runtime,
+Tool, and Config bytes remain unchanged across mutation and recovery. TUI
+delegation, messaging, completion, failure, retry, and Workspace presentation
+remain outside this slice.
 F6 or Ctrl-R now refreshes the local Config/statusline, Model, Usage, and Team
 snapshot from the Slash Panel or any read-only browser. Replacement is
 all-or-old at the TUI boundary: inspection or projection failure keeps the prior
@@ -772,8 +777,10 @@ lifecycle transitions usable and recoverable without exposing Team text or
 Session authority. Delegation now freezes the effective default Preset ID into
 the child, and the App Server can execute and recover one exact Active-child
 Provider Turn under that inherited ID without copying Config, credentials, or
-parent authority. Workspace allocation/leases/read sets/merge, Agent retry, and
-TUI lifecycle actions remain pending.
+parent authority. The Direct VT Agent Center now adds explicit selected-Agent
+cancellation and separate pending-operation acknowledgement with restart and
+retry recovery. Workspace allocation/leases/read sets/merge, Agent retry, and
+TUI delegation, messaging, completion, and failure actions remain pending.
 
 Exit criteria:
 

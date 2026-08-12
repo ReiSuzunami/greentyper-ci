@@ -500,11 +500,14 @@ charges still require a future dedicated authority path.
   provider-reported pricing authority.
   `/agent` can inspect the dedicated Team sidecar through a shared read-only
   lock and browse canonical Agent state plus bounded Task/budget metadata. It
-  never creates or repairs Ledger state, exposes Agent Session authority,
-  renders message/capsule contents, or acknowledges an operation. Incomplete
-  final-frame bytes remain visible as recovery required; corruption and partial
-  Product sidecars fail closed before terminal entry. Manual read-only snapshot
-  refresh is available; TUI Agent lifecycle actions remain pending. The local
+  never creates or repairs Ledger state, exposes Agent Session authority, or
+  renders message/capsule contents. Its explicit `A` flow can cancel the
+  selected non-terminal Agent through a rebound Session and separately
+  acknowledge the resulting exact Team operation. Restart preserves an
+  unacknowledged operation, and acknowledgement failure remains retryable.
+  Incomplete final-frame bytes remain visible as recovery required; corruption
+  and partial Product sidecars fail closed before terminal entry. Manual
+  read-only snapshot refresh is available. The local
   stdio App Server separately exposes bounded Delegate, message, complete,
   fail, cancel, and acknowledge operations. It strictly reopens existing
   Product state, chooses only from the rebound non-terminal Session set, keeps
@@ -554,8 +557,10 @@ charges still require a future dedicated authority path.
   one all-or-old TUI replacement after independent local Ledger and Config
   reads; it is not a cross-Ledger transactional snapshot. No background polling
   exists.
-  The separate `/agent` browser exposes read-only Team orchestration state, not a
-  Usage aggregate or mutation surface. It can also
+  The separate `/agent` browser exposes redacted Team orchestration state rather
+  than a Usage aggregate. Browsing is read-only; its bounded mutation surface is
+  limited to explicit selected-Agent cancellation and exact pending-operation
+  acknowledgement. It can also
   persist every user-scope Config Schema field, can create a complete Provider
   Profile or Model Preset, a named Usage Window, and a manual Price Schedule,
   and can confirm typed

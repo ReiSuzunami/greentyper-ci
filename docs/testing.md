@@ -503,9 +503,15 @@ capability labels, and scope labels are absent from VT output. Core tests
 separately prove shared-lock
 Team inspection never creates missing state, never repairs a torn final frame,
 and does not rewrite checksum corruption; Product tests prove missing and
-incomplete sidecar handling. These terminal tests do not prove lifecycle
-mutation, Team-operation acknowledgement, Workspace coordination, or
-real ConPTY behavior.
+incomplete sidecar handling. A second real-key product flow selects an Active
+child, confirms cancellation, and verifies the exact Team operation remains
+pending while Runtime and Tool bytes stay unchanged. A fresh terminal session
+then exposes that pending acknowledgement. Its first confirmation is forced to
+fail without consuming the operation; a second confirmation succeeds, proving
+restart recovery and retry without replaying the cancellation command. Private
+Task text remains absent and Config files remain uncreated. These terminal tests
+do not prove TUI delegation, messaging, completion, failure, retry, Workspace
+coordination, or real ConPTY behavior.
 A read-only real-key `/blockers` loop projects a pending Tool approval from the
 three Product Ledgers, keeps canonical arguments out of the list, survives
 resize, renders the Provider/credential/usage/cost/quota warning, and proves the
@@ -641,7 +647,7 @@ Runtime/Tool bytes, rejects dispatch or acknowledgement without any Ledger write
 while Provider recovery is pending, and leaves ordinary headless Provider Turns
 bound to the root while a child is Active. These tests do not prove remote transport,
 general Runtime control beyond the exact cancel/retry/resume flow, Workspace
-coordination, TUI lifecycle actions, arbitrary Tool
+coordination, TUI Agent lifecycle actions beyond cancel/acknowledge, arbitrary Tool
 approval/execution, or multi-client authentication.
 Child-Preset integration additionally proves Delegation persists only the
 effective default Preset ID, Team schema-2 replay yields no inherited ID, and
@@ -699,7 +705,7 @@ read-only `config catalog` integration test proves the snapshot contains no
 local path or credential reference.
 
 Remaining terminal-backend evidence covers real terminal/ConPTY resize and input,
-Agent Center lifecycle actions in the TUI, background refresh, broader multi-Tool/App Server approval,
+additional Agent Center lifecycle actions in the TUI, background refresh, broader multi-Tool/App Server approval,
 panic-abort cleanup, final host cell
 geometry, and input-ready/idle resource budgets.
 
