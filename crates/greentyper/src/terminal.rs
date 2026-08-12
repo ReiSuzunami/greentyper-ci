@@ -31,14 +31,15 @@ use crate::credential_vault::{
 };
 use crate::local_process::{LocalProcessError, LocalProcessExecutor};
 use crate::presentation::{
-    BlockerEntryAction, CredentialFlowView, DiscoveredModelAcceptance, ModelEntryAction,
-    PresentationController, PresentationControllerError, PresentationError, PresentationLayoutView,
-    PresentationSources, ProductToolApprovalView, ToolApprovalAction, ToolApprovalEntryAction,
-    TuiViewModel, Viewport, ViewportError,
+    AgentLifecycleFlowView, BlockerEntryAction, CredentialFlowView, DiscoveredModelAcceptance,
+    ModelEntryAction, PresentationController, PresentationControllerError, PresentationError,
+    PresentationLayoutView, PresentationSources, ProductToolApprovalView, ToolApprovalAction,
+    ToolApprovalEntryAction, TuiViewModel, Viewport, ViewportError,
 };
 use crate::product_driver::{
     ProductDriver, ProductDriverError, ProductInteraction, ProductToolDecision,
-    ProductToolDecisionOutcome, apply_model_preset_to_next_turn, freeze_model_selection,
+    ProductToolDecisionOutcome, acknowledge_product_team_operation,
+    apply_model_preset_to_next_turn, cancel_product_agent, freeze_model_selection,
     inspect_product_team, inspect_product_tools, stage_product_model_selection,
 };
 use crate::provider_connection::{ModelsHttpConnectionTester, ProviderConnectionTester};
@@ -68,6 +69,10 @@ trait TerminalProductActions {
     fn cancel_tool_approval(&mut self);
 
     fn acknowledge_output(&mut self, delivery: u64) -> Result<(), TerminalError>;
+
+    fn cancel_agent(&mut self, agent: u64) -> Result<u64, TerminalError>;
+
+    fn acknowledge_team_operation(&mut self, operation: u64) -> Result<(), TerminalError>;
 }
 
 struct LedgerTerminalProductActions<'a> {
@@ -191,6 +196,20 @@ impl TerminalProductActions for LedgerTerminalProductActions<'_> {
             ProductDriver::open_with_executor(self.ledger, executor, &mut interaction)?;
         let delivery = DeliveryId::new(delivery).map_err(RuntimeError::Model)?;
         driver.acknowledge(delivery)?;
+        Ok(())
+    }
+
+    fn cancel_agent(&mut self, agent: u64) -> Result<u64, TerminalError> {
+        let operation = cancel_product_agent(
+            self.ledger,
+            Some(agent),
+            "cancelled from Agent Center".to_owned(),
+        )?;
+        Ok(operation.operation.get())
+    }
+
+    fn acknowledge_team_operation(&mut self, operation: u64) -> Result<(), TerminalError> {
+        acknowledge_product_team_operation(self.ledger, operation)?;
         Ok(())
     }
 }
@@ -817,6 +836,11 @@ enum TerminalIntent {
     ToggleStatsDetail,
     MoveAgentSelection(isize),
     ToggleAgentDetail,
+    OpenAgentActions,
+    MoveAgentAction(isize),
+    ActivateAgentAction,
+    ConfirmAgentAction,
+    CancelAgentFlow,
     MoveBlockerSelection(isize),
     ActivateBlocker,
     MoveToolApprovalSelection(isize),
@@ -865,6 +889,8 @@ enum TerminalInputContext {
     ModelDiscoveryDialect,
     Stats,
     AgentCenter,
+    AgentActions,
+    AgentConfirmation,
     BlockerCenter,
     ToolApproval,
     ProductOutput,
@@ -1061,6 +1087,32 @@ impl TerminalInputState {
             TerminalInputEvent::Enter if context == TerminalInputContext::AgentCenter => {
                 TerminalIntent::ToggleAgentDetail
             }
+            TerminalInputEvent::Character('a') if context == TerminalInputContext::AgentCenter => {
+                TerminalIntent::OpenAgentActions
+            }
+            TerminalInputEvent::Character('A') if context == TerminalInputContext::AgentCenter => {
+                TerminalIntent::OpenAgentActions
+            }
+            TerminalInputEvent::Up if context == TerminalInputContext::AgentActions => {
+                TerminalIntent::MoveAgentAction(-1)
+            }
+            TerminalInputEvent::Down if context == TerminalInputContext::AgentActions => {
+                TerminalIntent::MoveAgentAction(1)
+            }
+            TerminalInputEvent::Enter if context == TerminalInputContext::AgentActions => {
+                TerminalIntent::ActivateAgentAction
+            }
+            TerminalInputEvent::Enter if context == TerminalInputContext::AgentConfirmation => {
+                TerminalIntent::ConfirmAgentAction
+            }
+            TerminalInputEvent::Escape
+                if matches!(
+                    context,
+                    TerminalInputContext::AgentActions | TerminalInputContext::AgentConfirmation
+                ) =>
+            {
+                TerminalIntent::CancelAgentFlow
+            }
             TerminalInputEvent::Up if context == TerminalInputContext::BlockerCenter => {
                 TerminalIntent::MoveBlockerSelection(-1)
             }
@@ -1233,6 +1285,8 @@ enum TerminalLoopOutcome {
     BeginDiscoveryAcceptance,
     ConfirmDiscoveryAcceptance,
     ApplyModelSelection,
+    CancelAgent(u64),
+    AcknowledgeTeamOperation(u64),
     LoadToolApproval(u64),
     ResolveToolApproval,
     CancelToolApproval,
@@ -1270,6 +1324,22 @@ enum CredentialFlow {
     },
     ConfirmForget {
         scope: ProviderCredentialScope,
+    },
+}
+
+#[derive(Clone, Copy)]
+enum AgentLifecycleFlow {
+    Actions {
+        agent: u64,
+        cancellable: bool,
+        pending_operation: Option<u64>,
+        selected: usize,
+    },
+    ConfirmCancel {
+        agent: u64,
+    },
+    ConfirmAcknowledgement {
+        operation: u64,
     },
 }
 
@@ -1379,6 +1449,7 @@ struct TerminalSession {
     pending_tool_action: Option<(u64, ProductToolDecision)>,
     credential_flow: Option<CredentialFlow>,
     pending_credential_command: Option<CredentialCommand>,
+    agent_flow: Option<AgentLifecycleFlow>,
     notice: Option<String>,
 }
 
@@ -1405,6 +1476,7 @@ impl TerminalSession {
             pending_tool_action: None,
             credential_flow: None,
             pending_credential_command: None,
+            agent_flow: None,
             notice: None,
         })
     }
@@ -1591,6 +1663,80 @@ impl TerminalSession {
             TerminalIntent::ToggleAgentDetail => {
                 let view = view.ok_or(TerminalError::ViewModelRequired)?;
                 self.controller.toggle_agent_detail(&view.agents);
+                self.notice = None;
+                Ok(TerminalLoopOutcome::Redraw)
+            }
+            TerminalIntent::OpenAgentActions => {
+                let target = view
+                    .and_then(|view| self.controller.selected_agent_action_target(&view.agents));
+                if let Some(target) = target {
+                    self.agent_flow = Some(AgentLifecycleFlow::Actions {
+                        agent: target.agent,
+                        cancellable: target.cancellable,
+                        pending_operation: target.pending_operation,
+                        selected: 0,
+                    });
+                    self.notice = None;
+                } else {
+                    self.notice = Some("Agent actions unavailable".to_owned());
+                }
+                Ok(TerminalLoopOutcome::Redraw)
+            }
+            TerminalIntent::MoveAgentAction(offset) => {
+                if let Some(AgentLifecycleFlow::Actions {
+                    cancellable,
+                    pending_operation,
+                    selected,
+                    ..
+                }) = self.agent_flow.as_mut()
+                {
+                    let count = usize::from(*cancellable)
+                        .saturating_add(usize::from(pending_operation.is_some()))
+                        .saturating_add(1);
+                    *selected = selected.saturating_add_signed(offset).min(count - 1);
+                }
+                self.notice = None;
+                Ok(TerminalLoopOutcome::Redraw)
+            }
+            TerminalIntent::ActivateAgentAction => {
+                let Some(AgentLifecycleFlow::Actions {
+                    agent,
+                    cancellable,
+                    pending_operation,
+                    selected,
+                }) = self.agent_flow
+                else {
+                    return Ok(TerminalLoopOutcome::Noop);
+                };
+                let mut index = 0;
+                if cancellable {
+                    if selected == index {
+                        self.agent_flow = Some(AgentLifecycleFlow::ConfirmCancel { agent });
+                        return Ok(TerminalLoopOutcome::Redraw);
+                    }
+                    index += 1;
+                }
+                if let Some(operation) = pending_operation {
+                    if selected == index {
+                        self.agent_flow =
+                            Some(AgentLifecycleFlow::ConfirmAcknowledgement { operation });
+                        return Ok(TerminalLoopOutcome::Redraw);
+                    }
+                }
+                self.agent_flow = None;
+                Ok(TerminalLoopOutcome::Redraw)
+            }
+            TerminalIntent::ConfirmAgentAction => match self.agent_flow.take() {
+                Some(AgentLifecycleFlow::ConfirmCancel { agent }) => {
+                    Ok(TerminalLoopOutcome::CancelAgent(agent))
+                }
+                Some(AgentLifecycleFlow::ConfirmAcknowledgement { operation }) => {
+                    Ok(TerminalLoopOutcome::AcknowledgeTeamOperation(operation))
+                }
+                _ => Ok(TerminalLoopOutcome::Noop),
+            },
+            TerminalIntent::CancelAgentFlow => {
+                self.agent_flow = None;
                 self.notice = None;
                 Ok(TerminalLoopOutcome::Redraw)
             }
@@ -2208,7 +2354,17 @@ impl TerminalSession {
     }
 
     fn input_context(&self) -> TerminalInputContext {
-        if matches!(self.credential_flow, Some(CredentialFlow::Actions { .. })) {
+        if matches!(self.agent_flow, Some(AgentLifecycleFlow::Actions { .. })) {
+            TerminalInputContext::AgentActions
+        } else if matches!(
+            self.agent_flow,
+            Some(
+                AgentLifecycleFlow::ConfirmCancel { .. }
+                    | AgentLifecycleFlow::ConfirmAcknowledgement { .. }
+            )
+        ) {
+            TerminalInputContext::AgentConfirmation
+        } else if matches!(self.credential_flow, Some(CredentialFlow::Actions { .. })) {
             TerminalInputContext::CredentialActions
         } else if matches!(self.credential_flow, Some(CredentialFlow::Secret { .. })) {
             TerminalInputContext::CredentialSecret
@@ -2596,6 +2752,27 @@ impl TerminalSession {
                 },
                 CredentialFlow::ConfirmReplace { .. } => CredentialFlowView::ConfirmReplace,
                 CredentialFlow::ConfirmForget { .. } => CredentialFlowView::ConfirmForget,
+            });
+        }
+        if let Some(flow) = self.agent_flow {
+            layout.show_agent_lifecycle_flow(match flow {
+                AgentLifecycleFlow::Actions {
+                    agent,
+                    cancellable,
+                    pending_operation,
+                    selected,
+                } => AgentLifecycleFlowView::Actions {
+                    agent,
+                    cancellable,
+                    pending_operation,
+                    selected,
+                },
+                AgentLifecycleFlow::ConfirmCancel { agent } => {
+                    AgentLifecycleFlowView::ConfirmCancel { agent }
+                }
+                AgentLifecycleFlow::ConfirmAcknowledgement { operation } => {
+                    AgentLifecycleFlowView::ConfirmAcknowledgement { operation }
+                }
             });
         }
         Ok(layout)
@@ -3297,6 +3474,95 @@ where
                 let frame = session.frame(Some(config), &view)?;
                 surface.write_frame(&renderer.draw(&frame)?)?;
             }
+            TerminalLoopOutcome::CancelAgent(agent) => {
+                if let Some(product) = product.as_deref_mut() {
+                    match product.cancel_agent(agent) {
+                        Ok(operation) => {
+                            if let Some(ledger) = snapshot.refresh_ledger {
+                                match refresh_terminal_view(
+                                    ledger,
+                                    config,
+                                    session.controller.slash_query(),
+                                ) {
+                                    Ok(refreshed) => {
+                                        session.controller.reconcile_snapshot(&refreshed.view);
+                                        *config = refreshed.config;
+                                        view = refreshed.view;
+                                        session.notice = Some(format!(
+                                            "Agent {agent} cancelled; operation {operation} awaits acknowledgement"
+                                        ));
+                                    }
+                                    Err(_) => {
+                                        session.notice = Some(format!(
+                                            "Agent cancellation committed as operation {operation}; refresh failed"
+                                        ));
+                                    }
+                                }
+                            } else {
+                                session.notice = Some(format!(
+                                    "Agent {agent} cancelled; operation {operation} awaits acknowledgement"
+                                ));
+                            }
+                        }
+                        Err(_) => {
+                            session.notice = Some(
+                                "Agent cancellation failed; refresh current state before retry"
+                                    .to_owned(),
+                            );
+                        }
+                    }
+                } else {
+                    session.notice = Some("Agent cancellation unavailable".to_owned());
+                }
+                let frame = session.frame(Some(config), &view)?;
+                surface.write_frame(&renderer.draw(&frame)?)?;
+            }
+            TerminalLoopOutcome::AcknowledgeTeamOperation(operation) => {
+                if let Some(product) = product.as_deref_mut() {
+                    match product.acknowledge_team_operation(operation) {
+                        Ok(()) => {
+                            if let Some(ledger) = snapshot.refresh_ledger {
+                                match refresh_terminal_view(
+                                    ledger,
+                                    config,
+                                    session.controller.slash_query(),
+                                ) {
+                                    Ok(refreshed) => {
+                                        session.controller.reconcile_snapshot(&refreshed.view);
+                                        *config = refreshed.config;
+                                        view = refreshed.view;
+                                        session.notice = Some(format!(
+                                            "Team operation {operation} acknowledged"
+                                        ));
+                                    }
+                                    Err(_) => {
+                                        session.notice = Some(format!(
+                                            "Team operation {operation} acknowledged; refresh failed"
+                                        ));
+                                    }
+                                }
+                            } else {
+                                session.notice =
+                                    Some(format!("Team operation {operation} acknowledged"));
+                            }
+                        }
+                        Err(_) => {
+                            session.agent_flow =
+                                Some(AgentLifecycleFlow::ConfirmAcknowledgement { operation });
+                            session.notice = Some(
+                                "Team operation acknowledgement failed; operation remains pending"
+                                    .to_owned(),
+                            );
+                        }
+                    }
+                } else {
+                    session.agent_flow =
+                        Some(AgentLifecycleFlow::ConfirmAcknowledgement { operation });
+                    session.notice = Some("Team operation acknowledgement unavailable".to_owned());
+                }
+                let frame = session.frame(Some(config), &view)?;
+                surface.write_frame(&renderer.draw(&frame)?)?;
+            }
             TerminalLoopOutcome::ResolveCredential => {
                 resolve_pending_credential_command(&mut session, config, credential_vault)?;
                 let frame = session.frame(Some(config), &view)?;
@@ -3707,10 +3973,10 @@ mod tests {
         TerminalInputContext, TerminalInputEvent, TerminalInputState, TerminalIntent,
         TerminalLoopOutcome, TerminalMode, TerminalProductActions, TerminalSession,
         TerminalSnapshotSource, TerminalSurface, TerminalToolResolution, Viewport,
-        build_terminal_view, map_crossterm_event, refresh_terminal_view, run_terminal_loop,
-        run_terminal_loop_with_connection_tester, run_terminal_loop_with_credential_vault,
-        run_terminal_loop_with_discovery_service, run_terminal_loop_with_product_actions,
-        run_terminal_loop_with_snapshot_refresh,
+        build_terminal_view, inspect_product_team, map_crossterm_event, refresh_terminal_view,
+        run_terminal_loop, run_terminal_loop_with_connection_tester,
+        run_terminal_loop_with_credential_vault, run_terminal_loop_with_discovery_service,
+        run_terminal_loop_with_product_actions, run_terminal_loop_with_snapshot_refresh,
     };
 
     struct CompleteStatsUsageProvider;
@@ -3753,6 +4019,8 @@ mod tests {
         cancellations: usize,
         acknowledgements: Vec<u64>,
         acknowledgement_failures: usize,
+        agent_cancellations: Vec<u64>,
+        team_acknowledgements: Vec<u64>,
     }
 
     impl RecordingTerminalProductActions {
@@ -3765,6 +4033,8 @@ mod tests {
                 cancellations: 0,
                 acknowledgements: Vec::new(),
                 acknowledgement_failures: 0,
+                agent_cancellations: Vec::new(),
+                team_acknowledgements: Vec::new(),
             }
         }
 
@@ -3827,6 +4097,16 @@ mod tests {
                     "injected acknowledgement failure",
                 )));
             }
+            Ok(())
+        }
+
+        fn cancel_agent(&mut self, agent: u64) -> Result<u64, TerminalError> {
+            self.agent_cancellations.push(agent);
+            Ok(91)
+        }
+
+        fn acknowledge_team_operation(&mut self, operation: u64) -> Result<(), TerminalError> {
+            self.team_acknowledgements.push(operation);
             Ok(())
         }
     }
@@ -6462,6 +6742,181 @@ favorite = true
         assert!(!paths.user().exists());
         assert!(!paths.project().exists());
         std::fs::remove_dir_all(root).expect("remove agent browser fixture");
+    }
+
+    #[test]
+    fn terminal_agent_actions_cancel_then_acknowledge_durably() {
+        let root = terminal_test_root("agent-actions-cancel");
+        let ledger = root.join("runtime.ledger");
+        let team_ledger = terminal_sidecar_path(&ledger, "team");
+        let tool_ledger = terminal_sidecar_path(&ledger, "tool");
+        let held_team_ledger = root.join("runtime.ledger.team.held");
+        let paths = ConfigPaths::new(root.join("user.toml"), root.join("project.toml"));
+        std::fs::create_dir_all(&root).expect("create Agent action fixture directory");
+        let (mut runtime, _) =
+            RuntimeKernel::open_with_team_and_tools(&ledger, &team_ledger, &tool_ledger, 2)
+                .expect("open Agent action runtime");
+        let root_commit = runtime
+            .dispatch_team(TeamCommand::AdmitRoot {
+                task: TaskSpec::new("private-action-root", TaskScope::default()),
+                budget: ResourceBudget::new(1_000, 8),
+                capabilities: CapabilitySnapshot::default(),
+            })
+            .expect("admit Agent action root");
+        let root_session = match root_commit.commit.outcome {
+            CommandOutcome::RootAdmitted { session, .. } => session,
+            other => panic!("unexpected root outcome: {other:?}"),
+        };
+        runtime
+            .acknowledge_team_operation(root_commit.operation)
+            .expect("acknowledge root operation");
+        let child = runtime
+            .dispatch_team(TeamCommand::Delegate {
+                parent: root_session,
+                task: TaskSpec::new("private-action-child", TaskScope::default()),
+                budget: ResourceBudget::new(100, 1),
+                capabilities: CapabilitySnapshot::default(),
+            })
+            .expect("delegate Agent action child");
+        runtime
+            .acknowledge_team_operation(child.operation)
+            .expect("acknowledge child operation");
+        drop(runtime);
+
+        let runtime_before = std::fs::read(&ledger).expect("read Runtime Ledger");
+        let tool_before = std::fs::read(&tool_ledger).expect("read Tool Ledger");
+        let mut config =
+            ConfigRuntime::open(paths.clone(), ConfigDocument::empty()).expect("config runtime");
+        let view = build_terminal_view(&ledger, &config, "/").expect("Agent action view");
+        let mut events = "agent"
+            .chars()
+            .map(|character| {
+                Event::Key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
+            })
+            .collect::<VecDeque<_>>();
+        events.extend([
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL)),
+        ]);
+
+        let cancelled_output = run_terminal_loop_with_snapshot_refresh(
+            Vec::new(),
+            FakeTerminalMode::default(),
+            &mut config,
+            &view,
+            &ledger,
+            Viewport::new(80, 24).expect("Agent action viewport"),
+            move || Ok(events.pop_front().expect("bounded Agent action events")),
+        )
+        .expect("Agent action loop");
+        let cancelled_output = String::from_utf8(cancelled_output).expect("Agent action VT output");
+
+        assert!(
+            cancelled_output.contains("Agent 2 / Actions"),
+            "Agent action output: {cancelled_output:?}"
+        );
+        assert!(cancelled_output.contains("> Cancel Agent"));
+        assert!(cancelled_output.contains("Agent 2 cancelled; operation 3"));
+        assert!(!cancelled_output.contains("private-action"));
+
+        let pending = inspect_product_team(&ledger)
+            .expect("inspect pending Team operation")
+            .expect("pending Team state");
+        assert_eq!(
+            pending
+                .operations
+                .iter()
+                .filter(|operation| {
+                    operation.status
+                        == greentyper_core::agent_team::TeamOperationStatus::CommittedAwaitingAcknowledgement
+                })
+                .map(|operation| operation.operation.get())
+                .collect::<Vec<_>>(),
+            [3]
+        );
+
+        let view = build_terminal_view(&ledger, &config, "/").expect("reopened Agent action view");
+        let mut events = "agent"
+            .chars()
+            .map(|character| {
+                Event::Key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
+            })
+            .collect::<VecDeque<_>>();
+        events.extend([
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL)),
+        ]);
+        let team_path = team_ledger.clone();
+        let held_path = held_team_ledger.clone();
+        let mut enter_count = 0;
+        let acknowledged_output = run_terminal_loop_with_snapshot_refresh(
+            Vec::new(),
+            FakeTerminalMode::default(),
+            &mut config,
+            &view,
+            &ledger,
+            Viewport::new(80, 24).expect("reopened Agent action viewport"),
+            move || {
+                let event = events.pop_front().expect("bounded acknowledgement events");
+                if matches!(&event, Event::Key(key) if key.code == KeyCode::Enter) {
+                    enter_count += 1;
+                    if enter_count == 3 {
+                        std::fs::rename(&team_path, &held_path)
+                            .expect("hide Team Ledger for failed acknowledgement");
+                    } else if enter_count == 4 {
+                        std::fs::rename(&held_path, &team_path)
+                            .expect("restore Team Ledger before acknowledgement retry");
+                    }
+                }
+                Ok(event)
+            },
+        )
+        .expect("reopened acknowledgement loop");
+        let acknowledged_output =
+            String::from_utf8(acknowledged_output).expect("acknowledgement VT output");
+        assert!(acknowledged_output.contains("> Acknowledge operation 3"));
+        assert!(
+            acknowledged_output
+                .contains("Team operation acknowledgement failed; operation remains pending")
+        );
+        assert!(!acknowledged_output.contains("private-action"));
+        assert_eq!(
+            std::fs::read(&ledger).expect("reread Runtime Ledger"),
+            runtime_before
+        );
+        assert_eq!(
+            std::fs::read(&tool_ledger).expect("reread Tool Ledger"),
+            tool_before
+        );
+        let team = inspect_product_team(&ledger)
+            .expect("inspect final Team Ledger")
+            .expect("Team state");
+        let child = team
+            .projection
+            .agents
+            .iter()
+            .find(|agent| agent.id.get() == 2)
+            .expect("cancelled child");
+        assert_eq!(
+            child.status,
+            greentyper_core::agent_team::AgentStatus::Cancelled
+        );
+        assert!(team.operations.iter().all(|operation| {
+            operation.status == greentyper_core::agent_team::TeamOperationStatus::Acknowledged
+        }));
+        assert!(!paths.user().exists());
+        assert!(!paths.project().exists());
+        assert!(!held_team_ledger.exists());
+        std::fs::remove_dir_all(root).expect("remove Agent action fixture");
     }
 
     #[test]

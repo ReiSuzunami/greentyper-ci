@@ -926,6 +926,8 @@ pub(crate) struct AgentCenterView {
     operations_awaiting_acknowledgement: usize,
     message_count: usize,
     agents: Vec<AgentCenterEntryView>,
+    #[serde(skip)]
+    pending_operation_ids: Vec<u64>,
 }
 
 impl From<&KernelTeamSnapshot> for AgentCenterView {
@@ -970,8 +972,23 @@ impl From<&KernelTeamSnapshot> for AgentCenterView {
                 .count(),
             message_count: projection.messages.len(),
             agents,
+            pending_operation_ids: team
+                .operations
+                .iter()
+                .filter(|operation| {
+                    operation.status == TeamOperationStatus::CommittedAwaitingAcknowledgement
+                })
+                .map(|operation| operation.operation.get())
+                .collect(),
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct AgentActionTarget {
+    pub(crate) agent: u64,
+    pub(crate) cancellable: bool,
+    pub(crate) pending_operation: Option<u64>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -1548,6 +1565,24 @@ impl PresentationController {
         ) {
             *detail = !*detail;
         }
+    }
+
+    pub(crate) fn selected_agent_action_target(
+        &self,
+        agents: &Availability<AgentCenterView>,
+    ) -> Option<AgentActionTarget> {
+        let PresentationState::AgentCenter { selected, .. } = self.state else {
+            return None;
+        };
+        let Availability::Known(agents) = agents else {
+            return None;
+        };
+        let agent = agents.agents.get(selected)?;
+        Some(AgentActionTarget {
+            agent: agent.id,
+            cancellable: !matches!(agent.status, "succeeded" | "failed" | "cancelled"),
+            pending_operation: agents.pending_operation_ids.first().copied(),
+        })
     }
 
     pub(crate) fn move_blocker_selection(&mut self, blockers: &[BlockerView], offset: isize) {
@@ -2663,6 +2698,22 @@ pub(crate) enum CredentialFlowView {
     ConfirmForget,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AgentLifecycleFlowView {
+    Actions {
+        agent: u64,
+        cancellable: bool,
+        pending_operation: Option<u64>,
+        selected: usize,
+    },
+    ConfirmCancel {
+        agent: u64,
+    },
+    ConfirmAcknowledgement {
+        operation: u64,
+    },
+}
+
 impl PresentationLayoutView {
     pub(crate) const fn viewport(&self) -> Viewport {
         self.viewport
@@ -2731,6 +2782,65 @@ impl PresentationLayoutView {
                 LayoutRowView::new("> Confirm removal", true),
                 LayoutRowView::new("Enter forgets; Escape returns", false),
                 LayoutRowView::new("the existing value cannot be recovered", false),
+            ],
+        };
+        let capacity = usize::from(self.viewport.height).saturating_sub(self.statusline.rows.len());
+        truncate_rows_keeping_selection(&mut body, capacity);
+        for row in &mut body {
+            row.text = fit_text(&row.text, usize::from(self.viewport.width));
+        }
+        self.body = body;
+    }
+
+    pub(crate) fn show_agent_lifecycle_flow(&mut self, flow: AgentLifecycleFlowView) {
+        let mut body = match flow {
+            AgentLifecycleFlowView::Actions {
+                agent,
+                cancellable,
+                pending_operation,
+                selected,
+            } => {
+                let mut rows = vec![LayoutRowView::new(
+                    format!("Agents / Agent {agent} / Actions"),
+                    false,
+                )];
+                let mut index = 0;
+                if cancellable {
+                    rows.push(LayoutRowView::new("> Cancel Agent", selected == index));
+                    index += 1;
+                }
+                if let Some(operation) = pending_operation {
+                    rows.push(LayoutRowView::new(
+                        format!("> Acknowledge operation {operation}"),
+                        selected == index,
+                    ));
+                    index += 1;
+                }
+                rows.push(LayoutRowView::new("> Return", selected == index));
+                rows.push(LayoutRowView::new("Enter selects; Escape returns", false));
+                rows.push(LayoutRowView::new(
+                    "Agent IDs select recovered Session authority only",
+                    false,
+                ));
+                rows
+            }
+            AgentLifecycleFlowView::ConfirmCancel { agent } => vec![
+                LayoutRowView::new(format!("Agents / Agent {agent} / Cancel"), false),
+                LayoutRowView::new("> Confirm cancellation", true),
+                LayoutRowView::new("Enter commits; Escape returns", false),
+                LayoutRowView::new(
+                    "the Team operation remains pending until acknowledged",
+                    false,
+                ),
+            ],
+            AgentLifecycleFlowView::ConfirmAcknowledgement { operation } => vec![
+                LayoutRowView::new("Agents / Team Operation", false),
+                LayoutRowView::new(format!("> Acknowledge operation {operation}"), true),
+                LayoutRowView::new("Enter acknowledges; Escape leaves pending", false),
+                LayoutRowView::new(
+                    "acknowledgement is durable and does not repeat the command",
+                    false,
+                ),
             ],
         };
         let capacity = usize::from(self.viewport.height).saturating_sub(self.statusline.rows.len());
@@ -3488,6 +3598,10 @@ fn agent_center_rows(
             index == selected,
         )
     }));
+    rows.push(LayoutRowView::new(
+        "A actions | Enter details | F6 refresh",
+        false,
+    ));
     rows
 }
 
@@ -3559,6 +3673,7 @@ fn agent_detail_rows(agents: &AgentCenterView, agent: &AgentCenterEntryView) -> 
             },
             false,
         ),
+        LayoutRowView::new("A actions | Escape returns", false),
     ]
 }
 
