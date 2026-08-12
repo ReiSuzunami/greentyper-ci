@@ -1509,6 +1509,25 @@ impl TerminalSession {
                         self.pending_model_selection = Some(preset);
                         Ok(TerminalLoopOutcome::ApplyModelSelection)
                     }
+                    ModelEntryAction::UpdateConfiguredStarter(preset_id) => {
+                        let runtime = runtime.ok_or(TerminalError::ConfigRuntimeRequired)?;
+                        match self.controller.begin_model_starter_update(
+                            runtime,
+                            ConfigScope::User,
+                            &preset_id,
+                        ) {
+                            Ok(()) => {
+                                self.validated_config_choice = None;
+                                self.sync_config_text();
+                                self.notice = Some(
+                                    "Release starter update staged; preview before commit"
+                                        .to_owned(),
+                                );
+                            }
+                            Err(source) => self.notice = Some(presentation_notice(&source)),
+                        }
+                        Ok(TerminalLoopOutcome::Redraw)
+                    }
                     ModelEntryAction::AcceptRelease => {
                         self.notice =
                             Some("Enter a Preset ID to accept this release starter".to_owned());
@@ -5627,6 +5646,97 @@ credential = "synthetic-starter-acceptance-reference"
             "gpt-5.6-sol"
         );
         std::fs::remove_dir_all(root).expect("remove starter acceptance fixture");
+    }
+
+    #[test]
+    fn terminal_loop_updates_a_release_starter_from_real_key_events_without_product_state() {
+        let root = terminal_test_root("model-starter-update");
+        let ledger = root.join("runtime.ledger");
+        let paths = ConfigPaths::new(root.join("user.toml"), root.join("project.toml"));
+        std::fs::create_dir_all(&root).expect("create starter update fixture directory");
+        std::fs::write(
+            paths.user(),
+            r#"schema_version = 2
+
+[providers.openai-main]
+template = "openai"
+credential = "private-terminal-starter-reference"
+dialects = ["responses", "chat_completions"]
+
+[model_presets.frontier]
+provider = "openai-main"
+model = "gpt-5.6-sol"
+dialect = "responses"
+favorite = true
+
+[model_presets.frontier.starter]
+catalog_key = "openai/gpt-5.6-sol"
+seed_revision = "2026-08-10.1"
+provider = "openai-main"
+model = "gpt-5.6-sol"
+dialect = "responses"
+"#,
+        )
+        .expect("write old release starter");
+        let mut config = ConfigRuntime::open(paths.clone(), ConfigDocument::empty())
+            .expect("open starter update Config");
+        let view = build_terminal_view(&ledger, &config, "/").expect("starter update view");
+        let mut events = "model"
+            .chars()
+            .map(|character| {
+                Event::Key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
+            })
+            .collect::<VecDeque<_>>();
+        events.extend([
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL)),
+        ]);
+
+        let output = run_terminal_loop_with_snapshot_refresh(
+            Vec::new(),
+            FakeTerminalMode::default(),
+            &mut config,
+            &view,
+            &ledger,
+            Viewport::new(120, 24).expect("starter update viewport"),
+            move || Ok(events.pop_front().expect("bounded starter update events")),
+        )
+        .expect("starter update loop");
+        let output = String::from_utf8(output).expect("starter update VT output");
+
+        for text in [
+            "2026-08-10.1",
+            "Release starter update staged; preview before commit",
+            "Config draft validated",
+        ] {
+            assert!(output.contains(text), "missing {text}: {output}");
+        }
+        assert!(!output.contains("private-terminal-starter-reference"));
+        let preset = config.model_preset("frontier").expect("updated starter");
+        assert_eq!(preset.model, "gpt-5.6-sol");
+        assert_eq!(preset.dialect, ProviderDialect::Responses);
+        assert_eq!(
+            preset.starter.expect("updated provenance").seed_revision,
+            "2026-08-10.2"
+        );
+        assert!(!ledger.exists());
+        assert!(!terminal_sidecar_path(&ledger, "team").exists());
+        assert!(!terminal_sidecar_path(&ledger, "tool").exists());
+        drop(config);
+        let reopened = ConfigRuntime::open(paths, ConfigDocument::empty())
+            .expect("reopen starter update Config");
+        assert_eq!(
+            reopened
+                .model_preset("frontier")
+                .expect("reopened starter")
+                .model,
+            "gpt-5.6-sol"
+        );
+        std::fs::remove_dir_all(root).expect("remove starter update fixture");
     }
 
     #[test]

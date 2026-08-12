@@ -835,6 +835,28 @@ where
                 };
                 self.store_draft(request.id, draft)
             }
+            "config.starter.update.begin" => {
+                let params = match parse_params::<BeginStarterUpdateParams>(request.params) {
+                    Ok(params) => params,
+                    Err(()) => return invalid_params(request.id),
+                };
+                if self.drafts.len() >= MAX_ACTIVE_DRAFTS {
+                    return error_response(
+                        Some(request.id),
+                        "resource_busy",
+                        "too many active drafts",
+                        None,
+                    );
+                }
+                let draft = match self
+                    .config
+                    .begin_model_starter_update(params.scope.into(), &params.preset)
+                {
+                    Ok(draft) => draft,
+                    Err(error) => return config_error_response(request.id, &error),
+                };
+                self.store_draft(request.id, draft)
+            }
             "config.draft.set" => {
                 let params = match parse_params::<SetDraftParams>(request.params) {
                     Ok(params) => params,
@@ -1583,6 +1605,13 @@ struct BeginStarterParams {
     preset: String,
     provider: String,
     catalog_key: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BeginStarterUpdateParams {
+    scope: WireConfigScope,
+    preset: String,
 }
 
 #[derive(Clone, Copy, Deserialize)]

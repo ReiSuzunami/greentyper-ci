@@ -325,12 +325,14 @@ pub(crate) struct ModelSelectorEntryView {
     availability: Availability<bool>,
     sources: Vec<ProviderDiscoverySource>,
     freshness: Option<ProviderDiscoveryFreshness>,
+    starter_update_available: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum ModelEntryAction {
     DetailChanged,
     ApplyConfigured(ModelPresetView),
+    UpdateConfiguredStarter(String),
     AcceptRelease,
     AcceptDiscovery(DiscoveredModelAcceptance),
     ReleaseUnavailable,
@@ -480,12 +482,15 @@ fn stats_distribution_entry_count(distribution: &UsageDistribution) -> usize {
 
 impl ModelSelectorEntryView {
     fn configured_preset(preset: ModelPresetView) -> Self {
+        let starter_update_available =
+            preset.starter_scope == Some(ConfigScope::User) && preset.starter_update_available;
         Self {
             choice: ModelSelectorChoiceView::ConfiguredPreset { preset },
             compatibility: Availability::Unknown,
             availability: Availability::Unknown,
             sources: Vec::new(),
             freshness: None,
+            starter_update_available,
         }
     }
 
@@ -542,6 +547,7 @@ impl ModelSelectorEntryView {
             availability,
             sources,
             freshness,
+            starter_update_available: false,
         }
     }
 
@@ -575,6 +581,7 @@ impl ModelSelectorEntryView {
             availability,
             sources: model.sources,
             freshness: Some(catalog.freshness),
+            starter_update_available: false,
         }
     }
 
@@ -1387,7 +1394,11 @@ impl PresentationController {
         }
         match &entry.choice {
             ModelSelectorChoiceView::ConfiguredPreset { preset } => {
-                ModelEntryAction::ApplyConfigured(preset.clone())
+                if entry.starter_update_available {
+                    ModelEntryAction::UpdateConfiguredStarter(preset.id.clone())
+                } else {
+                    ModelEntryAction::ApplyConfigured(preset.clone())
+                }
             }
             ModelSelectorChoiceView::ReleaseCatalog { model, .. }
                 if entry.compatibility == Availability::Known(true) =>
@@ -1996,6 +2007,18 @@ impl PresentationController {
         };
         self.object_create = None;
         Ok(())
+    }
+
+    pub(crate) fn begin_model_starter_update(
+        &mut self,
+        runtime: &ConfigRuntime,
+        scope: ConfigScope,
+        preset_id: &str,
+    ) -> Result<(), PresentationControllerError> {
+        self.require_discardable_editor()?;
+        let object = ConfigObjectRef::new(ConfigObjectKind::ModelPreset, preset_id);
+        let session = ConfigEditorSession::update_model_starter(runtime, scope, object.clone())?;
+        self.open_created_config_editor(runtime, object, session, true)
     }
 
     pub(crate) fn move_discovered_model_dialect(&mut self, offset: isize) {
@@ -3699,6 +3722,21 @@ fn model_detail_rows(entry: &ModelSelectorEntryView) -> Vec<LayoutRowView> {
                     false,
                 ),
             ]);
+            if let Some(starter) = &preset.starter {
+                rows.extend([
+                    LayoutRowView::new(format!("starter catalog {}", starter.catalog_key), false),
+                    LayoutRowView::new(format!("starter seed {}", starter.seed_revision), false),
+                    LayoutRowView::new(
+                        format!(
+                            "starter update available {}",
+                            entry.starter_update_available
+                        ),
+                        false,
+                    ),
+                ]);
+            } else {
+                rows.push(LayoutRowView::new("starter none", false));
+            }
         }
         ModelSelectorChoiceView::ReleaseCatalog { model, .. } => {
             let record = model.record();
@@ -6050,6 +6088,9 @@ source = "unknown"
                 default: false,
                 favorite: true,
                 fallback: Vec::new(),
+                starter: None,
+                starter_scope: None,
+                starter_update_available: false,
             },
             ModelPresetView {
                 id: "cheap".into(),
@@ -6063,6 +6104,9 @@ source = "unknown"
                 default: false,
                 favorite: false,
                 fallback: Vec::new(),
+                starter: None,
+                starter_scope: None,
+                starter_update_available: false,
             },
         ];
         let runtime = runtime(RecoveryStatus::Ready);
@@ -6112,6 +6156,157 @@ source = "unknown"
     }
 
     #[test]
+    fn model_selector_updates_a_release_starter_and_recovers_from_a_revision_conflict() {
+        let temp = TempTree::new("model-starter-update");
+        fs::write(
+            temp.paths().user(),
+            r#"schema_version = 2
+
+[providers.openai-main]
+template = "openai"
+credential = "private-presentation-starter-reference"
+dialects = ["responses", "chat_completions"]
+
+[model_presets.frontier]
+provider = "openai-main"
+model = "gpt-5.6-sol"
+dialect = "responses"
+favorite = true
+
+[model_presets.frontier.starter]
+catalog_key = "openai/gpt-5.6-sol"
+seed_revision = "2026-08-10.1"
+provider = "openai-main"
+model = "gpt-5.6-sol"
+dialect = "responses"
+"#,
+        )
+        .expect("write old release starter");
+        let mut runtime = ConfigRuntime::open(temp.paths(), ConfigDocument::empty())
+            .expect("open starter Config");
+        let presets = runtime.model_presets().expect("starter presets");
+        let catalog = runtime.catalog_models().expect("release catalog");
+        let selector = ModelSelectorView::build(&presets, &catalog, None, "frontier")
+            .expect("starter selector");
+        let entry = selector.all.first().expect("configured starter entry");
+        assert!(entry.starter_update_available);
+        let rows = model_detail_rows(entry)
+            .into_iter()
+            .map(|row| row.text)
+            .collect::<Vec<_>>();
+        assert!(rows.contains(&"starter seed 2026-08-10.1".to_owned()));
+        assert!(rows.contains(&"starter update available true".to_owned()));
+        assert!(!rows.iter().any(|row| row.contains("private-presentation")));
+
+        let mut controller = PresentationController::new();
+        controller
+            .set_slash_query("/model")
+            .expect("select model route");
+        controller
+            .activate(&mut runtime, ConfigScope::User, None)
+            .expect("open Model selector");
+        controller
+            .edit_model_query(Some('f'))
+            .expect("filter starter");
+        assert_eq!(
+            controller.activate_model_entry(&selector),
+            ModelEntryAction::DetailChanged
+        );
+        assert_eq!(
+            controller.activate_model_entry(&selector),
+            ModelEntryAction::UpdateConfiguredStarter("frontier".to_owned())
+        );
+        controller
+            .begin_model_starter_update(&runtime, ConfigScope::User, "frontier")
+            .expect("stage starter update");
+        assert_eq!(
+            controller
+                .preview_config(&mut runtime)
+                .expect("preview starter update")
+                .changes
+                .len(),
+            1
+        );
+
+        let mut winner_runtime = ConfigRuntime::open(temp.paths(), ConfigDocument::empty())
+            .expect("open competing Config Runtime");
+        let mut winner = ConfigEditorSession::open_from_query(
+            &winner_runtime,
+            ConfigScope::User,
+            "/config statusline preset",
+            0,
+            None,
+        )
+        .expect("open winning editor");
+        winner.stage_raw("minimal").expect("stage winning change");
+        winner
+            .commit(&mut winner_runtime)
+            .expect("commit winning revision");
+        let winner_bytes = fs::read(temp.paths().user()).expect("winner bytes");
+
+        assert!(matches!(
+            controller.commit_config(&mut runtime),
+            Err(PresentationControllerError::ConfigEditor(
+                ConfigEditorError::Config(ConfigRuntimeError::RevisionConflict { .. })
+            ))
+        ));
+        assert!(matches!(
+            controller.screen(Some(&runtime)).expect("stale editor"),
+            PresentationScreenView::ConfigEditor { dirty: true, .. }
+        ));
+        assert_eq!(
+            fs::read(temp.paths().user()).expect("bytes after conflict"),
+            winner_bytes
+        );
+
+        controller.discard_config().expect("discard stale update");
+        runtime.reload().expect("reload winning revision");
+        controller
+            .begin_model_starter_update(&runtime, ConfigScope::User, "frontier")
+            .expect("reopen starter update");
+        controller
+            .preview_config(&mut runtime)
+            .expect("preview reopened update");
+        controller
+            .commit_config(&mut runtime)
+            .expect("commit reopened update");
+        let preset = runtime.model_preset("frontier").expect("updated starter");
+        assert_eq!(preset.model, "gpt-5.6-sol");
+        assert_eq!(preset.dialect, ProviderDialect::Responses);
+        assert_eq!(
+            preset.starter.expect("updated provenance").seed_revision,
+            "2026-08-10.2"
+        );
+
+        let current = ModelSelectorView::build(
+            &runtime.model_presets().expect("current presets"),
+            &runtime.catalog_models().expect("current catalog"),
+            None,
+            "frontier",
+        )
+        .expect("current starter selector");
+        let mut current_controller = PresentationController::new();
+        current_controller
+            .set_slash_query("/model")
+            .expect("set current model route");
+        current_controller
+            .activate(&mut runtime, ConfigScope::User, None)
+            .expect("open current Model selector");
+        current_controller
+            .edit_model_query(Some('f'))
+            .expect("filter current starter");
+        assert_eq!(
+            current_controller.activate_model_entry(&current),
+            ModelEntryAction::DetailChanged
+        );
+        assert!(matches!(
+            current_controller.activate_model_entry(&current),
+            ModelEntryAction::ApplyConfigured(preset) if preset.id == "frontier"
+        ));
+        assert!(!temp.root.join("runtime.ledger").exists());
+    }
+
+    #[test]
     fn model_selector_projects_recent_usage_in_stable_deduplicated_order() {
         let temp = TempTree::new("recent-model-selector");
         let ledger = temp.root.join("runtime.ledger");
@@ -6146,6 +6341,9 @@ source = "unknown"
                 default: false,
                 favorite: false,
                 fallback: Vec::new(),
+                starter: None,
+                starter_scope: None,
+                starter_update_available: false,
             },
             ModelPresetView {
                 id: "new-preset".into(),
@@ -6159,6 +6357,9 @@ source = "unknown"
                 default: false,
                 favorite: false,
                 fallback: Vec::new(),
+                starter: None,
+                starter_scope: None,
+                starter_update_available: false,
             },
         ];
         let discovery_catalogs = [ProviderDiscoveryCatalogView {
@@ -6282,6 +6483,9 @@ source = "unknown"
             default: false,
             favorite: false,
             fallback: Vec::new(),
+            starter: None,
+            starter_scope: None,
+            starter_update_available: false,
         }];
         let runtime = runtime(RecoveryStatus::Ready);
         let config = ConfigRuntimeStatus {

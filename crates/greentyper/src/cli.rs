@@ -573,6 +573,17 @@ fn run_config(command: ConfigCommand) -> Result<(), CliError> {
             let commit = runtime.commit(draft, dry_run)?;
             write_json(&commit)
         }
+        ConfigCommand::UpdateStarter {
+            paths,
+            scope,
+            preset,
+            dry_run,
+        } => {
+            let mut runtime = open_config_runtime(paths)?;
+            let draft = runtime.begin_model_starter_update(scope, &preset)?;
+            let commit = runtime.commit(draft, dry_run)?;
+            write_json(&commit)
+        }
         ConfigCommand::Get { paths, path } => {
             let runtime = open_config_runtime(paths)?;
             let entry = runtime.get_effective(&path)?;
@@ -1154,6 +1165,12 @@ enum ConfigCommand {
         preset: String,
         provider: String,
         catalog_key: String,
+        dry_run: bool,
+    },
+    UpdateStarter {
+        paths: ConfigPaths,
+        scope: ConfigScope,
+        preset: String,
         dry_run: bool,
     },
     Get {
@@ -2157,6 +2174,18 @@ fn parse_config(mut arguments: impl Iterator<Item = String>) -> Result<ConfigCom
                 dry_run,
             })
         }
+        "update-starter" => {
+            let scope = scope.ok_or(CliError::Usage("config update-starter requires --scope"))?;
+            let [preset]: [String; 1] = positionals.try_into().map_err(|_| {
+                CliError::Usage("config update-starter requires exactly one Preset ID")
+            })?;
+            Ok(ConfigCommand::UpdateStarter {
+                paths,
+                scope,
+                preset,
+                dry_run,
+            })
+        }
         "get" => {
             reject_config_scope(scope, "--scope is not valid for config get")?;
             reject_dry_run(dry_run, "--dry-run is not valid for config get")?;
@@ -2420,6 +2449,7 @@ Usage:\n\
   greentyper config discovery status|refresh|catalog [PROFILE] [--discovery-state PATH]\n\
   greentyper config discovery accept PRESET_ID PROFILE MODEL --dialect DIALECT --scope user|project [--dry-run]\n\
   greentyper config accept-starter PRESET_ID PROVIDER CATALOG_KEY --scope user|project [--dry-run]\n\
+  greentyper config update-starter PRESET_ID --scope user|project [--dry-run]\n\
   greentyper config get PATH [--user-config PATH] [--project-config PATH]\n\
   greentyper config set PATH VALUE --scope user|project [--dry-run]\n\
   greentyper config reset PATH --scope user|project [--dry-run]\n\

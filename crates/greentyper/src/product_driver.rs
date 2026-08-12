@@ -844,6 +844,9 @@ mod tests {
             default: false,
             favorite: true,
             fallback: vec!["careful".into()],
+            starter: None,
+            starter_scope: None,
+            starter_update_available: false,
         };
 
         let dialect = apply_model_preset_to_next_turn(&mut layers, &preset);
@@ -877,6 +880,9 @@ mod tests {
             default: false,
             favorite: true,
             fallback: Vec::new(),
+            starter: None,
+            starter_scope: None,
+            starter_update_available: false,
         };
         let mut missing_layers = ConfigLayers::default();
         apply_model_preset_to_next_turn(&mut missing_layers, &preset);
