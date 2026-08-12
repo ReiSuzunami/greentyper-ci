@@ -48,6 +48,14 @@ provider-native execution remains fail-closed.
 
 Provider simulators, in-memory stores, and other test adapters live beside the interfaces they exercise. Internal helpers are not promoted into packages merely to make them independently visible.
 
+The core Workspace Coordinator slice owns bounded workspace/worktree identity
+facts and, on Unix, root-inode-bound directory handles, shared/exclusive local
+Lease locks, component-by-component no-follow Read Set capture, and bounded
+revalidation. Windows Lease/Read Set operations fail closed until an audited
+reparse-point-safe handle adapter lands; facts remain portable. It does not
+execute Git, assign worktrees, mutate files, or add Workspace fields to Team
+Events.
+
 The core must build and run pure tests on macOS ARM. Platform-specific I/O enters through explicit seams; canonical policy never depends directly on a terminal, network stack, credential store, or Windows handle.
 
 ### `greentyper`

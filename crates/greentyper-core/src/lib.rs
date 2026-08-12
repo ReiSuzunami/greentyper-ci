@@ -15,3 +15,4 @@ pub mod runtime;
 pub mod schema;
 pub mod tool_runtime;
 pub mod usage;
+pub mod workspace;

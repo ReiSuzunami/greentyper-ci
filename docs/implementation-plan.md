@@ -786,8 +786,15 @@ checkpoint inspection and confirmed Safe-Barrier reduction, while `/blockers`
 can durably rearm an explicitly retryable Provider block without automatically
 resuming it. CLI/App Server now also expose that exact Provider recovery with a
 persisted Agent-owner check; the CLI composes resume, delivery, and
-acknowledgement. Workspace allocation/leases/read sets/merge and retrying a
-terminal Team Agent remain pending.
+acknowledgement. Workspace Coordinator facts and canonical workspace/worktree
+identities are portable. Unix now adds root-inode-bound directory Leases,
+component-by-component no-follow Read Set capture, bounded JSON revalidation,
+and an exclusive writer freshness gate through `greentyper-core`; the
+`workspace` CLI exposes facts, capture, and validation. Windows Lease/Read Set
+operations fail closed until an audited reparse-point-safe adapter lands.
+These facts remain independent of Team Events and do not allocate Git
+worktrees or perform mutations. Git worktree allocation, merge/conflict
+outcomes, and retrying a terminal Team Agent remain pending.
 
 Exit criteria:
 

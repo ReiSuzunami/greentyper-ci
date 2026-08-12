@@ -547,6 +547,16 @@ Each mutation commits only Team state and remains pending until a separate
 confirmation acknowledges its exact operation ID. Restart re-exposes that
 pending acknowledgement, and a failed acknowledgement leaves it retryable.
 These actions never write Runtime, Tool, or Config state.
+`workspace inspect --root PATH` emits stable redacted Workspace/Worktree facts.
+On Unix, `workspace capture` holds a shared directory Lease while opening each
+bounded relative file component-by-component without following symlinks, then
+emits a digest-only Read Set. `workspace validate` reopens that bounded JSON
+Read Set under the same Lease and fails nonzero when any observed file changed.
+The writer-facing core gate requires an exclusive Lease plus a fresh Read Set
+before mutation. These commands do not execute Git, allocate worktrees, expose
+the absolute root, or modify user files. Windows Lease/Read Set operations
+currently fail closed pending an audited reparse-point-safe handle adapter;
+facts-only inspection remains available.
 `/blockers` now lists the latest Runtime, Team, Task, Tool, and Config blockers.
 The list and its non-Tool details come from local snapshots. A retryable blocked
 Provider Turn opens bounded detail on the first Enter; the second Enter durably
@@ -584,7 +594,7 @@ before implementation. Live inference conformance,
 automatic transport retry or partial-stream reconnect, Messages reasoning
 blocks, provider-native Context Mode execution, broader multi-Tool approval
 presentation, broader Provider and Tool adapters,
-Workspace, retrying terminal Team Agents, general App Server Runtime control beyond the exact
+Git worktree allocation/merge, retrying terminal Team Agents, general App Server Runtime control beyond the exact
 cancel/retry/resume recovery flow, and
 remote App Server transport remain. The loopback Provider tracer remains
 an internal harness; `local.echo` is intentionally a fixed opt-in command rather

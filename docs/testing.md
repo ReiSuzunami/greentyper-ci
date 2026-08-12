@@ -18,6 +18,12 @@ Property tests must include:
 - Config resolution is deterministic and respects built-in < user < project < CLI precedence.
 - Delegation never creates a capability outside the parent snapshot.
 - One writable worktree never has two simultaneous Workspace Leases.
+- Workspace facts reject symlink/traversal roots; Unix read-only directory
+  Leases coexist, read-write Leases exclude readers/writers,
+  component-by-component opens reject symlinks, bounded JSON rejects
+  oversized/corrupt Read Sets, and stale Read Sets fail before mutation.
+  Windows Lease/Read Set operations fail closed pending an audited
+  reparse-point-safe adapter.
 - Usage Rollups equal aggregation over their source Usage Records.
 - Half-open and cross-midnight Usage Windows assign an attempt at most once per named window; overlapping windows remain independent.
 - Usage Window tests cover both occurrences of a repeated DST hour, the absence of instants in a skipped hour, versioned time-zone rule provenance, and rejection when Windows `local` cannot resolve to an IANA zone.

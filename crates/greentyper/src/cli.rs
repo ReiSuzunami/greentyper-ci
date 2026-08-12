@@ -60,6 +60,7 @@ use greentyper_core::tool_runtime::{
 use greentyper_core::usage::{
     RuntimeUsageQuery, RuntimeUsageSnapshot, UsageCursor, UsageError, UsageTimestamp, UsageWindow,
 };
+use greentyper_core::workspace::{ReadSet, WorkspaceAccess, WorkspaceError, WorkspaceRoot};
 
 struct ConfiguredProviderFallbackPlan<P> {
     candidates: Vec<ProviderFallbackCandidate>,
@@ -351,6 +352,7 @@ pub fn run(arguments: impl Iterator<Item = String>) -> Result<(), CliError> {
                 )
             }
         },
+        Command::Workspace(command) => run_workspace(command),
         Command::Cancel { ledger, turn } => {
             let outcome = if has_product_driver_state(&ledger)? {
                 cancel_product_provider_turn(&ledger, turn)?
@@ -598,6 +600,35 @@ fn run_config(command: ConfigCommand) -> Result<(), CliError> {
             let vault = PlatformCredentialVault;
             let mut tester = ModelsHttpConnectionTester::new(&vault);
             write_json(&tester.test(&profile))
+        }
+    }
+}
+
+fn run_workspace(command: WorkspaceCommand) -> Result<(), CliError> {
+    match command {
+        WorkspaceCommand::Inspect { root } => {
+            let root = WorkspaceRoot::open(root)?;
+            write_json(&root.facts())
+        }
+        WorkspaceCommand::Capture { root, paths } => {
+            let root = WorkspaceRoot::open(root)?;
+            let lease = root.acquire_lease(WorkspaceAccess::ReadOnly)?;
+            let read_set = lease.capture_read_set(&root, paths)?;
+            write_json(&read_set)
+        }
+        WorkspaceCommand::Validate { root, input } => {
+            let root = WorkspaceRoot::open(root)?;
+            let lease = root.acquire_lease(WorkspaceAccess::ReadOnly)?;
+            let read_set = ReadSet::from_json_reader(fs::File::open(input)?)?;
+            let validation = lease.validate_read_set(&root, &read_set)?;
+            if validation.valid {
+                write_json(&validation)
+            } else {
+                Err(WorkspaceError::StaleReadSet {
+                    changed_paths: validation.stale_paths,
+                }
+                .into())
+            }
         }
     }
 }
@@ -1279,6 +1310,7 @@ enum Command {
         query: Option<RuntimeUsageQuery>,
     },
     Context(ContextCommand),
+    Workspace(WorkspaceCommand),
     Cancel {
         ledger: PathBuf,
         turn: TurnId,
@@ -1323,6 +1355,13 @@ enum ContextCommand {
         ledger: PathBuf,
         policy: ContextReductionPolicy,
     },
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum WorkspaceCommand {
+    Inspect { root: PathBuf },
+    Capture { root: PathBuf, paths: Vec<String> },
+    Validate { root: PathBuf, input: PathBuf },
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -1535,6 +1574,9 @@ fn parse(mut arguments: impl Iterator<Item = String>) -> Result<Command, CliErro
     }
     if command == "context" {
         return parse_context(arguments).map(Command::Context);
+    }
+    if command == "workspace" {
+        return parse_workspace(arguments).map(Command::Workspace);
     }
     if command == "app-server" {
         return parse_app_server(arguments);
@@ -1873,6 +1915,89 @@ fn parse_context(mut arguments: impl Iterator<Item = String>) -> Result<ContextC
             Ok(ContextCommand::Reduce { ledger, policy })
         }
         _ => Err(CliError::Usage("context requires status or reduce")),
+    }
+}
+
+fn parse_workspace(
+    mut arguments: impl Iterator<Item = String>,
+) -> Result<WorkspaceCommand, CliError> {
+    let action = arguments.next().ok_or(CliError::Usage(
+        "workspace requires inspect, capture, or validate",
+    ))?;
+    let mut root = None;
+    let mut paths = Vec::new();
+    let mut input = None;
+    while let Some(argument) = arguments.next() {
+        match argument.as_str() {
+            "--root" => {
+                if root.is_some() {
+                    return Err(CliError::Usage("duplicate --root"));
+                }
+                let value = arguments
+                    .next()
+                    .ok_or(CliError::Usage("--root is missing its value"))?;
+                if value.is_empty() || value.starts_with('-') {
+                    return Err(CliError::Usage("--root is missing its value"));
+                }
+                root = Some(PathBuf::from(value));
+            }
+            "--path" => {
+                if paths.len() == greentyper_core::workspace::MAX_READ_SET_ENTRIES {
+                    return Err(CliError::Usage("workspace read-set has too many paths"));
+                }
+                let value = arguments
+                    .next()
+                    .ok_or(CliError::Usage("--path is missing its value"))?;
+                if value.is_empty() || value.starts_with('-') {
+                    return Err(CliError::Usage("--path is missing its value"));
+                }
+                paths.push(value);
+            }
+            "--read-set" => {
+                if input.is_some() {
+                    return Err(CliError::Usage("duplicate --read-set"));
+                }
+                let value = arguments
+                    .next()
+                    .ok_or(CliError::Usage("--read-set is missing its value"))?;
+                if value.is_empty() || value.starts_with('-') {
+                    return Err(CliError::Usage("--read-set is missing its value"));
+                }
+                input = Some(PathBuf::from(value));
+            }
+            _ => return Err(CliError::Usage("unknown workspace option")),
+        }
+    }
+    let root = root.ok_or(CliError::Usage("workspace requires --root"))?;
+    match action.as_str() {
+        "inspect" => {
+            if !paths.is_empty() || input.is_some() {
+                return Err(CliError::Usage("workspace inspect accepts only --root"));
+            }
+            Ok(WorkspaceCommand::Inspect { root })
+        }
+        "capture" => {
+            if paths.is_empty() || input.is_some() {
+                return Err(CliError::Usage(
+                    "workspace capture requires one or more --path options",
+                ));
+            }
+            Ok(WorkspaceCommand::Capture { root, paths })
+        }
+        "validate" => {
+            if input.is_none() || !paths.is_empty() {
+                return Err(CliError::Usage(
+                    "workspace validate accepts --root and --read-set only",
+                ));
+            }
+            Ok(WorkspaceCommand::Validate {
+                root,
+                input: input.expect("checked above"),
+            })
+        }
+        _ => Err(CliError::Usage(
+            "workspace requires inspect, capture, or validate",
+        )),
     }
 }
 
@@ -3112,6 +3237,9 @@ Usage:\n\
   greentyper stats [--ledger PATH] [--at UNIX_MS] [--summary-only | --limit N [--cursor CURSOR]]\n\
   greentyper context status [--ledger PATH]\n\
   greentyper context reduce [--ledger PATH] [--max-raw-bytes N] [--max-raw-items N]\n\
+  greentyper workspace inspect --root PATH\n\
+  greentyper workspace capture --root PATH --path RELATIVE_PATH [--path RELATIVE_PATH ...]\n\
+  greentyper workspace validate --root PATH --read-set FILE\n\
   greentyper cancel [--ledger PATH] --turn ID\n\
   greentyper retry [--ledger PATH] --turn ID\n\
   greentyper reconcile [--ledger PATH] --delivery ID\n\
@@ -3155,6 +3283,7 @@ pub enum CliError {
     ProviderHttp(ProviderHttpError),
     Provider(ProviderError),
     ProviderDiscovery(ProviderDiscoveryError),
+    Workspace(WorkspaceError),
     Credential(CredentialVaultError),
     ProductDriver(ProductDriverError),
     Presentation(PresentationSmokeError),
@@ -3183,6 +3312,7 @@ impl fmt::Display for CliError {
             Self::ProviderHttp(source) => write!(formatter, "{source}"),
             Self::Provider(source) => write!(formatter, "{source}"),
             Self::ProviderDiscovery(source) => write!(formatter, "{source}"),
+            Self::Workspace(source) => write!(formatter, "{source}"),
             Self::Credential(source) => write!(formatter, "{source}"),
             Self::ProductDriver(source) => write!(formatter, "{source}"),
             Self::Presentation(source) => write!(formatter, "{source}"),
@@ -3203,6 +3333,7 @@ impl Error for CliError {
             Self::ProviderHttp(source) => Some(source),
             Self::Provider(source) => Some(source),
             Self::ProviderDiscovery(source) => Some(source),
+            Self::Workspace(source) => Some(source),
             Self::Credential(source) => Some(source),
             Self::ProductDriver(source) => Some(source),
             Self::Presentation(source) => Some(source),
@@ -3267,6 +3398,12 @@ impl From<ProviderDiscoveryError> for CliError {
     }
 }
 
+impl From<WorkspaceError> for CliError {
+    fn from(source: WorkspaceError) -> Self {
+        Self::Workspace(source)
+    }
+}
+
 impl From<ProductDriverError> for CliError {
     fn from(source: ProductDriverError) -> Self {
         Self::ProductDriver(source)
@@ -3321,9 +3458,9 @@ mod tests {
 
     use super::{
         AgentCommand, Command, ConfigCommand, CredentialCommand, CredentialOutcome, ToolCommand,
-        begin_discovered_model_preset, build_provider_fallback_plan, deliver_and_ack_to,
-        deliver_product_and_ack_to, execute_credential_command, parse, provider_discovery_catalog,
-        refresh_provider_discovery,
+        WorkspaceCommand, begin_discovered_model_preset, build_provider_fallback_plan,
+        deliver_and_ack_to, deliver_product_and_ack_to, execute_credential_command, parse,
+        provider_discovery_catalog, refresh_provider_discovery,
     };
 
     static NEXT_TEMP: AtomicU64 = AtomicU64::new(1);
@@ -3494,6 +3631,46 @@ mod tests {
         ));
         assert!(
             parse(["stats".to_owned(), "--at".to_owned(), "later".to_owned()].into_iter()).is_err()
+        );
+        assert!(matches!(
+            parse(
+                [
+                    "workspace".to_owned(),
+                    "inspect".to_owned(),
+                    "--root".to_owned(),
+                    "/tmp/workspace".to_owned(),
+                ]
+                .into_iter()
+            ),
+            Ok(Command::Workspace(WorkspaceCommand::Inspect { root }))
+                if root == Path::new("/tmp/workspace")
+        ));
+        assert!(matches!(
+            parse(
+                [
+                    "workspace".to_owned(),
+                    "capture".to_owned(),
+                    "--root".to_owned(),
+                    "/tmp/workspace".to_owned(),
+                    "--path".to_owned(),
+                    "src/lib.rs".to_owned(),
+                ]
+                .into_iter()
+            ),
+            Ok(Command::Workspace(WorkspaceCommand::Capture { paths, .. }))
+                if paths == ["src/lib.rs"]
+        ));
+        assert!(
+            parse(
+                [
+                    "workspace".to_owned(),
+                    "validate".to_owned(),
+                    "--root".to_owned(),
+                    "/tmp/workspace".to_owned(),
+                ]
+                .into_iter()
+            )
+            .is_err()
         );
     }
 

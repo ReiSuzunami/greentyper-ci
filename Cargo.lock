@@ -709,6 +709,7 @@ dependencies = [
  "jiff",
  "jiff-tzdb",
  "libc",
+ "rustix",
  "serde",
  "serde_json",
  "sha2",
