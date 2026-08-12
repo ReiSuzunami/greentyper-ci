@@ -928,6 +928,8 @@ impl RuntimeKernel {
         &mut self,
         operation: TeamOperationId,
     ) -> Result<TeamOperationAcknowledgeOutcome, RuntimeError> {
+        self.require_no_tool_reconciliation()?;
+        self.require_ready()?;
         let team = self.team.as_mut().ok_or(RuntimeError::TeamUnavailable)?;
         team.acknowledge(operation)
     }
@@ -1498,6 +1500,7 @@ impl RuntimeKernel {
         command: TeamCommand,
     ) -> Result<TeamOperationCommit, RuntimeError> {
         self.require_no_tool_reconciliation()?;
+        self.require_ready()?;
         let team = self.team.as_mut().ok_or(RuntimeError::TeamUnavailable)?;
         team.dispatch(command)
     }

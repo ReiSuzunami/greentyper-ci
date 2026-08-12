@@ -5,6 +5,11 @@ use std::fs;
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 
+use greentyper_core::agent_team::{
+    AgentStatus, Capability, CapabilitySnapshot, CommandOutcome, CompletionCapsule,
+    DurableTeamError, ResourceBudget, TaskScope, TeamOperationAcknowledgeOutcome,
+    TeamOperationCommit,
+};
 use greentyper_core::config::{
     CONFIG_FILE_SCHEMA_VERSION, ConfigCommit, ConfigDraft, ConfigErrorCategory, ConfigRuntime,
     ConfigRuntimeError, ConfigScope, ConfigValue, MAX_CONFIG_STRING_BYTES, config_schema,
@@ -31,9 +36,11 @@ use crate::local_process::LocalProcessExecutor;
 use crate::presentation::AgentCenterView;
 use crate::product_driver::{
     ProductDriver, ProductDriverError, ProductInteraction, ProductToolDecision,
-    ProductToolDecisionOutcome, cancel_product_provider_turn, has_product_driver_state,
-    inspect_product_team, inspect_product_tools, reconcile_product_tool,
-    request_product_provider_turn_recovery, require_pending_context_mode_execution,
+    ProductToolDecisionOutcome, acknowledge_product_team_operation, cancel_product_agent,
+    cancel_product_provider_turn, complete_product_agent, delegate_product_agent,
+    fail_product_agent, has_product_driver_state, inspect_product_team, inspect_product_tools,
+    message_from_product_agent, reconcile_product_tool, request_product_provider_turn_recovery,
+    require_pending_context_mode_execution,
 };
 use crate::provider_http::ConfiguredProvider;
 
@@ -522,21 +529,140 @@ where
             }
             "agent.list" => match parse_params::<EmptyParams>(request.params) {
                 Ok(_) => match inspect_product_team(&self.runtime_path) {
-                    Ok(Some(team)) => success_response(
-                        request.id,
-                        json!({
-                            "available": true,
-                            "team": AgentCenterView::from(&team),
-                        }),
-                    ),
+                    Ok(Some(team)) => {
+                        let pending_operations = team
+                            .operations
+                            .iter()
+                            .filter(|record| {
+                                record.status
+                                    == greentyper_core::agent_team::TeamOperationStatus::CommittedAwaitingAcknowledgement
+                            })
+                            .map(team_operation_record)
+                            .collect::<Vec<_>>();
+                        success_response(
+                            request.id,
+                            json!({
+                                "available": true,
+                                "team": AgentCenterView::from(&team),
+                                "pending_operations": pending_operations,
+                            }),
+                        )
+                    }
                     Ok(None) => success_response(
                         request.id,
-                        json!({ "available": false, "team": Value::Null }),
+                        json!({
+                            "available": false,
+                            "team": Value::Null,
+                            "pending_operations": [],
+                        }),
                     ),
                     Err(_) => team_inspection_error(request.id),
                 },
                 Err(()) => invalid_params(request.id),
             },
+            "agent.delegate" => {
+                let params = match parse_params::<AgentDelegateParams>(request.params) {
+                    Ok(params) => params,
+                    Err(()) => return invalid_params(request.id),
+                };
+                let scope = params.scope.map(TaskScope::from_labels);
+                let capabilities = CapabilitySnapshot::from_capabilities(
+                    params.capabilities.into_iter().map(Capability::from),
+                );
+                match delegate_product_agent(
+                    &self.runtime_path,
+                    params.parent,
+                    params.title,
+                    scope,
+                    ResourceBudget::new(params.token_budget, params.tool_budget),
+                    capabilities,
+                ) {
+                    Ok(commit) => team_operation_response(request.id, &commit),
+                    Err(error) => team_control_error(request.id, error),
+                }
+            }
+            "agent.message" => {
+                let params = match parse_params::<AgentMessageParams>(request.params) {
+                    Ok(params) => params,
+                    Err(()) => return invalid_params(request.id),
+                };
+                match message_from_product_agent(
+                    &self.runtime_path,
+                    params.agent,
+                    params.recipient,
+                    params.body,
+                ) {
+                    Ok(commit) => team_operation_response(request.id, &commit),
+                    Err(error) => team_control_error(request.id, error),
+                }
+            }
+            "agent.complete" => {
+                let params = match parse_params::<AgentCompleteParams>(request.params) {
+                    Ok(params) => params,
+                    Err(()) => return invalid_params(request.id),
+                };
+                let capsule = CompletionCapsule {
+                    outcome: params.outcome,
+                    evidence: params.evidence,
+                    changes: params.changes,
+                    tests: params.tests,
+                    decisions: params.decisions,
+                    blockers: params.blockers,
+                    artifacts: params.artifacts,
+                    residual_risks: params.residual_risks,
+                };
+                match complete_product_agent(&self.runtime_path, params.agent, capsule) {
+                    Ok(commit) => team_operation_response(request.id, &commit),
+                    Err(error) => team_control_error(request.id, error),
+                }
+            }
+            "agent.fail" | "agent.cancel" => {
+                let params = match parse_params::<AgentTerminalParams>(request.params) {
+                    Ok(params) => params,
+                    Err(()) => return invalid_params(request.id),
+                };
+                let result = if request.operation == "agent.fail" {
+                    fail_product_agent(&self.runtime_path, params.agent, params.reason)
+                } else {
+                    cancel_product_agent(&self.runtime_path, params.agent, params.reason)
+                };
+                match result {
+                    Ok(commit) => team_operation_response(request.id, &commit),
+                    Err(error) => team_control_error(request.id, error),
+                }
+            }
+            "agent.acknowledge" => {
+                let params = match parse_params::<AgentOperationParams>(request.params) {
+                    Ok(params) if params.operation > 0 => params,
+                    Ok(_) | Err(()) => return invalid_params(request.id),
+                };
+                match acknowledge_product_team_operation(&self.runtime_path, params.operation) {
+                    Ok(outcome) => {
+                        let status = match outcome {
+                            TeamOperationAcknowledgeOutcome::Durable(_) => "acknowledged",
+                            TeamOperationAcknowledgeOutcome::AlreadyAcknowledged => {
+                                "already_acknowledged"
+                            }
+                        };
+                        let team = match inspect_product_team(&self.runtime_path) {
+                            Ok(Some(team)) => team,
+                            Ok(None) | Err(_) => return team_inspection_error(request.id),
+                        };
+                        success_response(
+                            request.id,
+                            json!({
+                                "status": status,
+                                "operation": params.operation,
+                                "ledger": {
+                                    "transaction": team.ledger_head.transaction,
+                                    "sequence": team.ledger_head.sequence,
+                                },
+                            }),
+                        )
+                    }
+                    Err(error) => team_control_error(request.id, error),
+                }
+            }
             "tool.status" => match parse_params::<EmptyParams>(request.params) {
                 Ok(_) => match inspect_product_tools(&self.runtime_path) {
                     Ok(snapshot) => {
@@ -1301,7 +1427,12 @@ fn product_control_ready(runtime_path: &PathBuf) -> bool {
     }
     let team_ready = inspect_product_team(runtime_path).is_ok_and(|team| {
         team.is_some_and(|team| {
-            team.recovered_tail_bytes == 0 && team.projection.active_agent_count() == 1
+            team.recovered_tail_bytes == 0
+                && team
+                    .projection
+                    .agents
+                    .iter()
+                    .any(|agent| agent.parent.is_none() && agent.status == AgentStatus::Active)
         })
     });
     let tools_ready =
@@ -1325,6 +1456,107 @@ fn team_inspection_error(id: u64) -> Value {
         "Agent Team state could not be inspected",
         None,
     )
+}
+
+fn team_operation_record(record: &greentyper_core::agent_team::TeamOperationRecord) -> Value {
+    json!({
+        "operation": record.operation.get(),
+        "transaction": record.transaction.get(),
+        "first_sequence": record.first_sequence.get(),
+        "last_sequence": record.last_sequence.get(),
+        "event_count": record.event_count,
+    })
+}
+
+fn team_operation_response(id: u64, operation: &TeamOperationCommit) -> Value {
+    let outcome = match &operation.commit.outcome {
+        CommandOutcome::RootAdmitted { task, agent, .. } => json!({
+            "kind": "root_admitted",
+            "task": task.get(),
+            "agent": agent.get(),
+        }),
+        CommandOutcome::Delegated { task, agent, .. } => json!({
+            "kind": "delegated",
+            "task": task.get(),
+            "agent": agent.get(),
+        }),
+        CommandOutcome::MessageAccepted { message } => json!({
+            "kind": "message_accepted",
+            "message": message.get(),
+        }),
+        CommandOutcome::StateChanged { task, agent } => json!({
+            "kind": "state_changed",
+            "task": task.get(),
+            "agent": agent.get(),
+        }),
+    };
+    success_response(
+        id,
+        json!({
+            "status": "committed_awaiting_acknowledgement",
+            "operation": operation.operation.get(),
+            "ledger": {
+                "transaction": operation.commit.transaction.get(),
+                "sequence": operation.commit.revision.get(),
+                "event_count": operation.commit.events.len(),
+            },
+            "outcome": outcome,
+        }),
+    )
+}
+
+fn team_control_error(id: u64, error: ProductDriverError) -> Value {
+    match error {
+        ProductDriverError::UnknownAgent(_) => {
+            error_response(Some(id), "unknown_agent", "Agent is unknown", None)
+        }
+        ProductDriverError::UnknownTeamOperation(_) => error_response(
+            Some(id),
+            "unknown_team_operation",
+            "Team operation is unknown",
+            None,
+        ),
+        ProductDriverError::Runtime(RuntimeError::TeamOperationReconciliationRequired(
+            operation,
+        )) => {
+            let mut response = error_response(
+                Some(id),
+                "team_acknowledgement_required",
+                "a committed Team operation must be acknowledged first",
+                None,
+            );
+            response["error"]["operation"] = json!(operation.get());
+            response
+        }
+        ProductDriverError::Runtime(RuntimeError::Busy(_)) => error_response(
+            Some(id),
+            "runtime_busy",
+            "the Provider Runtime must be ready before changing Agent Team state",
+            None,
+        ),
+        ProductDriverError::Runtime(RuntimeError::Team(DurableTeamError::Team(_))) => {
+            error_response(
+                Some(id),
+                "invalid_value",
+                "Agent Team command is invalid",
+                None,
+            )
+        }
+        ProductDriverError::TeamStateUnavailable
+        | ProductDriverError::CurrentAgentUnavailable
+        | ProductDriverError::UnexpectedRecovery => error_response(
+            Some(id),
+            "team_unavailable",
+            "Agent Team state could not be changed",
+            None,
+        ),
+        _ => error_response(
+            Some(id),
+            "team_unavailable",
+            "Agent Team state could not be changed",
+            None,
+        ),
+    }
 }
 
 fn tool_status_record(record: &ToolCallRecord) -> Value {
@@ -1526,6 +1758,82 @@ struct Request<'request> {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct EmptyParams {}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AgentDelegateParams {
+    parent: Option<u64>,
+    title: String,
+    scope: Option<Vec<String>>,
+    token_budget: u64,
+    tool_budget: u32,
+    #[serde(default)]
+    capabilities: Vec<WireCapability>,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum WireCapability {
+    WorkspaceRead,
+    WorkspaceWrite,
+    Process,
+    Network,
+    Tool { name: String },
+}
+
+impl From<WireCapability> for Capability {
+    fn from(capability: WireCapability) -> Self {
+        match capability {
+            WireCapability::WorkspaceRead => Self::WorkspaceRead,
+            WireCapability::WorkspaceWrite => Self::WorkspaceWrite,
+            WireCapability::Process => Self::Process,
+            WireCapability::Network => Self::Network,
+            WireCapability::Tool { name } => Self::Tool(name),
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AgentOperationParams {
+    operation: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AgentMessageParams {
+    agent: Option<u64>,
+    recipient: Option<u64>,
+    body: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AgentCompleteParams {
+    agent: Option<u64>,
+    outcome: String,
+    #[serde(default)]
+    evidence: Vec<String>,
+    #[serde(default)]
+    changes: Vec<String>,
+    #[serde(default)]
+    tests: Vec<String>,
+    #[serde(default)]
+    decisions: Vec<String>,
+    #[serde(default)]
+    blockers: Vec<String>,
+    #[serde(default)]
+    artifacts: Vec<String>,
+    #[serde(default)]
+    residual_risks: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AgentTerminalParams {
+    agent: Option<u64>,
+    reason: String,
+}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]

@@ -9,9 +9,10 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use greentyper_core::agent_team::{
-    AgentSession, Capability, CapabilitySnapshot, CommandOutcome, DurableTeamError,
-    DurableTeamRuntime, ResourceBudget, TaskScope, TaskSpec, TeamCommand, TeamOperationRecord,
-    TeamOperationStatus,
+    AgentSession, AgentStatus, Capability, CapabilitySnapshot, CommandOutcome, CompletionCapsule,
+    DurableTeamError, DurableTeamRuntime, MessageRecipient, ResourceBudget, TaskScope, TaskSpec,
+    TeamCommand, TeamOperationAcknowledgeOutcome, TeamOperationCommit, TeamOperationKind,
+    TeamOperationRecord, TeamOperationStatus,
 };
 use greentyper_core::config::{ConfigEpoch, ConfigLayers, ModelPresetView};
 use greentyper_core::ledger::{DurabilityReceipt, LedgerHead};
@@ -36,6 +37,7 @@ use crate::local_process::{LOCAL_ECHO_TOOL, local_echo_resources};
 
 const APPROVAL_LIFETIME: Duration = Duration::from_secs(5 * 60);
 const DENIAL_REASON: &str = "user denied Provider Tool call";
+const PRODUCT_MAX_ACTIVE_AGENTS: usize = 2;
 
 pub(crate) trait ProductInteraction {
     fn present_team_operation(&mut self, record: TeamOperationRecord) -> io::Result<()>;
@@ -130,8 +132,12 @@ impl<E: ToolEffectExecutor> ProductDriver<E> {
         }
         let team_path = sidecar_path(runtime_path, "team");
         let tool_path = sidecar_path(runtime_path, "tool");
-        let (kernel, recovery) =
-            RuntimeKernel::open_with_team_and_tools(runtime_path, team_path, tool_path, 1)?;
+        let (kernel, recovery) = RuntimeKernel::open_with_team_and_tools(
+            runtime_path,
+            team_path,
+            tool_path,
+            PRODUCT_MAX_ACTIVE_AGENTS,
+        )?;
         Self::from_recovery(kernel, recovery, executor, interaction, true)
     }
 
@@ -151,7 +157,7 @@ impl<E: ToolEffectExecutor> ProductDriver<E> {
             runtime_path,
             team_path,
             tool_path,
-            1,
+            PRODUCT_MAX_ACTIVE_AGENTS,
         )?;
         Self::from_recovery(kernel, recovery, executor, interaction, false)
     }
@@ -172,7 +178,7 @@ impl<E: ToolEffectExecutor> ProductDriver<E> {
             runtime_path,
             team_path,
             tool_path,
-            1,
+            PRODUCT_MAX_ACTIVE_AGENTS,
         )?;
         let status = kernel.snapshot().status;
         if status != (RecoveryStatus::ResumeRequired { turn }) {
@@ -187,16 +193,8 @@ impl<E: ToolEffectExecutor> ProductDriver<E> {
                 RuntimeError::TeamOperationReconciliationRequired(record.operation),
             ));
         }
-        let mut sessions = recovery.into_sessions();
-        let session = match sessions.len() {
-            1 => sessions
-                .pop()
-                .ok_or(ProductDriverError::UnexpectedRecovery)?,
-            0 => {
-                return Err(ProductDriverError::ProviderTurnOwnerUnavailable(turn.get()));
-            }
-            _ => return Err(ProductDriverError::UnexpectedRecovery),
-        };
+        let session = active_root_session(recovery)
+            .map_err(|_| ProductDriverError::ProviderTurnOwnerUnavailable(turn.get()))?;
         Ok(Self {
             kernel,
             session,
@@ -218,7 +216,14 @@ impl<E: ToolEffectExecutor> ProductDriver<E> {
             .filter(|record| record.status == TeamOperationStatus::CommittedAwaitingAcknowledgement)
             .copied()
             .collect();
-        let mut sessions = recovery.into_sessions();
+        if let Some(record) = pending_operations
+            .iter()
+            .find(|record| record.kind != TeamOperationKind::RootAdmission)
+        {
+            return Err(ProductDriverError::Runtime(
+                RuntimeError::TeamOperationReconciliationRequired(record.operation),
+            ));
+        }
         for record in pending_operations {
             interaction
                 .present_team_operation(record)
@@ -226,13 +231,10 @@ impl<E: ToolEffectExecutor> ProductDriver<E> {
             kernel.acknowledge_team_operation(record.operation)?;
         }
 
-        let session = match sessions.len() {
-            0 if admit_if_empty => admit_root(&mut kernel, interaction)?,
-            0 => return Err(ProductDriverError::UnexpectedRecovery),
-            1 => sessions
-                .pop()
-                .ok_or(ProductDriverError::UnexpectedRecovery)?,
-            _ => return Err(ProductDriverError::UnexpectedRecovery),
+        let session = if recovery.snapshot().projection.agents.is_empty() && admit_if_empty {
+            admit_root(&mut kernel, interaction)?
+        } else {
+            active_root_session(recovery)?
         };
         Ok(Self {
             kernel,
@@ -473,23 +475,17 @@ pub(crate) fn stage_product_model_selection(
     if !path_entry_exists(runtime_path)? || !has_product_driver_state(runtime_path)? {
         return Err(ProductDriverError::CurrentAgentUnavailable);
     }
-    let team =
-        inspect_product_team(runtime_path)?.ok_or(ProductDriverError::CurrentAgentUnavailable)?;
-    if team.projection.active_agent_count() != 1 {
-        return Err(ProductDriverError::CurrentAgentUnavailable);
-    }
+    inspect_product_team(runtime_path)?.ok_or(ProductDriverError::CurrentAgentUnavailable)?;
     let team_path = sidecar_path(runtime_path, "team");
     let tool_path = sidecar_path(runtime_path, "tool");
-    let (mut kernel, recovery) =
-        RuntimeKernel::open_with_team_and_tools(runtime_path, team_path, tool_path, 1)?;
-    let mut sessions = recovery.into_sessions();
-    let session = match sessions.len() {
-        1 => sessions
-            .pop()
-            .ok_or(ProductDriverError::UnexpectedRecovery)?,
-        0 => return Err(ProductDriverError::CurrentAgentUnavailable),
-        _ => return Err(ProductDriverError::UnexpectedRecovery),
-    };
+    let (mut kernel, recovery) = RuntimeKernel::open_with_team_and_tools(
+        runtime_path,
+        team_path,
+        tool_path,
+        PRODUCT_MAX_ACTIVE_AGENTS,
+    )?;
+    let session =
+        active_root_session(recovery).map_err(|_| ProductDriverError::CurrentAgentUnavailable)?;
     kernel
         .stage_model_selection(session, selection)
         .map_err(ProductDriverError::Runtime)
@@ -508,16 +504,10 @@ pub(crate) fn cancel_product_provider_turn(
         runtime_path,
         team_path,
         tool_path,
-        1,
+        PRODUCT_MAX_ACTIVE_AGENTS,
     )?;
-    let mut sessions = recovery.into_sessions();
-    let session = match sessions.len() {
-        1 => sessions
-            .pop()
-            .ok_or(ProductDriverError::UnexpectedRecovery)?,
-        0 => return Err(ProductDriverError::ProviderTurnOwnerUnavailable(turn.get())),
-        _ => return Err(ProductDriverError::UnexpectedRecovery),
-    };
+    let session = active_root_session(recovery)
+        .map_err(|_| ProductDriverError::ProviderTurnOwnerUnavailable(turn.get()))?;
     kernel
         .cancel_blocked_provider_turn(session, turn)
         .map_err(ProductDriverError::Runtime)
@@ -537,16 +527,10 @@ pub(crate) fn request_product_provider_turn_recovery(
         runtime_path,
         team_path,
         tool_path,
-        1,
+        PRODUCT_MAX_ACTIVE_AGENTS,
     )?;
-    let mut sessions = recovery.into_sessions();
-    let session = match sessions.len() {
-        1 => sessions
-            .pop()
-            .ok_or(ProductDriverError::UnexpectedRecovery)?,
-        0 => return Err(ProductDriverError::ProviderTurnOwnerUnavailable(turn.get())),
-        _ => return Err(ProductDriverError::UnexpectedRecovery),
-    };
+    let session = active_root_session(recovery)
+        .map_err(|_| ProductDriverError::ProviderTurnOwnerUnavailable(turn.get()))?;
     kernel
         .request_blocked_provider_turn_recovery(session, turn)
         .map_err(ProductDriverError::Runtime)
@@ -585,8 +569,11 @@ pub(crate) fn inspect_product_team(
     if !runtime_path.exists() {
         return Err(ProductDriverError::IncompleteState);
     }
-    let inspection = DurableTeamRuntime::inspect(sidecar_path(runtime_path, "team"), 1)
-        .map_err(ProductDriverError::Team)?;
+    let inspection = DurableTeamRuntime::inspect(
+        sidecar_path(runtime_path, "team"),
+        PRODUCT_MAX_ACTIVE_AGENTS,
+    )
+    .map_err(ProductDriverError::Team)?;
     Ok(Some(KernelTeamSnapshot {
         projection: inspection.snapshot().clone(),
         ledger_head: inspection.ledger_head(),
@@ -609,7 +596,7 @@ pub(crate) fn open_product_context_runtime(
         runtime_path,
         sidecar_path(runtime_path, "team"),
         sidecar_path(runtime_path, "tool"),
-        1,
+        PRODUCT_MAX_ACTIVE_AGENTS,
     )?;
     Ok(kernel)
 }
@@ -628,7 +615,7 @@ pub(crate) fn reconcile_product_tool(
         runtime_path,
         team_path,
         tool_path,
-        1,
+        PRODUCT_MAX_ACTIVE_AGENTS,
     )?;
     let record = kernel
         .tool_snapshot()
@@ -647,6 +634,194 @@ pub(crate) fn reconcile_product_tool(
     kernel
         .reconcile_tool_call(session, record.call, decision)
         .map_err(ProductDriverError::Runtime)
+}
+
+pub(crate) fn delegate_product_agent(
+    runtime_path: &Path,
+    parent: Option<u64>,
+    title: String,
+    scope: Option<TaskScope>,
+    budget: ResourceBudget,
+    capabilities: CapabilitySnapshot,
+) -> Result<TeamOperationCommit, ProductDriverError> {
+    dispatch_product_agent_command(runtime_path, parent, |session, snapshot| {
+        let parent = snapshot
+            .projection
+            .agent(session.agent())
+            .ok_or(ProductDriverError::CurrentAgentUnavailable)?;
+        let inherited_scope = snapshot
+            .projection
+            .task(parent.task)
+            .ok_or(ProductDriverError::CurrentAgentUnavailable)?
+            .scope
+            .clone();
+        Ok(TeamCommand::Delegate {
+            parent: session,
+            task: TaskSpec::new(title, scope.unwrap_or(inherited_scope)),
+            budget,
+            capabilities,
+        })
+    })
+}
+
+pub(crate) fn message_from_product_agent(
+    runtime_path: &Path,
+    agent: Option<u64>,
+    recipient: Option<u64>,
+    body: String,
+) -> Result<TeamOperationCommit, ProductDriverError> {
+    dispatch_product_agent_command(runtime_path, agent, |session, snapshot| {
+        let recipient = match recipient {
+            Some(id) => MessageRecipient::Agent(
+                snapshot
+                    .projection
+                    .agents
+                    .iter()
+                    .find(|agent| agent.id.get() == id)
+                    .ok_or(ProductDriverError::UnknownAgent(id))?
+                    .id,
+            ),
+            None => MessageRecipient::Team,
+        };
+        Ok(TeamCommand::SendMessage {
+            from: session,
+            recipient,
+            body,
+        })
+    })
+}
+
+pub(crate) fn complete_product_agent(
+    runtime_path: &Path,
+    agent: Option<u64>,
+    capsule: CompletionCapsule,
+) -> Result<TeamOperationCommit, ProductDriverError> {
+    dispatch_product_agent_command(runtime_path, agent, |session, _| {
+        Ok(TeamCommand::Complete {
+            agent: session,
+            capsule,
+        })
+    })
+}
+
+pub(crate) fn fail_product_agent(
+    runtime_path: &Path,
+    agent: Option<u64>,
+    reason: String,
+) -> Result<TeamOperationCommit, ProductDriverError> {
+    dispatch_product_agent_command(runtime_path, agent, |session, _| {
+        Ok(TeamCommand::Fail {
+            agent: session,
+            reason,
+        })
+    })
+}
+
+pub(crate) fn cancel_product_agent(
+    runtime_path: &Path,
+    agent: Option<u64>,
+    reason: String,
+) -> Result<TeamOperationCommit, ProductDriverError> {
+    dispatch_product_agent_command(runtime_path, agent, |session, _| {
+        Ok(TeamCommand::Cancel {
+            agent: session,
+            reason,
+        })
+    })
+}
+
+pub(crate) fn acknowledge_product_team_operation(
+    runtime_path: &Path,
+    operation: u64,
+) -> Result<TeamOperationAcknowledgeOutcome, ProductDriverError> {
+    let (mut kernel, recovery) = open_product_team_control(runtime_path)?;
+    let operation = recovery
+        .snapshot()
+        .operations
+        .iter()
+        .find(|record| record.operation.get() == operation)
+        .ok_or(ProductDriverError::UnknownTeamOperation(operation))?
+        .operation;
+    kernel
+        .acknowledge_team_operation(operation)
+        .map_err(ProductDriverError::Runtime)
+}
+
+fn dispatch_product_agent_command(
+    runtime_path: &Path,
+    agent: Option<u64>,
+    command: impl FnOnce(
+        AgentSession,
+        &greentyper_core::runtime::KernelTeamSnapshot,
+    ) -> Result<TeamCommand, ProductDriverError>,
+) -> Result<TeamOperationCommit, ProductDriverError> {
+    let (mut kernel, recovery) = open_product_team_control(runtime_path)?;
+    let snapshot = recovery.snapshot().clone();
+    let target = match agent {
+        Some(agent) => {
+            snapshot
+                .projection
+                .agents
+                .iter()
+                .find(|candidate| candidate.id.get() == agent)
+                .ok_or(ProductDriverError::UnknownAgent(agent))?
+                .id
+        }
+        None => active_root_agent(&snapshot)?,
+    };
+    let session = recovery
+        .into_sessions()
+        .into_iter()
+        .find(|session| session.agent() == target)
+        .ok_or(ProductDriverError::CurrentAgentUnavailable)?;
+    let command = command(session, &snapshot)?;
+    kernel
+        .dispatch_team(command)
+        .map_err(ProductDriverError::Runtime)
+}
+
+fn open_product_team_control(
+    runtime_path: &Path,
+) -> Result<(RuntimeKernel, greentyper_core::runtime::KernelTeamRecovery), ProductDriverError> {
+    if !path_entry_exists(runtime_path)? || !has_product_driver_state(runtime_path)? {
+        return Err(ProductDriverError::TeamStateUnavailable);
+    }
+    RuntimeKernel::open_with_team_and_tools_existing_strict(
+        runtime_path,
+        sidecar_path(runtime_path, "team"),
+        sidecar_path(runtime_path, "tool"),
+        PRODUCT_MAX_ACTIVE_AGENTS,
+    )
+    .map_err(ProductDriverError::Runtime)
+}
+
+fn active_root_session(
+    recovery: greentyper_core::runtime::KernelTeamRecovery,
+) -> Result<AgentSession, ProductDriverError> {
+    let root = active_root_agent(recovery.snapshot())?;
+    recovery
+        .into_sessions()
+        .into_iter()
+        .find(|session| session.agent() == root)
+        .ok_or(ProductDriverError::CurrentAgentUnavailable)
+}
+
+fn active_root_agent(
+    snapshot: &greentyper_core::runtime::KernelTeamSnapshot,
+) -> Result<greentyper_core::agent_team::AgentId, ProductDriverError> {
+    let mut roots = snapshot
+        .projection
+        .agents
+        .iter()
+        .filter(|agent| agent.parent.is_none() && agent.status == AgentStatus::Active);
+    let root = roots
+        .next()
+        .ok_or(ProductDriverError::CurrentAgentUnavailable)?
+        .id;
+    if roots.next().is_some() {
+        return Err(ProductDriverError::UnexpectedRecovery);
+    }
+    Ok(root)
 }
 
 fn admit_root(
@@ -713,6 +888,9 @@ pub(crate) enum ProductDriverError {
     ToolOwnerUnavailable(u64),
     ToolApprovalUnavailable(u64),
     ToolApprovalMismatch { expected: u64, actual: u64 },
+    TeamStateUnavailable,
+    UnknownAgent(u64),
+    UnknownTeamOperation(u64),
     ProviderTurnStateUnavailable,
     ProviderTurnOwnerUnavailable(u64),
     UnexpectedRecovery,
@@ -752,6 +930,13 @@ impl fmt::Display for ProductDriverError {
                 formatter,
                 "selected Tool call {expected} does not match pending call {actual}"
             ),
+            Self::TeamStateUnavailable => {
+                write!(formatter, "Product Agent Team state is unavailable")
+            }
+            Self::UnknownAgent(agent) => write!(formatter, "unknown Agent {agent}"),
+            Self::UnknownTeamOperation(operation) => {
+                write!(formatter, "unknown Team operation {operation}")
+            }
             Self::ProviderTurnStateUnavailable => {
                 write!(formatter, "Product Provider Turn state is unavailable")
             }
@@ -782,6 +967,9 @@ impl Error for ProductDriverError {
             | Self::ToolOwnerUnavailable(_)
             | Self::ToolApprovalUnavailable(_)
             | Self::ToolApprovalMismatch { .. }
+            | Self::TeamStateUnavailable
+            | Self::UnknownAgent(_)
+            | Self::UnknownTeamOperation(_)
             | Self::ProviderTurnStateUnavailable
             | Self::ProviderTurnOwnerUnavailable(_)
             | Self::UnexpectedRecovery => None,

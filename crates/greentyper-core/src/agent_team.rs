@@ -532,8 +532,19 @@ pub enum TeamOperationStatus {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TeamOperationKind {
+    RootAdmission,
+    Delegation,
+    Message,
+    Completion,
+    Failure,
+    Cancellation,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TeamOperationRecord {
     pub operation: TeamOperationId,
+    pub kind: TeamOperationKind,
     pub transaction: TransactionId,
     pub first_sequence: EventSeq,
     pub last_sequence: EventSeq,
@@ -1055,6 +1066,12 @@ impl TeamRuntime {
                     .expect("validated Team event sequence");
                 Some(TeamOperationRecord {
                     operation: *operation,
+                    kind: classify_operation_transaction(
+                        self.event_log
+                            .iter()
+                            .filter(|candidate| candidate.transaction == *transaction),
+                    )
+                    .expect("validated Team operation transaction has one command kind"),
                     transaction: *transaction,
                     first_sequence: event.sequence,
                     last_sequence: EventSeq(last_sequence),
@@ -1083,6 +1100,7 @@ impl TeamRuntime {
         let mut cursor = 0_usize;
         let mut expected_sequence = 1_u64;
         let mut expected_transaction = 1_u64;
+        let mut replay_active_limit = 1_usize;
 
         while cursor < events.len() {
             let first = &events[cursor];
@@ -1173,8 +1191,9 @@ impl TeamRuntime {
                     source,
                 }
             })?;
+            replay_active_limit = replay_active_limit.max(candidate.active_agent_count());
             candidate
-                .validate_quiescent(max_active_agents)
+                .validate_quiescent(replay_active_limit)
                 .map_err(|source| RecoveryError::InvalidEvent {
                     sequence: events[cursor + event_count - 1].sequence,
                     source,
@@ -2569,6 +2588,11 @@ fn validate_operation_transaction(events: &[TeamEvent]) -> Result<(), TeamError>
         if *transaction != event.transaction {
             return invariant("Team operation marker transaction does not match its frame".into());
         }
+        if classify_operation_transaction(events.iter()).is_none() {
+            return invariant(
+                "Team operation transaction must contain exactly one command kind".into(),
+            );
+        }
     } else if let Some(event) = acknowledged.first() {
         if acknowledged.len() != 1 || events.len() != 1 {
             return invariant("Team operation acknowledgement must be its own transaction".into());
@@ -2589,6 +2613,24 @@ fn validate_operation_transaction(events: &[TeamEvent]) -> Result<(), TeamError>
     }
 
     Ok(())
+}
+
+fn classify_operation_transaction<'a>(
+    events: impl IntoIterator<Item = &'a TeamEvent>,
+) -> Option<TeamOperationKind> {
+    let mut kinds = events.into_iter().filter_map(|event| match &event.kind {
+        TeamEventKind::AgentCreated { parent: None, .. } => Some(TeamOperationKind::RootAdmission),
+        TeamEventKind::AgentCreated {
+            parent: Some(_), ..
+        } => Some(TeamOperationKind::Delegation),
+        TeamEventKind::MessageSent { .. } => Some(TeamOperationKind::Message),
+        TeamEventKind::CompletionCapsuleSubmitted { .. } => Some(TeamOperationKind::Completion),
+        TeamEventKind::TaskFailed { .. } => Some(TeamOperationKind::Failure),
+        TeamEventKind::TaskCancelled { .. } => Some(TeamOperationKind::Cancellation),
+        _ => None,
+    });
+    let kind = kinds.next()?;
+    kinds.next().is_none().then_some(kind)
 }
 
 fn validate_budget(budget: ResourceBudget) -> Result<(), TeamError> {

@@ -5760,6 +5760,7 @@ source = "unknown"
     fn view_model_preserves_every_actionable_blocker() {
         let operation = TeamOperationRecord {
             operation: TeamOperationId::default(),
+            kind: greentyper_core::agent_team::TeamOperationKind::Delegation,
             transaction: TransactionId::default(),
             first_sequence: EventSeq::default(),
             last_sequence: EventSeq::default(),
