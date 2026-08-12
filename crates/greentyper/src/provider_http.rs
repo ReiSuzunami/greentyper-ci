@@ -6308,7 +6308,10 @@ source = "unknown"
             .expect("TLS server config");
         let listener = TcpListener::bind(("127.0.0.1", 0)).expect("TLS listener");
         let address = listener.local_addr().unwrap();
-        let timeout = Duration::from_secs(10);
+        // TLS setup can be starved by the full parallel test suite on CI.
+        // Keep this fixture deadline above the production request work it
+        // verifies so scheduler load cannot masquerade as a transport failure.
+        let timeout = Duration::from_secs(30);
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().expect("TLS accept");
             stream
