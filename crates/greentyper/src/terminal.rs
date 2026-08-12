@@ -311,8 +311,7 @@ fn build_terminal_view(
         config,
         query,
         &runtime,
-        &context,
-        &usage,
+        (&context, &usage),
         team.as_ref(),
         &tools,
         discovery.as_ref(),
@@ -335,8 +334,7 @@ fn refresh_terminal_view(
         &config,
         query,
         &runtime,
-        &context,
-        &usage,
+        (&context, &usage),
         team.as_ref(),
         &tools,
         discovery.as_ref(),
@@ -371,12 +369,15 @@ fn build_terminal_view_from_sources(
     config: &ConfigRuntime,
     query: &str,
     runtime: &RuntimeSnapshot,
-    context: &greentyper_core::runtime::ContextInspection,
-    usage: &RuntimeUsageSnapshot,
+    context_and_usage: (
+        &greentyper_core::runtime::ContextInspection,
+        &RuntimeUsageSnapshot,
+    ),
     team: Option<&KernelTeamSnapshot>,
     tools: &ToolSnapshot,
     discovery: Option<&ProviderDiscoveryState>,
 ) -> Result<TuiViewModel, TerminalError> {
+    let (context, usage) = context_and_usage;
     let status = config.status();
     let resolved = config.config_layers()?.resolve()?;
     let model_presets = config.model_presets()?;
