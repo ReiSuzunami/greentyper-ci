@@ -542,7 +542,7 @@ fn read_entry(root: &WorkspaceRoot, relative: &str) -> Result<ReadSetEntry, Work
     Ok(ReadSetEntry {
         path: relative.to_string_lossy().into_owned(),
         bytes: bytes.len() as u64,
-        digest: hex_digest(&bytes),
+        digest: sha256_digest(&bytes),
     })
 }
 
@@ -562,6 +562,12 @@ fn hash_tagged(tag: &str, value: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(tag.as_bytes());
     hasher.update([0]);
+    hasher.update(value);
+    hex_digest(hasher.finalize())
+}
+
+fn sha256_digest(value: &[u8]) -> String {
+    let mut hasher = Sha256::new();
     hasher.update(value);
     hex_digest(hasher.finalize())
 }
@@ -691,6 +697,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn writer_is_exclusive_but_readers_can_share() {
         let path = temp_root("lease");
         let root = Arc::new(WorkspaceRoot::open(&path).expect("root"));
@@ -718,6 +725,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn read_set_detects_mutation_without_writing() {
         let path = temp_root("read-set");
         fs::write(path.join("tracked.txt"), b"before").expect("write");
@@ -735,6 +743,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn read_only_lease_cannot_pass_writer_gate() {
         let path = temp_root("writer-gate");
         fs::write(path.join("tracked.txt"), b"safe").expect("write");
@@ -751,6 +760,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn traversal_and_symlink_entries_fail_closed() {
         let path = temp_root("paths");
         fs::write(path.join("tracked.txt"), b"safe").expect("write");
@@ -771,6 +781,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn lease_blocks_across_threads() {
         let path = temp_root("thread");
         let root = Arc::new(WorkspaceRoot::open(&path).expect("root"));
@@ -784,6 +795,18 @@ mod tests {
             Err(WorkspaceError::Locked)
         ));
         drop(held);
+        fs::remove_dir_all(path).expect("cleanup");
+    }
+
+    #[test]
+    #[cfg(not(unix))]
+    fn leases_fail_closed_without_an_audited_handle_adapter() {
+        let path = temp_root("unsupported");
+        let root = WorkspaceRoot::open(&path).expect("root facts");
+        assert!(matches!(
+            root.acquire_lease(WorkspaceAccess::ReadOnly),
+            Err(WorkspaceError::UnsupportedPlatform)
+        ));
         fs::remove_dir_all(path).expect("cleanup");
     }
 }
