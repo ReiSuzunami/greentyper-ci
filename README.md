@@ -105,9 +105,10 @@ retry after partial output or Tool effects. Every other template/dialect pair
 fails closed unless the product has an explicit adapter for that exact identity.
 `headless --preset ID` resolves the exact configured Model Preset plus its
 explicit fallback graph in depth-first, first-occurrence order, bounded to 16
-Provider candidates. Every candidate is adapter-preflighted before Runtime
-state opens, then its Profile, model, dialect, and request policy are frozen in
-distinct Config and Provider Epochs for the Turn. It cannot be combined with
+Provider candidates. The complete plan's typed Context Modes are preflighted
+before credential lookup, every candidate is adapter-preflighted before Runtime
+state opens, and then its Profile, model, dialect, Context Mode, and request
+policy are frozen in distinct Config and Provider Epochs for the Turn. It cannot be combined with
 `--dialect`; missing IDs, invalid graphs, and capability-lowering fallbacks fail
 before admission rather than falling back to a model-name match.
 
@@ -118,7 +119,7 @@ framing retain that boundary; other malformed Provider data remains an invalid
 response. An adapter never reconnects or repeats the same request automatically,
 and requests carry no inference idempotency key, so an absent response is not
 proof that the remote service did no work or incurred no usage. For a Preset
-with an explicit fallback chain, Runtime schema 13 may instead advance to the
+with an explicit fallback chain, Runtime schema 14 may instead advance to the
 next separately frozen candidate only after `BeforeResponse` or
 `BeforeFirstEvent`; each candidate gets a new Usage Attempt and candidate-bound
 cost evaluation. It never switches after the first event, malformed output,
@@ -252,11 +253,13 @@ Flash, maps `max_output_tokens` plus `reasoning.effort` values `low`, `high`, an
 continuation reconstructs bounded input items instead of using
 `previous_response_id`. Reasoning text is bounded and transition-validated by
 the dialect decoder but is not projected as visible output or persisted raw.
-Runtime Event schema 13 preserves schema 12's exact-head Context checkpoint,
-schema 11's redacted Provider-unavailability stage and durable
-`TurnRetryRequested` recovery, schema 10's typed block origin and
-`TurnCancelled`, and schema 9's selected Preset policy. It adds frozen fallback
-Config/Provider references and `ProviderFallbackRequested` recovery.
+Runtime Event schema 14 preserves schema 13's frozen fallback
+Config/Provider references and `ProviderFallbackRequested` recovery, schema
+12's exact-head Context checkpoint, schema 11's redacted
+Provider-unavailability stage and durable `TurnRetryRequested` recovery,
+schema 10's typed block origin and `TurnCancelled`, and schema 9's selected
+Preset policy. Schema 14 adds the typed Context Mode and its Config source to
+the frozen Config Epoch; older schemas replay as built-in `canonical`.
 OpenAI Responses sends reasoning as `reasoning.effort`, OpenAI Chat Completions
 sends `reasoning_effort`, and both send `service_tier`; their output-token
 fields are `max_output_tokens` and `max_completion_tokens`. DeepSeek Chat and
@@ -265,8 +268,9 @@ effort or service tier because their reasoning blocks and tier semantics are
 not yet mapped by these adapters.
 Unset fields remain omitted, except Messages retains its 4096 token fallback.
 One in-process Tool continuation uses the same policy; replay reconstructs it
-after restart without making continuation resumable. Requested effort/tier
-enter durable Usage Attempts separately from observed Provider metadata.
+after restart without making continuation resumable. Requested Context Mode,
+effort, and tier enter durable Usage Attempts separately from observed Provider
+metadata.
 Historical schema 8 preserves the schema-7 request-policy and schema-6 Usage and Cost contract, which
 brackets every Provider invocation with a durable
 Usage Attempt, records UTC start/completion and outcome, preserves exact,
@@ -297,7 +301,7 @@ The Context View projects ordered canonical Item/Turn/role facts from an exact
 Ledger head. Reduction keeps a configurable recent raw tail and replaces older
 text with Item-bound SHA-256, byte-count, role, and token-estimate references;
 the Event Ledger remains authoritative. Schema 12 introduced the singleton
-checkpoint contract, and current Runtime Event schema 13 preserves it: publish
+checkpoint contract, and current Runtime Event schema 14 preserves it: publish
 only at a Ready Safe Barrier, verify the prior Ledger head on replay, reject
 stale drafts without writing, and validate every persisted checkpoint against
 complete canonical Items instead of recursively reducing summaries.
@@ -312,10 +316,17 @@ older artifact references remain durable evidence and are not rehydrated into
 the request. Restart and explicit resume rebuild the same projection from the
 pending Turn and frozen Config/Provider Epochs. Responses, Chat Completions, and
 Messages map the ordered user/assistant Items to their native request shapes and
-preserve them through the supported one-Tool continuation. With no checkpoint,
-the existing single-input request shape remains unchanged. Semantic Compactor
-output, provider-native compaction, external Artifact storage, and Durable
-Memory remain Phase 6 work.
+preserve them through the supported one-Tool continuation. The default
+`canonical` Context Mode keeps the first Turn's single-input request shape;
+later Turns without a checkpoint replay the bounded complete canonical history,
+while a checkpoint supplies its verified recent tail plus later completed
+Items. `provider_native` is a typed Config choice but currently fails before
+credential lookup, Provider construction, network I/O, or Turn admission.
+Explicit and soft-pressure Context reduction preflight the effective next-Turn
+Preset chain before publishing a checkpoint.
+Provider-native continuation identity, Semantic Compactor output,
+provider-native compaction, external Artifact storage, and Durable Memory remain
+Phase 6 work.
 Editable Config schedules require manual provenance. The bundled DeepSeek rate
 card supplies versioned official schedules. A custom DeepSeek origin with no
 pricing override defaults to an immutable `template_mirror` estimate; explicit
@@ -475,7 +486,7 @@ and 7-day summaries. Tab and Shift-Tab move across Attempts, Turn,
 Provider & Model, Dialect & Policy, current Thread, Agent, Team, Named Window,
 and Token & Cache groups; Up/Down selects a row and Enter opens bounded detail.
 Turn detail uses the cached Turn rollup. Provider, requested/observed model,
-dialect, reasoning, and requested/observed service-tier distributions remain
+dialect, requested Context Mode, reasoning, and requested/observed service-tier distributions remain
 scoped to their Turn and keep unknown values explicit. Attempt detail includes
 provider, model, policy, token, cost, outcome, and timing facts. Aggregate
 detail preserves exact, estimated, unknown, and overflow token/cost states.
@@ -524,7 +535,7 @@ pending `local.echo` call; neither is a general Tool policy editor, audited
 ConPTY integration, automatic starter-update workflow, background/periodic
 Provider discovery, or automatic Provider execution. Live inference conformance,
 automatic transport retry or partial-stream reconnect, Messages reasoning
-blocks, Preset context-mode execution, broader multi-Tool approval
+blocks, provider-native Context Mode execution, broader multi-Tool approval
 presentation, broader Provider and Tool adapters,
 Workspace, new-Agent Preset-default inheritance,
 Agent lifecycle actions, general App Server Runtime control beyond the exact

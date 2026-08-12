@@ -566,8 +566,8 @@ fn schema_and_parser_are_versioned_typed_and_secret_safe() {
         (
             "model_presets.<id>.context_mode",
             ConfigValueKind::String,
-            ConfigFieldInteraction::Text {
-                max_bytes: MAX_CONFIG_STRING_BYTES,
+            ConfigFieldInteraction::Choice {
+                choices: &["canonical", "provider_native"],
             },
         ),
         (
@@ -601,6 +601,10 @@ fn schema_and_parser_are_versioned_typed_and_secret_safe() {
             "model_presets.fast.service_tier",
             &["auto", "default", "flex", "scale", "priority", "fast"][..],
         ),
+        (
+            "model_presets.fast.context_mode",
+            &["canonical", "provider_native"][..],
+        ),
         ("model_presets.fast.favorite", &["false", "true"][..]),
     ] {
         for choice in choices {
@@ -610,6 +614,7 @@ fn schema_and_parser_are_versioned_typed_and_secret_safe() {
             );
         }
     }
+    assert!(parse_config_value("model_presets.fast.context_mode", "automatic").is_err());
     for (path_pattern, value_kind) in [
         ("stats.windows.<id>.start", ConfigValueKind::String),
         ("stats.windows.<id>.end", ConfigValueKind::String),

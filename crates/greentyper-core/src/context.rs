@@ -615,6 +615,37 @@ pub struct ContextRequestView {
 }
 
 impl ContextRequestView {
+    pub fn from_items(head: LedgerHead, items: &[CanonicalItem]) -> Result<Self, ContextViewError> {
+        let view = ContextView::from_items(head, items)?;
+        let leading_assistant_items = view
+            .items
+            .iter()
+            .position(|item| item.role == ContextViewRole::User)
+            .unwrap_or(view.items.len());
+        let items = view.items[leading_assistant_items..].to_vec();
+        let mut raw_bytes = 0_u64;
+        let mut estimated_tokens = 0_u64;
+        for item in &items {
+            raw_bytes = raw_bytes
+                .checked_add(
+                    u64::try_from(item.text.len())
+                        .map_err(|_| ContextViewError::ArithmeticOverflow)?,
+                )
+                .ok_or(ContextViewError::ArithmeticOverflow)?;
+            estimated_tokens = estimated_tokens
+                .checked_add(item.estimated_tokens)
+                .ok_or(ContextViewError::ArithmeticOverflow)?;
+        }
+        Ok(Self {
+            source: view.source,
+            archived_items: u64::try_from(leading_assistant_items)
+                .map_err(|_| ContextViewError::ArithmeticOverflow)?,
+            items,
+            raw_bytes,
+            estimated_tokens,
+        })
+    }
+
     #[must_use]
     pub const fn source(&self) -> ContextEventRange {
         self.source

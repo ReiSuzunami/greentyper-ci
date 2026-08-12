@@ -14,8 +14,9 @@ use crate::agent_team::{
     TeamOperationStatus, TeamSnapshot,
 };
 use crate::config::{
-    ConfigEpoch, ConfigError, ConfigLayer, ConfigLayers, ConfigSource, MAX_CONFIG_ID_BYTES,
-    MAX_CONFIG_STRING_BYTES, MAX_MODEL_PRESET_FALLBACK_CANDIDATES, ReasoningEffort, ServiceTier,
+    ConfigEpoch, ConfigError, ConfigLayer, ConfigLayers, ConfigSource, ContextMode,
+    MAX_CONFIG_ID_BYTES, MAX_CONFIG_STRING_BYTES, MAX_MODEL_PRESET_FALLBACK_CANDIDATES,
+    ReasoningEffort, ServiceTier,
 };
 use crate::context::{
     ContextAdmissionDecision, ContextArtifactRef, ContextEventRange, ContextPressureSnapshot,
@@ -711,6 +712,29 @@ impl RuntimeKernel {
         })
     }
 
+    pub fn inspect_pending_context_mode(
+        path: impl AsRef<Path>,
+    ) -> Result<Option<ContextMode>, RuntimeError> {
+        let report = match FileLedger::inspect(path) {
+            Ok(report) => report,
+            Err(LedgerError::Io(source)) if source.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(None);
+            }
+            Err(source) => return Err(RuntimeError::Ledger(source)),
+        };
+        let state = replay_runtime(&report.events)?;
+        let Some(pending) = state.pending.as_ref() else {
+            return Ok(None);
+        };
+        let config = state
+            .configs
+            .get(&pending.config)
+            .ok_or(RuntimeError::CorruptState(
+                "pending Config Epoch is missing",
+            ))?;
+        Ok(Some(*config.resolved().context_mode().value()))
+    }
+
     pub fn inspect_context(path: impl AsRef<Path>) -> Result<ContextInspection, RuntimeError> {
         let report = match FileLedger::inspect(path) {
             Ok(report) => report,
@@ -1124,6 +1148,7 @@ impl RuntimeKernel {
         let input = input.into();
         if pressure.admission() == ContextAdmissionDecision::Reduce {
             validate_input(&input)?;
+            require_layers_context_mode_execution(layers)?;
             let checkpoint = self.prepare_context_checkpoint(ContextReductionPolicy::default())?;
             self.publish_context_checkpoint(checkpoint)?;
         }
@@ -1318,6 +1343,7 @@ impl RuntimeKernel {
             mut leading_deltas,
             mut usage_records,
         } = *approval;
+        require_context_mode_execution(*provider_request.config.resolved().context_mode().value())?;
         require_provider_snapshot(provider, &provider_request.provider)?;
         let turn = provider_request.turn;
         let outcome = self.resolve_tool_call(request, decision, executor)?;
@@ -1534,6 +1560,7 @@ impl RuntimeKernel {
         agent: Option<AgentId>,
         turn: TurnId,
     ) -> Result<DurabilityReceipt, RuntimeError> {
+        self.require_pending_context_mode_execution(turn)?;
         let record = self
             .state
             .turns
@@ -1607,6 +1634,7 @@ impl RuntimeKernel {
         agent: Option<AgentId>,
         turn: TurnId,
     ) -> Result<Option<DurabilityReceipt>, RuntimeError> {
+        self.require_pending_context_mode_execution(turn)?;
         let record = self
             .state
             .turns
@@ -1643,6 +1671,25 @@ impl RuntimeKernel {
         .map(Some)
     }
 
+    fn require_pending_context_mode_execution(&self, turn: TurnId) -> Result<(), RuntimeError> {
+        let Some(pending) = self
+            .state
+            .pending
+            .as_ref()
+            .filter(|pending| pending.turn == turn)
+        else {
+            return Ok(());
+        };
+        let config = self
+            .state
+            .configs
+            .get(&pending.config)
+            .ok_or(RuntimeError::CorruptState(
+                "pending Config Epoch is missing",
+            ))?;
+        require_context_mode_execution(*config.resolved().context_mode().value())
+    }
+
     fn admit_turn(
         &mut self,
         layers: &ConfigLayers,
@@ -1669,8 +1716,10 @@ impl RuntimeKernel {
                 pressure: context_pressure.expect("hard pressure is present"),
             });
         }
-        self.provider_context_for_history(&self.state.items)?;
-
+        require_layers_context_mode_execution(layers)?;
+        for fallback in &fallbacks {
+            require_layers_context_mode_execution(&fallback.layers)?;
+        }
         let thread = match self.state.thread {
             Some(thread) => thread,
             None => ThreadId::new(self.state.next_thread).map_err(RuntimeError::Model)?,
@@ -1692,6 +1741,10 @@ impl RuntimeKernel {
             price_schedules.clone(),
         )
         .map_err(RuntimeError::Config)?;
+        self.provider_context_for_history(
+            &self.state.items,
+            *config.resolved().context_mode().value(),
+        )?;
         if let Some(selection) = &primary_selection {
             validate_fallback_selection(selection, &config)?;
         }
@@ -2015,7 +2068,10 @@ impl RuntimeKernel {
                 "pending user Item is not the latest canonical Item",
             ));
         }
-        let context = self.provider_context_for_history(&self.state.items[..user_index])?;
+        let context = self.provider_context_for_history(
+            &self.state.items[..user_index],
+            *config.resolved().context_mode().value(),
+        )?;
         let request = ProviderRequest {
             thread,
             turn: pending.turn,
@@ -2030,13 +2086,22 @@ impl RuntimeKernel {
     fn provider_context_for_history(
         &self,
         history: &[CanonicalItem],
+        mode: ContextMode,
     ) -> Result<Option<ContextRequestView>, RuntimeError> {
-        self.state
-            .context_checkpoint
-            .as_ref()
-            .map(|checkpoint| checkpoint.view.materialize_request(history))
-            .transpose()
-            .map_err(RuntimeError::Context)
+        require_context_mode_execution(mode)?;
+        if history.is_empty() {
+            return Ok(None);
+        }
+        match self.state.context_checkpoint.as_ref() {
+            Some(checkpoint) => checkpoint
+                .view
+                .materialize_request(history)
+                .map(Some)
+                .map_err(RuntimeError::Context),
+            None => ContextRequestView::from_items(self.ledger.head(), history)
+                .map(Some)
+                .map_err(RuntimeError::Context),
+        }
     }
 
     fn pending_max_output_bytes(&self, turn: TurnId) -> Result<usize, RuntimeError> {
@@ -2380,6 +2445,23 @@ fn path_keys_equal(left: &Path, right: &Path) -> bool {
 #[cfg(not(any(windows, target_os = "macos")))]
 fn path_keys_equal(left: &Path, right: &Path) -> bool {
     left == right
+}
+
+fn require_layers_context_mode_execution(layers: &ConfigLayers) -> Result<(), RuntimeError> {
+    let mode = *layers
+        .resolve()
+        .map_err(RuntimeError::Config)?
+        .context_mode()
+        .value();
+    require_context_mode_execution(mode)
+}
+
+/// Rejects Context Modes without an executable Runtime implementation.
+pub fn require_context_mode_execution(mode: ContextMode) -> Result<(), RuntimeError> {
+    match mode {
+        ContextMode::Canonical => Ok(()),
+        ContextMode::ProviderNative => Err(RuntimeError::UnsupportedContextMode(mode)),
+    }
 }
 
 fn validate_input(input: &str) -> Result<(), RuntimeError> {
@@ -3154,6 +3236,7 @@ struct UsageContext {
     profile: String,
     model: String,
     dialect: Option<ProviderDialect>,
+    context_mode: ContextMode,
     reasoning_effort: Option<ReasoningEffort>,
     service_tier: Option<ServiceTier>,
 }
@@ -3520,6 +3603,7 @@ impl RuntimeState {
                                 )
                                 .map_err(RuntimeError::Usage)?
                                 .with_requested_policy(
+                                    Some(context.context_mode.as_str()),
                                     context.reasoning_effort.map(ReasoningEffort::as_str),
                                     context.service_tier.map(ServiceTier::as_str),
                                 ),
@@ -3787,6 +3871,7 @@ impl RuntimeState {
                 )
                 .map_err(RuntimeError::Usage)?
                 .with_requested_policy(
+                    Some(context.context_mode.as_str()),
                     context.reasoning_effort.map(ReasoningEffort::as_str),
                     context.service_tier.map(ServiceTier::as_str),
                 );
@@ -3977,6 +4062,7 @@ impl RuntimeState {
             profile: provider.profile().to_owned(),
             model: provider.model().to_owned(),
             dialect: provider.dialect(),
+            context_mode: *config.resolved().context_mode().value(),
             reasoning_effort: config
                 .resolved()
                 .reasoning_effort()
@@ -4703,6 +4789,8 @@ fn encode_config_epoch(encoder: &mut Encoder, epoch: &ConfigEpoch) -> Result<(),
             encoder.u8(source_tag(value.source()));
         }
     }
+    encoder.string(resolved.context_mode().value().as_str())?;
+    encoder.u8(source_tag(resolved.context_mode().source()));
     Ok(())
 }
 
@@ -4724,6 +4812,7 @@ fn decode_config_epoch(
         project: ConfigLayer::default(),
         cli: ConfigLayer::default(),
     };
+    layers.built_in.context_mode = Some(ContextMode::Canonical);
     layer_mut(&mut layers, profile_source).provider_profile = Some(profile);
     layer_mut(&mut layers, model_source).provider_model = Some(model);
     layer_mut(&mut layers, max_output_source).max_output_bytes = Some(max_output);
@@ -4804,6 +4893,14 @@ fn decode_config_epoch(
                 ));
             }
         }
+    }
+    if schema >= 14 {
+        let value = decoder.string(MAX_CONFIG_STRING_BYTES)?;
+        let value = ContextMode::parse(&value).ok_or(RuntimeError::CorruptEvent(
+            "invalid Config Epoch context mode",
+        ))?;
+        let source = decode_source(decoder.u8()?)?;
+        layer_mut(&mut layers, source).context_mode = Some(value);
     }
     let epoch = ConfigEpoch::freeze_with_observability(id, &layers, usage_windows, price_schedules)
         .map_err(RuntimeError::Config)?;
@@ -5093,6 +5190,7 @@ pub enum RuntimeError {
     Provider(ProviderError),
     Usage(UsageError),
     Context(ContextViewError),
+    UnsupportedContextMode(ContextMode),
     ContextCheckpointNotAtSafeBarrier,
     ContextAdmissionBlocked {
         pressure: ContextPressureSnapshot,
@@ -5140,6 +5238,12 @@ impl fmt::Display for RuntimeError {
             Self::Provider(source) => write!(formatter, "{source}"),
             Self::Usage(source) => write!(formatter, "{source}"),
             Self::Context(source) => write!(formatter, "{source}"),
+            Self::UnsupportedContextMode(ContextMode::ProviderNative) => {
+                write!(formatter, "provider-native Context Mode is not available")
+            }
+            Self::UnsupportedContextMode(ContextMode::Canonical) => {
+                write!(formatter, "canonical Context Mode is not available")
+            }
             Self::ContextCheckpointNotAtSafeBarrier => {
                 write!(formatter, "Context checkpoint requires a Safe Barrier")
             }
@@ -5233,6 +5337,10 @@ impl Error for RuntimeError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent_team::{
+        Capability, CapabilitySnapshot, CommandOutcome, ResourceBudget, TaskScope, TaskSpec,
+    };
+    use crate::tool_runtime::{AuthorizedToolCall, ToolExecution};
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static TEST_LEDGER_NONCE: AtomicU64 = AtomicU64::new(1);
@@ -5291,6 +5399,149 @@ mod tests {
             false,
         )
         .expect("valid Provider Profile snapshot")
+    }
+
+    #[derive(Default)]
+    struct ApprovalFixtureProvider {
+        continuations: usize,
+    }
+
+    impl ProviderRuntime for ApprovalFixtureProvider {
+        fn run(&mut self, _request: &ProviderRequest) -> Result<Vec<ProviderEvent>, ProviderError> {
+            Ok(vec![
+                ProviderEvent::FunctionCall(ProviderToolCall::new(
+                    "call-context-mode",
+                    "context-mode-tool",
+                    "{}",
+                )?),
+                ProviderEvent::Completed(UsageRecord::default()),
+            ])
+        }
+
+        fn continue_after_tool(
+            &mut self,
+            _request: &ProviderRequest,
+            _output: &ProviderToolOutput,
+        ) -> Result<Vec<ProviderEvent>, ProviderError> {
+            self.continuations += 1;
+            Ok(vec![ProviderEvent::Completed(UsageRecord::default())])
+        }
+    }
+
+    #[derive(Default)]
+    struct CountingToolExecutor {
+        calls: usize,
+    }
+
+    impl ToolEffectExecutor for CountingToolExecutor {
+        fn execute(&mut self, _call: &AuthorizedToolCall<'_>) -> ToolExecution {
+            self.calls += 1;
+            ToolExecution::Succeeded {
+                output: b"tool output".to_vec(),
+            }
+        }
+    }
+
+    fn admit_test_root(kernel: &mut RuntimeKernel) -> AgentSession {
+        let operation = kernel
+            .dispatch_team(TeamCommand::AdmitRoot {
+                task: TaskSpec::new(
+                    "test Context Mode Tool preflight",
+                    TaskScope::from_labels(["context-mode"]),
+                ),
+                budget: ResourceBudget::new(1_000, 1),
+                capabilities: CapabilitySnapshot::from_capabilities([Capability::Tool(
+                    "context-mode-tool".to_owned(),
+                )]),
+            })
+            .expect("admit test root");
+        kernel
+            .acknowledge_team_operation(operation.operation)
+            .expect("acknowledge test root");
+        match operation.commit.outcome {
+            CommandOutcome::RootAdmitted { session, .. } => session,
+            other => panic!("unexpected root admission: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn provider_native_tool_continuation_rejects_before_tool_or_provider_effects() {
+        let runtime_path = test_ledger_path("provider-native-tool-runtime");
+        let team_path = test_ledger_path("provider-native-tool-team");
+        let tool_path = test_ledger_path("provider-native-tool-tool");
+        let (mut kernel, recovery) =
+            RuntimeKernel::open_with_team_and_tools(&runtime_path, &team_path, &tool_path, 1)
+                .expect("open Tool Runtime");
+        assert!(recovery.into_sessions().is_empty());
+        let root = admit_test_root(&mut kernel);
+        let mut provider = ApprovalFixtureProvider::default();
+        let outcome = kernel
+            .execute_provider_turn(
+                root,
+                &ConfigLayers::default(),
+                "request one Tool",
+                &mut provider,
+                |_| Ok(ToolResources::default()),
+            )
+            .expect("request Tool approval");
+        let ProviderTurnOutcome::ApprovalRequired(mut approval) = outcome else {
+            panic!("Provider did not request Tool approval")
+        };
+        let mut provider_native_layers = ConfigLayers::default();
+        provider_native_layers.cli.context_mode = Some(ContextMode::ProviderNative);
+        approval.provider_request.config = ConfigEpoch::freeze(
+            approval.provider_request.config.id(),
+            &provider_native_layers,
+        )
+        .expect("freeze provider-native approval Config");
+
+        let runtime_before = kernel.snapshot();
+        let tools_before = kernel
+            .tool_snapshot()
+            .expect("Tool snapshot before decision");
+        let runtime_bytes_before = std::fs::read(&runtime_path).expect("read Runtime ledger");
+        let team_bytes_before = std::fs::read(&team_path).expect("read Team ledger");
+        let tool_bytes_before = std::fs::read(&tool_path).expect("read Tool ledger");
+        let mut executor = CountingToolExecutor::default();
+        assert!(matches!(
+            kernel.resolve_provider_tool_call(
+                approval,
+                ApprovalDecision::Grant {
+                    expires_at_unix_ms: u64::MAX,
+                },
+                &mut executor,
+                &mut provider,
+            ),
+            Err(RuntimeError::UnsupportedContextMode(
+                ContextMode::ProviderNative
+            ))
+        ));
+        assert_eq!(executor.calls, 0);
+        assert_eq!(provider.continuations, 0);
+        assert_eq!(kernel.snapshot(), runtime_before);
+        assert_eq!(
+            kernel
+                .tool_snapshot()
+                .expect("Tool snapshot after decision"),
+            tools_before
+        );
+        drop(kernel);
+        assert_eq!(
+            std::fs::read(&runtime_path).expect("reread Runtime ledger"),
+            runtime_bytes_before
+        );
+        assert_eq!(
+            std::fs::read(&team_path).expect("reread Team ledger"),
+            team_bytes_before
+        );
+        assert_eq!(
+            std::fs::read(&tool_path).expect("reread Tool ledger"),
+            tool_bytes_before
+        );
+
+        std::fs::remove_file(runtime_path).expect("cleanup Runtime ledger");
+        std::fs::remove_file(team_path).expect("cleanup Team ledger");
+        std::fs::remove_file(tool_path).expect("cleanup Tool ledger");
     }
 
     #[test]
@@ -5515,6 +5766,12 @@ mod tests {
         .encode()
         .expect("encode Config Epoch");
         assert_eq!(schema_six.schema, RUNTIME_EVENT_SCHEMA);
+        schema_six.payload.truncate(
+            schema_six.payload.len()
+                - (std::mem::size_of::<u32>()
+                    + crate::config::ContextMode::Canonical.as_str().len()
+                    + std::mem::size_of::<u8>()),
+        );
         assert_eq!(schema_six.payload.pop(), Some(0));
         assert_eq!(schema_six.payload.pop(), Some(0));
         schema_six.schema = 6;
@@ -5538,6 +5795,12 @@ mod tests {
         .encode()
         .expect("encode request-policy Config Epoch");
         let mut schema_seven = encoded.clone();
+        schema_seven.payload.truncate(
+            schema_seven.payload.len()
+                - (std::mem::size_of::<u32>()
+                    + crate::config::ContextMode::Canonical.as_str().len()
+                    + std::mem::size_of::<u8>()),
+        );
         schema_seven.schema = 7;
         assert_eq!(
             RuntimeEvent::decode(&stored_runtime_event(schema_seven))

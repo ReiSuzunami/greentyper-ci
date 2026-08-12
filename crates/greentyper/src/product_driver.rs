@@ -24,6 +24,7 @@ use greentyper_core::runtime::{
     AcknowledgeOutcome, CancelTurnOutcome, KernelTeamSnapshot, ModelSelection, PreparedOutput,
     ProviderFallbackCandidate, ProviderToolApproval, ProviderTurnOutcome, RecoveryStatus,
     RuntimeError, RuntimeKernel,
+    require_context_mode_execution as require_frozen_context_mode_execution,
 };
 use greentyper_core::tool_runtime::{
     ApprovalDecision, ToolCallRecord, ToolCallStatus, ToolEffectExecutor,
@@ -62,7 +63,26 @@ pub(crate) fn apply_model_preset_to_next_turn(
     layers.cli.max_output_tokens = preset.max_output_tokens;
     layers.cli.reasoning_effort = preset.reasoning_effort;
     layers.cli.service_tier = preset.service_tier;
+    layers.cli.context_mode = preset.context_mode;
     preset.dialect
+}
+
+pub(crate) fn require_context_mode_execution(layers: &ConfigLayers) -> Result<(), RuntimeError> {
+    let mode = *layers
+        .resolve()
+        .map_err(RuntimeError::Config)?
+        .context_mode()
+        .value();
+    require_frozen_context_mode_execution(mode)
+}
+
+pub(crate) fn require_pending_context_mode_execution(
+    runtime_path: &Path,
+) -> Result<(), RuntimeError> {
+    let Some(mode) = RuntimeKernel::inspect_pending_context_mode(runtime_path)? else {
+        return Ok(());
+    };
+    require_frozen_context_mode_execution(mode)
 }
 
 pub(crate) fn freeze_model_selection(
@@ -99,6 +119,8 @@ impl<E: ToolEffectExecutor> ProductDriver<E> {
         executor: E,
         interaction: &mut impl ProductInteraction,
     ) -> Result<Self, ProductDriverError> {
+        require_pending_context_mode_execution(runtime_path)
+            .map_err(ProductDriverError::Runtime)?;
         has_product_driver_state(runtime_path)?;
         if let Some(parent) = runtime_path
             .parent()
@@ -118,6 +140,8 @@ impl<E: ToolEffectExecutor> ProductDriver<E> {
         executor: E,
         interaction: &mut impl ProductInteraction,
     ) -> Result<Self, ProductDriverError> {
+        require_pending_context_mode_execution(runtime_path)
+            .map_err(ProductDriverError::Runtime)?;
         if !runtime_path.exists() || !has_product_driver_state(runtime_path)? {
             return Err(ProductDriverError::ToolStateUnavailable);
         }
@@ -137,6 +161,8 @@ impl<E: ToolEffectExecutor> ProductDriver<E> {
         turn: TurnId,
         executor: E,
     ) -> Result<Self, ProductDriverError> {
+        require_pending_context_mode_execution(runtime_path)
+            .map_err(ProductDriverError::Runtime)?;
         if !runtime_path.exists() || !has_product_driver_state(runtime_path)? {
             return Err(ProductDriverError::ProviderTurnStateUnavailable);
         }
@@ -501,6 +527,7 @@ pub(crate) fn request_product_provider_turn_recovery(
     runtime_path: &Path,
     turn: TurnId,
 ) -> Result<DurabilityReceipt, ProductDriverError> {
+    require_pending_context_mode_execution(runtime_path).map_err(ProductDriverError::Runtime)?;
     if !path_entry_exists(runtime_path)? || !has_product_driver_state(runtime_path)? {
         return Err(ProductDriverError::ProviderTurnStateUnavailable);
     }
@@ -780,7 +807,7 @@ mod tests {
 
     use greentyper_core::agent_team::TeamOperationRecord;
     use greentyper_core::config::{
-        ConfigDocument, ConfigLayers, ConfigPaths, ConfigRuntime, ConfigRuntimeStatus,
+        ConfigDocument, ConfigLayers, ConfigPaths, ConfigRuntime, ConfigRuntimeStatus, ContextMode,
         ModelPresetView, ReasoningEffort, ServiceTier,
     };
     use greentyper_core::provider::{
@@ -804,6 +831,7 @@ mod tests {
         layers.cli.max_output_tokens = Some(4096);
         layers.cli.reasoning_effort = Some(ReasoningEffort::High);
         layers.cli.service_tier = Some(ServiceTier::Priority);
+        layers.cli.context_mode = Some(ContextMode::Canonical);
         let preset = ModelPresetView {
             id: "fast".into(),
             provider: "edge".into(),
@@ -812,7 +840,7 @@ mod tests {
             reasoning_effort: None,
             service_tier: None,
             max_output_tokens: None,
-            context_mode: Some("compact".into()),
+            context_mode: Some(ContextMode::ProviderNative),
             default: false,
             favorite: true,
             fallback: vec!["careful".into()],
@@ -827,7 +855,10 @@ mod tests {
         assert!(resolved.max_output_tokens().is_none());
         assert!(resolved.reasoning_effort().is_none());
         assert!(resolved.service_tier().is_none());
-        assert_eq!(preset.context_mode.as_deref(), Some("compact"));
+        assert_eq!(
+            *resolved.context_mode().value(),
+            ContextMode::ProviderNative
+        );
         assert_eq!(preset.fallback, ["careful"]);
     }
 

@@ -1,6 +1,6 @@
 use greentyper_core::config::{
-    ConfigEpoch, ConfigError, ConfigLayer, ConfigLayers, ConfigSource, MAX_OUTPUT_TOKENS,
-    ReasoningEffort, ServiceTier,
+    ConfigEpoch, ConfigError, ConfigLayer, ConfigLayers, ConfigSource, ContextMode,
+    MAX_OUTPUT_TOKENS, ReasoningEffort, ServiceTier,
 };
 use greentyper_core::model::{
     CanonicalItem, ConfigEpochId, ItemId, ItemRole, MAX_ITEM_TEXT_BYTES, ThreadId, TurnId,
@@ -56,6 +56,11 @@ fn request_policy_enums_are_closed_and_canonical() {
         assert_eq!(ServiceTier::parse(value.as_str()), Some(value));
     }
     assert_eq!(ServiceTier::parse("free"), None);
+
+    for value in [ContextMode::Canonical, ContextMode::ProviderNative] {
+        assert_eq!(ContextMode::parse(value.as_str()), Some(value));
+    }
+    assert_eq!(ContextMode::parse("automatic"), None);
 }
 
 #[test]
@@ -157,6 +162,37 @@ fn frozen_epoch_is_immutable_when_layers_change() {
         Some(ServiceTier::Default)
     );
     assert_ne!(frozen.fingerprint(), newer.fingerprint());
+}
+
+#[test]
+fn context_mode_is_frozen_into_config_identity() {
+    let baseline = ConfigEpoch::freeze(
+        ConfigEpochId::new(1).expect("nonzero epoch"),
+        &ConfigLayers::default(),
+    )
+    .expect("freeze default context mode");
+    assert_eq!(
+        *baseline.resolved().context_mode().value(),
+        ContextMode::Canonical
+    );
+    assert_eq!(
+        baseline.resolved().context_mode().source(),
+        ConfigSource::BuiltIn
+    );
+
+    let mut native_layers = ConfigLayers::default();
+    native_layers.cli.context_mode = Some(ContextMode::ProviderNative);
+    let native = ConfigEpoch::freeze(
+        ConfigEpochId::new(2).expect("nonzero epoch"),
+        &native_layers,
+    )
+    .expect("freeze provider-native context mode");
+    assert_eq!(
+        *native.resolved().context_mode().value(),
+        ContextMode::ProviderNative
+    );
+    assert_eq!(native.resolved().context_mode().source(), ConfigSource::Cli);
+    assert_ne!(baseline.fingerprint(), native.fingerprint());
 }
 
 #[test]

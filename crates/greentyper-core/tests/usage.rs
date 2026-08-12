@@ -1,6 +1,6 @@
 use greentyper_core::config::{
     ConfigDocument, ConfigEpoch, ConfigError, ConfigLayers, ConfigPaths, ConfigRuntime,
-    ReasoningEffort, ServiceTier,
+    ContextMode, ReasoningEffort, ServiceTier,
 };
 use greentyper_core::ledger::FileLedger;
 use greentyper_core::model::ConfigEpochId;
@@ -345,12 +345,13 @@ fn excessive_usage_windows_are_rejected_before_runtime_append() {
 
 #[test]
 fn runtime_persists_attempts_and_rebuilds_cached_rollups() {
-    assert_eq!(RUNTIME_EVENT_SCHEMA, 13);
+    assert_eq!(RUNTIME_EVENT_SCHEMA, 14);
     let temp = TempConfig::new();
     let ledger = temp.root.join("runtime.ledger");
     let mut runtime = RuntimeKernel::open(&ledger).unwrap();
     let mut provider = DeterministicProvider::default();
     let mut layers = ConfigLayers::default();
+    layers.cli.context_mode = Some(ContextMode::Canonical);
     layers.cli.reasoning_effort = Some(ReasoningEffort::High);
     layers.cli.service_tier = Some(ServiceTier::Priority);
     let output = runtime
@@ -364,12 +365,18 @@ fn runtime_persists_attempts_and_rebuilds_cached_rollups() {
     let attempt = &snapshot.attempts()[0];
     assert_eq!(attempt.provider_profile(), "simulator");
     assert_eq!(attempt.requested_model(), "deterministic-v1");
+    assert_eq!(attempt.requested_context_mode(), Some("canonical"));
     assert_eq!(attempt.requested_reasoning_effort(), Some("high"));
     assert_eq!(attempt.requested_service_tier(), Some("priority"));
     assert!(attempt.started_at().is_some());
     assert!(attempt.completed_at() >= attempt.started_at());
     let total = snapshot.thread().unwrap().usage();
     assert_eq!(total.attempts(), 1);
+    assert_eq!(
+        total.requested_context_modes().values().get("canonical"),
+        Some(&1)
+    );
+    assert_eq!(total.requested_context_modes().unknown(), 0);
     assert_eq!(total.input_tokens().exact(), Some(0));
     assert!(total.input_tokens().estimated().unwrap() > 0);
 }

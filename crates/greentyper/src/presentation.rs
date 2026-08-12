@@ -458,6 +458,7 @@ fn stats_policy_entry_count(stats: &RuntimeUsageSnapshot) -> usize {
     stats.turns().iter().fold(0, |total, turn| {
         [
             turn.usage().dialects(),
+            turn.usage().requested_context_modes(),
             turn.usage().requested_reasoning_efforts(),
             turn.usage().observed_reasoning_efforts(),
             turn.usage().requested_service_tiers(),
@@ -825,7 +826,7 @@ fn model_matches(entry: &ModelSelectorEntryView, tokens: &[String]) -> bool {
                 None,
                 preset.reasoning_effort.as_ref().map(|value| value.as_str()),
                 preset.service_tier.as_ref().map(|value| value.as_str()),
-                preset.context_mode.as_deref(),
+                preset.context_mode.as_ref().map(|value| value.as_str()),
             ),
             ModelSelectorChoiceView::ReleaseCatalog { model, .. } => (
                 model.record().primary_dialect().value().as_str(),
@@ -3678,7 +3679,10 @@ fn model_detail_rows(entry: &ModelSelectorEntryView) -> Vec<LayoutRowView> {
                     false,
                 ),
                 LayoutRowView::new(
-                    format!("context {}", preset.context_mode.as_deref().unwrap_or("?")),
+                    format!(
+                        "context {}",
+                        preset.context_mode.map_or("?", |value| value.as_str())
+                    ),
                     false,
                 ),
                 LayoutRowView::new(format!("default {}", preset.default), false),
@@ -3987,6 +3991,7 @@ fn stats_policy_rows(
         let rollup = turn.usage();
         for (dimension, distribution) in [
             ("dialect", rollup.dialects()),
+            ("requested context mode", rollup.requested_context_modes()),
             ("requested reasoning", rollup.requested_reasoning_efforts()),
             ("observed reasoning", rollup.observed_reasoning_efforts()),
             ("requested service tier", rollup.requested_service_tiers()),
@@ -4495,6 +4500,13 @@ fn stats_attempt_detail_rows(attempt: &UsageAttempt) -> Vec<LayoutRowView> {
             format!(
                 "dialect {}",
                 attempt.dialect().map_or("?", |value| value.as_str())
+            ),
+            false,
+        ),
+        LayoutRowView::new(
+            format!(
+                "context mode requested {}",
+                attempt.requested_context_mode().unwrap_or("?")
             ),
             false,
         ),

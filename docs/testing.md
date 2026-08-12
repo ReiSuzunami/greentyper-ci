@@ -160,17 +160,18 @@ and process death after a durable Tool success cannot repeat the effect.
 Migration tests replay a historical schema-1 Ledger before appending current
 events, decode historical schema-2 and schema-3 Provider Epoch shapes
 separately, and round-trip current Provider Profile, dialect, Config Usage
-Window, Usage Attempt, Price Schedule, selected output-token data, reasoning
-effort, service tier, and distinct template-mirror pricing provenance while
+Window, Usage Attempt, Price Schedule, selected output-token data, Context Mode
+and source, reasoning effort, service tier, and distinct template-mirror pricing provenance while
 rejecting fingerprint, outcome, timestamp, and transition tampering. A schema-5
 Config Epoch without the optional token field, a schema-6 Config Epoch without
 request-policy fields, and a schema-7 Config Epoch without template-mirror tags
-remain replayable under current Runtime Event schema 13; schema 8 Ledgers remain
+remain replayable under current Runtime Event schema 14; schema 8 Ledgers remain
 compatible before the schema-9 Model-selection event, and schema-9 Ledgers
 replay with legacy untyped block origin before schema-10 cancellation events.
 Schema-10 blocks replay without a retry stage and therefore remain
-non-retryable; schema 13 preserves schema 11's stage and retry-request event,
-schema 12's checkpoint, and adds frozen fallback recovery.
+non-retryable; schema 14 preserves schema 13's frozen fallback recovery, schema
+12's checkpoint, and schema 11's stage and retry-request event, while adding
+typed Context Mode to new Config Epochs.
 
 Product integration tests also run the configured Responses, Chat Completions,
 and Messages adapters against concrete loopback HTTP tracers. They resolve and
@@ -271,8 +272,8 @@ automatic retry policy or partial-stream reconnect, live Providers, or broader T
 
 The first Usage projection suite durably records Provider request and
 continuation attempts, closes interrupted attempts only on explicit resume,
-preserves frozen requested reasoning effort and service tier separately from
-observed metadata,
+preserves frozen requested Context Mode, reasoning effort, and service tier
+separately from observed metadata,
 and rebuilds cached Turn, Thread, Agent, Team, rolling, and named-window
 rollups. A deterministic exhaustive small-input test compares cached totals to
 source attempts across exact, estimated, unknown, and failed combinations;
@@ -451,8 +452,8 @@ Provider call or Ledger write, then exact admission consumes one selection and
 freezes the expected Provider Epoch. Headless integration proves automatic
 pending-ID resolution plus credential-preflight and explicit-ID-conflict
 failure preserve all three Ledger byte streams. These tests do not prove
-background/periodic Provider discovery, automatic starter updates,
-new-Agent default inheritance, or context-mode execution. Separate headless and
+background/periodic Provider discovery, automatic starter updates, or
+new-Agent default inheritance. Separate headless and
 Config CLI integration tests now prove project `agent.default_model_preset`
 overrides the user value, an explicit Preset is used when no conflicting
 pending selection exists, missing targets are rejected without file mutation,
@@ -474,8 +475,9 @@ Usage Windows and complete token/cache records. It selects the second durable
 attempt, opens provider/model/outcome detail, then cycles through Turn,
 Provider & Model, Dialect & Policy, current Thread, Agent, Team, Named Window,
 and Token & Cache groups and opens each detail across deterministic resizes.
-Exact layout assertions pin requested/observed and unknown distribution buckets
-plus cache-read, cache-write, and reasoning-token quantities. Empty and
+Exact layout assertions pin requested Context Mode, requested/observed and
+unknown distribution buckets, plus cache-read, cache-write, and reasoning-token
+quantities. Empty and
 unavailable snapshots clamp stale selection, close detail, render explicit
 empty state, and create no Ledger. Runtime, Team, and Tool Ledger bytes remain
 unchanged. Core replay tests separate exact and estimated cache ratios, retain
@@ -632,7 +634,7 @@ occupancy renders with `~` while an unavailable pressure fact remains unknown.
 Context tests now prove exact-head canonical projection, bounded recent raw
 tails, SHA-256 references for old Items, reduction of history larger than the raw
 View boundary, and foreign-reference rejection. Checkpoint tests introduced at
-schema 12 and replayed under current schema 13 prove a Safe Barrier checkpoint
+schema 12 and replayed under current schema 14 prove a Safe Barrier checkpoint
 replays, stale publication leaves exact bytes unchanged,
 wrong prior heads and tampered references fail closed, soft pressure checkpoints
 before the next Turn, and unknown pressure creates none. CLI tests prove missing
@@ -642,14 +644,19 @@ byte-identical. Tool tests also reject an unresolved approval as non-barrier.
 Request-projection tests prove archived bodies stay omitted while the recent tail
 and post-checkpoint Items remain ordered, an incomplete leading Assistant turn
 is omitted, malformed authoritative history fails closed, and an oversized
-delta rejects before admission. Runtime tests prove the
-next request and crash/reopen resume reconstruct that projection. Real loopback
+delta rejects before admission. Runtime tests prove canonical mode projects
+bounded complete history without a checkpoint, the first Turn retains the
+single-input shape, and crash/reopen resume reconstructs the frozen mode and
+projection. Headless and core failure tests prove `provider_native`, including
+one hidden inside a fallback chain, fails before credentials, Provider effects,
+Ledger creation, Tool continuation, soft-pressure checkpoints, or explicit
+`context reduce` publication. Real loopback
 body assertions cover Responses, Chat Completions, and Messages plus one Tool
 continuation for each request family. A cross-process CLI flow proves explicit
 reduce, next-Turn admission interruption, explicit resume, and checkpoint
 inspection without exposing Context text. These tests do not constitute
-provider-native semantic compaction, external Artifact persistence, Durable
-Memory, or P6 resource evidence.
+provider-native Context Mode execution, provider-native semantic compaction,
+external Artifact persistence, Durable Memory, or P6 resource evidence.
 Provider-wizard tests derive a normalized Profile from an uncommitted multi-field
 Draft, keep credential references out of serialized screens, leave Config
 untouched during the connection check, invalidate a prior result after any staged

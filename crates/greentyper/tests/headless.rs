@@ -164,9 +164,21 @@ fn stats_reports_replayed_usage_without_user_text() {
     let document: serde_json::Value = serde_json::from_str(&text).expect("stats JSON");
     assert_eq!(document["attempts"].as_array().map(Vec::len), Some(1));
     assert_eq!(document["attempts"][0]["outcome"], "succeeded");
+    assert_eq!(
+        document["attempts"][0]["requested_context_mode"],
+        "canonical"
+    );
     assert_eq!(document["attempts"][0]["usage"]["accuracy"], "estimated");
     assert_eq!(document["attempts"][0]["cost_provenance"], "unknown");
     assert_eq!(document["thread"]["usage"]["attempts"], 1);
+    assert_eq!(
+        document["thread"]["usage"]["requested_context_modes"]["values"]["canonical"],
+        1
+    );
+    assert_eq!(
+        document["thread"]["usage"]["requested_context_modes"]["unknown"],
+        0
+    );
     assert_eq!(document["team"], serde_json::Value::Null);
     fs::remove_file(path).expect("cleanup Runtime ledger");
 }
@@ -880,6 +892,118 @@ max_output_tokens = 2048
         "{missing:?}"
     );
     assert!(!ledger.exists());
+
+    fs::remove_dir_all(config_root).expect("cleanup config root");
+}
+
+#[test]
+fn headless_rejects_provider_native_context_before_credentials_or_ledger() {
+    let ledger = temp_path("provider-native-context");
+    let config_root = temp_path("provider-native-context-config");
+    let config_path = user_config_path(&config_root);
+    fs::create_dir_all(config_path.parent().unwrap()).expect("create config parent");
+    fs::write(
+        &config_path,
+        r#"schema_version = 1
+
+[providers.edge]
+template = "openai-compatible"
+credential = "private-edge-credential-reference"
+base_url = "https://provider.invalid/v1"
+dialects = ["responses"]
+
+[providers.edge.routes]
+responses = "/responses"
+
+[providers.edge.pricing]
+source = "unknown"
+
+[model_presets.native]
+provider = "edge"
+model = "fixture-model"
+dialect = "responses"
+context_mode = "provider_native"
+"#,
+    )
+    .expect("write provider-native Model Preset");
+
+    let output = binary_with_config_root(&config_root)
+        .args(["headless", "--preset", "native", "--ledger"])
+        .arg(&ledger)
+        .args(["--input", "must fail before credential lookup"])
+        .output()
+        .expect("reject provider-native Context Mode");
+    assert!(!output.status.success(), "{output:?}");
+    assert!(output.stdout.is_empty(), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("provider-native Context Mode is not available"),
+        "{output:?}"
+    );
+    assert!(!stderr.contains("private-edge-credential-reference"));
+    assert!(!stderr.contains("credential binding was not found"));
+    assert!(!ledger.exists());
+    assert!(!sidecar_path(&ledger, "team").exists());
+    assert!(!sidecar_path(&ledger, "tool").exists());
+
+    fs::remove_dir_all(config_root).expect("cleanup config root");
+}
+
+#[test]
+fn headless_preflights_every_fallback_context_before_credentials_or_ledger() {
+    let ledger = temp_path("provider-native-fallback-context");
+    let config_root = temp_path("provider-native-fallback-context-config");
+    let config_path = user_config_path(&config_root);
+    fs::create_dir_all(config_path.parent().unwrap()).expect("create config parent");
+    fs::write(
+        &config_path,
+        r#"schema_version = 1
+
+[providers.edge]
+template = "openai-compatible"
+credential = "private-edge-credential-reference"
+base_url = "https://provider.invalid/v1"
+dialects = ["responses"]
+
+[providers.edge.routes]
+responses = "/responses"
+
+[providers.edge.pricing]
+source = "unknown"
+
+[model_presets.primary]
+provider = "edge"
+model = "primary-model"
+dialect = "responses"
+fallback = ["native"]
+
+[model_presets.native]
+provider = "edge"
+model = "native-model"
+dialect = "responses"
+context_mode = "provider_native"
+"#,
+    )
+    .expect("write fallback Context Mode config");
+
+    let output = binary_with_config_root(&config_root)
+        .args(["headless", "--preset", "primary", "--ledger"])
+        .arg(&ledger)
+        .args(["--input", "preflight the complete fallback chain"])
+        .output()
+        .expect("reject provider-native fallback Context Mode");
+    assert!(!output.status.success(), "{output:?}");
+    assert!(output.stdout.is_empty(), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("provider-native Context Mode is not available"),
+        "{output:?}"
+    );
+    assert!(!stderr.contains("private-edge-credential-reference"));
+    assert!(!stderr.contains("credential binding was not found"));
+    assert!(!ledger.exists());
+    assert!(!sidecar_path(&ledger, "team").exists());
+    assert!(!sidecar_path(&ledger, "tool").exists());
 
     fs::remove_dir_all(config_root).expect("cleanup config root");
 }

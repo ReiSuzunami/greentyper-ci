@@ -266,7 +266,7 @@ move across Attempts, Turn, Provider & Model, Dialect & Policy, current Thread,
 Agent, Team, Named Window, and Token & Cache groups; Up/Down selects a row and
 Enter opens bounded detail. Turn views read the cached Turn rollups directly.
 The distribution groups expose per-Turn provider, requested/observed model,
-dialect, reasoning, and requested/observed service-tier counts while preserving
+dialect, requested Context Mode, reasoning, and requested/observed service-tier counts while preserving
 unknown buckets. The browser renders 1-hour, 1-day, and 7-day summaries without
 writing the Runtime, Team, or Tool Ledger. Token & Cache and each scoped rollup
 detail expose token-weighted cache-read/input and cache-write/input ratios.
@@ -665,7 +665,7 @@ dialect = "responses"
 reasoning_effort = "high"
 service_tier = "default"
 max_output_tokens = 32768
-context_mode = "provider_native"
+context_mode = "canonical"
 favorite = true
 fallback = []
 ```
@@ -677,8 +677,9 @@ before admission. OpenCode Go admission separately requires the exact model and
 dialect pair from the release catalog; it does not infer another dialect. The
 effective dialect is frozen in the Provider Epoch. This is not transport retry
 or automatic provider routing. Presets may also define reasoning effort,
-reasoning mode where supported, service tier, output limit, context policy, and
-an explicit fallback graph. Config resolves that graph depth-first in
+reasoning mode where supported, service tier, output limit, typed Context Mode,
+and an explicit fallback graph. Context Mode accepts only `canonical` or
+`provider_native`; `canonical` is the built-in default. Config resolves that graph depth-first in
 first-occurrence order, rejects cycles and unknown references, and caps the
 result at 16 Provider candidates. Each direct fallback must retain any required
 reasoning effort, service tier, and context mode and provide at least the
@@ -687,10 +688,12 @@ explicit. Presets never grant tools, approvals, credentials, or workspace
 authority.
 
 The current headless execution surface accepts `--preset ID`. It resolves the
-exact configured ID and its explicit fallback candidates, adapter-preflights
-the complete plan before opening Runtime state, and freezes every candidate's
-Profile/model/dialect and optional `max_output_tokens`, typed reasoning effort,
-and typed service tier in distinct Config/Provider Epochs for the next Turn.
+exact configured ID and its explicit fallback candidates, preflights every
+Context Mode before credential lookup, adapter-preflights the complete plan
+before opening Runtime state, and freezes every candidate's
+Profile/model/dialect, Context Mode, optional `max_output_tokens`, typed
+reasoning effort, and typed service tier in distinct Config/Provider Epochs for
+the next Turn.
 `--preset` and `--dialect` are mutually exclusive, and an unknown ID fails
 rather than triggering model-name inference. Responses maps
 reasoning to `reasoning.effort`; OpenAI Chat Completions uses
@@ -707,7 +710,7 @@ DeepSeek-only thinking field, and likewise rejects both unsupported policy
 fields. Initial requests and one
 in-process Tool continuation retain the same frozen values; restart replay
 reconstructs them without making Tool continuation resumable. Requested Usage
-metadata records the same policy. The accepted reasoning values are `none`,
+metadata records the same Context Mode and policy. The accepted reasoning values are `none`,
 `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`; service tiers are
 `auto`, `default`,
 `flex`, `scale`, `priority`, and `fast`. Provider/model support is narrower and
@@ -725,7 +728,15 @@ overrides user scope. A conflicting explicit/pending pair still fails before
 Provider or Ledger mutation. Unknown default IDs fail Config validation, and
 the generic Config set/reset flow can replace or clear the field. Repeating an
 already-applied set/reset returns `written: false` without rewriting the Config
-layer. Context-mode execution and new-Agent inheritance remain target behavior.
+layer. `canonical` execution keeps the first Turn's single-input shape, replays
+bounded completed canonical history on later Turns when no checkpoint exists,
+uses a verified checkpoint tail when one does, and reconstructs the same mode
+on explicit resume. `provider_native` remains a visible typed choice but fails
+before credential lookup, Provider construction, network I/O, or Ledger
+admission. Explicit Context reduction resolves the pending or default Preset
+chain and rejects any provider-native candidate before opening Product state or
+publishing a checkpoint. Provider-native continuation identity and new-Agent
+inheritance remain target behavior.
 
 The rendered model browser now provides Favorites, Recent, Compatible, and All
 views with fuzzy search and bounded provider, dialect, context, capability,
@@ -840,8 +851,9 @@ Usage Windows are half-open intervals: the example includes 10:00 and excludes 2
 The statusline may show a compact selected window such as `work 87.2K/$1.43`.
 The current `/stats` browser presents the latest successful rolling summaries
 and durable
-attempt detail with Provider Profile, requested and observed model, reasoning
-effort, service tier, tokens, cost, outcome, and timestamps. It also presents
+attempt detail with Provider Profile, requested and observed model, requested
+Context Mode, reasoning effort, service tier, tokens, cost, outcome, and
+timestamps. It also presents
 current Thread, Agent, Team, and named-window rollups plus rolling token-class,
 cache-read, and cache-write quantities and ratios. Ratios aggregate reported
 cache-read or cache-write input over reported input tokens; exact and estimated
@@ -888,7 +900,7 @@ reasoning_output_micros_per_million = 3000000
 ```
 
 The resolved schedule book rejects duplicate or overlapping selectors. Config
-Epoch creation freezes the book and its fingerprints. Runtime Event schema 13
+Epoch creation freezes the book and its fingerprints. Runtime Event schema 14
 appends normalized Usage first and its cost evaluation second in one transaction;
 replay recomputes the result from that frozen evidence. Missing token classes,
 missing selectors, inconsistent accounting, and arithmetic overflow remain

@@ -37,6 +37,35 @@ fn binary() -> Command {
     command
 }
 
+fn binary_with_config_root(config_root: &Path) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_greentyper"));
+    command
+        .current_dir(config_root)
+        .env("HOME", config_root)
+        .env("APPDATA", config_root)
+        .env("XDG_CONFIG_HOME", config_root);
+    command
+}
+
+fn user_config_path(config_root: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        config_root.join("GreenTyper").join("config.toml")
+    }
+    #[cfg(target_os = "macos")]
+    {
+        config_root
+            .join("Library")
+            .join("Application Support")
+            .join("GreenTyper")
+            .join("config.toml")
+    }
+    #[cfg(all(not(windows), not(target_os = "macos")))]
+    {
+        config_root.join("greentyper").join("config.toml")
+    }
+}
+
 fn context_command(action: &str, ledger: &Path) -> Command {
     let mut command = binary();
     command.args(["context", action, "--ledger"]).arg(ledger);
@@ -139,6 +168,62 @@ fn context_reduce_publishes_a_bounded_checkpoint_and_status_is_read_only() {
     );
 
     fs::remove_file(ledger).expect("cleanup Runtime Ledger");
+}
+
+#[test]
+fn context_reduce_rejects_provider_native_before_runtime_mutation() {
+    let ledger = temp_path("provider-native-reduce");
+    let config_root = temp_path("provider-native-reduce-config");
+    let config_path = user_config_path(&config_root);
+    fs::create_dir_all(config_path.parent().expect("Config parent"))
+        .expect("create Config directory");
+    fs::write(
+        &config_path,
+        r#"schema_version = 1
+
+[agent]
+default_model_preset = "native"
+
+[model_presets.native]
+provider = "simulator"
+model = "deterministic-v1"
+dialect = "responses"
+context_mode = "provider_native"
+"#,
+    )
+    .expect("write provider-native Config");
+    let mut runtime = RuntimeKernel::open(&ledger).expect("open Runtime");
+    let mut provider = DeterministicProvider::default();
+    let output = runtime
+        .execute(&ConfigLayers::default(), "canonical history", &mut provider)
+        .expect("complete canonical Turn");
+    runtime
+        .acknowledge(output.delivery())
+        .expect("acknowledge canonical Turn");
+    drop(runtime);
+    let bytes_before = fs::read(&ledger).expect("read Runtime Ledger");
+
+    let reduced = binary_with_config_root(&config_root)
+        .args(["context", "reduce", "--ledger"])
+        .arg(&ledger)
+        .output()
+        .expect("reject provider-native Context reduction");
+    assert!(!reduced.status.success(), "{reduced:?}");
+    assert!(reduced.stdout.is_empty(), "{reduced:?}");
+    assert!(
+        String::from_utf8_lossy(&reduced.stderr)
+            .contains("provider-native Context Mode is not available"),
+        "{reduced:?}"
+    );
+    assert_eq!(
+        fs::read(&ledger).expect("reread Runtime Ledger"),
+        bytes_before
+    );
+    assert!(!sidecar_path(&ledger, "team").exists());
+    assert!(!sidecar_path(&ledger, "tool").exists());
+
+    fs::remove_file(ledger).expect("cleanup Runtime Ledger");
+    fs::remove_dir_all(config_root).expect("cleanup Config root");
 }
 
 #[test]

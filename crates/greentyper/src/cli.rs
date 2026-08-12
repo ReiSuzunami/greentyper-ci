@@ -18,7 +18,8 @@ use crate::product_driver::{
     ProductDriver, ProductDriverError, ProductInteraction, ProductToolDecision,
     apply_model_preset_to_next_turn, cancel_product_provider_turn, freeze_model_selection,
     has_product_driver_state, inspect_product_tools, open_product_context_runtime,
-    reconcile_product_tool, request_product_provider_turn_recovery,
+    reconcile_product_tool, request_product_provider_turn_recovery, require_context_mode_execution,
+    require_pending_context_mode_execution,
 };
 use crate::provider_connection::{ModelsHttpConnectionTester, ProviderConnectionTester};
 use crate::provider_discovery_catalog::{
@@ -43,7 +44,7 @@ use greentyper_core::provider_catalog::ProviderCatalog;
 use greentyper_core::provider_discovery::{ProviderDiscoveryError, ProviderDiscoveryState};
 use greentyper_core::runtime::{
     AcknowledgeOutcome, CancelTurnOutcome, ContextCheckpoint, ContextInspection, PreparedOutput,
-    ProviderFallbackCandidate, ProviderToolApproval, RecoveryStatus, RuntimeKernel,
+    ProviderFallbackCandidate, ProviderToolApproval, RecoveryStatus, RuntimeError, RuntimeKernel,
 };
 use greentyper_core::tool_runtime::{
     ToolCallRecord, ToolCallStatus, ToolEffectExecutor, ToolReconciliationDecision, ToolSnapshot,
@@ -55,6 +56,56 @@ use greentyper_core::usage::{
 struct ConfiguredProviderFallbackPlan<P> {
     candidates: Vec<ProviderFallbackCandidate>,
     providers: Vec<P>,
+}
+
+fn preflight_context_reduction(ledger: &Path) -> Result<(), CliError> {
+    let pending_selection = RuntimeKernel::inspect(ledger)?.pending_model_selection;
+    let config = open_config_runtime(default_config_paths()?)?;
+    let base_layers = config.config_layers()?.clone();
+    let preset_id = pending_selection
+        .as_ref()
+        .map(|pending| pending.selection().preset_id().to_owned())
+        .or(config.default_model_preset()?.map(str::to_owned));
+    let preset_chain = preset_id
+        .as_deref()
+        .map(|id| config.model_preset_chain(id))
+        .transpose()?;
+    let mut layers = base_layers.clone();
+    if let Some(presets) = &preset_chain {
+        for preset in presets {
+            let mut candidate_layers = base_layers.clone();
+            apply_model_preset_to_next_turn(&mut candidate_layers, preset);
+            require_context_mode_execution(&candidate_layers)?;
+        }
+        apply_model_preset_to_next_turn(
+            &mut layers,
+            presets
+                .first()
+                .expect("a resolved Model Preset chain is not empty"),
+        );
+    } else {
+        require_context_mode_execution(&layers)?;
+    }
+    if let Some(pending) = pending_selection.as_ref() {
+        let usage_windows = config.resolved_usage_windows()?;
+        let price_schedules = config.resolved_price_schedules()?;
+        let applied = freeze_model_selection(
+            &layers,
+            &usage_windows,
+            &price_schedules,
+            preset_chain
+                .as_ref()
+                .and_then(|presets| presets.first())
+                .expect("pending selection chose a Model Preset"),
+        )?;
+        if &applied != pending.selection() {
+            return Err(RuntimeError::InvalidModelSelection(
+                "pending Preset changed before Context reduction",
+            )
+            .into());
+        }
+    }
+    Ok(())
 }
 
 fn build_provider_fallback_plan<P>(
@@ -72,11 +123,11 @@ fn build_provider_fallback_plan<P>(
 where
     P: ProviderRuntime,
 {
-    let mut candidates = Vec::with_capacity(presets.len());
-    let mut providers = Vec::with_capacity(presets.len());
+    let mut preflight = Vec::with_capacity(presets.len());
     for preset in presets {
         let mut layers = base_layers.clone();
         apply_model_preset_to_next_turn(&mut layers, preset);
+        require_context_mode_execution(&layers)?;
         let model = layers
             .resolve()
             .map_err(|_| {
@@ -87,6 +138,12 @@ where
             .provider_model()
             .value()
             .clone();
+        preflight.push((layers, model));
+    }
+
+    let mut candidates = Vec::with_capacity(presets.len());
+    let mut providers = Vec::with_capacity(presets.len());
+    for (preset, (layers, model)) in presets.iter().zip(preflight) {
         let profile = config.provider_profile(&preset.provider)?;
         let provider = build_provider(profile, &model, preset.dialect)?;
         let selection = freeze_model_selection(&layers, usage_windows, price_schedules, preset)?;
@@ -169,6 +226,7 @@ pub fn run(arguments: impl Iterator<Item = String>) -> Result<(), CliError> {
                     );
                 }
             }
+            require_context_mode_execution(&layers)?;
             let fallback_plan = preset_chain
                 .as_deref()
                 .filter(|presets| presets.len() > 1)
@@ -278,6 +336,7 @@ pub fn run(arguments: impl Iterator<Item = String>) -> Result<(), CliError> {
             }
         }
         Command::Resume { ledger, local_echo } => {
+            require_pending_context_mode_execution(&ledger)?;
             let has_product_state = has_product_driver_state(&ledger)?;
             if local_echo || has_product_state {
                 resume_product_turn(&ledger)
@@ -317,6 +376,7 @@ pub fn run(arguments: impl Iterator<Item = String>) -> Result<(), CliError> {
                 write_context_inspection(&inspection)
             }
             ContextCommand::Reduce { ledger, policy } => {
+                preflight_context_reduction(&ledger)?;
                 let mut runtime = open_product_context_runtime(&ledger)?;
                 let checkpoint = runtime.prepare_context_checkpoint(policy)?;
                 runtime.publish_context_checkpoint(checkpoint)?;
@@ -342,6 +402,7 @@ pub fn run(arguments: impl Iterator<Item = String>) -> Result<(), CliError> {
             Ok(())
         }
         Command::Retry { ledger, turn } => {
+            require_pending_context_mode_execution(&ledger)?;
             if has_product_driver_state(&ledger)? {
                 return retry_product_turn(&ledger, turn);
             }

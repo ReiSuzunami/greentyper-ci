@@ -33,7 +33,7 @@ use crate::product_driver::{
     ProductDriver, ProductDriverError, ProductInteraction, ProductToolDecision,
     ProductToolDecisionOutcome, cancel_product_provider_turn, has_product_driver_state,
     inspect_product_team, inspect_product_tools, reconcile_product_tool,
-    request_product_provider_turn_recovery,
+    request_product_provider_turn_recovery, require_pending_context_mode_execution,
 };
 use crate::provider_http::ConfiguredProvider;
 
@@ -247,6 +247,9 @@ where
                     Ok(turn) => turn,
                     Err(_) => return invalid_turn(request.id),
                 };
+                if let Err(error) = require_pending_context_mode_execution(&self.runtime_path) {
+                    return runtime_retry_error(request.id, error);
+                }
                 let target = match runtime_control_target(&self.runtime_path) {
                     Some(target) => target,
                     None => return runtime_control_error(request.id),
@@ -305,6 +308,9 @@ where
                     Ok(turn) => turn,
                     Err(_) => return invalid_turn(request.id),
                 };
+                if let Err(error) = require_pending_context_mode_execution(&self.runtime_path) {
+                    return runtime_resume_error(request.id, error);
+                }
                 let target = match runtime_control_target(&self.runtime_path) {
                     Some(target) => target,
                     None => return runtime_control_error(request.id),

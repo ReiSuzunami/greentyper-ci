@@ -125,7 +125,7 @@ Completions, and Messages never retry or reconnect automatically at any of
 those boundaries. Because inference requests have no idempotency key, a missing
 response does not establish that the remote service did no work or incurred no
 usage. Schema 11+ exposes `retryable=true` only for an initial Provider request
-blocked at `BeforeResponse` or `BeforeFirstEvent`. Schema 13 admits an explicit
+blocked at `BeforeResponse` or `BeforeFirstEvent`. Schema 14 preserves an explicit
 Preset fallback plan as separately frozen Config/Provider Epochs. Execution may
 advance to the next candidate only at those early boundaries and only after the
 failed candidate's Usage Attempt and cost evaluation are durable. It never
@@ -141,11 +141,12 @@ work or billing. A process exit or adapter preflight failure after the
 transaction is recoverable by explicit `resume`; another early failure blocks
 again. Historical stage-untyped blocks reject recovery without mutation.
 
-Runtime Event schema 13 preserves schema 12's Context checkpoint, schema 11's
-unavailability stage and `TurnRetryRequested`, plus schema 10's typed
-`TurnBlocked` origin and `TurnCancelled`. It adds bounded frozen fallback
-references on admission and the exact-next-candidate
-`ProviderFallbackRequested` transition. The cancellation transaction remains
+Runtime Event schema 14 preserves schema 13's bounded frozen fallback
+references and exact-next-candidate `ProviderFallbackRequested` transition,
+schema 12's Context checkpoint, schema 11's unavailability stage and
+`TurnRetryRequested`, plus schema 10's typed `TurnBlocked` origin and
+`TurnCancelled`. Schema 14 adds typed Context Mode plus Config source to every
+new Config Epoch; historical Config Epochs replay as built-in `canonical`. The cancellation transaction remains
 limited to the exact Provider-origin blocked Turn and clears pending recovery
 while retaining the Turn, its completed Usage/cost evidence, and immutable
 Config and Provider Epochs. A repeated exact
@@ -205,18 +206,18 @@ descriptors while Tool Runtime remains the authority gate. Approval and
 `EffectPrepared` are durable before the injected executor runs. A successful
 UTF-8 result may then enter one Provider continuation. The final
 `OutputPrepared` transaction stores the combined canonical text and one or two
-bounded Usage Records. Runtime Event schema 13 preserves the schema-6 contract
+bounded Usage Records. Runtime Event schema 14 preserves the schema-6 contract
 that durably brackets every Provider request or continuation with Usage Attempt start/finish Events and
 carries the Agent scope, Provider dialect, frozen Usage Windows, UTC times,
 outcome, exact/estimated marker, optional token/cache classes, service tier, and
 frozen Provider Profile snapshot, then records one frozen Price Schedule cost
 evaluation plus optional selected-Preset output-token, typed reasoning-effort,
-and typed service-tier policy in the Config Epoch. Requested effort/tier are
-kept distinct from observed Provider metadata. Schema 9 added a bounded
+and typed service-tier policy in the Config Epoch. Requested Context Mode,
+effort, and tier are kept distinct from observed Provider metadata. Schema 9 added a bounded
 `ModelSelectionStaged` Event bound to the authenticated current Agent. The next
 matching `TurnAdmitted` consumes it in the same transaction as Config and
 Provider freeze; pre-admission failure leaves it pending. Historical schema-1
-through schema-12 Runtime transactions replay and can be followed by schema-13
+through schema-13 Runtime transactions replay and can be followed by schema-14
 transactions; schema-1 token counts become explicitly estimated legacy attempts.
 
 This tracer bullet intentionally stores only the Tool result digest. If the
@@ -365,7 +366,7 @@ not change recovery of an already admitted Turn.
 Schema 12 introduced each checkpoint as a singleton transaction bound
 to the exact prior Ledger head. Publication requires Ready Runtime state, no
 unacknowledged Team operation, no unresolved Tool approval, and no Tool
-reconciliation. Current Runtime Event schema 13 preserves that contract. A
+reconciliation. Current Runtime Event schema 14 preserves that contract. A
 stale draft, corrupt reference, wrong source head, or unsafe state fails before
 append; replay revalidates references against authoritative canonical Items.
 Every publication rebuilds from full Items, so checkpoint
@@ -384,8 +385,14 @@ User Item, so every dialect receives a complete conversation boundary. Archived
 artifact bodies remain omitted; no Artifact fetch or summary text is invented.
 The pending user Item stays the separate current input. Recovery locates that
 same user Item and rebuilds the same history projection before explicit resume,
-while the frozen Config and Provider Epoch identities remain unchanged. A
-missing checkpoint preserves the prior single-input request behavior.
+while the frozen Config and Provider Epoch identities remain unchanged. Under
+the default `canonical` Context Mode, a missing checkpoint keeps the first
+Turn's single-input shape and sends bounded completed canonical history on later
+Turns. The typed `provider_native` mode is rejected before credential lookup,
+Provider construction, network I/O, identifier allocation, or Ledger append.
+The same preflight runs before soft-pressure and explicit `context reduce`
+checkpoint publication, including every candidate in the effective Preset
+fallback chain.
 
 Responses, Chat Completions, and Messages map the projected roles to ordered
 native messages. Stateful Responses continuations bind the existing response;
@@ -397,7 +404,7 @@ storage, and Durable Memory remain pending.
 
 Prompt/provider text and credential material are not part of the Usage domain.
 Requested or observed metadata not supplied by the current Provider remains
-unknown. Runtime Event schema 13 preserves the rule that records
+unknown. Runtime Event schema 14 preserves the rule that records
 `UsageAttemptFinished` before `UsageAttemptCostEvaluated` in the same transaction. The Config Epoch freezes
 the resolved Price Schedule book; replay recomputes the cost claim from that
 book and the normalized Usage Record, rejecting a changed schedule fingerprint,

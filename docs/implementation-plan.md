@@ -127,15 +127,15 @@ existing durable Tool approval/effect state machine, feeds one successful UTF-8
 result into a Provider continuation, and durably prepares combined canonical
 output. Recovery tests prove stale Sessions cannot invoke the Provider,
 ambiguous effects cannot continue, and process death after a durable Tool
-success blocks rather than repeating the effect. Runtime Event schema 13 preserves
+success blocks rather than repeating the effect. Runtime Event schema 14 preserves
 durable Usage Attempt boundaries, frozen Usage Windows, Provider dialect, the
 expanded optional Usage Records, frozen Provider Profile snapshot, and the
 subsequent frozen Price Schedule cost evaluation plus an optional selected-Preset
 output-token limit, typed reasoning/service-tier policy, distinct template-mirror
 pricing provenance, pending current-Agent Model selection, typed Provider-block
 origin and unavailability stage, durable cancellation, explicit early Provider
-retry, and frozen Preset fallback recovery while replaying historical schema 1
-through schema 12.
+retry, frozen Preset fallback recovery, and typed Context Mode while replaying
+historical schema 1 through schema 13.
 
 A product-private `local.echo` tracer now exercises the concrete process seam.
 It launches a fixed same-binary child without a shell, clears inherited
@@ -199,8 +199,9 @@ first decoded event, or after the first event; early EOF uses the same decoder
 progress while semantic format failures remain invalid responses. Loopback
 fixtures assert one connection and therefore no automatic transport retry.
 Schema 11 added the unavailability stage and `TurnRetryRequested`; schema 12
-added the exact-head Context checkpoint; current Runtime Event schema 13 adds
-bounded frozen Preset fallback candidates and `ProviderFallbackRequested`.
+added the exact-head Context checkpoint; schema 13 added bounded frozen Preset
+fallback candidates and `ProviderFallbackRequested`; current Runtime Event
+schema 14 adds typed Context Mode plus Config source.
 Execution switches candidates only after an initial request fails before its
 first event. After restart, the CLI explicitly selects the next frozen candidate
 first and otherwise retries the active one. Each attempt retains candidate-bound
@@ -217,7 +218,7 @@ untyped states fail closed.
 The remaining slices are still policy, protocol, and fault-adapter work:
 live inference conformance, non-Windows credential backends, configurable proxy
 policy, background/periodic catalog discovery, DeepSeek Chat/Messages reasoning
-blocks, Preset context-mode execution, broader
+blocks, provider-native Context Mode execution, broader
 canonical Items, multiple
 Tool calls,
 durable resumable Tool result references, richer TUI/App Server
@@ -238,7 +239,7 @@ Exit criteria:
 
 Add VT/ConPTY TUI, hierarchical Command Paths, global command palette, Config Schema-driven editors, Provider wizard, model selector, adaptive statusline, Context Pressure, Usage Records/Rollups, `/stats`, and named Usage Windows.
 
-The first observability slice is implemented. Runtime Event schema 13 preserves
+The first observability slice is implemented. Runtime Event schema 14 preserves
 the schema-6 contract that durably brackets each Provider request and continuation with an immutable Usage Attempt,
 including UTC start/completion, outcome, Agent scope when present, frozen
 Provider Profile/model/dialect, exact or estimated Usage Records, and explicit
@@ -629,7 +630,21 @@ successful candidate once. Crash recovery selects the next frozen candidate
 before retrying the active one, resumes that exact Provider Epoch, and never
 replays the failed primary. Team and Tool Ledgers remain byte-identical.
 
-New-Agent default inheritance, context mode, automatic
+An explicit five-slice Context-Mode batch now makes `canonical` and
+`provider_native` schema-owned choices with built-in `canonical` default,
+freezes the mode and Config source in schema-14 Config Epochs, and maps older
+epochs to built-in `canonical`. Canonical execution keeps the first Turn's
+single-input request, replays bounded completed canonical history on later
+Turns without a checkpoint, consumes the verified checkpoint tail when present,
+and reconstructs the same history on explicit resume. `provider_native` remains
+visible but fails before credential lookup, Provider construction, network I/O,
+identifier allocation, or Ledger append; every fallback candidate's mode is
+preflighted before any credential access, and explicit or soft-pressure Context
+reduction performs the same check before checkpoint publication. Requested
+Context Mode is durable Usage metadata and appears in the per-Turn policy
+distribution without changing token or cost arithmetic.
+
+New-Agent default inheritance, provider-native Context Mode execution, automatic
 starter updates, and background/periodic discovery remain pending.
 
 Exit criteria:
@@ -660,7 +675,7 @@ Implement Artifact offload, Context Pressure thresholds, deterministic reduction
 The Context foundation is implemented as four vertical slices. The core projects
 ordered canonical Items from an exact Ledger head; reduction replaces old raw
 text with Item-bound SHA-256 references while retaining a bounded recent tail;
-schema 12 introduced the singleton checkpoint contract, which current schema 13
+schema 12 introduced the singleton checkpoint contract, which current schema 14
 preserves at a Safe Barrier while rejecting a
 stale source head; and `context status`/`context reduce` expose missing-safe
 inspection plus explicit recovery. Soft pressure uses the same checkpoint path
@@ -676,8 +691,9 @@ for explicit resume; Responses, Chat Completions, and Messages map the ordered
 conversation and preserve it through the supported one-Tool continuation; and a
 cross-process CLI test proves `context reduce`, next-Turn admission interruption,
 explicit `resume`, and post-recovery inspection. Archived artifact bodies remain
-excluded, Config/Provider Epochs remain frozen, and a missing checkpoint keeps
-the legacy current-input request.
+excluded and Config/Provider Epochs remain frozen. Under canonical Context Mode,
+a missing checkpoint keeps the first Turn's current-input request and projects
+bounded completed canonical history on later Turns.
 
 This is not the full phase. There is no semantic handoff, provider-native
 compactor, external Artifact store, typed Memory Candidate, retrieval,

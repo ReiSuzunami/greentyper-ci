@@ -281,6 +281,7 @@ pub struct UsageAttempt {
     requested_model: String,
     observed_model: Option<String>,
     dialect: Option<ProviderDialect>,
+    requested_context_mode: Option<String>,
     requested_reasoning_effort: Option<String>,
     observed_reasoning_effort: Option<String>,
     requested_service_tier: Option<String>,
@@ -334,6 +335,7 @@ impl UsageAttempt {
             requested_model,
             observed_model: None,
             dialect,
+            requested_context_mode: None,
             requested_reasoning_effort: None,
             observed_reasoning_effort: None,
             requested_service_tier: None,
@@ -354,9 +356,11 @@ impl UsageAttempt {
 
     pub(crate) fn with_requested_policy(
         mut self,
+        context_mode: Option<&str>,
         reasoning_effort: Option<&str>,
         service_tier: Option<&str>,
     ) -> Self {
+        self.requested_context_mode = context_mode.map(str::to_owned);
         self.requested_reasoning_effort = reasoning_effort.map(str::to_owned);
         self.requested_service_tier = service_tier.map(str::to_owned);
         self
@@ -400,6 +404,11 @@ impl UsageAttempt {
     #[must_use]
     pub const fn dialect(&self) -> Option<ProviderDialect> {
         self.dialect
+    }
+
+    #[must_use]
+    pub fn requested_context_mode(&self) -> Option<&str> {
+        self.requested_context_mode.as_deref()
     }
 
     #[must_use]
@@ -833,6 +842,7 @@ pub struct UsageRollup {
     requested_models: UsageDistribution,
     observed_models: UsageDistribution,
     dialects: UsageDistribution,
+    requested_context_modes: UsageDistribution,
     requested_reasoning_efforts: UsageDistribution,
     observed_reasoning_efforts: UsageDistribution,
     requested_service_tiers: UsageDistribution,
@@ -928,6 +938,11 @@ impl UsageRollup {
     }
 
     #[must_use]
+    pub const fn requested_context_modes(&self) -> &UsageDistribution {
+        &self.requested_context_modes
+    }
+
+    #[must_use]
     pub const fn requested_reasoning_efforts(&self) -> &UsageDistribution {
         &self.requested_reasoning_efforts
     }
@@ -973,6 +988,8 @@ impl UsageRollup {
         self.observed_models.observe(attempt.observed_model());
         self.dialects
             .observe(attempt.dialect.map(ProviderDialect::as_str));
+        self.requested_context_modes
+            .observe(attempt.requested_context_mode());
         self.requested_reasoning_efforts
             .observe(attempt.requested_reasoning_effort());
         self.observed_reasoning_efforts
@@ -1061,6 +1078,8 @@ impl UsageRollup {
         self.requested_models.merge(&other.requested_models);
         self.observed_models.merge(&other.observed_models);
         self.dialects.merge(&other.dialects);
+        self.requested_context_modes
+            .merge(&other.requested_context_modes);
         self.requested_reasoning_efforts
             .merge(&other.requested_reasoning_efforts);
         self.observed_reasoning_efforts

@@ -95,14 +95,18 @@ Checkpoint creation uses a Safe Barrier and event-range compare-and-swap. The Co
 
 The current foundation implements exact-head canonical Views, bounded recent
 raw tails with Item-bound SHA-256 references, the schema-12 Safe Barrier
-checkpoint contract under current Runtime Event schema 13,
+checkpoint contract under current Runtime Event schema 14,
 full-Item rebases, soft-pressure publication, explicit CLI inspect/reduce, and a
 bounded Provider request projection. Admission and resume validate the persisted
 checkpoint against canonical history, send only its recent tail plus later
 completed Items, and leave archived artifact references as evidence rather than
 rehydrating them. The three supported HTTP dialects preserve that conversation
-through their one-Tool continuation. Semantic/provider-native compaction,
-external Artifact storage, and Durable Memory remain target behavior.
+through their one-Tool continuation. The default canonical Context Mode replays
+bounded completed canonical history when no checkpoint exists and uses the
+verified checkpoint tail when one does; it is frozen in the Config Epoch and
+reconstructed on resume. Provider-native Context Mode execution,
+semantic/provider-native compaction, external Artifact storage, and Durable
+Memory remain target behavior.
 
 ### Config Runtime
 
@@ -138,7 +142,7 @@ The Model Catalog merges release seeds, lazy provider discovery, and explicit us
 
 ## Usage and Context Observability
 
-Every inference attempt records provider/profile identity, requested and observed model, dialect, start and completion time, reasoning effort, service tier, token classes, cache reads and writes when reported, and cost provenance. Rollups derive token-weighted cache-read/input and cache-write/input ratios while preserving exact, estimated, missing, internally inconsistent, and overflowed states. Unsupported values remain unknown.
+Every inference attempt records provider/profile identity, requested and observed model, dialect, requested Context Mode, start and completion time, reasoning effort, service tier, token classes, cache reads and writes when reported, and cost provenance. Rollups derive token-weighted cache-read/input and cache-write/input ratios while preserving exact, estimated, missing, internally inconsistent, and overflowed states. Unsupported values remain unknown.
 
 Usage Rollups provide current Turn, Thread, Agent, Agent Team, rolling 1-hour/1-day/7-day, and named Usage Window views without scanning history during render. Context status combines projected next-request occupancy, output reserve, last provider-reported usage, and an exact/estimated marker.
 

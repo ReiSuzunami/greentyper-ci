@@ -12,8 +12,8 @@ use sha2::{Digest, Sha256};
 use url::{Host, Url};
 
 use super::{
-    ConfigLayer, ConfigLayers, MAX_CONFIG_ID_BYTES, MAX_CONFIG_STRING_BYTES, ReasoningEffort,
-    ServiceTier,
+    ConfigLayer, ConfigLayers, ContextMode, MAX_CONFIG_ID_BYTES, MAX_CONFIG_STRING_BYTES,
+    ReasoningEffort, ServiceTier,
 };
 use crate::pricing::{
     PriceSchedule, PriceScheduleBook, PriceScheduleDefinition, PriceScheduleSource, TokenRates,
@@ -148,6 +148,10 @@ const SERVICE_TIER_CHOICES: &[&str] = &[
     ServiceTier::Scale.as_str(),
     ServiceTier::Priority.as_str(),
     ServiceTier::Fast.as_str(),
+];
+const CONTEXT_MODE_CHOICES: &[&str] = &[
+    ContextMode::Canonical.as_str(),
+    ContextMode::ProviderNative.as_str(),
 ];
 const BOOLEAN_CHOICES: &[&str] = &["false", "true"];
 const STATUSLINE_PRESET_CHOICES: &[&str] = &["minimal", "balanced", "diagnostic", "custom"];
@@ -763,10 +767,14 @@ fn config_field_interaction(descriptor: &ConfigSchemaEntry) -> ConfigFieldIntera
             false,
             "integer",
         )
-        | ("model_presets.<id>.context_mode", ConfigValueKind::String, false, "context_mode")
         | ("model_presets.<id>.fallback", ConfigValueKind::StringList, false, "preset_list") => {
             ConfigFieldInteraction::Text {
                 max_bytes: MAX_CONFIG_STRING_BYTES,
+            }
+        }
+        ("model_presets.<id>.context_mode", ConfigValueKind::String, false, "context_mode") => {
+            ConfigFieldInteraction::Choice {
+                choices: CONTEXT_MODE_CHOICES,
             }
         }
         ("model_presets.<id>.favorite", ConfigValueKind::Boolean, false, "toggle") => {
@@ -908,7 +916,7 @@ pub struct ModelPresetView {
     pub reasoning_effort: Option<ReasoningEffort>,
     pub service_tier: Option<ServiceTier>,
     pub max_output_tokens: Option<u32>,
-    pub context_mode: Option<String>,
+    pub context_mode: Option<ContextMode>,
     pub default: bool,
     pub favorite: bool,
     pub fallback: Vec<String>,
@@ -1647,6 +1655,18 @@ impl ConfigRuntime {
                         })
                     })
                     .transpose()?;
+                let context_mode = preset
+                    .context_mode
+                    .as_deref()
+                    .map(|value| {
+                        ContextMode::parse(value).ok_or_else(|| {
+                            invalid(
+                                format!("model_presets.{id}.context_mode"),
+                                "unknown context mode",
+                            )
+                        })
+                    })
+                    .transpose()?;
                 Ok(ModelPresetView {
                     id: id.clone(),
                     provider,
@@ -1655,7 +1675,7 @@ impl ConfigRuntime {
                     reasoning_effort,
                     service_tier,
                     max_output_tokens: preset.max_output_tokens,
-                    context_mode: preset.context_mode.clone(),
+                    context_mode,
                     default: default == Some(id.as_str()),
                     favorite: preset.favorite.unwrap_or(false),
                     fallback: preset.fallback.clone().unwrap_or_default(),
@@ -2597,8 +2617,10 @@ fn resolve_documents(
             );
         }
     }
+    let mut built_in_layer = built_in.bootstrap_layer();
+    built_in_layer.context_mode = Some(ContextMode::Canonical);
     let layers = ConfigLayers {
-        built_in: built_in.bootstrap_layer(),
+        built_in: built_in_layer,
         user: user.bootstrap_layer(),
         project: project.bootstrap_layer(),
         cli: cli.bootstrap_layer(),
@@ -3245,7 +3267,7 @@ fn require_scope(
 
 pub fn parse_config_value(path: &str, raw: &str) -> Result<ConfigValue, ConfigRuntimeError> {
     let descriptor = require_schema_entry(path)?;
-    match descriptor.value_kind {
+    let value = match descriptor.value_kind {
         ConfigValueKind::String => Ok(ConfigValue::String(raw.to_owned())),
         ConfigValueKind::PositiveInteger => raw
             .parse::<u32>()
@@ -3272,7 +3294,9 @@ pub fn parse_config_value(path: &str, raw: &str) -> Result<ConfigValue, ConfigRu
                 .map_err(|_| invalid(path, "expected a TOML array of strings"))?;
             Ok(ConfigValue::StringList(parsed.value))
         }
-    }
+    }?;
+    validate_value(path, &value)?;
+    Ok(value)
 }
 
 fn validate_value(path: &str, value: &ConfigValue) -> Result<(), ConfigRuntimeError> {
@@ -3287,6 +3311,10 @@ fn validate_value(path: &str, value: &ConfigValue) -> Result<(), ConfigRuntimeEr
                 && ServiceTier::parse(value).is_none()
             {
                 Err(invalid(path, "unknown service tier"))
+            } else if path_matches("model_presets.<id>.context_mode", path)
+                && ContextMode::parse(value).is_none()
+            {
+                Err(invalid(path, "unknown context mode"))
             } else {
                 Ok(())
             }
@@ -3380,8 +3408,10 @@ fn normalize_route(path: &str, route: &str) -> Result<String, ConfigRuntimeError
 
 fn validate_effective(document: &ConfigDocument) -> Result<(), ConfigRuntimeError> {
     document.validate_layer()?;
+    let mut built_in = document.bootstrap_layer();
+    built_in.context_mode = Some(ContextMode::Canonical);
     let bootstrap = ConfigLayers {
-        built_in: document.bootstrap_layer(),
+        built_in,
         user: ConfigLayer::default(),
         project: ConfigLayer::default(),
         cli: ConfigLayer::default(),
@@ -4410,6 +4440,7 @@ impl ConfigDocument {
             max_output_tokens: None,
             reasoning_effort: None,
             service_tier: None,
+            context_mode: None,
         }
     }
 

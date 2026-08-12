@@ -4,7 +4,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use greentyper_core::config::{
-    ConfigDocument, ConfigEpoch, ConfigLayers, ConfigPaths, ConfigRuntime,
+    ConfigDocument, ConfigEpoch, ConfigLayers, ConfigPaths, ConfigRuntime, ConfigSource,
+    ContextMode,
 };
 use greentyper_core::context::{
     ContextPressure, ContextPressureAccuracy, ContextPressureInput, ContextPressurePolicy,
@@ -167,6 +168,153 @@ fn published_checkpoint_is_used_by_the_next_provider_request() {
         .expect("complete second Turn");
     drop(runtime);
     fs::remove_file(path).expect("cleanup Runtime ledger");
+}
+
+#[test]
+fn canonical_context_mode_replays_history_without_a_checkpoint() {
+    let path = temp_path("canonical-context-replay");
+    let mut runtime = RuntimeKernel::open(&path).expect("open Runtime");
+    let mut provider = CountingProvider::default();
+    let first = runtime
+        .execute(&ConfigLayers::default(), "first", &mut provider)
+        .expect("prepare first output");
+    runtime
+        .acknowledge(first.delivery())
+        .expect("complete first Turn");
+    let second = runtime
+        .execute(&ConfigLayers::default(), "second", &mut provider)
+        .expect("prepare second output");
+
+    assert_eq!(provider.requests.len(), 2);
+    assert!(provider.requests[0].context.is_none());
+    let context = provider.requests[1]
+        .context
+        .as_ref()
+        .expect("canonical replay Context");
+    assert_eq!(context.archived_items(), 0);
+    assert_eq!(context.items().len(), 2);
+    assert_eq!(context.items()[0].text(), "first");
+    assert_eq!(context.items()[1].text(), "simulated: first");
+    assert_eq!(provider.requests[1].input, "second");
+
+    runtime
+        .acknowledge(second.delivery())
+        .expect("complete second Turn");
+    drop(runtime);
+    fs::remove_file(path).expect("cleanup Runtime ledger");
+}
+
+#[test]
+fn provider_native_context_rejects_before_admission_or_provider_effects() {
+    let path = temp_path("provider-native-context");
+    let mut runtime = RuntimeKernel::open(&path).expect("open Runtime");
+    let mut layers = ConfigLayers::default();
+    layers.cli.context_mode = Some(ContextMode::ProviderNative);
+    let before = runtime.snapshot();
+    let bytes_before = fs::read(&path).expect("read Runtime Ledger");
+    let mut provider = CountingProvider::default();
+
+    assert!(matches!(
+        runtime.execute(&layers, "must not be admitted", &mut provider),
+        Err(RuntimeError::UnsupportedContextMode(
+            ContextMode::ProviderNative
+        ))
+    ));
+    assert_eq!(provider.calls, 0);
+    assert_eq!(runtime.snapshot(), before);
+    assert_eq!(
+        fs::read(&path).expect("reread Runtime Ledger"),
+        bytes_before
+    );
+
+    drop(runtime);
+    fs::remove_file(path).expect("cleanup Runtime ledger");
+}
+
+#[test]
+fn persisted_provider_native_context_rejects_retry_without_mutation() {
+    let source_path = temp_path("provider-native-retry-source");
+    let target_path = temp_path("provider-native-retry-target");
+    let mut source = RuntimeKernel::open(&source_path).expect("open source Runtime");
+    assert!(matches!(
+        source.execute(
+            &ConfigLayers::default(),
+            "blocked canonical input",
+            &mut UnavailableProvider
+        ),
+        Err(RuntimeError::Provider(ProviderError::Unavailable { .. }))
+    ));
+    drop(source);
+
+    let mut provider_native_layers = ConfigLayers::default();
+    provider_native_layers.cli.context_mode = Some(ContextMode::ProviderNative);
+    let provider_native_epoch = ConfigEpoch::freeze(
+        ConfigEpochId::new(1).expect("Config Epoch ID"),
+        &provider_native_layers,
+    )
+    .expect("freeze provider-native Config Epoch");
+    let report = FileLedger::inspect(&source_path).expect("inspect blocked source Runtime");
+    let (mut ledger, _) = FileLedger::open(&target_path).expect("open target Runtime Ledger");
+    let mut cursor = 0;
+    while cursor < report.events.len() {
+        let event_count = usize::try_from(report.events[cursor].events_in_transaction)
+            .expect("transaction event count");
+        let end = cursor.checked_add(event_count).expect("transaction end");
+        let mut transaction = report.events[cursor..end]
+            .iter()
+            .map(|event| event.data.clone())
+            .collect::<Vec<_>>();
+        for event in &mut transaction {
+            if event.kind == 2 {
+                event.payload[8..16]
+                    .copy_from_slice(&provider_native_epoch.fingerprint().to_le_bytes());
+                let canonical_suffix =
+                    std::mem::size_of::<u32>() + ContextMode::Canonical.as_str().len() + 1;
+                event.payload.truncate(
+                    event
+                        .payload
+                        .len()
+                        .checked_sub(canonical_suffix)
+                        .expect("current Config Epoch Context Mode suffix"),
+                );
+                push_string(&mut event.payload, ContextMode::ProviderNative.as_str());
+                event.payload.push(4);
+            }
+        }
+        ledger
+            .append(ledger.head(), &transaction)
+            .expect("append rewritten Runtime transaction");
+        cursor = end;
+    }
+    drop(ledger);
+
+    let bytes_before = fs::read(&target_path).expect("read provider-native Runtime ledger");
+    let mut recovered = RuntimeKernel::open(&target_path).expect("replay provider-native Runtime");
+    let RecoveryStatus::Blocked { turn, .. } = recovered.snapshot().status else {
+        panic!("rewritten provider-native Turn is not blocked")
+    };
+    let head_before = recovered.snapshot().head;
+    assert!(matches!(
+        recovered.request_blocked_turn_retry(turn),
+        Err(RuntimeError::UnsupportedContextMode(
+            ContextMode::ProviderNative
+        ))
+    ));
+    assert!(matches!(
+        recovered.request_blocked_turn_recovery(turn),
+        Err(RuntimeError::UnsupportedContextMode(
+            ContextMode::ProviderNative
+        ))
+    ));
+    assert_eq!(recovered.snapshot().head, head_before);
+    drop(recovered);
+    assert_eq!(
+        fs::read(&target_path).expect("reread provider-native Runtime ledger"),
+        bytes_before
+    );
+
+    fs::remove_file(source_path).expect("cleanup source Runtime ledger");
+    fs::remove_file(target_path).expect("cleanup target Runtime ledger");
 }
 
 #[test]
@@ -400,6 +548,49 @@ fn soft_context_pressure_publishes_a_checkpoint_before_the_next_turn() {
 }
 
 #[test]
+fn provider_native_soft_pressure_rejects_before_checkpoint_mutation() {
+    let path = temp_path("provider-native-context-pressure-soft");
+    let mut runtime = RuntimeKernel::open(&path).expect("open Runtime");
+    let mut provider = CountingProvider::default();
+    let first = runtime
+        .execute(&ConfigLayers::default(), "first", &mut provider)
+        .expect("prepare first output");
+    runtime
+        .acknowledge(first.delivery())
+        .expect("complete first Turn");
+    let pressure = ContextPressure::project(
+        ContextPressureInput::known(1_000, 550, 100, ContextPressureAccuracy::Exact),
+        ContextPressurePolicy::default(),
+    )
+    .expect("soft Context Pressure");
+    let mut layers = ConfigLayers::default();
+    layers.cli.context_mode = Some(ContextMode::ProviderNative);
+    let before = runtime.snapshot();
+    let bytes_before = fs::read(&path).expect("read Runtime Ledger before soft pressure");
+
+    assert!(matches!(
+        runtime.execute_with_context_pressure(
+            &layers,
+            pressure,
+            "must not publish a checkpoint",
+            &mut provider,
+        ),
+        Err(RuntimeError::UnsupportedContextMode(
+            ContextMode::ProviderNative
+        ))
+    ));
+    assert_eq!(provider.calls, 1);
+    assert!(runtime.context_checkpoint().is_none());
+    assert_eq!(runtime.snapshot(), before);
+    drop(runtime);
+    assert_eq!(
+        fs::read(&path).expect("reread Runtime Ledger after soft pressure"),
+        bytes_before
+    );
+    fs::remove_file(path).expect("cleanup Runtime ledger");
+}
+
+#[test]
 fn unknown_context_pressure_preserves_admission_without_inventing_a_checkpoint() {
     let path = temp_path("context-pressure-unknown");
     let mut runtime = RuntimeKernel::open(&path).expect("open Runtime");
@@ -521,6 +712,39 @@ fn output_token_limit_survives_admission_crash_and_resume() {
         .resume(&mut provider)
         .expect("resume with frozen output-token limit");
     assert_eq!(provider.seen, Some(4_096));
+    recovered
+        .acknowledge(output.delivery())
+        .expect("acknowledge resumed output");
+    drop(recovered);
+    fs::remove_file(path).expect("cleanup Runtime ledger");
+}
+
+#[test]
+fn context_mode_survives_admission_crash_and_resume() {
+    let path = temp_path("context-mode-resume");
+    let mut layers = ConfigLayers::default();
+    layers.cli.context_mode = Some(ContextMode::Canonical);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut runtime = RuntimeKernel::open(&path).expect("open Runtime");
+        let mut provider = PanicProvider;
+        let _ = runtime.execute(&layers, "resume canonical", &mut provider);
+    }));
+    assert!(result.is_err());
+    assert_eq!(
+        RuntimeKernel::inspect_pending_context_mode(&path)
+            .expect("inspect frozen pending Context Mode"),
+        Some(ContextMode::Canonical)
+    );
+
+    let mut recovered = RuntimeKernel::open(&path).expect("recover Runtime");
+    let mut provider = ContextModeProvider { seen: None };
+    let output = recovered
+        .resume(&mut provider)
+        .expect("resume with frozen context mode");
+    assert_eq!(
+        provider.seen,
+        Some((ContextMode::Canonical, ConfigSource::Cli))
+    );
     recovered
         .acknowledge(output.delivery())
         .expect("acknowledge resumed output");
@@ -808,6 +1032,48 @@ fn provider_fallback_freezes_each_candidate_and_attributes_usage_and_cost() {
     let replayed = recovered.usage_snapshot(UsageTimestamp::now().expect("usage timestamp"));
     assert_eq!(replayed.attempts(), usage.attempts());
     drop(recovered);
+    fs::remove_file(path).expect("cleanup Runtime ledger");
+}
+
+#[test]
+fn provider_fallback_preflights_every_context_mode_before_admission() {
+    let path = temp_path("provider-fallback-context-mode");
+    let price_schedules = fallback_price_book();
+    let candidates = [
+        fallback_candidate("primary", "model-primary", &price_schedules),
+        fallback_candidate_with_context_mode(
+            "backup",
+            "model-backup",
+            &price_schedules,
+            ContextMode::ProviderNative,
+        ),
+    ];
+    let mut providers = [CountingProvider::default(), CountingProvider::default()];
+    let mut runtime = RuntimeKernel::open(&path).expect("open Runtime");
+    let before = runtime.snapshot();
+    let bytes_before = fs::read(&path).expect("read Runtime Ledger");
+
+    assert!(matches!(
+        runtime.execute_with_provider_fallbacks(
+            &candidates,
+            Vec::new(),
+            price_schedules,
+            "must reject the complete fallback plan",
+            &mut providers,
+        ),
+        Err(RuntimeError::UnsupportedContextMode(
+            ContextMode::ProviderNative
+        ))
+    ));
+    assert_eq!(providers[0].calls, 0);
+    assert_eq!(providers[1].calls, 0);
+    assert_eq!(runtime.snapshot(), before);
+    assert_eq!(
+        fs::read(&path).expect("reread Runtime Ledger"),
+        bytes_before
+    );
+
+    drop(runtime);
     fs::remove_file(path).expect("cleanup Runtime ledger");
 }
 
@@ -1139,6 +1405,70 @@ fn unsupported_runtime_event_schema_fails_closed() {
 }
 
 #[test]
+fn schema_thirteen_config_epoch_replays_with_built_in_canonical_context() {
+    let source_path = temp_path("schema-thirteen-source");
+    let target_path = temp_path("schema-thirteen-replay");
+    let mut runtime = RuntimeKernel::open(&source_path).expect("open source Runtime");
+    let crashed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut provider = PanicProvider;
+        let _ = runtime.execute(
+            &ConfigLayers::default(),
+            "legacy pending input",
+            &mut provider,
+        );
+    }));
+    assert!(crashed.is_err());
+    drop(runtime);
+
+    let mut events: Vec<EventData> = FileLedger::inspect(&source_path)
+        .expect("inspect source Runtime ledger")
+        .events
+        .into_iter()
+        .map(|event| event.data)
+        .collect();
+    for event in &mut events {
+        event.schema = 13;
+        if event.kind == 2 {
+            let suffix_bytes =
+                std::mem::size_of::<u32>() + ContextMode::Canonical.as_str().len() + 1;
+            event.payload.truncate(
+                event
+                    .payload
+                    .len()
+                    .checked_sub(suffix_bytes)
+                    .expect("current Config Epoch contains the schema 14 Context Mode suffix"),
+            );
+        }
+    }
+    let (mut ledger, _) = FileLedger::open(&target_path).expect("open schema 13 Ledger");
+    ledger
+        .append(LedgerHead::default(), &events)
+        .expect("append schema 13 admission");
+    drop(ledger);
+
+    assert_eq!(
+        RuntimeKernel::inspect_pending_context_mode(&target_path)
+            .expect("inspect schema 13 pending Context Mode"),
+        Some(ContextMode::Canonical)
+    );
+    let mut recovered = RuntimeKernel::open(&target_path).expect("replay schema 13 Runtime");
+    let mut provider = ContextModeProvider { seen: None };
+    let output = recovered
+        .resume(&mut provider)
+        .expect("resume schema 13 pending Turn");
+    assert_eq!(
+        provider.seen,
+        Some((ContextMode::Canonical, ConfigSource::BuiltIn))
+    );
+    recovered
+        .acknowledge(output.delivery())
+        .expect("acknowledge schema 13 output");
+
+    fs::remove_file(source_path).expect("cleanup source Runtime ledger");
+    fs::remove_file(target_path).expect("cleanup schema 13 Runtime ledger");
+}
+
+#[test]
 fn schema_one_runtime_turn_replays_and_can_continue_with_current_schema() {
     let path = temp_path("schema-one-replay");
     let layers = ConfigLayers::default();
@@ -1373,6 +1703,20 @@ struct OutputTokenProvider {
     seen: Option<u32>,
 }
 
+struct ContextModeProvider {
+    seen: Option<(ContextMode, ConfigSource)>,
+}
+
+impl ProviderRuntime for ContextModeProvider {
+    fn run(&mut self, request: &ProviderRequest) -> Result<Vec<ProviderEvent>, ProviderError> {
+        self.seen = Some((
+            *request.config.resolved().context_mode().value(),
+            request.config.resolved().context_mode().source(),
+        ));
+        DeterministicProvider::default().run(request)
+    }
+}
+
 impl ProviderRuntime for OutputTokenProvider {
     fn run(&mut self, request: &ProviderRequest) -> Result<Vec<ProviderEvent>, ProviderError> {
         self.seen = request
@@ -1399,9 +1743,33 @@ fn fallback_candidate(
     model: &str,
     price_schedules: &PriceScheduleBook,
 ) -> ProviderFallbackCandidate {
+    fallback_candidate_with_optional_context_mode(preset_id, model, price_schedules, None)
+}
+
+fn fallback_candidate_with_context_mode(
+    preset_id: &str,
+    model: &str,
+    price_schedules: &PriceScheduleBook,
+    context_mode: ContextMode,
+) -> ProviderFallbackCandidate {
+    fallback_candidate_with_optional_context_mode(
+        preset_id,
+        model,
+        price_schedules,
+        Some(context_mode),
+    )
+}
+
+fn fallback_candidate_with_optional_context_mode(
+    preset_id: &str,
+    model: &str,
+    price_schedules: &PriceScheduleBook,
+    context_mode: Option<ContextMode>,
+) -> ProviderFallbackCandidate {
     let mut layers = ConfigLayers::default();
     layers.cli.provider_profile = Some("simulator".to_owned());
     layers.cli.provider_model = Some(model.to_owned());
+    layers.cli.context_mode = context_mode;
     let config = ConfigEpoch::freeze_with_observability(
         ConfigEpochId::new(1).expect("Config Epoch ID"),
         &layers,

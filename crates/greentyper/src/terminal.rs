@@ -3412,7 +3412,7 @@ mod tests {
     use greentyper_core::config::{
         ConfigDocument, ConfigEditorSession, ConfigFieldContents, ConfigLayers, ConfigObjectKind,
         ConfigObjectRef, ConfigPaths, ConfigRuntime, ConfigRuntimeError, ConfigScope, ConfigValue,
-        MAX_CONFIG_STRING_BYTES, ReasoningEffort, ServiceTier,
+        ContextMode, MAX_CONFIG_STRING_BYTES, ReasoningEffort, ServiceTier,
     };
     use greentyper_core::pricing::PriceScheduleSource;
     use greentyper_core::provider::{
@@ -5499,6 +5499,7 @@ favorite = true
             .collect::<Vec<_>>();
         for expected in [
             "dialect ?",
+            "requested context mode canonical",
             "requested reasoning ?",
             "observed reasoning ?",
             "requested service tier ?",
@@ -7709,9 +7710,7 @@ timezone = "local"
             Event::Key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
         }));
         events.push_back(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)));
-        events.extend("full".chars().map(|character| {
-            Event::Key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
-        }));
+        events.push_back(Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)));
         events.extend([
             Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
             Event::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)),
@@ -7743,7 +7742,7 @@ timezone = "local"
         assert_eq!(preset.reasoning_effort, Some(ReasoningEffort::Low));
         assert_eq!(preset.service_tier, Some(ServiceTier::Fast));
         assert_eq!(preset.max_output_tokens, Some(2_048));
-        assert_eq!(preset.context_mode.as_deref(), Some("full"));
+        assert_eq!(preset.context_mode, Some(ContextMode::Canonical));
         assert!(preset.favorite);
         assert!(preset.fallback.is_empty());
         assert!(output.starts_with(ENTER_TERMINAL));
@@ -7760,7 +7759,7 @@ timezone = "local"
         assert_eq!(preset.reasoning_effort, Some(ReasoningEffort::Low));
         assert_eq!(preset.service_tier, Some(ServiceTier::Fast));
         assert_eq!(preset.max_output_tokens, Some(2_048));
-        assert_eq!(preset.context_mode.as_deref(), Some("full"));
+        assert_eq!(preset.context_mode, Some(ContextMode::Canonical));
         assert!(preset.favorite);
         assert!(preset.fallback.is_empty());
         assert!(!ledger.exists());

@@ -103,6 +103,32 @@ impl ServiceTier {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextMode {
+    Canonical,
+    ProviderNative,
+}
+
+impl ContextMode {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Canonical => "canonical",
+            Self::ProviderNative => "provider_native",
+        }
+    }
+
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "canonical" => Some(Self::Canonical),
+            "provider_native" => Some(Self::ProviderNative),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ConfigSource {
     BuiltIn,
@@ -119,6 +145,7 @@ pub struct ConfigLayer {
     pub max_output_tokens: Option<u32>,
     pub reasoning_effort: Option<ReasoningEffort>,
     pub service_tier: Option<ServiceTier>,
+    pub context_mode: Option<ContextMode>,
 }
 
 impl ConfigLayer {
@@ -131,6 +158,7 @@ impl ConfigLayer {
             max_output_tokens: None,
             reasoning_effort: None,
             service_tier: None,
+            context_mode: Some(ContextMode::Canonical),
         }
     }
 }
@@ -180,6 +208,7 @@ pub struct ResolvedConfig {
     max_output_tokens: Option<Sourced<u32>>,
     reasoning_effort: Option<Sourced<ReasoningEffort>>,
     service_tier: Option<Sourced<ServiceTier>>,
+    context_mode: Sourced<ContextMode>,
 }
 
 impl ResolvedConfig {
@@ -211,6 +240,11 @@ impl ResolvedConfig {
     #[must_use]
     pub const fn service_tier(&self) -> Option<&Sourced<ServiceTier>> {
         self.service_tier.as_ref()
+    }
+
+    #[must_use]
+    pub const fn context_mode(&self) -> &Sourced<ContextMode> {
+        &self.context_mode
     }
 }
 
@@ -359,6 +393,13 @@ impl ConfigLayers {
             (&self.project.service_tier, ConfigSource::Project),
             (&self.cli.service_tier, ConfigSource::Cli),
         ]);
+        let context_mode = resolve_optional([
+            (&self.built_in.context_mode, ConfigSource::BuiltIn),
+            (&self.user.context_mode, ConfigSource::User),
+            (&self.project.context_mode, ConfigSource::Project),
+            (&self.cli.context_mode, ConfigSource::Cli),
+        ])
+        .ok_or(ConfigError::MissingRequired("context.mode"))?;
 
         Ok(ResolvedConfig {
             provider_profile,
@@ -367,6 +408,7 @@ impl ConfigLayers {
             max_output_tokens,
             reasoning_effort,
             service_tier,
+            context_mode,
         })
     }
 }
@@ -509,6 +551,21 @@ fn fingerprint(
         for bytes in [
             service_tier.value.as_str().as_bytes(),
             &[source_tag(service_tier.source)],
+        ] {
+            hash ^= bytes.len() as u64;
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+            for byte in bytes {
+                hash ^= u64::from(*byte);
+                hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        }
+    }
+    if config.context_mode.value != ContextMode::Canonical
+        || config.context_mode.source != ConfigSource::BuiltIn
+    {
+        for bytes in [
+            config.context_mode.value.as_str().as_bytes(),
+            &[source_tag(config.context_mode.source)],
         ] {
             hash ^= bytes.len() as u64;
             hash = hash.wrapping_mul(0x0000_0100_0000_01b3);

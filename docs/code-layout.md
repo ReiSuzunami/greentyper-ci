@@ -41,7 +41,10 @@ handoff, provider-native compaction, Artifact storage, and Durable Memory;
 concrete Provider and Tool integration stays behind the narrow core interfaces
 and is owned by the product package. The product adapters map projected Context
 Items into Responses, Chat Completions, and Messages request bodies and keep the
-same conversation across the supported one-Tool continuation.
+same conversation across the supported one-Tool continuation. The default
+canonical Context Mode is frozen in Config Epochs, uses full bounded completed
+history or a verified checkpoint tail, and is reconstructed on resume;
+provider-native execution remains fail-closed.
 
 Provider simulators, in-memory stores, and other test adapters live beside the interfaces they exercise. Internal helpers are not promoted into packages merely to make them independently visible.
 
@@ -60,7 +63,7 @@ Object lifecycle/Provider-wizard controller, deterministic viewport-row layout, 
 ProductDriver that composes the Kernel-owned Team, Tool, Provider, approval, and
 delivery seams. The public `retry --turn ID` and `cancel --turn ID` paths use
 strict existing-state open, recovered Active Agent authority for Product
-Ledgers, and schema-13 Runtime recovery. A recovery request for an initial
+Ledgers, and schema-14 Runtime recovery. A recovery request for an initial
 Provider failure selects the next already-frozen Preset fallback first; when no
 candidate remains it rearms the active candidate. Both retain the frozen Turn
 and immutable candidate Epochs. Cancellation calls no Provider. Neither path

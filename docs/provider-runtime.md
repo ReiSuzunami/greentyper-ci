@@ -57,13 +57,14 @@ remain separate work.
 All three HTTP dialect paths reject serialized request bodies above 128 KiB
 before network I/O. A Tool continuation also rejects any second Tool call at
 the adapter boundary; the Runtime repeats that invariant before projection.
-If Runtime has a durable Context checkpoint, it first validates and materializes
-a bounded conversation containing the checkpoint's recent raw tail plus later
-completed canonical Items. A leading Assistant Item from a split retained Turn
-is omitted up to the next User boundary. Archived artifact bodies are not fetched. Responses
-uses an ordered message-input array, while Chat Completions and Messages use
-their native message arrays; an absent checkpoint retains the existing scalar
-Responses input and one-user-message shapes. The supported Tool continuation
+The frozen `canonical` Context Mode validates and materializes a bounded
+conversation from a durable checkpoint's recent raw tail plus later completed
+canonical Items, or from bounded completed canonical history when no checkpoint
+exists. The first Turn still retains the existing scalar Responses input and
+one-user-message shapes. A leading Assistant Item from a split retained Turn is
+omitted up to the next User boundary. Archived artifact bodies are not fetched.
+Responses uses an ordered message-input array, while Chat Completions and
+Messages use their native message arrays. The supported Tool continuation
 keeps the same conversation: stateful Responses binds the response ID, while
 stateless DeepSeek Responses, Chat Completions, and Messages append the Tool
 call/result to the stored in-memory request messages. This adds no credential,
@@ -71,7 +72,8 @@ Tool, Agent, or Config authority and persists no extra raw Provider payload.
 The Kernel durably brackets each request and continuation as a separate Usage
 Attempt before invoking this adapter, so transport failure, interruption,
 successful usage, and replay remain distinguishable without persisting raw
-Provider events.
+Provider events. The typed `provider_native` Context Mode is rejected before
+credential lookup, adapter construction, network I/O, or Runtime admission.
 When Config supplies a matching Price Schedule, the Runtime freezes the resolved
 schedule book in the Config Epoch and appends a separate pay-as-you-go cost
 evaluation after normalized Usage. This is provider-neutral accounting: the HTTP
@@ -104,7 +106,8 @@ blocked.
 
 An explicitly configured Model Preset fallback is a separate Runtime policy,
 not transport retry. Config resolves at most 16 candidates; the product
-preflights every adapter before opening Runtime state, and schema 13 freezes a
+preflights every candidate Context Mode before credential lookup, preflights
+every adapter before opening Runtime state, and schema 14 freezes a
 distinct Config/Provider Epoch for each candidate. Runtime advances only after
 `BeforeResponse` or `BeforeFirstEvent`, after closing the failed candidate's
 Usage Attempt and cost evaluation. `AfterFirstEvent`, malformed output,
@@ -124,7 +127,7 @@ recovery without mutation.
 
 `greentyper cancel --ledger PATH --turn ID` remains the explicit terminal
 recovery for a typed Provider-origin block. Schema 10 introduced the block origin
-and validated `TurnCancelled`; current schema 13 preserves that contract. The
+and validated `TurnCancelled`; current schema 14 preserves that contract. The
 event
 clears only the pending Turn; it retains its user item, immutable Usage/cost
 history, and frozen Config and Provider Epochs. Repeating the exact cancellation
@@ -505,8 +508,8 @@ plus the [OpenCode Go endpoint matrix](https://opencode.ai/docs/go/).
   model, including reasoning, refusal, annotations, and hosted Tools.
 - Reasoning, refusal, annotation, hosted-tool, and other Responses event kinds
   not listed above.
-- DeepSeek Chat/Messages thinking/signature/server-tool blocks, Preset
-  context-mode execution, Chat
+- DeepSeek Chat/Messages thinking/signature/server-tool blocks, provider-native
+  Context Mode execution, Chat
   Completions refusal/reasoning and other delta kinds, and non-streaming
   Provider responses.
 - Multiple Tool calls, parallel calls, persisted resumable Provider
