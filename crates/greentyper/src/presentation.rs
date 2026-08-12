@@ -914,6 +914,7 @@ pub(crate) struct AgentCenterEntryView {
     reserved_tools: u32,
     capability_count: usize,
     scope_count: usize,
+    inherited_model_preset: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -948,6 +949,10 @@ impl From<&KernelTeamSnapshot> for AgentCenterView {
                     reserved_tools: agent.reserved_budget.tool_calls,
                     capability_count: agent.capabilities.iter().count(),
                     scope_count: task.map_or(0, |task| task.scope.iter().count()),
+                    inherited_model_preset: agent
+                        .inherited_model_preset
+                        .as_ref()
+                        .map(|preset| preset.id().to_owned()),
                 }
             })
             .collect();
@@ -3501,6 +3506,13 @@ fn agent_detail_rows(agents: &AgentCenterView, agent: &AgentCenterEntryView) -> 
             false,
         ),
         LayoutRowView::new(format!("task {}", agent.task), false),
+        LayoutRowView::new(
+            format!(
+                "inherited preset {}",
+                agent.inherited_model_preset.as_deref().unwrap_or("none")
+            ),
+            false,
+        ),
         LayoutRowView::new(
             format!(
                 "task status {} | {} dependencies",

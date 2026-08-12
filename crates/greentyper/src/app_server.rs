@@ -15,15 +15,19 @@ use greentyper_core::config::{
     ConfigRuntimeError, ConfigScope, ConfigValue, MAX_CONFIG_STRING_BYTES, config_schema,
 };
 use greentyper_core::model::{DeliveryId, ItemRole, TurnId};
+use greentyper_core::pricing::PriceScheduleBook;
+use greentyper_core::provider::{ProviderError, ProviderRuntime};
 use greentyper_core::runtime::{
-    AcknowledgeOutcome, CancelTurnOutcome, PreparedOutput, ProviderToolApproval, RecoveryStatus,
-    RuntimeError, RuntimeKernel,
+    AcknowledgeOutcome, CancelTurnOutcome, PreparedOutput, ProviderFallbackCandidate,
+    ProviderToolApproval, RecoveryStatus, RuntimeError, RuntimeKernel,
 };
 use greentyper_core::tool_runtime::{
     AuthorizedToolCall, ToolCallRecord, ToolCallStatus, ToolEffectExecutor, ToolExecution,
     ToolReconciliationDecision, ToolRuntimeError,
 };
-use greentyper_core::usage::{RuntimeUsageQuery, UsageCursor, UsageError, UsageTimestamp};
+use greentyper_core::usage::{
+    RuntimeUsageQuery, UsageCursor, UsageError, UsageTimestamp, UsageWindow,
+};
 use serde::{Deserialize, Deserializer};
 use serde_json::value::RawValue;
 use serde_json::{Value, json};
@@ -36,11 +40,12 @@ use crate::local_process::LocalProcessExecutor;
 use crate::presentation::AgentCenterView;
 use crate::product_driver::{
     ProductDriver, ProductDriverError, ProductInteraction, ProductToolDecision,
-    ProductToolDecisionOutcome, acknowledge_product_team_operation, cancel_product_agent,
-    cancel_product_provider_turn, complete_product_agent, delegate_product_agent,
-    fail_product_agent, has_product_driver_state, inspect_product_team, inspect_product_tools,
+    ProductToolDecisionOutcome, acknowledge_product_team_operation,
+    apply_model_preset_to_next_turn, cancel_product_agent, cancel_product_provider_turn,
+    complete_product_agent, delegate_product_agent, fail_product_agent, freeze_model_selection,
+    has_product_driver_state, inspect_product_team, inspect_product_tools,
     message_from_product_agent, reconcile_product_tool, request_product_provider_turn_recovery,
-    require_pending_context_mode_execution,
+    require_context_mode_execution, require_pending_context_mode_execution,
 };
 use crate::provider_http::ConfiguredProvider;
 
@@ -488,19 +493,60 @@ where
                         );
                     }
                 };
-                let mut runtime = match RuntimeKernel::open_existing_strict(&self.runtime_path) {
-                    Ok(runtime) => runtime,
+                let snapshot = match RuntimeKernel::inspect(&self.runtime_path) {
+                    Ok(snapshot) if snapshot.recovered_tail_bytes == 0 => snapshot,
+                    Ok(_) | Err(_) => return runtime_control_error(request.id),
+                };
+                let pending_turn = match snapshot.status {
+                    RecoveryStatus::ReconciliationRequired {
+                        turn,
+                        delivery: pending,
+                    } if pending == delivery => Some(turn),
+                    RecoveryStatus::Ready => None,
+                    _ => return unknown_delivery(request.id),
+                };
+                let product_state = match has_product_driver_state(&self.runtime_path) {
+                    Ok(product_state) => product_state,
                     Err(_) => return runtime_control_error(request.id),
                 };
-                let status = match runtime.acknowledge(delivery) {
-                    Ok(AcknowledgeOutcome::Durable(_)) => "acknowledged",
-                    Ok(AcknowledgeOutcome::AlreadyAcknowledged) => "already_acknowledged",
-                    Err(RuntimeError::UnknownDelivery(_)) => {
-                        return unknown_delivery(request.id);
-                    }
-                    Err(_) => return runtime_control_error(request.id),
+                let (status, head) = if product_state && pending_turn.is_some() {
+                    let turn = pending_turn.expect("prepared Product delivery has a Turn");
+                    let mut driver = match ProductDriver::open_existing_for_delivery(
+                        &self.runtime_path,
+                        turn,
+                        BoxedToolExecutor(Box::new(ReviewOnlyExecutor)),
+                    ) {
+                        Ok(driver) => driver,
+                        Err(_) => return runtime_control_error(request.id),
+                    };
+                    let status = match driver.acknowledge(delivery) {
+                        Ok(AcknowledgeOutcome::Durable(_)) => "acknowledged",
+                        Ok(AcknowledgeOutcome::AlreadyAcknowledged) => "already_acknowledged",
+                        Err(ProductDriverError::Runtime(RuntimeError::UnknownDelivery(_))) => {
+                            return unknown_delivery(request.id);
+                        }
+                        Err(_) => return runtime_control_error(request.id),
+                    };
+                    let head = RuntimeKernel::inspect(&self.runtime_path)
+                        .map(|snapshot| snapshot.head)
+                        .unwrap_or(snapshot.head);
+                    (status, head)
+                } else {
+                    let mut runtime = match RuntimeKernel::open_existing_strict(&self.runtime_path)
+                    {
+                        Ok(runtime) => runtime,
+                        Err(_) => return runtime_control_error(request.id),
+                    };
+                    let status = match runtime.acknowledge(delivery) {
+                        Ok(AcknowledgeOutcome::Durable(_)) => "acknowledged",
+                        Ok(AcknowledgeOutcome::AlreadyAcknowledged) => "already_acknowledged",
+                        Err(RuntimeError::UnknownDelivery(_)) => {
+                            return unknown_delivery(request.id);
+                        }
+                        Err(_) => return runtime_control_error(request.id),
+                    };
+                    (status, runtime.snapshot().head)
                 };
-                let head = runtime.snapshot().head;
                 success_response(
                     request.id,
                     json!({
@@ -569,6 +615,10 @@ where
                 let capabilities = CapabilitySnapshot::from_capabilities(
                     params.capabilities.into_iter().map(Capability::from),
                 );
+                let inherited_model_preset = match self.config.default_model_preset() {
+                    Ok(preset) => preset.map(str::to_owned),
+                    Err(error) => return config_error_response(request.id, &error),
+                };
                 match delegate_product_agent(
                     &self.runtime_path,
                     params.parent,
@@ -576,9 +626,106 @@ where
                     scope,
                     ResourceBudget::new(params.token_budget, params.tool_budget),
                     capabilities,
+                    inherited_model_preset.as_deref(),
                 ) {
                     Ok(commit) => team_operation_response(request.id, &commit),
                     Err(error) => team_control_error(request.id, error),
+                }
+            }
+            "agent.turn" => {
+                let params = match parse_params::<AgentTurnParams>(request.params) {
+                    Ok(params) if !params.input.is_empty() => params,
+                    Ok(_) | Err(()) => return invalid_params(request.id),
+                };
+                let executor = match (self.executor_factory)() {
+                    Ok(executor) => executor,
+                    Err(()) => {
+                        return error_response(
+                            Some(request.id),
+                            "tool_execution_unavailable",
+                            "local Tool execution is unavailable",
+                            None,
+                        );
+                    }
+                };
+                let mut driver = match ProductDriver::open_existing_for_agent(
+                    &self.runtime_path,
+                    params.agent,
+                    executor,
+                ) {
+                    Ok(driver) => driver,
+                    Err(error) => return team_control_error(request.id, error),
+                };
+                let Some(preset_id) = driver.inherited_model_preset().map(str::to_owned) else {
+                    return error_response(
+                        Some(request.id),
+                        "agent_preset_unavailable",
+                        "Agent has no inherited Model Preset",
+                        None,
+                    );
+                };
+                let plan = match build_agent_provider_plan(
+                    &self.config,
+                    &preset_id,
+                    SharedCredentialVault(&*self.vault),
+                ) {
+                    Ok(plan) => plan,
+                    Err(AgentProviderPlanError::Config(error)) => {
+                        return config_error_response(request.id, &error);
+                    }
+                    Err(AgentProviderPlanError::Runtime(error)) => {
+                        return runtime_resume_error(request.id, error);
+                    }
+                    Err(AgentProviderPlanError::Provider) => {
+                        return provider_control_error(request.id);
+                    }
+                };
+                let AgentProviderPlan {
+                    candidates,
+                    mut providers,
+                    usage_windows,
+                    price_schedules,
+                } = plan;
+                for provider in &mut providers {
+                    provider.enable_local_echo();
+                }
+                let mut interaction = AppServerProductInteraction;
+                let result = driver.execute_with_provider_fallbacks(
+                    &candidates,
+                    usage_windows,
+                    price_schedules,
+                    params.input,
+                    &mut providers,
+                    &mut interaction,
+                );
+                drop(providers);
+                drop(driver);
+                match result {
+                    Ok(output) => prepared_runtime_response(request.id, &output),
+                    Err(ProductDriverError::Interaction(_)) => {
+                        let call = inspect_product_tools(&self.runtime_path)
+                            .ok()
+                            .filter(|tools| tools.recovered_tail_bytes == 0)
+                            .and_then(|tools| {
+                                tools.calls.into_iter().find(|record| {
+                                    record.status == ToolCallStatus::AwaitingApproval
+                                })
+                            });
+                        match call {
+                            Some(call) => success_response(
+                                request.id,
+                                json!({
+                                    "status": "tool_approval_required",
+                                    "call": call.call.get(),
+                                }),
+                            ),
+                            None => runtime_control_error(request.id),
+                        }
+                    }
+                    Err(ProductDriverError::Runtime(error)) => {
+                        runtime_resume_error(request.id, error)
+                    }
+                    Err(_) => runtime_control_error(request.id),
                 }
             }
             "agent.message" => {
@@ -752,11 +899,10 @@ where
                     if !product_control_ready(&self.runtime_path) {
                         return tool_control_unavailable(request.id);
                     }
-                    let mut interaction = AppServerProductInteraction;
-                    let mut driver = match ProductDriver::open_existing_with_executor(
+                    let mut driver = match ProductDriver::open_existing_for_tool_recovery(
                         &self.runtime_path,
+                        call,
                         BoxedToolExecutor(Box::new(ReviewOnlyExecutor)),
-                        &mut interaction,
                     ) {
                         Ok(driver) => driver,
                         Err(error) => return tool_control_error(request.id, error),
@@ -835,11 +981,10 @@ where
                         );
                     }
                 };
-                let mut interaction = AppServerProductInteraction;
-                let mut driver = match ProductDriver::open_existing_with_executor(
+                let mut driver = match ProductDriver::open_existing_for_tool_recovery(
                     &self.runtime_path,
+                    call,
                     executor,
-                    &mut interaction,
                 ) {
                     Ok(driver) => driver,
                     Err(error) => return tool_control_error(request.id, error),
@@ -1217,6 +1362,125 @@ impl<V: CredentialVault> CredentialVault for BorrowedCredentialVault<'_, V> {
     }
 }
 
+#[derive(Clone, Copy)]
+struct SharedCredentialVault<'vault, V>(&'vault V);
+
+impl<V: CredentialVault> CredentialVault for SharedCredentialVault<'_, V> {
+    fn bind(
+        &mut self,
+        _scope: &ProviderCredentialScope,
+        _secret: SecretValue,
+    ) -> Result<(), CredentialVaultError> {
+        Err(CredentialVaultError::Unavailable)
+    }
+
+    fn replace(
+        &mut self,
+        _scope: &ProviderCredentialScope,
+        _secret: SecretValue,
+    ) -> Result<(), CredentialVaultError> {
+        Err(CredentialVaultError::Unavailable)
+    }
+
+    fn resolve(
+        &self,
+        scope: &ProviderCredentialScope,
+    ) -> Result<SecretValue, CredentialVaultError> {
+        self.0.resolve(scope)
+    }
+
+    fn forget(&mut self, _scope: &ProviderCredentialScope) -> Result<bool, CredentialVaultError> {
+        Err(CredentialVaultError::Unavailable)
+    }
+}
+
+struct AgentProviderPlan<P> {
+    candidates: Vec<ProviderFallbackCandidate>,
+    providers: Vec<P>,
+    usage_windows: Vec<UsageWindow>,
+    price_schedules: PriceScheduleBook,
+}
+
+enum AgentProviderPlanError {
+    Config(ConfigRuntimeError),
+    Runtime(RuntimeError),
+    Provider,
+}
+
+fn build_agent_provider_plan<'vault, V: CredentialVault>(
+    config: &ConfigRuntime,
+    preset_id: &str,
+    vault: SharedCredentialVault<'vault, V>,
+) -> Result<
+    AgentProviderPlan<ConfiguredProvider<SharedCredentialVault<'vault, V>>>,
+    AgentProviderPlanError,
+> {
+    let presets = config
+        .model_preset_chain(preset_id)
+        .map_err(AgentProviderPlanError::Config)?;
+    let base_layers = config
+        .config_layers()
+        .map_err(AgentProviderPlanError::Config)?
+        .clone();
+    let usage_windows = config
+        .resolved_usage_windows()
+        .map_err(AgentProviderPlanError::Config)?;
+    let price_schedules = config
+        .resolved_price_schedules()
+        .map_err(AgentProviderPlanError::Config)?;
+    let mut preflight = Vec::with_capacity(presets.len());
+    for preset in &presets {
+        let mut layers = base_layers.clone();
+        apply_model_preset_to_next_turn(&mut layers, preset);
+        require_context_mode_execution(&layers).map_err(AgentProviderPlanError::Runtime)?;
+        let model = layers
+            .resolve()
+            .map_err(|_| AgentProviderPlanError::Provider)?
+            .provider_model()
+            .value()
+            .clone();
+        preflight.push((layers, model));
+    }
+
+    let mut candidates = Vec::with_capacity(presets.len());
+    let mut providers = Vec::with_capacity(presets.len());
+    for (preset, (layers, model)) in presets.iter().zip(preflight) {
+        let profile = config
+            .provider_profile(&preset.provider)
+            .map_err(AgentProviderPlanError::Config)?;
+        let provider = match profile {
+            Some(profile) => ConfiguredProvider::for_new_turn_with_preferred_dialect(
+                profile,
+                &model,
+                preset.dialect,
+                SharedCredentialVault(vault.0),
+            ),
+            None => Err(ProviderError::InvalidConfiguration(
+                "simulator Provider cannot select a wire dialect",
+            )),
+        }
+        .map_err(|_| AgentProviderPlanError::Provider)?;
+        let selection = freeze_model_selection(&layers, &usage_windows, &price_schedules, preset)
+            .map_err(AgentProviderPlanError::Runtime)?;
+        candidates.push(
+            ProviderFallbackCandidate::new(
+                selection,
+                layers,
+                provider.profile_snapshot().cloned(),
+                provider.dialect(),
+            )
+            .map_err(AgentProviderPlanError::Runtime)?,
+        );
+        providers.push(provider);
+    }
+    Ok(AgentProviderPlan {
+        candidates,
+        providers,
+        usage_windows,
+        price_schedules,
+    })
+}
+
 struct AppServerProductInteraction;
 
 impl ProductInteraction for AppServerProductInteraction {
@@ -1432,7 +1696,7 @@ fn product_control_ready(runtime_path: &PathBuf) -> bool {
                     .projection
                     .agents
                     .iter()
-                    .any(|agent| agent.parent.is_none() && agent.status == AgentStatus::Active)
+                    .any(|agent| agent.status == AgentStatus::Active)
         })
     });
     let tools_ready =
@@ -1769,6 +2033,13 @@ struct AgentDelegateParams {
     tool_budget: u32,
     #[serde(default)]
     capabilities: Vec<WireCapability>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AgentTurnParams {
+    agent: u64,
+    input: String,
 }
 
 #[derive(Deserialize)]
@@ -2302,7 +2573,10 @@ mod tests {
     use std::time::Duration;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use greentyper_core::agent_team::TeamOperationRecord;
+    use greentyper_core::agent_team::{
+        Capability, CapabilitySnapshot, CommandOutcome, InheritedModelPreset, ResourceBudget,
+        TaskScope, TaskSpec, TeamCommand, TeamOperationRecord,
+    };
     use greentyper_core::config::{ConfigDocument, ConfigPaths, ConfigRuntime};
     use greentyper_core::ledger::LedgerHead;
     use greentyper_core::model::TurnId;
@@ -2325,6 +2599,8 @@ mod tests {
         include_bytes!("../../../tests/fixtures/provider/responses/v1/http-tool-call.sse");
     const TOOL_CONTINUATION_SSE: &[u8] =
         include_bytes!("../../../tests/fixtures/provider/responses/v1/http-tool-continuation.sse");
+    const TEXT_SSE: &[u8] =
+        include_bytes!("../../../tests/fixtures/provider/responses/v1/http-text.sse");
 
     #[test]
     fn runtime_status_exposes_provider_retry_eligibility() {
@@ -2505,6 +2781,177 @@ source = "unknown"
             }
         });
         (format!("http://{address}"), handle)
+    }
+
+    #[test]
+    fn app_server_runs_a_turn_for_the_exact_active_child_agent() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time after epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "greentyper-app-server-child-turn-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).expect("create child Turn directory");
+        let runtime_path = root.join("runtime.ledger");
+        let team_path = runtime_path.with_extension("ledger.team");
+        let tool_path = runtime_path.with_extension("ledger.tool");
+        let (base_url, server) = spawn_tool_server(vec![TEXT_SSE]);
+        let document = ConfigDocument::parse(&format!(
+            r#"
+schema_version = 2
+
+[agent]
+default_model_preset = "child-default"
+
+[providers.child-provider]
+template = "openai-compatible"
+credential = "child-secret"
+base_url = {base_url:?}
+dialects = ["responses"]
+allow_insecure_loopback = true
+
+[providers.child-provider.routes]
+responses = "/v1/responses"
+
+[providers.child-provider.pricing]
+source = "unknown"
+
+[model_presets.child-default]
+provider = "child-provider"
+model = "fixture-model"
+dialect = "responses"
+"#,
+        ))
+        .expect("parse child Turn Config");
+        let config = ConfigRuntime::open(
+            ConfigPaths::new(root.join("user.toml"), root.join("project.toml")),
+            document,
+        )
+        .expect("open child Turn Config");
+        let profile = config
+            .provider_profile("child-provider")
+            .expect("resolve child profile")
+            .expect("external child profile");
+        let scope = ProviderCredentialScope::from_profile(&profile)
+            .expect("child Provider credential scope");
+        let mut vault = InMemoryCredentialVault::default();
+        vault
+            .bind(
+                &scope,
+                SecretValue::new(TOOL_TEST_SECRET.to_vec()).expect("child Provider secret"),
+            )
+            .expect("bind child Provider credential");
+
+        let (mut kernel, recovery) =
+            RuntimeKernel::open_with_team_and_tools(&runtime_path, &team_path, &tool_path, 2)
+                .expect("open child Product state");
+        assert!(recovery.into_sessions().is_empty());
+        let root_admission = kernel
+            .dispatch_team(TeamCommand::AdmitRoot {
+                task: TaskSpec::new("root", TaskScope::default()),
+                budget: ResourceBudget::new(2_000, 2),
+                capabilities: CapabilitySnapshot::from_capabilities([
+                    Capability::Process,
+                    Capability::Tool("local.echo".into()),
+                ]),
+            })
+            .expect("admit root");
+        kernel
+            .acknowledge_team_operation(root_admission.operation)
+            .expect("acknowledge root");
+        let root_session = match root_admission.commit.outcome {
+            CommandOutcome::RootAdmitted { session, .. } => session,
+            other => panic!("unexpected root admission: {other:?}"),
+        };
+        let delegation = kernel
+            .dispatch_team(TeamCommand::DelegateWithModelPreset {
+                parent: root_session,
+                task: TaskSpec::new("child", TaskScope::default()),
+                budget: ResourceBudget::new(500, 1),
+                capabilities: CapabilitySnapshot::default(),
+                inherited_model_preset: Some(
+                    InheritedModelPreset::new("child-default").expect("inherited Preset"),
+                ),
+            })
+            .expect("delegate child");
+        kernel
+            .acknowledge_team_operation(delegation.operation)
+            .expect("acknowledge child");
+        let child = match delegation.commit.outcome {
+            CommandOutcome::Delegated { agent, .. } => agent,
+            other => panic!("unexpected delegation: {other:?}"),
+        };
+        drop(kernel);
+        let team_before = fs::read(&team_path).expect("read Team before child Turn");
+        let tool_before = fs::read(&tool_path).expect("read Tool before child Turn");
+
+        let mut app = AppServer::new(config, runtime_path.clone(), &mut vault, || {
+            Ok(BoxedToolExecutor(Box::new(NeverExecutor)))
+        });
+        let prepared = app.handle(
+            json!({
+                "id": 1,
+                "operation": "agent.turn",
+                "params": {"agent": child.get(), "input": "private child input"},
+            })
+            .to_string()
+            .as_bytes(),
+        );
+        let config = app.config.reload_candidate().expect("reopen child Config");
+        drop(app);
+        server.join().expect("join child Provider server");
+
+        assert_eq!(prepared["result"]["status"], "prepared");
+        assert_eq!(prepared["result"]["text"], "fixture network 中");
+        assert_eq!(prepared["result"]["usage_record_count"], 1);
+        let delivery = prepared["result"]["delivery"]
+            .as_u64()
+            .expect("child delivery ID");
+        let mut reopened = AppServer::new(config, runtime_path.clone(), &mut vault, || {
+            Ok(BoxedToolExecutor(Box::new(NeverExecutor)))
+        });
+        let recovered = reopened.handle(
+            format!(
+                "{{\"id\":2,\"operation\":\"runtime.delivery\",\"params\":{{\"delivery\":{delivery}}}}}"
+            )
+            .as_bytes(),
+        );
+        let acknowledged = reopened.handle(
+            format!(
+                "{{\"id\":3,\"operation\":\"runtime.acknowledge\",\"params\":{{\"delivery\":{delivery}}}}}"
+            )
+            .as_bytes(),
+        );
+        drop(reopened);
+        assert_eq!(recovered["result"]["status"], "prepared");
+        assert_eq!(recovered["result"]["text"], "fixture network 中");
+        assert_eq!(recovered["result"]["delivery"], delivery);
+        assert_eq!(acknowledged["result"]["status"], "acknowledged");
+        let usage = RuntimeKernel::inspect_usage(
+            &runtime_path,
+            greentyper_core::usage::UsageTimestamp::now().expect("usage time"),
+        )
+        .expect("inspect child usage");
+        assert_eq!(usage.attempts().len(), 1);
+        assert_eq!(usage.attempts()[0].agent(), Some(child.get()));
+        assert_eq!(usage.attempts()[0].provider_profile(), "child-provider");
+        assert_eq!(usage.attempts()[0].requested_model(), "fixture-model");
+        assert_eq!(
+            fs::read(&team_path).expect("read Team after child Turn"),
+            team_before
+        );
+        assert_eq!(
+            fs::read(&tool_path).expect("read Tool after child Turn"),
+            tool_before
+        );
+        assert!(!root.join("user.toml").exists());
+        assert!(!root.join("project.toml").exists());
+        let output = prepared.to_string();
+        assert!(!output.contains("private child input"));
+        assert!(!output.contains(std::str::from_utf8(TOOL_TEST_SECRET).unwrap()));
+        fs::remove_dir_all(root).expect("remove child Turn directory");
     }
 
     fn read_http_request(stream: &mut TcpStream) -> String {

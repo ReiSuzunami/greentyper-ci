@@ -1399,6 +1399,23 @@ fn app_server_agent_list_is_read_only_and_redacts_team_content() {
 fn app_server_delegates_and_recovers_the_team_acknowledgement_boundary() {
     let temp = TempTree::new();
     temp.create_agent_state();
+    fs::create_dir_all(
+        temp.project_config()
+            .parent()
+            .expect("project Config directory"),
+    )
+    .expect("create project Config directory");
+    let config = concat!(
+        "schema_version = 2\n",
+        "[agent]\n",
+        "default_model_preset = \"child-default\"\n",
+        "[model_presets.child-default]\n",
+        "provider = \"simulator\"\n",
+        "model = \"deterministic-v1\"\n",
+        "dialect = \"responses\"\n",
+    );
+    fs::write(temp.project_config(), config).expect("write child default Config");
+    let config_before = fs::read(temp.project_config()).expect("read child default Config");
     let runtime_before =
         fs::read(temp.runtime_ledger()).expect("read Runtime Ledger before delegate");
     let tool_before = fs::read(temp.tool_ledger()).expect("read Tool Ledger before delegate");
@@ -1484,6 +1501,13 @@ fn app_server_delegates_and_recovers_the_team_acknowledgement_boundary() {
     assert_eq!(agents[1]["tool_budget"], 1);
     assert_eq!(agents[1]["capability_count"], 1);
     assert_eq!(agents[1]["scope_count"], 1);
+    assert_eq!(agents[1]["inherited_model_preset"], "child-default");
+    assert_eq!(agents[0]["inherited_model_preset"], Value::Null);
+    assert_eq!(
+        fs::read(temp.project_config()).expect("reread child default Config"),
+        config_before
+    );
+    fs::remove_file(temp.project_config()).expect("remove child default Config fixture");
     assert_eq!(
         fs::read(temp.runtime_ledger()).expect("read Runtime Ledger after delegate"),
         runtime_before
