@@ -40,9 +40,11 @@ The Config Runtime stages edits, presents a diff, validates the complete affecte
 
 Before implementation, the following names and types are the normative v1 design contract for the fields used in this document. Phase 1 materializes this contract as the versioned machine-readable Config Schema; generated reference documentation may extend it but may not change these meanings without an ADR.
 
-Implementation status: the current Phase 1 Config Runtime parses and emits
-schema-version-1 TOML for user and project layers, resolves effective values
-with provenance, and exposes the addressable Provider Profile, Model Preset,
+Implementation status: the current Phase 1 Config Runtime reads schema-version-1
+TOML without rewriting it and emits schema-version-2 TOML on the next explicit
+user or project commit. Schema 2 adds read-only release-starter provenance.
+The Runtime resolves effective values with provenance and exposes the
+addressable Provider Profile, Model Preset,
 Price Schedule, statusline, and Usage Window fields listed below. Typed drafts support dry-run,
 revision compare-and-swap, atomic replacement, one recoverable backup, and a
 last-valid repair state. The headless Runtime freezes the bootstrap projection
@@ -72,7 +74,7 @@ user overrides a field. A custom origin under a template with a bundled,
 versioned release rate card defaults to `template_mirror`; other custom origins
 still require an explicit pricing decision.
 Default/constraint/normalization/migration metadata in Config Schema and
-automatic starter-update workflows remain later work. Background/periodic
+automatic starter-offer workflows remain later work. Background/periodic
 discovery is excluded by the current Performance Contract unless measured
 evidence supports an approved exception. The CLI owns explicit bounded
 Provider-discovery commands, while
@@ -97,6 +99,7 @@ F7 flow without making credential material a Config value.
 | `providers.<id>.allow_insecure_loopback` | Boolean; false by default and invalid for a non-loopback host | Next Provider Epoch |
 | `agent.default_model_preset` | Exact configured Model Preset ID; project scope overrides user scope | Next Turn |
 | `model_presets.<id>` | Provider, model, dialect, inference settings, context mode, and explicit fallback list | Next Turn and Provider Epoch when identity changes |
+| `model_presets.<id>.starter.*` | Read-only accepted release catalog key, seed revision, Profile, model, and dialect provenance | Next Config Epoch |
 | `price_schedules.<id>` | Version, currency, Provider Profile, model, optional dialect/service tier/context band, half-open UTC effective interval, provenance, and non-negative integer token-class rates | Next Config Epoch |
 | `ui.statusline` | Preset, expansion policy, segments, and optional named Usage Window reference | Immediate presentation update |
 | `stats.windows[]` | Unique ID, local start/end, day set, and resolvable time-zone ID | Next Config Epoch |
@@ -334,6 +337,7 @@ The current operations are:
 | `config.get` | Return the requested path, effective value with source layer, and redacted repair status; secret values are never addressable |
 | `config.draft.begin` | Open a draft for one writable layer and return its base revision |
 | `config.starter.begin` | Open an ordinary revision-bound Model Preset Draft from one exact compatible Profile-bound release candidate; perform no write, network request, or credential lookup |
+| `config.starter.update.begin` | Open an ordinary revision-bound Draft only when an accepted starter and all provenance-owned identity fields still belong to the requested scope and a newer compatible bundled record exists |
 | `config.draft.set` / `config.draft.reset` | Stage a typed change without affecting the current Config Epoch |
 | `config.draft.validate` | Return the normalized diff and field-addressed validation errors |
 | `config.draft.commit` | Compare the base revision, write atomically, and return the new revision and application timing |
@@ -476,7 +480,7 @@ win over template fields. A normal official profile therefore
 usually requires only a credential binding:
 
 ```toml
-schema_version = 1
+schema_version = 2
 
 [providers.openai-main]
 template = "openai"
@@ -541,7 +545,7 @@ The rendered TUI now supplies the narrow release-template and opaque
 credential-reference creation flow, the separate F7 origin-bound vault flow,
 the explicit F5 connection-test control, and the typed target-layer deletion
 confirmation described above. Custom template editing and automatic starter
-offers or updates remain pending.
+offers remain pending; accepted starter updates are explicit local Drafts.
 
 ## Model Catalog and Presets
 
@@ -642,7 +646,8 @@ available to the next local refresh. Each trigger lazily creates one worker for
 that probe and joins it before returning to the blocking terminal event loop.
 No worker, timer, poll, automatic retry, idle, or background probe exists
 between actions.
-Automatic starter offers and update suggestions remain pending.
+Automatic starter offers remain pending. Starter update availability is derived
+only from local schema-2 provenance and the bundled release catalog.
 Remote discovery can never add credentials, arbitrary endpoints, instructions,
 or capabilities.
 
@@ -656,9 +661,19 @@ CLI is `greentyper config accept-starter PRESET_ID PROVIDER CATALOG_KEY --scope
 user|project [--dry-run]`; the App Server uses `config.starter.begin` followed
 by the ordinary validate/commit operations. None of these paths reads a
 credential, contacts a Provider, writes a Ledger, or grants Agent authority.
-Later catalog refreshes may offer updates but never rewrite accepted presets
-silently. Automatic Provider Profile starter offers and update suggestions
-remain target behavior.
+Schema 2 stores the accepted catalog key, seed revision, Profile, model, and
+dialect as read-only provenance. `config update-starter PRESET_ID --scope
+user|project [--dry-run]` and `config.starter.update.begin` open the same
+ordinary Draft only while the target Preset still exactly matches that
+provenance and all release-owned fields come from the requested scope. A newer
+compatible bundled record updates the Profile/model/dialect tuple and
+provenance together while preserving reasoning, service tier, output limit,
+context mode, favorite, fallback, and default policy. Manual drift,
+mixed-scope overrides, an incompatible or missing record, an already-current
+starter, and revision conflict fail without overwriting the winner. No path
+rewrites an accepted Preset silently, performs discovery, reads credentials,
+contacts a Provider, or writes a Ledger. Automatic Provider Profile starter
+offers remain target behavior.
 
 A Model Preset is a runnable choice rather than catalog metadata:
 
@@ -762,9 +777,14 @@ template/fingerprint, observation timestamp, and exact model membership are
 checked again immediately before Draft creation. Drift returns to `/model` with
 an F5 retry path; revision conflict retains the normal Draft for discard and
 reopen. Discovery acceptance does not modify discovery state or any Ledger. The
-effective configured default is marked in both the `/model` list and detail. A
-second Enter on a configured Preset
-durably selects it for the existing current Agent's next Turn. The pending Preset ID is rendered in the
+effective configured default is marked in both the `/model` list and detail.
+A user-scope accepted release starter that still matches its schema-2
+provenance renders whether a newer compatible bundled record is available. When
+available, a second Enter opens the explicit update Draft described above;
+preview, CAS conflict, discard, commit, and Config reopen use the ordinary
+editor contract. Project-scope updates remain available through the CLI and App
+Server. A second Enter on other configured Presets durably selects one for the
+existing current Agent's next Turn. The pending Preset ID is rendered in the
 browser and can be replaced by another configured Preset. Selection is bound to the recovered Active Agent Session;
 it does not mutate Config, read a credential, contact a Provider, or affect a
 running child Agent. The next headless Turn without `--preset` resolves the exact

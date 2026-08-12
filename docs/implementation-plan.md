@@ -556,7 +556,7 @@ This does not complete Phase 3. Audited Windows ConPTY behavior, broader
 multi-Tool/App Server policy, general App Server Runtime control beyond the
 exact cancel/retry/resume recovery flow, remote App Server transport,
 automatic/background snapshot refresh,
-custom-template and automatic starter-offer/update workflow,
+custom-template and automatic starter-offer workflow,
 automatic Context View/token-source
 projection, provider-reported
 charge and subscription-quota accounting, richer observed Provider metadata,
@@ -577,7 +577,7 @@ Exit criteria:
 ## Phase 4: Provider Portability
 
 Continue the release templates and seed catalog with OpenCode Go adapter
-execution, automatic starter updates, provider capability probes, observed availability,
+execution, explicit starter updates, provider capability probes, observed availability,
 and broader provider/model epoch switching. The
 OpenAI/openai-compatible Responses and Chat Completions adapters, official
 DeepSeek Responses, Chat Completions, and Messages pairs, and release-verified
@@ -657,8 +657,21 @@ reduction performs the same check before checkpoint publication. Requested
 Context Mode is durable Usage metadata and appears in the per-Turn policy
 distribution without changing token or cost arithmetic.
 
+A four-slice release-starter update batch now makes Config schema 2 the emitted
+format while preserving schema-1 read compatibility without an open-time write.
+Accepted starters carry a complete read-only catalog key, seed revision,
+Profile, model, and dialect tuple. Core, CLI, App Server, and Direct VT paths
+open the same ordinary revision-bound Draft only when that tuple and every
+release-owned identity field still belong to the requested scope and a newer
+compatible bundled record exists. Preview/commit updates identity and
+provenance together while preserving user policy. Manual drift, mixed-scope
+overrides, incompatible or already-current seeds, and CAS conflict remain
+recoverable without overwrite. The paths perform no discovery, credential
+lookup, Provider request, Agent action, or Ledger write; automatic starter
+offers and silent updates remain absent.
+
 New-Agent default inheritance, provider-native Context Mode execution, and
-automatic starter updates remain pending. Background/periodic discovery is
+automatic starter offers remain pending. Background/periodic discovery is
 outside the current Performance Contract unless measured evidence supports an
 approved exception.
 

@@ -91,6 +91,7 @@ cargo run -p greentyper -- config discovery status
 cargo run -p greentyper -- config discovery refresh openai-main
 cargo run -p greentyper -- config discovery catalog openai-main
 cargo run -p greentyper -- config discovery accept frontier-live openai-main gpt-5.6-live --dialect responses --scope user
+cargo run -p greentyper -- config update-starter frontier --scope user --dry-run
 cargo run -p greentyper -- config get provider.model
 cargo run -p greentyper -- config test-provider
 ```
@@ -417,8 +418,9 @@ required and optional values. Missing references, fallback cycles, invalid
 limits, and revision conflicts keep the Draft live for repair or explicit
 discard. This form defines and edits Presets; the separate `/model` flow can
 accept one compatible release candidate into an ordinary user-owned Preset,
-then apply a configured Preset. Automatic starter offers and updates remain
-unavailable.
+explicitly update an unchanged accepted starter from its trusted release
+provenance, then apply a configured Preset. Automatic starter offers and silent
+updates remain unavailable.
 `/config stats-window add` now prompts for a bounded Usage Window ID and moves
 across start, end, weekday-list, and IANA-time-zone fields in one user-scope
 Draft. Each input is bounded to 512 bytes. The weekday list accepts a TOML
@@ -468,10 +470,21 @@ is an ordinary user-owned Preset;
 duplicate IDs, incompatible Profiles, validation failures, and stale revisions
 never overwrite Config. The effective `agent.default_model_preset` is marked as
 `configured default` in the list and `default true` in detail; project scope
-overrides user scope. A second Enter on configured detail durably selects
-that Preset for the existing current
-Agent's next Turn; the pending ID is visible and another configured Preset
-replaces it. Nothing is installed or executed implicitly. Selection
+overrides user scope. Config schema 2 records the exact release catalog key,
+seed revision, Profile, model, and dialect for an accepted release starter as
+read-only provenance. When a user-scope starter still matches that tuple and a
+newer compatible bundled record exists, configured detail marks the update and
+a second Enter opens an ordinary preview/CAS Draft. The update changes only the
+release-owned identity and provenance fields; user policy fields remain intact.
+The equivalent CLI is `config update-starter PRESET_ID --scope user|project`,
+and the App Server opens the same Draft with
+`config.starter.update.begin`. Manually edited, mixed-scope, incompatible,
+already-current, or stale-revision cases fail without overwriting Config. These
+paths perform no discovery, credential lookup, Provider request, or Ledger
+write. A second Enter on other configured detail durably selects that Preset
+for the existing current Agent's next Turn; the pending ID is visible and
+another configured Preset replaces it. Nothing is installed or executed
+implicitly. Selection
 authenticates the recovered Active Agent Session,
 writes no Config, reads no credential, and performs no Provider request. The
 next headless Turn without an explicit Preset resolves the exact pending ID,
@@ -535,7 +548,7 @@ is no background polling or automatic refresh. Runtime, Team, and Tool Ledgers
 are inspected independently, so one refresh is not a cross-Ledger transactional
 snapshot. The terminal and App Server approval surfaces are limited to the exact
 pending `local.echo` call; neither is a general Tool policy editor, audited
-ConPTY integration, automatic starter-update workflow, or automatic Provider
+ConPTY integration, automatic starter-offer workflow, or automatic Provider
 execution. Background/periodic Provider discovery is outside the current
 Performance Contract and requires measured evidence plus an approved exception
 before implementation. Live inference conformance,

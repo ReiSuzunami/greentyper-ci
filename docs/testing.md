@@ -452,7 +452,7 @@ Provider call or Ledger write, then exact admission consumes one selection and
 freezes the expected Provider Epoch. Headless integration proves automatic
 pending-ID resolution plus credential-preflight and explicit-ID-conflict
 failure preserve all three Ledger byte streams. These tests do not prove
-automatic starter updates or
+automatic starter offers or
 new-Agent default inheritance. Separate headless and
 Config CLI integration tests now prove project `agent.default_model_preset`
 overrides the user value, an explicit Preset is used when no conflicting
@@ -461,6 +461,14 @@ set/get/reset never creates a Runtime Ledger, and a repeated reset returns
 `written: false` with byte-identical Config. The real-key `/model` flow
 also freezes the effective default marker while its explicit current-Agent
 selection continues to modify only the Runtime Ledger.
+Schema-2 release-starter tests separately prove schema-1 read/no-write
+compatibility, complete trusted provenance, generic provenance-field read-only
+enforcement, explicit CLI dry-run/commit/reopen, connection-local App Server
+Draft capacity and conflict recovery, and the real-key `/model` preview/commit
+path. Drifted, mixed-scope, incompatible, already-current, and stale-revision
+cases preserve the prior bytes; the update preserves user policy and creates no
+Runtime, Team, or Tool Ledger. These tests do not prove an automatic starter
+offer or silent update path.
 A real-key loop now carries `/config stats-window add` through its bounded ID
 prompt and start/end/days/time-zone fields, previews, commits, and reopens the
 resolved window. Focused tests prove all four schema fields expose 512-byte text

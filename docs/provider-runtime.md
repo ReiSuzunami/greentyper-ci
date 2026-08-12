@@ -500,12 +500,15 @@ plus the [OpenCode Go endpoint matrix](https://opencode.ai/docs/go/).
 
 ## Still Pending
 
-- Live inference conformance, automatic Provider Profile starter offers and
-  updates, configurable proxy policy,
+- Live inference conformance, automatic Provider Profile starter offers,
+  configurable proxy policy,
   broader TLS platform evidence, automatic retry policy, and partial-stream
   reconnect. Release Provider
   Template defaults and seed catalog facts are bundled, but the current adapters
   do not reconnect or retry partial streams.
+- Explicit accepted-starter updates use schema-2 local provenance and the
+  ordinary Config Draft/CAS path. They perform no Provider request, credential
+  lookup, or Ledger mutation; there is no automatic or silent update path.
 - Background/periodic catalog discovery is excluded by the current Performance
   Contract unless measured evidence supports an approved exception.
 - Broader normalization into the eventual provider-neutral canonical Item

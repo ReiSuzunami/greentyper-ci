@@ -85,7 +85,11 @@ F6/Ctrl-R do not probe. Each action lazily creates one worker for that single
 probe and joins it before the blocking event loop resumes; no discovery worker
 or timer remains while idle. Discovery acceptance revalidates the
 exact observation before it opens an ordinary Config Draft. It also owns a
-bounded `context status`/`context reduce` CLI surface. Status delegates to
+schema-2 release-starter update flow shared by CLI, App Server, and Direct VT:
+complete read-only provenance gates an explicit Draft, user policy is
+preserved, and drift or CAS conflict leaves Config recoverable without any
+Provider, credential, Agent, or Ledger action. It also owns a bounded
+`context status`/`context reduce` CLI surface. Status delegates to
 read-only Runtime inspection; reduce strictly reopens existing Runtime state,
 includes Team/Tool sidecars when present so the core can enforce its Safe
 Barrier, and writes no Config, Team, Tool, credential, or Provider state. It also owns a

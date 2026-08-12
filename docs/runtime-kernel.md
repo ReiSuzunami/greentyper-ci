@@ -497,7 +497,9 @@ charges still require a future dedicated authority path.
   Product sidecars fail closed before terminal entry. Manual read-only snapshot
   refresh is available; all Agent lifecycle actions remain pending.
 - Complete Config Schema default/constraint/normalization/migration metadata and
-  automatic Provider Profile starter offers and update suggestions.
+  automatic Provider Profile starter offers. Explicit release-starter updates
+  are present as schema-2 Config Draft/CAS operations and never enter Runtime,
+  Provider, Team, or Tool authority before a later ordinary Turn admission.
   Background/periodic Provider discovery is excluded by the current Performance
   Contract unless measured evidence supports an approved exception. Release
   Provider Template defaults, seed
