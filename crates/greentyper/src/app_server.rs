@@ -2674,6 +2674,7 @@ mod tests {
                 reason: "Provider stream failed before its first event".into(),
                 retryable: true,
             },
+            pending_agent: None,
             pending_model_selection: None,
             recovered_tail_bytes: 0,
         });

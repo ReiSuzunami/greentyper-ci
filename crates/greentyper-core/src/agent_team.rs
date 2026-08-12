@@ -571,6 +571,7 @@ pub enum TeamOperationKind {
 pub struct TeamOperationRecord {
     pub operation: TeamOperationId,
     pub kind: TeamOperationKind,
+    pub agent: Option<AgentId>,
     pub transaction: TransactionId,
     pub first_sequence: EventSeq,
     pub last_sequence: EventSeq,
@@ -1114,6 +1115,12 @@ impl TeamRuntime {
                             .filter(|candidate| candidate.transaction == *transaction),
                     )
                     .expect("validated Team operation transaction has one command kind"),
+                    agent: operation_agent(
+                        self.event_log
+                            .iter()
+                            .filter(|candidate| candidate.transaction == *transaction),
+                        &self.state,
+                    ),
                     transaction: *transaction,
                     first_sequence: event.sequence,
                     last_sequence: EventSeq(last_sequence),
@@ -2685,6 +2692,36 @@ fn classify_operation_transaction<'a>(
     });
     let kind = kinds.next()?;
     kinds.next().is_none().then_some(kind)
+}
+
+fn operation_agent<'a>(
+    events: impl IntoIterator<Item = &'a TeamEvent>,
+    state: &TeamState,
+) -> Option<AgentId> {
+    let events: Vec<_> = events.into_iter().collect();
+    // A delegation operation is initiated by the parent Session.  The
+    // transaction also creates the child, so prefer the explicit parent
+    // marker instead of accidentally binding the pending acknowledgement to
+    // the newly-created child.
+    if let Some(parent) = events.iter().find_map(|event| match &event.kind {
+        TeamEventKind::DelegationGranted { parent, .. } => Some(*parent),
+        _ => None,
+    }) {
+        return Some(parent);
+    }
+    events.into_iter().find_map(|event| match &event.kind {
+        TeamEventKind::AgentCreated { agent, .. }
+        | TeamEventKind::AgentSucceeded { agent }
+        | TeamEventKind::AgentFailed { agent }
+        | TeamEventKind::AgentCancelled { agent }
+        | TeamEventKind::AgentBlocked { agent, .. }
+        | TeamEventKind::CompletionCapsuleSubmitted { agent, .. }
+        | TeamEventKind::MessageSent { from: agent, .. } => Some(*agent),
+        TeamEventKind::TaskFailed { task, .. } | TeamEventKind::TaskCancelled { task, .. } => {
+            state.tasks.get(task).and_then(|task| task.owner)
+        }
+        _ => None,
+    })
 }
 
 fn validate_budget(budget: ResourceBudget) -> Result<(), TeamError> {

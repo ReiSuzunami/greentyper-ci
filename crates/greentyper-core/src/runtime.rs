@@ -109,6 +109,7 @@ pub struct RuntimeSnapshot {
     pub thread: Option<ThreadId>,
     pub items: Vec<CanonicalItem>,
     pub status: RecoveryStatus,
+    pub pending_agent: Option<AgentId>,
     pub pending_model_selection: Option<PendingModelSelection>,
     pub recovered_tail_bytes: u64,
 }
@@ -694,6 +695,7 @@ impl RuntimeKernel {
                     thread: None,
                     items: Vec::new(),
                     status: RecoveryStatus::Ready,
+                    pending_agent: None,
                     pending_model_selection: None,
                     recovered_tail_bytes: 0,
                 });
@@ -707,6 +709,7 @@ impl RuntimeKernel {
             thread: state.thread,
             items: state.items,
             status,
+            pending_agent: state.pending.as_ref().and_then(|pending| pending.agent),
             pending_model_selection: state.pending_model_selection,
             recovered_tail_bytes: report.truncated_tail_bytes,
         })
@@ -803,6 +806,11 @@ impl RuntimeKernel {
             thread: self.state.thread,
             items: self.state.items.clone(),
             status: self.state.status(),
+            pending_agent: self
+                .state
+                .pending
+                .as_ref()
+                .and_then(|pending| pending.agent),
             pending_model_selection: self.state.pending_model_selection.clone(),
             recovered_tail_bytes: self.recovered_tail_bytes,
         }

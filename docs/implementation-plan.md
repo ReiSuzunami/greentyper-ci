@@ -454,8 +454,11 @@ operation pending, and separately acknowledges that exact operation after
 confirmation. Restart recovers the pending operation; injected acknowledgement
 failure preserves the modal and permits retry. Real-key tests prove Runtime,
 Tool, and Config bytes remain unchanged across mutation and recovery. TUI
-delegation, messaging, completion, failure, retry, and Workspace presentation
-remain outside this slice.
+delegation, messaging, completion, and failure are also available through the
+same owner-bound action flow. The selected Agent now projects its persisted
+Provider recovery state and can explicitly retry, resume, reopen prepared
+output, and acknowledge delivery. Workspace presentation remains outside this
+slice.
 F6 or Ctrl-R now refreshes the local Config/statusline, Model, Usage, and Team
 snapshot from the Slash Panel or any read-only browser. Replacement is
 all-or-old at the TUI boundary: inspection or projection failure keeps the prior
@@ -591,8 +594,7 @@ custom-template and automatic starter-offer workflow,
 automatic Context View/token-source
 projection, provider-reported
 charge and subscription-quota accounting, richer observed Provider metadata,
-Agent lifecycle
-actions in the TUI, Workspace coordination, and the P0/P1/P2/P6
+Workspace coordination, and the P0/P1/P2/P6
 performance evidence remain pending.
 Background/periodic catalog discovery is outside this default plan unless an
 approved Performance Contract exception is added first.
@@ -779,7 +781,9 @@ the child, and the App Server can execute and recover one exact Active-child
 Provider Turn under that inherited ID without copying Config, credentials, or
 parent authority. The Direct VT Agent Center now adds explicit selected-Agent
 cancellation, delegation, messaging, completion, failure, and separate
-pending-operation acknowledgement with restart and retry recovery. The public
+pending-operation acknowledgement with restart and retry recovery. It also
+binds Provider retry, resume, prepared-output reopen, and delivery
+acknowledgement to the selected persisted Turn owner. The public
 CLI exposes the same redacted status, lifecycle, acknowledgement, and exact
 Active-Agent Turn composition through ProductDriver. `/context` adds read-only
 checkpoint inspection and confirmed Safe-Barrier reduction, while `/blockers`

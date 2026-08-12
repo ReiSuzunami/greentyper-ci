@@ -716,7 +716,7 @@ read-only `config catalog` integration test proves the snapshot contains no
 local path or credential reference.
 
 Remaining terminal-backend evidence covers real terminal/ConPTY resize and input,
-additional Agent Center lifecycle actions in the TUI, background refresh, broader multi-Tool/App Server approval,
+background refresh, broader multi-Tool/App Server approval,
 panic-abort cleanup, final host cell
 geometry, and input-ready/idle resource budgets.
 

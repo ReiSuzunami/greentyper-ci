@@ -19,11 +19,12 @@ use greentyper_core::config::{
     MAX_CONFIG_ID_BYTES, ModelPresetView,
 };
 use greentyper_core::context::ContextReductionPolicy;
-use greentyper_core::model::{DeliveryId, TurnId};
+use greentyper_core::model::{DeliveryId, ItemRole, TurnId};
 use greentyper_core::provider::ProviderError;
 use greentyper_core::provider_discovery::{ProviderDiscoveryError, ProviderDiscoveryState};
 use greentyper_core::runtime::{
-    KernelTeamSnapshot, ProviderToolApproval, RuntimeError, RuntimeKernel, RuntimeSnapshot,
+    KernelTeamSnapshot, ProviderToolApproval, RecoveryStatus, RuntimeError, RuntimeKernel,
+    RuntimeSnapshot,
 };
 use greentyper_core::tool_runtime::{ToolCallStatus, ToolSnapshot};
 use greentyper_core::usage::{RuntimeUsageSnapshot, UsageError, UsageTimestamp};
@@ -46,7 +47,8 @@ use crate::product_driver::{
     delegate_product_agent, fail_product_agent, freeze_model_selection, has_product_driver_state,
     inspect_product_team, inspect_product_tools, message_from_product_agent,
     open_product_context_runtime, preflight_product_context_reduction,
-    request_product_provider_turn_recovery, stage_product_model_selection,
+    request_product_agent_provider_turn_recovery, request_product_provider_turn_recovery,
+    stage_product_model_selection,
 };
 use crate::provider_connection::{ModelsHttpConnectionTester, ProviderConnectionTester};
 use crate::provider_discovery_catalog::{
@@ -91,6 +93,21 @@ trait TerminalProductActions {
     fn acknowledge_team_operation(&mut self, operation: u64) -> Result<(), TerminalError>;
 
     fn retry_provider(&mut self, turn: u64) -> Result<(), TerminalError>;
+
+    fn retry_agent_provider(&mut self, agent: u64, turn: u64) -> Result<(), TerminalError>;
+
+    fn resume_agent_provider(
+        &mut self,
+        agent: u64,
+        turn: u64,
+    ) -> Result<TerminalToolResolution, TerminalError>;
+
+    fn load_agent_output(
+        &mut self,
+        agent: u64,
+        turn: u64,
+        delivery: u64,
+    ) -> Result<TerminalToolResolution, TerminalError>;
 }
 
 struct LedgerTerminalProductActions<'a> {
@@ -208,10 +225,25 @@ impl TerminalProductActions for LedgerTerminalProductActions<'_> {
 
     fn acknowledge_output(&mut self, delivery: u64) -> Result<(), TerminalError> {
         self.pending = None;
-        let mut interaction = TerminalApprovalInteraction;
+        let snapshot = RuntimeKernel::inspect(self.ledger)?;
+        let RecoveryStatus::ReconciliationRequired {
+            turn,
+            delivery: pending,
+        } = snapshot.status
+        else {
+            return Err(RuntimeError::UnknownDelivery(
+                DeliveryId::new(delivery).map_err(RuntimeError::Model)?,
+            )
+            .into());
+        };
+        if pending.get() != delivery {
+            return Err(RuntimeError::UnknownDelivery(
+                DeliveryId::new(delivery).map_err(RuntimeError::Model)?,
+            )
+            .into());
+        }
         let executor = LocalProcessExecutor::current()?;
-        let mut driver =
-            ProductDriver::open_with_executor(self.ledger, executor, &mut interaction)?;
+        let mut driver = ProductDriver::open_existing_for_delivery(self.ledger, turn, executor)?;
         let delivery = DeliveryId::new(delivery).map_err(RuntimeError::Model)?;
         driver.acknowledge(delivery)?;
         Ok(())
@@ -269,6 +301,73 @@ impl TerminalProductActions for LedgerTerminalProductActions<'_> {
             runtime.request_blocked_turn_recovery(turn)?;
         }
         Ok(())
+    }
+
+    fn retry_agent_provider(&mut self, agent: u64, turn: u64) -> Result<(), TerminalError> {
+        let turn = TurnId::new(turn).map_err(RuntimeError::Model)?;
+        request_product_agent_provider_turn_recovery(self.ledger, agent, turn)?;
+        Ok(())
+    }
+
+    fn resume_agent_provider(
+        &mut self,
+        agent: u64,
+        turn: u64,
+    ) -> Result<TerminalToolResolution, TerminalError> {
+        let turn = TurnId::new(turn).map_err(RuntimeError::Model)?;
+        let snapshot = RuntimeKernel::inspect(self.ledger)?;
+        if snapshot.pending_agent.map(|owner| owner.get()) != Some(agent) {
+            return Err(ProductDriverError::ProviderTurnOwnerUnavailable(turn.get()).into());
+        }
+        let mut interaction = TerminalApprovalInteraction;
+        let executor = LocalProcessExecutor::current()?;
+        let mut driver =
+            ProductDriver::open_existing_for_provider_recovery(self.ledger, turn, executor)?;
+        let mut provider = ConfiguredProvider::from_epoch(
+            driver
+                .pending_provider_epoch()
+                .ok_or(TerminalError::PendingProviderEpochRequired)?,
+            PlatformCredentialVault,
+        )?;
+        provider.enable_local_echo();
+        let output = driver.resume(&mut provider, &mut interaction)?;
+        Ok(TerminalToolResolution::Prepared {
+            delivery: output.delivery().get(),
+            text: output.text().to_owned(),
+        })
+    }
+
+    fn load_agent_output(
+        &mut self,
+        agent: u64,
+        turn: u64,
+        delivery: u64,
+    ) -> Result<TerminalToolResolution, TerminalError> {
+        let turn = TurnId::new(turn).map_err(RuntimeError::Model)?;
+        let snapshot = RuntimeKernel::inspect(self.ledger)?;
+        if snapshot.pending_agent.map(|owner| owner.get()) != Some(agent) {
+            return Err(ProductDriverError::ProviderTurnOwnerUnavailable(turn.get()).into());
+        }
+        let delivery = DeliveryId::new(delivery).map_err(RuntimeError::Model)?;
+        if !matches!(
+            snapshot.status,
+            RecoveryStatus::ReconciliationRequired {
+                turn: actual_turn,
+                delivery: actual_delivery,
+            } if actual_turn == turn && actual_delivery == delivery
+        ) {
+            return Err(RuntimeError::UnknownDelivery(delivery).into());
+        }
+        let output = snapshot
+            .items
+            .iter()
+            .rev()
+            .find(|item| item.turn() == turn && item.role() == ItemRole::Assistant)
+            .ok_or(TerminalError::ProductOutputUnavailable)?;
+        Ok(TerminalToolResolution::Prepared {
+            delivery: delivery.get(),
+            text: output.text().to_owned(),
+        })
     }
 }
 
@@ -1392,6 +1491,19 @@ enum TerminalLoopOutcome {
     CancelAgent(u64),
     AcknowledgeTeamOperation(u64),
     RetryProvider(u64),
+    RetryAgentProvider {
+        agent: u64,
+        turn: u64,
+    },
+    ResumeAgentProvider {
+        agent: u64,
+        turn: u64,
+    },
+    LoadAgentOutput {
+        agent: u64,
+        turn: u64,
+        delivery: u64,
+    },
     SubmitAgentText,
     LoadToolApproval(u64),
     ResolveToolApproval,
@@ -1440,6 +1552,10 @@ enum AgentLifecycleFlow {
         active: bool,
         cancellable: bool,
         pending_operation: Option<u64>,
+        retry_turn: Option<u64>,
+        resume_turn: Option<u64>,
+        pending_delivery: Option<(u64, u64)>,
+        provider_recovery: bool,
         selected: usize,
     },
     ConfirmCancel {
@@ -1818,6 +1934,10 @@ impl TerminalSession {
                         active: target.active,
                         cancellable: target.cancellable,
                         pending_operation: target.pending_operation,
+                        retry_turn: target.retry_turn,
+                        resume_turn: target.resume_turn,
+                        pending_delivery: target.pending_delivery,
+                        provider_recovery: target.provider_recovery,
                         selected: 0,
                     });
                     self.notice = None;
@@ -1831,17 +1951,26 @@ impl TerminalSession {
                     active,
                     cancellable,
                     pending_operation,
+                    retry_turn,
+                    resume_turn,
+                    pending_delivery,
+                    provider_recovery,
                     selected,
                     ..
                 }) = self.agent_flow.as_mut()
                 {
-                    let count = usize::from(*cancellable)
+                    let count = usize::from(retry_turn.is_some())
+                        .saturating_add(usize::from(resume_turn.is_some()))
+                        .saturating_add(usize::from(pending_delivery.is_some()))
+                        .saturating_add(usize::from(*cancellable))
                         .saturating_add(usize::from(pending_operation.is_some()))
-                        .saturating_add(if *active && pending_operation.is_none() {
-                            4
-                        } else {
-                            0
-                        })
+                        .saturating_add(
+                            if *active && pending_operation.is_none() && !*provider_recovery {
+                                4
+                            } else {
+                                0
+                            },
+                        )
                         .saturating_add(1);
                     *selected = selected.saturating_add_signed(offset).min(count - 1);
                 }
@@ -1854,12 +1983,41 @@ impl TerminalSession {
                     active,
                     cancellable,
                     pending_operation,
+                    retry_turn,
+                    resume_turn,
+                    pending_delivery,
+                    provider_recovery,
                     selected,
                 }) = self.agent_flow
                 else {
                     return Ok(TerminalLoopOutcome::Noop);
                 };
                 let mut index = 0;
+                if let Some(turn) = retry_turn {
+                    if selected == index {
+                        self.agent_flow = None;
+                        return Ok(TerminalLoopOutcome::RetryAgentProvider { agent, turn });
+                    }
+                    index += 1;
+                }
+                if let Some(turn) = resume_turn {
+                    if selected == index {
+                        self.agent_flow = None;
+                        return Ok(TerminalLoopOutcome::ResumeAgentProvider { agent, turn });
+                    }
+                    index += 1;
+                }
+                if let Some((turn, delivery)) = pending_delivery {
+                    if selected == index {
+                        self.agent_flow = None;
+                        return Ok(TerminalLoopOutcome::LoadAgentOutput {
+                            agent,
+                            turn,
+                            delivery,
+                        });
+                    }
+                    index += 1;
+                }
                 if cancellable {
                     if selected == index {
                         self.agent_flow = Some(AgentLifecycleFlow::ConfirmCancel { agent });
@@ -1874,7 +2032,7 @@ impl TerminalSession {
                         Some(AgentLifecycleFlow::ConfirmAcknowledgement { operation });
                     return Ok(TerminalLoopOutcome::Redraw);
                 }
-                if active && pending_operation.is_none() {
+                if active && pending_operation.is_none() && !provider_recovery {
                     let action = match selected.saturating_sub(index) {
                         0 => AgentTextAction::Delegate,
                         1 => AgentTextAction::Message,
@@ -3009,12 +3167,20 @@ impl TerminalSession {
                     active,
                     cancellable,
                     pending_operation,
+                    retry_turn,
+                    resume_turn,
+                    pending_delivery,
+                    provider_recovery,
                     selected,
                 } => AgentLifecycleFlowView::Actions {
                     agent,
                     active,
                     cancellable,
                     pending_operation,
+                    retry_turn,
+                    resume_turn,
+                    pending_delivery,
+                    provider_recovery,
                     selected,
                 },
                 AgentLifecycleFlow::ConfirmCancel { agent } => {
@@ -3639,6 +3805,103 @@ where
                 let frame = session.frame(Some(config), &view)?;
                 surface.write_frame(&renderer.draw(&frame)?)?;
             }
+            TerminalLoopOutcome::RetryAgentProvider { agent, turn } => {
+                let result = product
+                    .as_deref_mut()
+                    .map_or(Err(TerminalError::ViewModelRequired), |product| {
+                        product.retry_agent_provider(agent, turn)
+                    });
+                match result {
+                    Ok(()) => {
+                        if let Some(ledger) = snapshot.refresh_ledger
+                            && let Ok(refreshed) = refresh_terminal_view(
+                                ledger,
+                                config,
+                                session.controller.slash_query(),
+                            )
+                        {
+                            session.controller.reconcile_snapshot(&refreshed.view);
+                            *config = refreshed.config;
+                            view = refreshed.view;
+                        }
+                        session.notice =
+                            Some("Agent Provider retry armed; select Resume".to_owned());
+                    }
+                    Err(_) => {
+                        session.notice = Some(
+                            "Agent Provider retry failed; recovery remains available".to_owned(),
+                        );
+                    }
+                }
+                let frame = session.frame(Some(config), &view)?;
+                surface.write_frame(&renderer.draw(&frame)?)?;
+            }
+            TerminalLoopOutcome::ResumeAgentProvider { agent, turn } => {
+                let result = product
+                    .as_deref_mut()
+                    .map_or(Err(TerminalError::ViewModelRequired), |product| {
+                        product.resume_agent_provider(agent, turn)
+                    });
+                match result {
+                    Ok(TerminalToolResolution::Prepared { delivery, text }) => {
+                        if let Some(ledger) = snapshot.refresh_ledger
+                            && let Ok(refreshed) = refresh_terminal_view(
+                                ledger,
+                                config,
+                                session.controller.slash_query(),
+                            )
+                        {
+                            *config = refreshed.config;
+                            view = refreshed.view;
+                        }
+                        session.show_product_output(delivery, text);
+                        session.notice = Some("Recovered Provider output ready".to_owned());
+                    }
+                    Ok(TerminalToolResolution::Denied) | Err(_) => {
+                        if let Some(ledger) = snapshot.refresh_ledger
+                            && let Ok(refreshed) = refresh_terminal_view(
+                                ledger,
+                                config,
+                                session.controller.slash_query(),
+                            )
+                        {
+                            session.controller.reconcile_snapshot(&refreshed.view);
+                            *config = refreshed.config;
+                            view = refreshed.view;
+                        }
+                        session.notice = Some(
+                            "Agent Provider resume did not complete; recovery remains available"
+                                .to_owned(),
+                        );
+                    }
+                }
+                let frame = session.frame(Some(config), &view)?;
+                surface.write_frame(&renderer.draw(&frame)?)?;
+            }
+            TerminalLoopOutcome::LoadAgentOutput {
+                agent,
+                turn,
+                delivery,
+            } => {
+                let result = product
+                    .as_deref_mut()
+                    .map_or(Err(TerminalError::ViewModelRequired), |product| {
+                        product.load_agent_output(agent, turn, delivery)
+                    });
+                match result {
+                    Ok(TerminalToolResolution::Prepared { delivery, text }) => {
+                        session.show_product_output(delivery, text);
+                        session.notice = Some("Recovered Provider output ready".to_owned());
+                    }
+                    Ok(TerminalToolResolution::Denied) | Err(_) => {
+                        session.notice = Some(
+                            "Provider output unavailable; delivery remains pending".to_owned(),
+                        );
+                    }
+                }
+                let frame = session.frame(Some(config), &view)?;
+                surface.write_frame(&renderer.draw(&frame)?)?;
+            }
             outcome @ (TerminalLoopOutcome::RefreshProviderDiscovery
             | TerminalLoopOutcome::RefreshProviderDiscoveryOnOpen) => {
                 let on_open =
@@ -4209,6 +4472,7 @@ pub(crate) enum TerminalError {
     ConfigRuntimeRequired,
     ViewModelRequired,
     ToolApprovalUnavailable,
+    ProductOutputUnavailable,
     PendingProviderEpochRequired,
     Presentation(PresentationControllerError),
     PresentationModel(PresentationError),
@@ -4244,6 +4508,9 @@ impl fmt::Display for TerminalError {
             }
             Self::ToolApprovalUnavailable => {
                 formatter.write_str("selected Tool approval is unavailable")
+            }
+            Self::ProductOutputUnavailable => {
+                formatter.write_str("prepared Provider output is unavailable")
             }
             Self::PendingProviderEpochRequired => {
                 formatter.write_str("Tool approval requires a pending Provider Epoch")
@@ -4286,6 +4553,7 @@ impl Error for TerminalError {
             | Self::ConfigRuntimeRequired
             | Self::ViewModelRequired
             | Self::ToolApprovalUnavailable
+            | Self::ProductOutputUnavailable
             | Self::PendingProviderEpochRequired
             | Self::NonInteractive => None,
         }
@@ -4388,7 +4656,9 @@ mod tests {
     use greentyper_core::provider_discovery::{
         DiscoveredProviderModel, ProviderDiscoveryProfile, ProviderDiscoveryState,
     };
-    use greentyper_core::runtime::{ProviderToolApproval, ProviderTurnOutcome, RuntimeKernel};
+    use greentyper_core::runtime::{
+        ProviderToolApproval, ProviderTurnOutcome, RecoveryStatus, RuntimeKernel,
+    };
     use greentyper_core::usage::{UsageWeekday, UsageWindow};
 
     use crate::credential_vault::{
@@ -4418,6 +4688,16 @@ mod tests {
     struct CompleteStatsUsageProvider;
 
     struct PendingApprovalProvider;
+
+    struct UnavailableBeforeResponseProvider;
+
+    impl ProviderRuntime for UnavailableBeforeResponseProvider {
+        fn run(&mut self, _request: &ProviderRequest) -> Result<Vec<ProviderEvent>, ProviderError> {
+            Err(ProviderError::unavailable(
+                "injected Agent Provider failure",
+            ))
+        }
+    }
 
     impl ProviderRuntime for PendingApprovalProvider {
         fn run(&mut self, _request: &ProviderRequest) -> Result<Vec<ProviderEvent>, ProviderError> {
@@ -4461,6 +4741,9 @@ mod tests {
         agent_completions: Vec<(u64, String)>,
         agent_failures: Vec<(u64, String)>,
         team_acknowledgements: Vec<u64>,
+        provider_retries: Vec<(u64, u64)>,
+        provider_resumes: Vec<(u64, u64)>,
+        agent_output_loads: Vec<(u64, u64, u64)>,
     }
 
     impl RecordingTerminalProductActions {
@@ -4479,6 +4762,9 @@ mod tests {
                 agent_completions: Vec::new(),
                 agent_failures: Vec::new(),
                 team_acknowledgements: Vec::new(),
+                provider_retries: Vec::new(),
+                provider_resumes: Vec::new(),
+                agent_output_loads: Vec::new(),
             }
         }
 
@@ -4576,6 +4862,34 @@ mod tests {
 
         fn retry_provider(&mut self, _turn: u64) -> Result<(), TerminalError> {
             Ok(())
+        }
+
+        fn retry_agent_provider(&mut self, agent: u64, turn: u64) -> Result<(), TerminalError> {
+            self.provider_retries.push((agent, turn));
+            Ok(())
+        }
+
+        fn resume_agent_provider(
+            &mut self,
+            agent: u64,
+            turn: u64,
+        ) -> Result<TerminalToolResolution, TerminalError> {
+            self.provider_resumes.push((agent, turn));
+            self.outcomes
+                .pop_front()
+                .unwrap_or(Err(TerminalError::ToolApprovalUnavailable))
+        }
+
+        fn load_agent_output(
+            &mut self,
+            agent: u64,
+            turn: u64,
+            delivery: u64,
+        ) -> Result<TerminalToolResolution, TerminalError> {
+            self.agent_output_loads.push((agent, turn, delivery));
+            self.outcomes
+                .pop_front()
+                .unwrap_or(Err(TerminalError::ProductOutputUnavailable))
         }
     }
 
@@ -7439,6 +7753,92 @@ favorite = true
         assert!(!paths.project().exists());
         assert!(!held_team_ledger.exists());
         std::fs::remove_dir_all(root).expect("remove Agent action fixture");
+    }
+
+    #[test]
+    fn terminal_agent_recovery_retries_resumes_and_acknowledges_output() {
+        let root = terminal_test_root("agent-provider-recovery");
+        let ledger = root.join("runtime.ledger");
+        let team_ledger = terminal_sidecar_path(&ledger, "team");
+        let tool_ledger = terminal_sidecar_path(&ledger, "tool");
+        let paths = ConfigPaths::new(root.join("user.toml"), root.join("project.toml"));
+        std::fs::create_dir_all(&root).expect("create Agent recovery fixture directory");
+
+        let mut interaction = InterruptToolApproval;
+        let mut driver = ProductDriver::open_with_executor(
+            &ledger,
+            LocalProcessExecutor::current().expect("local process executor"),
+            &mut interaction,
+        )
+        .expect("open Product driver");
+        assert!(
+            driver
+                .execute(
+                    &ConfigLayers::default(),
+                    "recover Agent Provider",
+                    &mut UnavailableBeforeResponseProvider,
+                    &mut interaction,
+                )
+                .is_err()
+        );
+        drop(driver);
+
+        let team_before = std::fs::read(&team_ledger).expect("read Team Ledger");
+        let tool_before = std::fs::read(&tool_ledger).expect("read Tool Ledger");
+        let mut config =
+            ConfigRuntime::open(paths.clone(), ConfigDocument::empty()).expect("config runtime");
+        let view = build_terminal_view(&ledger, &config, "/").expect("Agent recovery view");
+        let mut events = "agent"
+            .chars()
+            .map(|character| {
+                Event::Key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
+            })
+            .collect::<VecDeque<_>>();
+        events.extend([
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL)),
+        ]);
+
+        let output = run_terminal_loop_with_snapshot_refresh(
+            Vec::new(),
+            FakeTerminalMode::default(),
+            &mut config,
+            &view,
+            &ledger,
+            Viewport::new(80, 24).expect("Agent recovery viewport"),
+            move || Ok(events.pop_front().expect("bounded Agent recovery events")),
+        )
+        .expect("Agent recovery loop");
+        let output = String::from_utf8(output).expect("Agent recovery VT output");
+
+        assert!(output.contains("Retry Provider turn"));
+        assert!(output.contains("Resume Provider turn"));
+        assert!(output.contains("simulated: recover Agent Provider"));
+        assert!(output.contains("Acknowledge delivery"));
+        assert!(output.contains("Provider output acknowledged"));
+        assert!(matches!(
+            RuntimeKernel::inspect(&ledger)
+                .expect("inspect recovered Runtime")
+                .status,
+            RecoveryStatus::Ready
+        ));
+        assert_eq!(
+            std::fs::read(&team_ledger).expect("reread Team Ledger"),
+            team_before
+        );
+        assert_eq!(
+            std::fs::read(&tool_ledger).expect("reread Tool Ledger"),
+            tool_before
+        );
+        assert!(!paths.user().exists());
+        assert!(!paths.project().exists());
+        std::fs::remove_dir_all(root).expect("remove Agent recovery fixture");
     }
 
     #[test]

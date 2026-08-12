@@ -120,7 +120,10 @@ All provide bounded query/group/row/detail navigation. Stats and ordinary Agent
 browsing remain read-only. The Agent Center additionally owns a bounded `A`
 action flow: delegation, messaging, completion, failure, cancellation, and
 exact pending-operation acknowledgement delegate authority to ProductDriver;
-restart and failure preserve the pending operation for retry. The Context screen
+restart and failure preserve the pending operation for retry. It also projects
+the selected Agent's persisted Provider Turn owner and exposes explicit retry,
+resume, prepared-output reopen, and delivery acknowledgement without falling
+back to root authority. The Context screen
 exposes exact-head inspection plus confirmed Safe-Barrier reduction. On compatible release detail, a second Enter creates an
 ordinary revision-bound user-scope Preset Draft through the core Config Runtime;
 CLI and App Server entry points reuse the same operation. On configured Model
@@ -181,9 +184,8 @@ retrievable and unacknowledged. The
 three Ledgers are inspected independently, not as a transactional snapshot.
 Project/user Preset defaults are Config-owned and now appear read-only in that
 browser; current-Agent pending selection remains a separate Runtime event.
-New-Agent inheritance is handled by Delegation, while Agent Center lifecycle
-actions beyond cancellation/acknowledgement remain outside that browser
-boundary. The local App Server lifecycle surface copies only the effective
+New-Agent inheritance is handled by Delegation. The local App Server lifecycle
+surface copies only the effective
 default Preset ID at Delegation and can run one exact Active-child Turn under
 that inherited identity; it reuses rebound Session authority and ordinary
 Config/Provider Epoch admission. The Stats browser already exposes cached Turn aggregates and

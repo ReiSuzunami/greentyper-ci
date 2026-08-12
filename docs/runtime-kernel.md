@@ -518,6 +518,10 @@ charges still require a future dedicated authority path.
   selected non-terminal Agent through a rebound Session and separately
   acknowledge the resulting exact Team operation. Restart preserves an
   unacknowledged operation, and acknowledgement failure remains retryable.
+  The same owner-scoped action menu now projects retryable Provider blocks,
+  resume-required Turns, and prepared deliveries for the selected Agent. Retry
+  only rearms; resume reconstructs the frozen Provider; recovered output is
+  displayed before the existing explicit acknowledgement step.
   Incomplete final-frame bytes remain visible as recovery required; corruption
   and partial Product sidecars fail closed before terminal entry. Manual
   read-only snapshot refresh is available. The local

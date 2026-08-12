@@ -919,6 +919,16 @@ pub(crate) struct AgentCenterEntryView {
     capability_count: usize,
     scope_count: usize,
     inherited_model_preset: Option<String>,
+    recovery: Option<AgentRecoveryView>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub(crate) enum AgentRecoveryView {
+    Retry { turn: u64 },
+    Resume { turn: u64 },
+    Acknowledge { turn: u64, delivery: u64 },
+    Blocked { turn: u64 },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -931,17 +941,45 @@ pub(crate) struct AgentCenterView {
     message_count: usize,
     agents: Vec<AgentCenterEntryView>,
     #[serde(skip)]
-    pending_operation_ids: Vec<u64>,
+    pending_operations: Vec<(u64, Option<u64>)>,
 }
 
-impl From<&KernelTeamSnapshot> for AgentCenterView {
-    fn from(team: &KernelTeamSnapshot) -> Self {
+impl AgentCenterView {
+    fn from_sources(team: &KernelTeamSnapshot, runtime: Option<&RuntimeSnapshot>) -> Self {
         let projection = &team.projection;
         let agents = projection
             .agents
             .iter()
             .map(|agent| {
                 let task = projection.task(agent.task);
+                let recovery = if let Some(runtime) =
+                    runtime.filter(|runtime| runtime.pending_agent == Some(agent.id))
+                {
+                    match &runtime.status {
+                        RecoveryStatus::Blocked {
+                            turn,
+                            retryable: true,
+                            ..
+                        } => Some(AgentRecoveryView::Retry { turn: turn.get() }),
+                        RecoveryStatus::ResumeRequired { turn } => {
+                            Some(AgentRecoveryView::Resume { turn: turn.get() })
+                        }
+                        RecoveryStatus::ReconciliationRequired { turn, delivery } => {
+                            Some(AgentRecoveryView::Acknowledge {
+                                turn: turn.get(),
+                                delivery: delivery.get(),
+                            })
+                        }
+                        RecoveryStatus::Blocked {
+                            turn,
+                            retryable: false,
+                            ..
+                        } => Some(AgentRecoveryView::Blocked { turn: turn.get() }),
+                        RecoveryStatus::Ready => None,
+                    }
+                } else {
+                    None
+                };
                 AgentCenterEntryView {
                     id: agent.id.get(),
                     parent: agent.parent.map(|parent| parent.get()),
@@ -959,6 +997,7 @@ impl From<&KernelTeamSnapshot> for AgentCenterView {
                         .inherited_model_preset
                         .as_ref()
                         .map(|preset| preset.id().to_owned()),
+                    recovery,
                 }
             })
             .collect();
@@ -976,15 +1015,26 @@ impl From<&KernelTeamSnapshot> for AgentCenterView {
                 .count(),
             message_count: projection.messages.len(),
             agents,
-            pending_operation_ids: team
+            pending_operations: team
                 .operations
                 .iter()
                 .filter(|operation| {
                     operation.status == TeamOperationStatus::CommittedAwaitingAcknowledgement
                 })
-                .map(|operation| operation.operation.get())
+                .map(|operation| {
+                    (
+                        operation.operation.get(),
+                        operation.agent.map(|agent| agent.get()),
+                    )
+                })
                 .collect(),
         }
+    }
+}
+
+impl From<&KernelTeamSnapshot> for AgentCenterView {
+    fn from(team: &KernelTeamSnapshot) -> Self {
+        Self::from_sources(team, None)
     }
 }
 
@@ -994,6 +1044,10 @@ pub(crate) struct AgentActionTarget {
     pub(crate) active: bool,
     pub(crate) cancellable: bool,
     pub(crate) pending_operation: Option<u64>,
+    pub(crate) retry_turn: Option<u64>,
+    pub(crate) resume_turn: Option<u64>,
+    pub(crate) pending_delivery: Option<(u64, u64)>,
+    pub(crate) provider_recovery: bool,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
@@ -1072,7 +1126,7 @@ impl TuiViewModel {
             .map_or(Availability::Unknown, Availability::Known);
         let agents = sources
             .team
-            .map(AgentCenterView::from)
+            .map(|team| AgentCenterView::from_sources(team, Some(sources.runtime)))
             .map_or(Availability::Unknown, Availability::Known);
         let blockers = build_blockers(&sources);
         let blocker_count = if sources.team.is_some() && sources.tools.is_some() {
@@ -1634,13 +1688,34 @@ impl PresentationController {
             return None;
         };
         let agent = agents.agents.get(selected)?;
-        let pending_operation = agents.pending_operation_ids.first().copied();
+        let pending_operation = agents
+            .pending_operations
+            .iter()
+            .find(|(_, owner)| *owner == Some(agent.id))
+            .map(|(operation, _)| *operation);
+        let (retry_turn, resume_turn, pending_delivery) = match agent.recovery.as_ref() {
+            Some(AgentRecoveryView::Retry { turn }) => (Some(*turn), None, None),
+            Some(AgentRecoveryView::Resume { turn }) => (None, Some(*turn), None),
+            Some(AgentRecoveryView::Acknowledge { turn, delivery }) => {
+                (None, None, Some((*turn, *delivery)))
+            }
+            Some(AgentRecoveryView::Blocked { .. }) | None => (None, None, None),
+        };
         let active = !matches!(agent.status, "succeeded" | "failed" | "cancelled");
         Some(AgentActionTarget {
             agent: agent.id,
             active,
-            cancellable: pending_operation.is_none() && active,
+            cancellable: pending_operation.is_none()
+                && retry_turn.is_none()
+                && resume_turn.is_none()
+                && pending_delivery.is_none()
+                && agent.recovery.is_none()
+                && active,
             pending_operation,
+            retry_turn,
+            resume_turn,
+            pending_delivery,
+            provider_recovery: agent.recovery.is_some(),
         })
     }
 
@@ -2782,6 +2857,10 @@ pub(crate) enum AgentLifecycleFlowView {
         active: bool,
         cancellable: bool,
         pending_operation: Option<u64>,
+        retry_turn: Option<u64>,
+        resume_turn: Option<u64>,
+        pending_delivery: Option<(u64, u64)>,
+        provider_recovery: bool,
         selected: usize,
     },
     ConfirmCancel {
@@ -2882,6 +2961,10 @@ impl PresentationLayoutView {
                 active,
                 cancellable,
                 pending_operation,
+                retry_turn,
+                resume_turn,
+                pending_delivery,
+                provider_recovery,
                 selected,
             } => {
                 let title = pending_operation.map_or_else(
@@ -2890,6 +2973,27 @@ impl PresentationLayoutView {
                 );
                 let mut rows = vec![LayoutRowView::new(title, false)];
                 let mut index = 0;
+                if let Some(turn) = retry_turn {
+                    rows.push(LayoutRowView::new(
+                        format!("> Retry Provider turn {turn}"),
+                        selected == index,
+                    ));
+                    index += 1;
+                }
+                if let Some(turn) = resume_turn {
+                    rows.push(LayoutRowView::new(
+                        format!("> Resume Provider turn {turn}"),
+                        selected == index,
+                    ));
+                    index += 1;
+                }
+                if let Some((turn, delivery)) = pending_delivery {
+                    rows.push(LayoutRowView::new(
+                        format!("> Open delivery {delivery} (turn {turn})"),
+                        selected == index,
+                    ));
+                    index += 1;
+                }
                 if cancellable {
                     rows.push(LayoutRowView::new("> Cancel Agent", selected == index));
                     index += 1;
@@ -2901,7 +3005,7 @@ impl PresentationLayoutView {
                     ));
                     index += 1;
                 }
-                if pending_operation.is_none() && active {
+                if pending_operation.is_none() && active && !provider_recovery {
                     for label in [
                         "Delegate Agent",
                         "Message Agent",
@@ -2915,7 +3019,9 @@ impl PresentationLayoutView {
                 rows.push(LayoutRowView::new("> Return", selected == index));
                 rows.push(LayoutRowView::new("Enter selects; Escape returns", false));
                 rows.push(LayoutRowView::new(
-                    if pending_operation.is_some() {
+                    if retry_turn.is_some() || resume_turn.is_some() || pending_delivery.is_some() {
+                        "Provider recovery is owner-scoped; output requires acknowledgement"
+                    } else if pending_operation.is_some() {
                         "Team operation IDs reconcile state; they grant no Agent authority"
                     } else {
                         "Agent IDs select recovered Session authority only"
@@ -3786,14 +3892,24 @@ fn agent_center_rows(
     }
     let selected = selected.min(agents.agents.len() - 1);
     rows.extend(agents.agents.iter().enumerate().map(|(index, agent)| {
+        let recovery = agent
+            .recovery
+            .as_ref()
+            .map_or("", |recovery| match recovery {
+                AgentRecoveryView::Retry { .. } => " | retry",
+                AgentRecoveryView::Resume { .. } => " | resume",
+                AgentRecoveryView::Acknowledge { .. } => " | delivery pending",
+                AgentRecoveryView::Blocked { .. } => " | blocked",
+            });
         LayoutRowView::new(
             format!(
-                "{} agent {} | {} | task {} | {}",
+                "{} agent {} | {} | task {} | {}{}",
                 if index == selected { '>' } else { ' ' },
                 agent.id,
                 agent.status,
                 agent.task,
-                agent.task_status
+                agent.task_status,
+                recovery
             ),
             index == selected,
         )
@@ -3846,6 +3962,24 @@ fn agent_detail_rows(agents: &AgentCenterView, agent: &AgentCenterEntryView) -> 
                 "reserved {} tokens | {} tool calls",
                 agent.reserved_tokens, agent.reserved_tools
             ),
+            false,
+        ),
+        LayoutRowView::new(
+            match agent.recovery.as_ref() {
+                Some(AgentRecoveryView::Retry { turn }) => {
+                    format!("provider turn {turn} blocked | retry available")
+                }
+                Some(AgentRecoveryView::Resume { turn }) => {
+                    format!("provider turn {turn} | resume available")
+                }
+                Some(AgentRecoveryView::Acknowledge { turn, delivery }) => {
+                    format!("provider turn {turn} | delivery {delivery} pending acknowledgement")
+                }
+                Some(AgentRecoveryView::Blocked { turn }) => {
+                    format!("provider turn {turn} blocked | manual recovery required")
+                }
+                None => "provider recovery ready".to_owned(),
+            },
             false,
         ),
         LayoutRowView::new(
@@ -5328,6 +5462,7 @@ pub(crate) fn build_smoke_view(
         thread: None,
         items: Vec::new(),
         status: RecoveryStatus::Ready,
+        pending_agent: None,
         pending_model_selection: None,
         recovered_tail_bytes: 0,
     };
@@ -5548,8 +5683,9 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use greentyper_core::agent_team::{
-        EventSeq, TaskId, TaskScope, TaskStatus, TaskView, TeamOperationId, TeamOperationRecord,
-        TeamOperationStatus, TeamSnapshot, TransactionId,
+        AgentId, AgentStatus, AgentView, CapabilitySnapshot, EventSeq, ResourceBudget, TaskId,
+        TaskScope, TaskStatus, TaskView, TeamOperationId, TeamOperationRecord, TeamOperationStatus,
+        TeamSnapshot, TransactionId,
     };
     use greentyper_core::config::{
         CommandMatchKind, CommandTarget, ConfigDocument, ConfigEditorError, ConfigEditorOperation,
@@ -5578,14 +5714,15 @@ mod tests {
     };
 
     use super::{
-        Availability, BlockerView, CostQuantityView, DiscoveredModelAcceptance, ModelEntryAction,
-        ModelSelectorGroup, ModelSelectorView, PresentationController, PresentationControllerError,
-        PresentationScreenView, PresentationSources, PresentationState, ProductToolApprovalView,
-        RecoveryBadge, SlashPanelView, StatsGroup, StatusSegmentKind, ToolApprovalAction,
-        ToolApprovalEntryAction, TuiViewModel, UsageQuantityView, UsageRatioView, UsageSummaryView,
-        Viewport, blocker_center_rows, cache_label, cost_label, display_width, fit_text,
-        model_detail_rows, model_selector_rows, stats_attempt_quantity_label, stats_rows,
-        status_segments, tool_approval_detail_lines, usage_accuracy_label,
+        AgentCenterView, AgentRecoveryView, Availability, BlockerView, CostQuantityView,
+        DiscoveredModelAcceptance, ModelEntryAction, ModelSelectorGroup, ModelSelectorView,
+        PresentationController, PresentationControllerError, PresentationScreenView,
+        PresentationSources, PresentationState, ProductToolApprovalView, RecoveryBadge,
+        SlashPanelView, StatsGroup, StatusSegmentKind, ToolApprovalAction, ToolApprovalEntryAction,
+        TuiViewModel, UsageQuantityView, UsageRatioView, UsageSummaryView, Viewport,
+        blocker_center_rows, cache_label, cost_label, display_width, fit_text, model_detail_rows,
+        model_selector_rows, stats_attempt_quantity_label, stats_rows, status_segments,
+        tool_approval_detail_lines, usage_accuracy_label,
     };
 
     static NEXT_TEMP: AtomicU64 = AtomicU64::new(1);
@@ -5648,6 +5785,7 @@ source = "unknown"
             thread: Some(ThreadId::new(7).expect("thread")),
             items: Vec::new(),
             status,
+            pending_agent: None,
             pending_model_selection: None,
             recovered_tail_bytes: 0,
         }
@@ -6124,6 +6262,7 @@ source = "unknown"
         let operation = TeamOperationRecord {
             operation: TeamOperationId::default(),
             kind: greentyper_core::agent_team::TeamOperationKind::Delegation,
+            agent: None,
             transaction: TransactionId::default(),
             first_sequence: EventSeq::default(),
             last_sequence: EventSeq::default(),
@@ -6939,6 +7078,48 @@ dialect = "responses"
                 detail: false,
             }
         );
+    }
+
+    #[test]
+    fn agent_center_projects_owner_scoped_provider_recovery() {
+        let team = KernelTeamSnapshot {
+            projection: TeamSnapshot {
+                revision: EventSeq::default(),
+                tasks: vec![],
+                agents: vec![AgentView {
+                    id: AgentId::default(),
+                    parent: None,
+                    task: TaskId::default(),
+                    status: AgentStatus::Active,
+                    budget: ResourceBudget::new(100, 1),
+                    reserved_budget: ResourceBudget::default(),
+                    capabilities: CapabilitySnapshot::default(),
+                    inherited_model_preset: None,
+                }],
+                messages: vec![],
+            },
+            ledger_head: LedgerHead::default(),
+            recovered_tail_bytes: 0,
+            operations: vec![],
+        };
+        let runtime = RuntimeSnapshot {
+            head: LedgerHead::default(),
+            thread: None,
+            items: vec![],
+            status: RecoveryStatus::Blocked {
+                turn: TurnId::new(3).expect("turn"),
+                reason: "provider unavailable".into(),
+                retryable: true,
+            },
+            pending_agent: Some(AgentId::default()),
+            pending_model_selection: None,
+            recovered_tail_bytes: 0,
+        };
+        let view = AgentCenterView::from_sources(&team, Some(&runtime));
+        assert!(matches!(
+            view.agents[0].recovery,
+            Some(AgentRecoveryView::Retry { turn: 3 })
+        ));
     }
 
     #[test]

@@ -546,6 +546,10 @@ message, submit a Completion Capsule, record failure, or explicitly cancel.
 Each mutation commits only Team state and remains pending until a separate
 confirmation acknowledges its exact operation ID. Restart re-exposes that
 pending acknowledgement, and a failed acknowledgement leaves it retryable.
+The same Agent action menu projects owner-scoped Provider recovery. It can
+rearm a retryable blocked Turn, resume the exact frozen Provider under the
+persisted Agent owner, and reopen prepared output before the existing explicit
+delivery acknowledgement.
 These actions never write Runtime, Tool, or Config state.
 `workspace inspect --root PATH` emits stable redacted Workspace/Worktree facts.
 On Unix, `workspace capture` holds a shared directory Lease while opening each
@@ -594,7 +598,7 @@ before implementation. Live inference conformance,
 automatic transport retry or partial-stream reconnect, Messages reasoning
 blocks, provider-native Context Mode execution, broader multi-Tool approval
 presentation, broader Provider and Tool adapters,
-Git worktree allocation/merge, retrying terminal Team Agents, general App Server Runtime control beyond the exact
+Git worktree allocation/merge, retrying terminal Team Agents after terminal lifecycle failure, general App Server Runtime control beyond the exact
 cancel/retry/resume recovery flow, and
 remote App Server transport remain. The loopback Provider tracer remains
 an internal harness; `local.echo` is intentionally a fixed opt-in command rather
