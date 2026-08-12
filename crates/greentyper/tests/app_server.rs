@@ -1653,6 +1653,230 @@ fn app_server_delegates_and_recovers_the_team_acknowledgement_boundary() {
 }
 
 #[test]
+fn app_server_stdio_runs_simulator_child_turn_and_recovers_delivery() {
+    let temp = TempTree::new();
+    fs::create_dir_all(
+        temp.project_config()
+            .parent()
+            .expect("project Config directory"),
+    )
+    .expect("create project Config directory");
+    fs::write(
+        temp.project_config(),
+        concat!(
+            "schema_version = 2\n",
+            "[agent]\n",
+            "default_model_preset = \"child-default\"\n",
+            "[model_presets.child-default]\n",
+            "provider = \"simulator\"\n",
+            "model = \"deterministic-v1\"\n",
+            "dialect = \"responses\"\n",
+        ),
+    )
+    .expect("write simulator child Config");
+    temp.create_agent_state();
+
+    let delegated = responses(&temp.run(
+        br#"{"id":1,"operation":"agent.delegate","params":{"title":"private simulator child","token_budget":500,"tool_budget":1}}"#,
+    ));
+    assert_eq!(delegated[0]["result"]["outcome"]["kind"], "delegated");
+    let operation = delegated[0]["result"]["operation"]
+        .as_u64()
+        .expect("delegation operation");
+    let child = delegated[0]["result"]["outcome"]["agent"]
+        .as_u64()
+        .expect("delegated child");
+    let acknowledged = responses(&temp.run(
+        format!(
+            "{{\"id\":2,\"operation\":\"agent.acknowledge\",\"params\":{{\"operation\":{operation}}}}}"
+        )
+        .as_bytes(),
+    ));
+    assert_eq!(acknowledged[0]["result"]["status"], "acknowledged");
+
+    let team_before = fs::read(temp.team_ledger()).expect("read Team before child Turn");
+    let tool_before = fs::read(temp.tool_ledger()).expect("read Tool before child Turn");
+    let prepared = responses(&temp.run(
+        format!(
+            "{{\"id\":3,\"operation\":\"agent.turn\",\"params\":{{\"agent\":{child},\"input\":\"child simulator input\"}}}}"
+        )
+        .as_bytes(),
+    ));
+    assert_eq!(prepared[0]["result"]["status"], "prepared");
+    assert_eq!(prepared[0]["result"]["agent"], child);
+    assert_eq!(
+        prepared[0]["result"]["text"],
+        "simulated: child simulator input"
+    );
+    let delivery = prepared[0]["result"]["delivery"]
+        .as_u64()
+        .expect("prepared delivery");
+
+    let recovered = responses(&temp.run(
+        format!(
+            "{{\"id\":4,\"operation\":\"runtime.delivery\",\"params\":{{\"delivery\":{delivery}}}}}"
+        )
+        .as_bytes(),
+    ));
+    assert_eq!(recovered[0]["result"]["status"], "prepared");
+    assert_eq!(
+        recovered[0]["result"]["turn"],
+        prepared[0]["result"]["turn"]
+    );
+    assert_eq!(
+        recovered[0]["result"]["text"],
+        "simulated: child simulator input"
+    );
+
+    let acknowledged = responses(&temp.run(
+        format!(
+            "{{\"id\":5,\"operation\":\"runtime.acknowledge\",\"params\":{{\"delivery\":{delivery}}}}}"
+        )
+        .as_bytes(),
+    ));
+    assert_eq!(acknowledged[0]["result"]["status"], "acknowledged");
+    let status = responses(&temp.run(br#"{"id":6,"operation":"runtime.status"}"#));
+    assert_eq!(status[0]["result"]["status"], "ready");
+    let second = responses(&temp.run(
+        format!(
+            "{{\"id\":8,\"operation\":\"agent.turn\",\"params\":{{\"agent\":{child},\"input\":\"second simulator input\"}}}}"
+        )
+        .as_bytes(),
+    ));
+    assert_eq!(second[0]["result"]["status"], "prepared");
+    assert_eq!(second[0]["result"]["agent"], child);
+    assert_eq!(
+        second[0]["result"]["text"],
+        "simulated: second simulator input"
+    );
+    let second_delivery = second[0]["result"]["delivery"]
+        .as_u64()
+        .expect("second prepared delivery");
+    let second_ack = responses(&temp.run(
+        format!(
+            "{{\"id\":9,\"operation\":\"runtime.acknowledge\",\"params\":{{\"delivery\":{second_delivery}}}}}"
+        )
+        .as_bytes(),
+    ));
+    assert_eq!(second_ack[0]["result"]["status"], "acknowledged");
+    let stats =
+        responses(&temp.run(br#"{"id":10,"operation":"runtime.stats","params":{"limit":10}}"#));
+    let attempts = stats[0]["result"]["page"]["attempts"]
+        .as_array()
+        .expect("child Usage attempts");
+    assert_eq!(attempts.len(), 2);
+    for attempt in attempts {
+        assert_eq!(attempt["agent"], child);
+        assert_eq!(attempt["provider_profile"], "simulator");
+        assert_eq!(attempt["requested_model"], "deterministic-v1");
+    }
+    assert_eq!(
+        fs::read(temp.team_ledger()).expect("read Team after child Turn"),
+        team_before
+    );
+    assert_eq!(
+        fs::read(temp.tool_ledger()).expect("read Tool after child Turn"),
+        tool_before
+    );
+    assert!(!temp.user_config().exists());
+    let listed = temp.run(br#"{"id":7,"operation":"agent.list","params":{}}"#);
+    assert!(!String::from_utf8_lossy(&listed.stdout).contains("private simulator child"));
+}
+
+#[test]
+fn app_server_agent_turn_unknown_agent_fails_without_mutating_state() {
+    let temp = TempTree::new();
+    temp.create_agent_state();
+    let runtime_before =
+        fs::read(temp.runtime_ledger()).expect("read Runtime before unknown Agent");
+    let team_before = fs::read(temp.team_ledger()).expect("read Team before unknown Agent");
+    let tool_before = fs::read(temp.tool_ledger()).expect("read Tool before unknown Agent");
+    let output = temp.run(
+        br#"{"id":1,"operation":"agent.turn","params":{"agent":999,"input":"must not run"}}
+"#,
+    );
+    let result = responses(&output);
+    assert_eq!(result[0]["error"]["category"], "unknown_agent");
+    assert_eq!(
+        fs::read(temp.runtime_ledger()).expect("read Runtime after unknown Agent"),
+        runtime_before
+    );
+    assert_eq!(
+        fs::read(temp.team_ledger()).expect("read Team after unknown Agent"),
+        team_before
+    );
+    assert_eq!(
+        fs::read(temp.tool_ledger()).expect("read Tool after unknown Agent"),
+        tool_before
+    );
+    assert!(!temp.user_config().exists());
+    assert!(!temp.project_config().exists());
+}
+
+#[test]
+fn app_server_agent_turn_missing_preset_fails_before_runtime_write() {
+    let temp = TempTree::new();
+    fs::create_dir_all(
+        temp.project_config()
+            .parent()
+            .expect("project Config directory"),
+    )
+    .expect("create project Config directory");
+    fs::write(
+        temp.project_config(),
+        concat!(
+            "schema_version = 2\n",
+            "[agent]\n",
+            "default_model_preset = \"child-default\"\n",
+            "[model_presets.child-default]\n",
+            "provider = \"simulator\"\n",
+            "model = \"deterministic-v1\"\n",
+            "dialect = \"responses\"\n",
+        ),
+    )
+    .expect("write simulator child Config");
+    temp.create_agent_state();
+    let delegated = responses(&temp.run(
+        br#"{"id":1,"operation":"agent.delegate","params":{"title":"private missing preset child","token_budget":500,"tool_budget":1}}"#,
+    ));
+    let operation = delegated[0]["result"]["operation"]
+        .as_u64()
+        .expect("delegation operation");
+    let child = delegated[0]["result"]["outcome"]["agent"]
+        .as_u64()
+        .expect("delegated child");
+    let _ = temp.run(
+        format!(
+            "{{\"id\":2,\"operation\":\"agent.acknowledge\",\"params\":{{\"operation\":{operation}}}}}"
+        )
+        .as_bytes(),
+    );
+    let runtime_before = fs::read(temp.runtime_ledger()).expect("read Runtime before preflight");
+    let team_before = fs::read(temp.team_ledger()).expect("read Team before preflight");
+    let tool_before = fs::read(temp.tool_ledger()).expect("read Tool before preflight");
+    fs::remove_file(temp.project_config()).expect("remove Config before missing-preset check");
+    let failed = responses(&temp.run(
+        format!(
+            "{{\"id\":3,\"operation\":\"agent.turn\",\"params\":{{\"agent\":{child},\"input\":\"must not run\"}}}}"
+        )
+        .as_bytes(),
+    ));
+    assert_eq!(failed[0]["error"]["category"], "unknown_object");
+    assert_eq!(
+        fs::read(temp.runtime_ledger()).expect("read Runtime after preflight"),
+        runtime_before
+    );
+    assert_eq!(
+        fs::read(temp.team_ledger()).expect("read Team after preflight"),
+        team_before
+    );
+    assert_eq!(
+        fs::read(temp.tool_ledger()).expect("read Tool after preflight"),
+        tool_before
+    );
+}
+
+#[test]
 fn app_server_fails_and_cancels_agents_durably_without_echoing_reasons() {
     let temp = TempTree::new();
     temp.create_agent_state();

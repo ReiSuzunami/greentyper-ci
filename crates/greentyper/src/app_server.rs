@@ -16,7 +16,7 @@ use greentyper_core::config::{
 };
 use greentyper_core::model::{DeliveryId, ItemRole, TurnId};
 use greentyper_core::pricing::PriceScheduleBook;
-use greentyper_core::provider::{ProviderError, ProviderRuntime};
+use greentyper_core::provider::ProviderRuntime;
 use greentyper_core::runtime::{
     AcknowledgeOutcome, CancelTurnOutcome, PreparedOutput, ProviderFallbackCandidate,
     ProviderToolApproval, RecoveryStatus, RuntimeError, RuntimeKernel,
@@ -701,7 +701,7 @@ where
                 drop(providers);
                 drop(driver);
                 match result {
-                    Ok(output) => prepared_runtime_response(request.id, &output),
+                    Ok(output) => prepared_agent_response(request.id, params.agent, &output),
                     Err(ProductDriverError::Interaction(_)) => {
                         let call = inspect_product_tools(&self.runtime_path)
                             .ok()
@@ -716,6 +716,7 @@ where
                                 request.id,
                                 json!({
                                     "status": "tool_approval_required",
+                                    "agent": params.agent,
                                     "call": call.call.get(),
                                 }),
                             ),
@@ -1508,9 +1509,10 @@ fn build_agent_provider_plan<'vault, V: CredentialVault>(
                 preset.dialect,
                 SharedCredentialVault(vault.0),
             ),
-            None => Err(ProviderError::InvalidConfiguration(
-                "simulator Provider cannot select a wire dialect",
-            )),
+            // A simulator preset still carries a schema dialect for selection
+            // identity, but its runtime deliberately has no wire dialect or
+            // credential boundary.
+            None => ConfiguredProvider::for_new_turn(None, SharedCredentialVault(vault.0)),
         }
         .map_err(|_| AgentProviderPlanError::Provider)?;
         let selection = freeze_model_selection(&layers, &usage_windows, &price_schedules, preset)
@@ -1676,16 +1678,25 @@ fn turn_not_resumable(id: u64) -> Value {
 }
 
 fn prepared_runtime_response(id: u64, output: &PreparedOutput) -> Value {
-    success_response(
-        id,
-        json!({
-            "status": "prepared",
-            "delivery": output.delivery().get(),
-            "turn": output.turn().get(),
-            "text": output.text(),
-            "usage_record_count": output.usage_records().len(),
-        }),
-    )
+    prepared_response(id, None, output)
+}
+
+fn prepared_agent_response(id: u64, agent: u64, output: &PreparedOutput) -> Value {
+    prepared_response(id, Some(agent), output)
+}
+
+fn prepared_response(id: u64, agent: Option<u64>, output: &PreparedOutput) -> Value {
+    let mut result = json!({
+        "status": "prepared",
+        "delivery": output.delivery().get(),
+        "turn": output.turn().get(),
+        "text": output.text(),
+        "usage_record_count": output.usage_records().len(),
+    });
+    if let Some(agent) = agent {
+        result["agent"] = json!(agent);
+    }
+    success_response(id, result)
 }
 
 fn invalid_turn(id: u64) -> Value {

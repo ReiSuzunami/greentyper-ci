@@ -663,7 +663,13 @@ approval/execution, or multi-client authentication.
 Child-Preset integration additionally proves Delegation persists only the
 effective default Preset ID, Team schema-2 replay yields no inherited ID, and
 `agent.list` projects the inherited identity without Config or credential
-material. A real loopback child Turn freezes the selected child Agent in Usage,
+material. Public stdio tests additionally run the deterministic simulator across
+separate processes: Delegate, acknowledge, `agent.turn`, `runtime.delivery`,
+explicit acknowledgement, and a second child Turn. They recover exact prepared
+text, attribute both Usage attempts to the selected child/`simulator`/
+`deterministic-v1`, keep Team/Tool bytes unchanged, and reject unknown Agents
+or missing inherited Presets before any Ledger write. A real loopback child Turn
+freezes the selected child Agent in Usage,
 Provider Profile, model, and dialect facts; returns prepared output; and keeps
 Team/Tool bytes unchanged. Product recovery tests interrupt child Provider and
 fixed `local.echo` Tool paths, then prove retry, cancellation, approval,
