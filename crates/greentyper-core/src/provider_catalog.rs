@@ -227,6 +227,163 @@ pub struct ModelCatalogRecord {
     availability: CatalogField<CatalogAvailability>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ReleaseModelIdentity {
+    pub catalog_key: &'static str,
+    pub provider_template: &'static str,
+    pub model: &'static str,
+    pub dialect: ProviderDialect,
+}
+
+struct HistoricalReleaseModels {
+    seed_revision: &'static str,
+    models: &'static [ReleaseModelIdentity],
+}
+
+const HISTORICAL_RELEASE_MODELS: &[HistoricalReleaseModels] = &[HistoricalReleaseModels {
+    seed_revision: "2026-08-10.1",
+    models: &[
+        ReleaseModelIdentity {
+            catalog_key: "deepseek/deepseek-v4-flash",
+            provider_template: "deepseek",
+            model: "deepseek-v4-flash",
+            dialect: ProviderDialect::Responses,
+        },
+        ReleaseModelIdentity {
+            catalog_key: "deepseek/deepseek-v4-pro",
+            provider_template: "deepseek",
+            model: "deepseek-v4-pro",
+            dialect: ProviderDialect::ChatCompletions,
+        },
+        ReleaseModelIdentity {
+            catalog_key: "openai/gpt-5.6-luna",
+            provider_template: "openai",
+            model: "gpt-5.6-luna",
+            dialect: ProviderDialect::Responses,
+        },
+        ReleaseModelIdentity {
+            catalog_key: "openai/gpt-5.6-sol",
+            provider_template: "openai",
+            model: "gpt-5.6-sol",
+            dialect: ProviderDialect::Responses,
+        },
+        ReleaseModelIdentity {
+            catalog_key: "openai/gpt-5.6-terra",
+            provider_template: "openai",
+            model: "gpt-5.6-terra",
+            dialect: ProviderDialect::Responses,
+        },
+        ReleaseModelIdentity {
+            catalog_key: "opencode-go/deepseek-v4-flash",
+            provider_template: "opencode-go",
+            model: "deepseek-v4-flash",
+            dialect: ProviderDialect::ChatCompletions,
+        },
+        ReleaseModelIdentity {
+            catalog_key: "opencode-go/deepseek-v4-pro",
+            provider_template: "opencode-go",
+            model: "deepseek-v4-pro",
+            dialect: ProviderDialect::ChatCompletions,
+        },
+        ReleaseModelIdentity {
+            catalog_key: "opencode-go/glm-5.1",
+            provider_template: "opencode-go",
+            model: "glm-5.1",
+            dialect: ProviderDialect::ChatCompletions,
+        },
+        ReleaseModelIdentity {
+            catalog_key: "opencode-go/glm-5.2",
+            provider_template: "opencode-go",
+            model: "glm-5.2",
+            dialect: ProviderDialect::ChatCompletions,
+        },
+        ReleaseModelIdentity {
+            catalog_key: "opencode-go/gpt-5.6-luna",
+            provider_template: "opencode-go",
+            model: "gpt-5.6-luna",
+            dialect: ProviderDialect::Responses,
+        },
+        ReleaseModelIdentity {
+            catalog_key: "opencode-go/grok-4.5",
+            provider_template: "opencode-go",
+            model: "grok-4.5",
+            dialect: ProviderDialect::ChatCompletions,
+        },
+        ReleaseModelIdentity {
+            catalog_key: "opencode-go/hy3",
+            provider_template: "opencode-go",
+            model: "hy3",
+            dialect: ProviderDialect::ChatCompletions,
+        },
+        ReleaseModelIdentity {
+            catalog_key: "opencode-go/kimi-k2.6",
+            provider_template: "opencode-go",
+            model: "kimi-k2.6",
+            dialect: ProviderDialect::ChatCompletions,
+        },
+        ReleaseModelIdentity {
+            catalog_key: "opencode-go/kimi-k2.7-code",
+            provider_template: "opencode-go",
+            model: "kimi-k2.7-code",
+            dialect: ProviderDialect::ChatCompletions,
+        },
+        ReleaseModelIdentity {
+            catalog_key: "opencode-go/kimi-k3",
+            provider_template: "opencode-go",
+            model: "kimi-k3",
+            dialect: ProviderDialect::ChatCompletions,
+        },
+        ReleaseModelIdentity {
+            catalog_key: "opencode-go/mimo-v2.5",
+            provider_template: "opencode-go",
+            model: "mimo-v2.5",
+            dialect: ProviderDialect::ChatCompletions,
+        },
+        ReleaseModelIdentity {
+            catalog_key: "opencode-go/mimo-v2.5-pro",
+            provider_template: "opencode-go",
+            model: "mimo-v2.5-pro",
+            dialect: ProviderDialect::ChatCompletions,
+        },
+        ReleaseModelIdentity {
+            catalog_key: "opencode-go/minimax-m2.7",
+            provider_template: "opencode-go",
+            model: "minimax-m2.7",
+            dialect: ProviderDialect::Messages,
+        },
+        ReleaseModelIdentity {
+            catalog_key: "opencode-go/minimax-m3",
+            provider_template: "opencode-go",
+            model: "minimax-m3",
+            dialect: ProviderDialect::Messages,
+        },
+        ReleaseModelIdentity {
+            catalog_key: "opencode-go/qwen3.6-plus",
+            provider_template: "opencode-go",
+            model: "qwen3.6-plus",
+            dialect: ProviderDialect::Messages,
+        },
+        ReleaseModelIdentity {
+            catalog_key: "opencode-go/qwen3.7-max",
+            provider_template: "opencode-go",
+            model: "qwen3.7-max",
+            dialect: ProviderDialect::Messages,
+        },
+        ReleaseModelIdentity {
+            catalog_key: "opencode-go/qwen3.7-plus",
+            provider_template: "opencode-go",
+            model: "qwen3.7-plus",
+            dialect: ProviderDialect::Messages,
+        },
+        ReleaseModelIdentity {
+            catalog_key: "opencode-go/qwen3.8-max",
+            provider_template: "opencode-go",
+            model: "qwen3.8-max",
+            dialect: ProviderDialect::Messages,
+        },
+    ],
+}];
+
 impl ModelCatalogRecord {
     #[must_use]
     pub const fn key(self) -> &'static str {
@@ -348,6 +505,28 @@ impl ProviderCatalog {
             .binary_search_by(|model| model.key.cmp(key))
             .ok()
             .map(|index| &self.models[index])
+    }
+
+    pub(crate) fn release_model_identity(
+        self,
+        seed_revision: &str,
+        catalog_key: &str,
+    ) -> Option<ReleaseModelIdentity> {
+        if seed_revision == self.seed_revision {
+            return self.model(catalog_key).map(|record| ReleaseModelIdentity {
+                catalog_key: record.key(),
+                provider_template: record.provider_template(),
+                model: record.model_id().value(),
+                dialect: record.primary_dialect().value(),
+            });
+        }
+        HISTORICAL_RELEASE_MODELS
+            .iter()
+            .find(|history| history.seed_revision == seed_revision)?
+            .models
+            .iter()
+            .copied()
+            .find(|identity| identity.catalog_key == catalog_key)
     }
 }
 
