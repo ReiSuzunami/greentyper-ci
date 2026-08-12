@@ -275,11 +275,20 @@ reasoning_output_micros_per_million = 3000000
 fn schema_and_parser_are_versioned_typed_and_secret_safe() {
     let schema = config_schema();
     assert!(schema.len() >= 30);
-    assert!(
+    assert_eq!(
         schema
             .iter()
-            .all(|entry| entry.interaction() != ConfigFieldInteraction::ReadOnly),
-        "every Config Schema field must expose a rendered interaction"
+            .filter(|entry| entry.interaction() == ConfigFieldInteraction::ReadOnly)
+            .map(|entry| entry.path_pattern)
+            .collect::<Vec<_>>(),
+        vec![
+            "model_presets.<id>.starter.catalog_key",
+            "model_presets.<id>.starter.seed_revision",
+            "model_presets.<id>.starter.provider",
+            "model_presets.<id>.starter.model",
+            "model_presets.<id>.starter.dialect",
+        ],
+        "only trusted release-starter provenance may be rendered read-only"
     );
     for (path_pattern, value_kind, interaction) in [
         (
@@ -790,10 +799,10 @@ fn schema_and_parser_are_versioned_typed_and_secret_safe() {
         Err(ConfigRuntimeError::SecretReadForbidden(_))
     ));
     assert!(matches!(
-        ConfigDocument::parse("schema_version = 2\n"),
+        ConfigDocument::parse("schema_version = 3\n"),
         Err(ConfigRuntimeError::UnsupportedSchema {
-            supported: 1,
-            actual: 2
+            supported: 2,
+            actual: 3
         })
     ));
     assert!(matches!(
@@ -2197,8 +2206,8 @@ credential = "synthetic-openai-credential-reference"
 "#,
     )
     .expect("parse starter Provider profile");
-    let mut runtime =
-        ConfigRuntime::open(paths.clone(), config).expect("resolve starter Provider profile");
+    let mut runtime = ConfigRuntime::open(paths.clone(), config.clone())
+        .expect("resolve starter Provider profile");
 
     let draft = runtime
         .begin_model_starter(
@@ -2241,6 +2250,11 @@ credential = "synthetic-openai-credential-reference"
             "model_presets.frontier.dialect",
             "model_presets.frontier.model",
             "model_presets.frontier.provider",
+            "model_presets.frontier.starter.catalog_key",
+            "model_presets.frontier.starter.dialect",
+            "model_presets.frontier.starter.model",
+            "model_presets.frontier.starter.provider",
+            "model_presets.frontier.starter.seed_revision",
         ]
     );
     assert!(
@@ -2253,6 +2267,403 @@ credential = "synthetic-openai-credential-reference"
     assert!(!paths.project().exists());
     assert!(!lock_path(paths.user()).exists());
     assert!(!lock_path(paths.project()).exists());
+
+    let draft = runtime
+        .begin_model_starter(
+            ConfigScope::User,
+            "frontier",
+            "openai-main",
+            "openai/gpt-5.6-sol",
+        )
+        .expect("rebuild starter draft");
+    let commit = runtime.commit(draft, false).expect("commit starter draft");
+    assert!(commit.written);
+    let reopened = ConfigRuntime::open(paths.clone(), config).expect("reopen starter Config");
+    let preset = reopened.model_preset("frontier").expect("reopen starter");
+    let starter = preset.starter.expect("starter provenance");
+    assert_eq!(starter.catalog_key, "openai/gpt-5.6-sol");
+    assert_eq!(starter.seed_revision, "2026-08-10.2");
+    assert_eq!(starter.provider, "openai-main");
+    assert_eq!(starter.model, "gpt-5.6-sol");
+    assert_eq!(starter.dialect, ProviderDialect::Responses);
+    let bytes = fs::read_to_string(paths.user()).expect("read committed starter");
+    assert!(bytes.starts_with("schema_version = 2\n"));
+    assert!(bytes.contains("[model_presets.frontier.starter]"));
+    assert!(!bytes.contains("synthetic-openai-credential-reference"));
+}
+
+#[test]
+fn schema_one_config_loads_without_writes_and_upgrades_on_the_next_commit() {
+    let temp = TempTree::new("schema-one-upgrade");
+    let paths = temp.paths();
+    let original = r#"schema_version = 1
+
+[model_presets.legacy]
+provider = "simulator"
+model = "deterministic-v1"
+dialect = "responses"
+"#;
+    write(paths.user(), original);
+
+    let mut runtime = ConfigRuntime::open(paths.clone(), ConfigDocument::empty())
+        .expect("open schema-one Config");
+    assert_eq!(
+        fs::read_to_string(paths.user()).expect("read legacy"),
+        original
+    );
+    assert!(
+        runtime
+            .model_preset("legacy")
+            .expect("legacy preset")
+            .starter
+            .is_none()
+    );
+    assert!(!lock_path(paths.user()).exists());
+
+    let mut draft = runtime
+        .begin_draft(ConfigScope::User)
+        .expect("begin upgrade draft");
+    draft
+        .set_raw("model_presets.legacy.favorite", "true")
+        .expect("stage explicit change");
+    runtime.commit(draft, false).expect("commit schema upgrade");
+    let upgraded = fs::read_to_string(paths.user()).expect("read upgraded Config");
+    assert!(upgraded.starts_with("schema_version = 2\n"));
+    assert!(upgraded.contains("favorite = true"));
+    assert!(!upgraded.contains("[model_presets.legacy.starter]"));
+}
+
+#[test]
+fn starter_provenance_requires_schema_two_and_a_complete_read_only_tuple() {
+    assert!(matches!(
+        ConfigDocument::parse(
+            r#"schema_version = 1
+[model_presets.bad]
+provider = "simulator"
+model = "deterministic-v1"
+dialect = "responses"
+[model_presets.bad.starter]
+catalog_key = "openai/gpt-5.6-sol"
+seed_revision = "2026-08-10.2"
+provider = "simulator"
+model = "deterministic-v1"
+dialect = "responses"
+"#,
+        ),
+        Err(ConfigRuntimeError::InvalidValue { path, .. }) if path == "schema_version"
+    ));
+    assert!(matches!(
+        ConfigDocument::parse(
+            r#"schema_version = 2
+[model_presets.bad]
+provider = "simulator"
+model = "deterministic-v1"
+dialect = "responses"
+[model_presets.bad.starter]
+catalog_key = "openai/gpt-5.6-sol"
+provider = "simulator"
+model = "deterministic-v1"
+dialect = "responses"
+"#,
+        ),
+        Err(ConfigRuntimeError::InvalidValue { path, .. })
+            if path == "model_presets.bad.starter.seed_revision"
+    ));
+
+    let runtime = ConfigRuntime::open(
+        TempTree::new("read-only-starter-provenance").paths(),
+        ConfigDocument::empty(),
+    )
+    .expect("open Config Runtime");
+    let mut draft = runtime.begin_draft(ConfigScope::User).expect("begin draft");
+    assert!(matches!(
+        draft.set_raw(
+            "model_presets.fake.starter.catalog_key",
+            "openai/gpt-5.6-sol"
+        ),
+        Err(ConfigRuntimeError::ReadOnlyScope(ConfigScope::User))
+    ));
+    assert!(matches!(
+        draft.reset("model_presets.fake.starter.catalog_key"),
+        Err(ConfigRuntimeError::ReadOnlyScope(ConfigScope::User))
+    ));
+}
+
+#[test]
+fn release_starter_update_is_explicit_revision_bound_and_preserves_user_policy() {
+    let temp = TempTree::new("release-starter-update");
+    let paths = temp.paths();
+    let original = r#"schema_version = 2
+
+[providers.openai-main]
+template = "openai"
+credential = "private-starter-update-reference"
+dialects = ["responses", "chat_completions"]
+
+[providers.openai-main.catalog]
+mode = "manual"
+
+[model_presets.backup]
+provider = "simulator"
+model = "deterministic-v1"
+dialect = "responses"
+reasoning_effort = "high"
+service_tier = "priority"
+max_output_tokens = 8192
+context_mode = "canonical"
+
+[model_presets.frontier]
+provider = "openai-main"
+model = "gpt-5.6-sol"
+dialect = "responses"
+reasoning_effort = "high"
+service_tier = "priority"
+max_output_tokens = 8192
+context_mode = "canonical"
+favorite = true
+fallback = ["backup"]
+
+[model_presets.frontier.starter]
+catalog_key = "openai/gpt-5.6-sol"
+seed_revision = "2026-08-10.1"
+provider = "openai-main"
+model = "gpt-5.6-sol"
+dialect = "responses"
+"#;
+    write(paths.user(), original);
+    let mut winner =
+        ConfigRuntime::open(paths.clone(), ConfigDocument::empty()).expect("open winner Runtime");
+    let mut loser =
+        ConfigRuntime::open(paths.clone(), ConfigDocument::empty()).expect("open loser Runtime");
+    assert!(
+        winner
+            .model_preset("frontier")
+            .expect("manual-catalog starter")
+            .starter_update_available
+    );
+    let draft = winner
+        .begin_model_starter_update(ConfigScope::User, "frontier")
+        .expect("begin starter update");
+    let stale = loser
+        .begin_model_starter_update(ConfigScope::User, "frontier")
+        .expect("begin stale starter update");
+    let preview = winner
+        .commit(draft.clone(), true)
+        .expect("preview starter update");
+    assert!(!preview.written);
+    assert_eq!(
+        preview
+            .changes
+            .iter()
+            .map(|change| change.path.as_str())
+            .collect::<Vec<_>>(),
+        vec!["model_presets.frontier.starter.seed_revision"]
+    );
+    assert_eq!(
+        fs::read_to_string(paths.user()).expect("preview bytes"),
+        original
+    );
+    assert!(!lock_path(paths.user()).exists());
+
+    winner.commit(draft, false).expect("commit starter update");
+    let winner_bytes = fs::read(paths.user()).expect("winner bytes");
+    assert!(matches!(
+        loser.commit(stale, false),
+        Err(ConfigRuntimeError::RevisionConflict { .. })
+    ));
+    assert_eq!(
+        fs::read(paths.user()).expect("bytes after stale commit"),
+        winner_bytes
+    );
+
+    let reopened = ConfigRuntime::open(paths.clone(), ConfigDocument::empty())
+        .expect("reopen updated starter");
+    let preset = reopened.model_preset("frontier").expect("updated preset");
+    assert_eq!(preset.provider, "openai-main");
+    assert_eq!(preset.model, "gpt-5.6-sol");
+    assert_eq!(preset.dialect, ProviderDialect::Responses);
+    assert_eq!(
+        preset.reasoning_effort,
+        Some(greentyper_core::config::ReasoningEffort::High)
+    );
+    assert_eq!(
+        preset.service_tier,
+        Some(greentyper_core::config::ServiceTier::Priority)
+    );
+    assert_eq!(preset.max_output_tokens, Some(8192));
+    assert_eq!(
+        preset.context_mode,
+        Some(greentyper_core::config::ContextMode::Canonical)
+    );
+    assert!(preset.favorite);
+    assert_eq!(preset.fallback, ["backup"]);
+    let starter = preset.starter.expect("updated provenance");
+    assert_eq!(starter.catalog_key, "openai/gpt-5.6-sol");
+    assert_eq!(starter.seed_revision, "2026-08-10.2");
+    assert_eq!(starter.model, "gpt-5.6-sol");
+    assert_eq!(starter.dialect, ProviderDialect::Responses);
+    assert!(matches!(
+        reopened.begin_model_starter_update(ConfigScope::User, "frontier"),
+        Err(ConfigRuntimeError::InvalidValue { path, .. })
+            if path == "model_presets.frontier.starter"
+    ));
+    assert_eq!(
+        fs::read(paths.user()).expect("bytes after repeated update"),
+        winner_bytes
+    );
+}
+
+#[test]
+fn release_starter_update_rejects_ordinary_drifted_and_overridden_presets_without_writes() {
+    for (label, user, project, expected_path) in [
+        (
+            "ordinary",
+            r#"schema_version = 2
+[providers.openai-main]
+template = "openai"
+[model_presets.frontier]
+provider = "openai-main"
+model = "gpt-5.5-sol"
+dialect = "responses"
+"#,
+            None,
+            "model_presets.frontier.starter",
+        ),
+        (
+            "drifted",
+            r#"schema_version = 2
+[providers.openai-main]
+template = "openai"
+[model_presets.frontier]
+provider = "openai-main"
+model = "manual-edit"
+dialect = "responses"
+[model_presets.frontier.starter]
+catalog_key = "openai/gpt-5.6-sol"
+seed_revision = "2026-08-10.1"
+provider = "openai-main"
+model = "gpt-5.6-sol"
+dialect = "responses"
+"#,
+            None,
+            "model_presets.frontier",
+        ),
+        (
+            "overridden",
+            r#"schema_version = 2
+[providers.openai-main]
+template = "openai"
+[model_presets.frontier]
+provider = "openai-main"
+model = "gpt-5.6-sol"
+dialect = "responses"
+[model_presets.frontier.starter]
+catalog_key = "openai/gpt-5.6-sol"
+seed_revision = "2026-08-10.1"
+provider = "openai-main"
+model = "gpt-5.6-sol"
+dialect = "responses"
+"#,
+            Some(
+                r#"schema_version = 2
+[model_presets.frontier]
+model = "gpt-5.6-sol"
+"#,
+            ),
+            "model_presets.frontier",
+        ),
+    ] {
+        let temp = TempTree::new(label);
+        let paths = temp.paths();
+        write(paths.user(), user);
+        if let Some(project) = project {
+            write(paths.project(), project);
+        }
+        let user_before = fs::read(paths.user()).expect("user bytes");
+        let project_before = paths
+            .project()
+            .exists()
+            .then(|| fs::read(paths.project()).unwrap());
+        let runtime = ConfigRuntime::open(paths.clone(), ConfigDocument::empty())
+            .expect("open rejection fixture");
+        assert!(matches!(
+            runtime.begin_model_starter_update(ConfigScope::User, "frontier"),
+            Err(ConfigRuntimeError::InvalidValue { path, .. }) if path == expected_path
+        ));
+        assert_eq!(fs::read(paths.user()).expect("unchanged user"), user_before);
+        assert_eq!(
+            paths
+                .project()
+                .exists()
+                .then(|| fs::read(paths.project()).unwrap()),
+            project_before
+        );
+        assert!(!lock_path(paths.user()).exists());
+        assert!(!lock_path(paths.project()).exists());
+    }
+}
+
+#[test]
+fn release_starter_provenance_rejects_empty_unknown_and_mismatched_raw_tuples() {
+    for (label, starter, expected) in [
+        (
+            "empty",
+            r#"catalog_key = ""
+seed_revision = "2026-08-10.1"
+provider = "openai-main"
+model = "gpt-5.6-sol"
+dialect = "responses""#,
+            "cannot be empty",
+        ),
+        (
+            "unknown-seed",
+            r#"catalog_key = "openai/gpt-5.6-sol"
+seed_revision = "future-seed"
+provider = "openai-main"
+model = "gpt-5.6-sol"
+dialect = "responses""#,
+            "not a supported update source",
+        ),
+        (
+            "mismatched",
+            r#"catalog_key = "openai/gpt-5.6-sol"
+seed_revision = "2026-08-10.1"
+provider = "openai-main"
+model = "gpt-5.6-terra"
+dialect = "responses""#,
+            "does not match its catalog record",
+        ),
+    ] {
+        let temp = TempTree::new(label);
+        let paths = temp.paths();
+        let document = format!(
+            r#"schema_version = 2
+[providers.openai-main]
+template = "openai"
+[model_presets.frontier]
+provider = "openai-main"
+model = "gpt-5.6-sol"
+dialect = "responses"
+[model_presets.frontier.starter]
+{starter}
+"#
+        );
+        write(paths.user(), &document);
+        let before = fs::read(paths.user()).expect("invalid provenance bytes");
+        let runtime = ConfigRuntime::open(paths.clone(), ConfigDocument::empty())
+            .expect("open invalid provenance in repair state");
+        assert!(!runtime.status().ready);
+        assert!(
+            runtime
+                .status()
+                .issues
+                .iter()
+                .any(|issue| issue.detail.contains(expected))
+        );
+        assert_eq!(fs::read(paths.user()).expect("unchanged bytes"), before);
+        assert!(!lock_path(paths.user()).exists());
+        assert!(!lock_path(paths.project()).exists());
+    }
 }
 
 #[test]
