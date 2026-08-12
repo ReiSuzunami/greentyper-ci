@@ -1716,12 +1716,12 @@ impl TerminalSession {
                     }
                     index += 1;
                 }
-                if let Some(operation) = pending_operation {
-                    if selected == index {
-                        self.agent_flow =
-                            Some(AgentLifecycleFlow::ConfirmAcknowledgement { operation });
-                        return Ok(TerminalLoopOutcome::Redraw);
-                    }
+                if let Some(operation) = pending_operation
+                    && selected == index
+                {
+                    self.agent_flow =
+                        Some(AgentLifecycleFlow::ConfirmAcknowledgement { operation });
+                    return Ok(TerminalLoopOutcome::Redraw);
                 }
                 self.agent_flow = None;
                 Ok(TerminalLoopOutcome::Redraw)
