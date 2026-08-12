@@ -490,6 +490,7 @@ fn validate_root_path(path: &Path) -> Result<(), WorkspaceError> {
     {
         return Err(WorkspaceError::InvalidRoot);
     }
+    validate_root_components(path)?;
     let metadata = fs::symlink_metadata(path).map_err(|error| {
         if error.kind() == io::ErrorKind::NotFound {
             WorkspaceError::RootNotFound
@@ -502,6 +503,32 @@ fn validate_root_path(path: &Path) -> Result<(), WorkspaceError> {
     }
     if !metadata.is_dir() {
         return Err(WorkspaceError::NotDirectory);
+    }
+    Ok(())
+}
+
+fn validate_root_components(path: &Path) -> Result<(), WorkspaceError> {
+    let mut cursor = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => cursor.push(prefix.as_os_str()),
+            Component::RootDir => cursor.push(component.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => return Err(WorkspaceError::InvalidRoot),
+            Component::Normal(name) => {
+                cursor.push(name);
+                let metadata = fs::symlink_metadata(&cursor).map_err(|error| {
+                    if error.kind() == io::ErrorKind::NotFound {
+                        WorkspaceError::RootNotFound
+                    } else {
+                        WorkspaceError::Io(error)
+                    }
+                })?;
+                if metadata.file_type().is_symlink() {
+                    return Err(WorkspaceError::SymlinkPath);
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -780,6 +807,27 @@ mod tests {
             Err(WorkspaceError::SymlinkPath)
         ));
         fs::remove_dir_all(path).expect("cleanup");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn root_traversal_and_intermediate_symlink_fail_closed() {
+        let parent = temp_root("root-paths");
+        let real = parent.join("real");
+        fs::create_dir(&real).expect("real root");
+        let link = parent.join("link");
+        std::os::unix::fs::symlink(&real, &link).expect("root symlink");
+
+        assert!(matches!(
+            WorkspaceRoot::open(parent.join("real").join("..")),
+            Err(WorkspaceError::InvalidRoot)
+        ));
+        assert!(matches!(
+            WorkspaceRoot::open(link),
+            Err(WorkspaceError::SymlinkPath)
+        ));
+
+        fs::remove_dir_all(parent).expect("cleanup");
     }
 
     #[test]
