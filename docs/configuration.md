@@ -241,8 +241,9 @@ Likewise, `/model` browses configured Presets and release candidates while
 detail opens a user-scope starter Draft; after preview and commit, the resulting
 configured Preset can be selected for the current Agent's next Turn.
 `/agent` browses the latest successful Team sidecar projection. Browsing is
-read-only; `A` may explicitly cancel the selected non-terminal Agent and later
-acknowledge the exact pending Team operation. The numeric Agent and operation
+read-only; `A` may explicitly cancel the selected non-terminal Agent. When a
+Team operation is pending, the same key instead opens a Team-level action to
+acknowledge that exact operation. The numeric Agent and operation
 IDs are selectors only: every mutation still requires a Session rebound from
 validated Product recovery.
 `/blockers` lists Runtime, Team, Task, Tool, and Config blockers from the latest

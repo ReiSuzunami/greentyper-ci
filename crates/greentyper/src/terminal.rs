@@ -3505,13 +3505,15 @@ where
                             }
                         }
                         Err(_) => {
+                            session.agent_flow = Some(AgentLifecycleFlow::ConfirmCancel { agent });
                             session.notice = Some(
-                                "Agent cancellation failed; refresh current state before retry"
+                                "Agent cancellation failed; confirmation remains available"
                                     .to_owned(),
                             );
                         }
                     }
                 } else {
+                    session.agent_flow = Some(AgentLifecycleFlow::ConfirmCancel { agent });
                     session.notice = Some("Agent cancellation unavailable".to_owned());
                 }
                 let frame = session.frame(Some(config), &view)?;
@@ -6800,8 +6802,12 @@ favorite = true
             Event::Key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE)),
             Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
             Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
             Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL)),
         ]);
+        let cancel_team_path = team_ledger.clone();
+        let cancel_held_path = held_team_ledger.clone();
+        let mut cancel_enter_count = 0;
 
         let cancelled_output = run_terminal_loop_with_snapshot_refresh(
             Vec::new(),
@@ -6810,7 +6816,20 @@ favorite = true
             &view,
             &ledger,
             Viewport::new(80, 24).expect("Agent action viewport"),
-            move || Ok(events.pop_front().expect("bounded Agent action events")),
+            move || {
+                let event = events.pop_front().expect("bounded Agent action events");
+                if matches!(&event, Event::Key(key) if key.code == KeyCode::Enter) {
+                    cancel_enter_count += 1;
+                    if cancel_enter_count == 3 {
+                        std::fs::rename(&cancel_team_path, &cancel_held_path)
+                            .expect("hide Team Ledger for failed cancellation");
+                    } else if cancel_enter_count == 4 {
+                        std::fs::rename(&cancel_held_path, &cancel_team_path)
+                            .expect("restore Team Ledger before cancellation retry");
+                    }
+                }
+                Ok(event)
+            },
         )
         .expect("Agent action loop");
         let cancelled_output = String::from_utf8(cancelled_output).expect("Agent action VT output");
@@ -6820,7 +6839,9 @@ favorite = true
             "Agent action output: {cancelled_output:?}"
         );
         assert!(cancelled_output.contains("> Cancel Agent"));
-        assert!(cancelled_output.contains("Agent 2 cancelled; operation 3"));
+        assert!(
+            cancelled_output.contains("Agent cancellation failed; confirmation remains available")
+        );
         assert!(!cancelled_output.contains("private-action"));
 
         let pending = inspect_product_team(&ledger)
@@ -6884,6 +6905,7 @@ favorite = true
         let acknowledged_output =
             String::from_utf8(acknowledged_output).expect("acknowledgement VT output");
         assert!(acknowledged_output.contains("> Acknowledge operation 3"));
+        assert!(!acknowledged_output.contains("> Cancel Agent"));
         assert!(
             acknowledged_output
                 .contains("Team operation acknowledgement failed; operation remains pending")

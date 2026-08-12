@@ -527,7 +527,7 @@ Token & Cache and every scoped rollup detail also show token-weighted
 cache-read/input and cache-write/input ratios. Exact and estimated records stay
 separate; missing, internally inconsistent, and overflowed facts stay explicit.
 The adaptive statusline shows compact 1-hour read/write ratios when width permits.
-`/agent` now browses the latest successful read-only Team sidecar projection.
+`/agent` now browses the latest successful redacted Team sidecar projection.
 Up/Down selects
 canonical Agents and Enter shows status, Task identity and state, budgets,
 reservations, and bounded metadata counts. It never renders Task titles,

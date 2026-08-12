@@ -1578,10 +1578,12 @@ impl PresentationController {
             return None;
         };
         let agent = agents.agents.get(selected)?;
+        let pending_operation = agents.pending_operation_ids.first().copied();
         Some(AgentActionTarget {
             agent: agent.id,
-            cancellable: !matches!(agent.status, "succeeded" | "failed" | "cancelled"),
-            pending_operation: agents.pending_operation_ids.first().copied(),
+            cancellable: pending_operation.is_none()
+                && !matches!(agent.status, "succeeded" | "failed" | "cancelled"),
+            pending_operation,
         })
     }
 
@@ -2800,10 +2802,11 @@ impl PresentationLayoutView {
                 pending_operation,
                 selected,
             } => {
-                let mut rows = vec![LayoutRowView::new(
-                    format!("Agents / Agent {agent} / Actions"),
-                    false,
-                )];
+                let title = pending_operation.map_or_else(
+                    || format!("Agents / Agent {agent} / Actions"),
+                    |_| "Agents / Team Operation".to_owned(),
+                );
+                let mut rows = vec![LayoutRowView::new(title, false)];
                 let mut index = 0;
                 if cancellable {
                     rows.push(LayoutRowView::new("> Cancel Agent", selected == index));
@@ -2819,7 +2822,11 @@ impl PresentationLayoutView {
                 rows.push(LayoutRowView::new("> Return", selected == index));
                 rows.push(LayoutRowView::new("Enter selects; Escape returns", false));
                 rows.push(LayoutRowView::new(
-                    "Agent IDs select recovered Session authority only",
+                    if pending_operation.is_some() {
+                        "Team operation IDs reconcile state; they grant no Agent authority"
+                    } else {
+                        "Agent IDs select recovered Session authority only"
+                    },
                     false,
                 ));
                 rows
