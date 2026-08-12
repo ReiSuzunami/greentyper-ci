@@ -94,11 +94,21 @@ pub(crate) fn refresh_provider_discovery<T: ProviderConnectionTester + ?Sized>(
     tester: &mut T,
 ) -> Result<ProviderConnectionTestStatus, ProviderDiscoveryError> {
     let status = tester.test(profile);
+    let _ = commit_provider_discovery_status(profile, state_path, observed_at_unix_ms, &status)?;
+    Ok(status)
+}
+
+pub(crate) fn commit_provider_discovery_status(
+    profile: &ProviderProfileSnapshot,
+    state_path: &Path,
+    observed_at_unix_ms: i64,
+    status: &ProviderConnectionTestStatus,
+) -> Result<Option<ProviderDiscoveryState>, ProviderDiscoveryError> {
     if let ProviderConnectionTestStatus::Succeeded {
         profile: observed_profile,
         fingerprint,
         models,
-    } = &status
+    } = status
     {
         if observed_profile != profile.profile() || *fingerprint != profile.fingerprint() {
             return Err(ProviderDiscoveryError::ObservationMismatch);
@@ -116,9 +126,9 @@ pub(crate) fn refresh_provider_discovery<T: ProviderConnectionTester + ?Sized>(
             observed_at_unix_ms,
             models,
         )?;
-        ProviderDiscoveryState::replace_profile(state_path, snapshot)?;
+        return ProviderDiscoveryState::replace_profile(state_path, snapshot).map(Some);
     }
-    Ok(status)
+    Ok(None)
 }
 
 pub(crate) fn provider_discovery_catalogs(
