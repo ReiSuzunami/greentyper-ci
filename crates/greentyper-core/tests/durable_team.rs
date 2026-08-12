@@ -6,8 +6,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use greentyper_core::agent_team::{
     AgentSession, Capability, CapabilitySnapshot, CommandOutcome, CommitDurability,
-    CompletionCapsule, DurableTeamError, DurableTeamRuntime, MessageRecipient, ResourceBudget,
-    TaskScope, TaskSpec, TeamCommand, TeamError, TeamEventKind,
+    CompletionCapsule, DurableTeamError, DurableTeamRuntime, InheritedModelPreset,
+    MessageRecipient, ResourceBudget, TaskScope, TaskSpec, TeamCommand, TeamError, TeamEventKind,
 };
 use greentyper_core::ledger::{EventData, FileLedger, LedgerError, LedgerHead};
 use greentyper_core::schema::SchemaKind;
@@ -410,6 +410,50 @@ fn every_team_transition_survives_durable_replay() {
     let recovered = DurableTeamRuntime::open(&path, 2).expect("replay every Team transition");
     assert_eq!(recovered.snapshot(), expected_snapshot);
     assert_eq!(recovered.event_log(), expected_events);
+    drop(recovered);
+    fs::remove_file(path).expect("cleanup ledger");
+}
+
+#[test]
+fn delegated_agent_inherited_model_preset_survives_reopen() {
+    let path = temp_path("inherited-model-preset");
+    let mut team = DurableTeamRuntime::open(&path, 2).expect("create durable Team");
+    let root = admit_root(&mut team);
+    let commit = team
+        .dispatch(TeamCommand::DelegateWithModelPreset {
+            parent: root,
+            task: TaskSpec::new("child provider turn", TaskScope::from_labels(["src"])),
+            budget: ResourceBudget::new(200, 1),
+            capabilities: CapabilitySnapshot::from_capabilities([Capability::WorkspaceRead]),
+            inherited_model_preset: Some(
+                InheritedModelPreset::new("frontier").expect("valid Model Preset"),
+            ),
+        })
+        .expect("delegate child with inherited Model Preset");
+    let child = match commit.outcome {
+        CommandOutcome::Delegated { agent, .. } => agent,
+        other => panic!("unexpected delegation outcome: {other:?}"),
+    };
+    let expected = team.snapshot();
+    assert_eq!(
+        expected
+            .agent(child)
+            .and_then(|agent| agent.inherited_model_preset.as_ref())
+            .map(InheritedModelPreset::id),
+        Some("frontier")
+    );
+    drop(team);
+
+    let recovered = DurableTeamRuntime::open(&path, 2).expect("reopen durable Team");
+    assert_eq!(recovered.snapshot(), expected);
+    assert_eq!(
+        recovered
+            .snapshot()
+            .agent(child)
+            .and_then(|agent| agent.inherited_model_preset.as_ref())
+            .map(InheritedModelPreset::id),
+        Some("frontier")
+    );
     drop(recovered);
     fs::remove_file(path).expect("cleanup ledger");
 }

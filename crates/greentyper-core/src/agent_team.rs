@@ -21,6 +21,7 @@ const MAX_TASK_TITLE_BYTES: usize = 1024;
 const MAX_SCOPE_LABEL_BYTES: usize = 256;
 const MAX_SCOPE_LABELS: usize = 64;
 const MAX_TOOL_NAME_BYTES: usize = 256;
+const MAX_MODEL_PRESET_ID_BYTES: usize = 64;
 const MAX_CAPABILITIES: usize = 64;
 const MAX_TASK_DEPENDENCIES: usize = 256;
 const MAX_CAPSULE_ENTRIES: usize = 1024;
@@ -46,6 +47,22 @@ identifier!(MessageId);
 identifier!(EventSeq);
 identifier!(TransactionId);
 identifier!(TeamOperationId);
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct InheritedModelPreset(String);
+
+impl InheritedModelPreset {
+    pub fn new(id: impl Into<String>) -> Result<Self, TeamError> {
+        let id = id.into();
+        validate_model_preset_id(&id)?;
+        Ok(Self(id))
+    }
+
+    #[must_use]
+    pub fn id(&self) -> &str {
+        &self.0
+    }
+}
 
 impl AgentId {
     pub(crate) const fn from_stored(value: u64) -> Option<Self> {
@@ -286,6 +303,13 @@ pub enum TeamCommand {
         budget: ResourceBudget,
         capabilities: CapabilitySnapshot,
     },
+    DelegateWithModelPreset {
+        parent: AgentSession,
+        task: TaskSpec,
+        budget: ResourceBudget,
+        capabilities: CapabilitySnapshot,
+        inherited_model_preset: Option<InheritedModelPreset>,
+    },
     SendMessage {
         from: AgentSession,
         recipient: MessageRecipient,
@@ -368,6 +392,7 @@ pub struct AgentView {
     pub budget: ResourceBudget,
     pub reserved_budget: ResourceBudget,
     pub capabilities: CapabilitySnapshot,
+    pub inherited_model_preset: Option<InheritedModelPreset>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -418,6 +443,7 @@ pub enum TeamEventKind {
         parent: Option<AgentId>,
         budget: ResourceBudget,
         capabilities: CapabilitySnapshot,
+        inherited_model_preset: Option<InheritedModelPreset>,
     },
     TaskOwnerAssigned {
         task: TaskId,
@@ -591,6 +617,7 @@ pub enum TeamError {
     ScopeLabelTooLarge,
     TooManyScopeLabels,
     InvalidCapability,
+    InvalidModelPreset,
     ToolNameTooLarge,
     TooManyCapabilities,
     InvalidBudget,
@@ -673,6 +700,10 @@ impl fmt::Display for TeamError {
             Self::InvalidCapability => write!(
                 formatter,
                 "Capability Snapshot contains an invalid capability"
+            ),
+            Self::InvalidModelPreset => write!(
+                formatter,
+                "inherited Model Preset must be a lowercase Config identifier"
             ),
             Self::ToolNameTooLarge => {
                 write!(
@@ -964,7 +995,17 @@ impl TeamRuntime {
                 capabilities,
             } => {
                 let parent = self.authenticate(parent)?;
-                self.plan_delegation(parent, task, budget, capabilities)?
+                self.plan_delegation(parent, task, budget, capabilities, None)?
+            }
+            TeamCommand::DelegateWithModelPreset {
+                parent,
+                task,
+                budget,
+                capabilities,
+                inherited_model_preset,
+            } => {
+                let parent = self.authenticate(parent)?;
+                self.plan_delegation(parent, task, budget, capabilities, inherited_model_preset)?
             }
             TeamCommand::SendMessage {
                 from,
@@ -1023,6 +1064,7 @@ impl TeamRuntime {
                     budget: agent.budget,
                     reserved_budget: agent.reserved_budget,
                     capabilities: agent.capabilities.clone(),
+                    inherited_model_preset: agent.inherited_model_preset.clone(),
                 })
                 .collect(),
             messages: self.state.messages.clone(),
@@ -1262,6 +1304,7 @@ impl TeamRuntime {
                     parent: None,
                     budget,
                     capabilities,
+                    inherited_model_preset: None,
                 },
                 TeamEventKind::TaskOwnerAssigned {
                     task: task_id,
@@ -1282,6 +1325,7 @@ impl TeamRuntime {
         task: TaskSpec,
         budget: ResourceBudget,
         capabilities: CapabilitySnapshot,
+        inherited_model_preset: Option<InheritedModelPreset>,
     ) -> Result<(Vec<TeamEventKind>, CommandOutcome), TeamError> {
         let parent_agent = self
             .state
@@ -1306,6 +1350,9 @@ impl TeamRuntime {
             return Err(TeamError::ScopeExpansion { parent });
         }
         validate_capabilities(&capabilities)?;
+        if let Some(preset) = &inherited_model_preset {
+            validate_model_preset_id(preset.id())?;
+        }
         if !capabilities.is_subset_of(&parent_agent.capabilities) {
             return Err(TeamError::CapabilityExpansion { parent });
         }
@@ -1334,6 +1381,7 @@ impl TeamRuntime {
                     parent: Some(parent),
                     budget,
                     capabilities,
+                    inherited_model_preset,
                 },
                 TeamEventKind::TaskOwnerAssigned {
                     task: task_id,
@@ -1774,6 +1822,7 @@ struct AgentRecord {
     budget: ResourceBudget,
     reserved_budget: ResourceBudget,
     capabilities: CapabilitySnapshot,
+    inherited_model_preset: Option<InheritedModelPreset>,
 }
 
 impl TeamState {
@@ -1818,6 +1867,7 @@ impl TeamState {
                 parent,
                 budget,
                 capabilities,
+                inherited_model_preset,
             } => {
                 validate_stored_identifier(agent.get(), "Agent")?;
                 let expected = next_identifier(self.agents.keys().map(|id| id.get()))?;
@@ -1839,6 +1889,9 @@ impl TeamState {
                 }
                 validate_budget(*budget)?;
                 validate_capabilities(capabilities)?;
+                if let Some(preset) = inherited_model_preset {
+                    validate_model_preset_id(preset.id())?;
+                }
                 match parent {
                     Some(parent_id) => {
                         let parent_agent = self
@@ -1889,6 +1942,7 @@ impl TeamState {
                         budget: *budget,
                         reserved_budget: ResourceBudget::default(),
                         capabilities: capabilities.clone(),
+                        inherited_model_preset: inherited_model_preset.clone(),
                     },
                 );
             }
@@ -2703,6 +2757,20 @@ fn validate_reason(reason: &str) -> Result<(), TeamError> {
         return Err(TeamError::ReasonTooLarge);
     }
     Ok(())
+}
+
+fn validate_model_preset_id(id: &str) -> Result<(), TeamError> {
+    if id.is_empty()
+        || id.len() > MAX_MODEL_PRESET_ID_BYTES
+        || !id
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        || !id.as_bytes().first().is_some_and(u8::is_ascii_alphanumeric)
+    {
+        Err(TeamError::InvalidModelPreset)
+    } else {
+        Ok(())
+    }
 }
 
 fn validate_stored_task_spec(spec: &TaskSpec) -> Result<(), TeamError> {

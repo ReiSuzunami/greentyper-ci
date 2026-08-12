@@ -12,6 +12,7 @@ use super::*;
 
 const TEAM_EVENT_SCHEMA: u16 = SchemaKind::TeamEvent.current().get();
 const TEAM_EVENT_SCHEMA_V1: u16 = 1;
+const TEAM_EVENT_SCHEMA_V2: u16 = 2;
 
 /// File-backed adapter for [`TeamRuntime`].
 ///
@@ -386,6 +387,13 @@ fn decode_stored_event(stored: &StoredEvent) -> Result<TeamEvent, DurableTeamErr
 }
 
 fn encode_event_data(kind: &TeamEventKind) -> Result<EventData, DurableTeamError> {
+    encode_event_data_for_schema(kind, TEAM_EVENT_SCHEMA)
+}
+
+fn encode_event_data_for_schema(
+    kind: &TeamEventKind,
+    schema: u16,
+) -> Result<EventData, DurableTeamError> {
     let mut encoder = Encoder::default();
     let tag = match kind {
         TeamEventKind::TaskCreated { task, spec } => {
@@ -399,12 +407,16 @@ fn encode_event_data(kind: &TeamEventKind) -> Result<EventData, DurableTeamError
             parent,
             budget,
             capabilities,
+            inherited_model_preset,
         } => {
             encoder.identifier(agent.get());
             encoder.identifier(task.get());
             encode_optional_agent(&mut encoder, *parent);
             encode_budget(&mut encoder, *budget);
             encode_capabilities(&mut encoder, capabilities)?;
+            if schema >= TEAM_EVENT_SCHEMA {
+                encode_optional_model_preset(&mut encoder, inherited_model_preset)?;
+            }
             2
         }
         TeamEventKind::TaskOwnerAssigned { task, agent } => {
@@ -508,14 +520,17 @@ fn encode_event_data(kind: &TeamEventKind) -> Result<EventData, DurableTeamError
     };
 
     Ok(EventData {
-        schema: TEAM_EVENT_SCHEMA,
+        schema,
         kind: tag,
         payload: encoder.finish(),
     })
 }
 
 fn decode_event_data(data: &EventData) -> Result<TeamEventKind, DurableTeamError> {
-    if !matches!(data.schema, TEAM_EVENT_SCHEMA_V1 | TEAM_EVENT_SCHEMA) {
+    if !matches!(
+        data.schema,
+        TEAM_EVENT_SCHEMA_V1 | TEAM_EVENT_SCHEMA_V2 | TEAM_EVENT_SCHEMA
+    ) {
         return Err(DurableTeamError::UnsupportedTeamEventSchema {
             supported: TEAM_EVENT_SCHEMA,
             actual: data.schema,
@@ -532,13 +547,26 @@ fn decode_event_data(data: &EventData) -> Result<TeamEventKind, DurableTeamError
             task: decode_task(&mut decoder)?,
             spec: decode_task_spec(&mut decoder)?,
         },
-        2 => TeamEventKind::AgentCreated {
-            agent: decode_agent(&mut decoder)?,
-            task: decode_task(&mut decoder)?,
-            parent: decode_optional_agent(&mut decoder)?,
-            budget: decode_budget(&mut decoder)?,
-            capabilities: decode_capabilities(&mut decoder)?,
-        },
+        2 => {
+            let agent = decode_agent(&mut decoder)?;
+            let task = decode_task(&mut decoder)?;
+            let parent = decode_optional_agent(&mut decoder)?;
+            let budget = decode_budget(&mut decoder)?;
+            let capabilities = decode_capabilities(&mut decoder)?;
+            let inherited_model_preset = if data.schema >= TEAM_EVENT_SCHEMA {
+                decode_optional_model_preset(&mut decoder)?
+            } else {
+                None
+            };
+            TeamEventKind::AgentCreated {
+                agent,
+                task,
+                parent,
+                budget,
+                capabilities,
+                inherited_model_preset,
+            }
+        }
         3 => TeamEventKind::TaskOwnerAssigned {
             task: decode_task(&mut decoder)?,
             agent: decode_agent(&mut decoder)?,
@@ -711,6 +739,34 @@ fn decode_optional_agent(decoder: &mut Decoder<'_>) -> Result<Option<AgentId>, D
         0 => Ok(None),
         1 => Ok(Some(decode_agent(decoder)?)),
         _ => Err(DurableTeamError::CorruptEvent("invalid optional Agent tag")),
+    }
+}
+
+fn encode_optional_model_preset(
+    encoder: &mut Encoder,
+    preset: &Option<InheritedModelPreset>,
+) -> Result<(), DurableTeamError> {
+    match preset {
+        None => encoder.u8(0),
+        Some(preset) => {
+            encoder.u8(1);
+            encoder.string(preset.id())?;
+        }
+    }
+    Ok(())
+}
+
+fn decode_optional_model_preset(
+    decoder: &mut Decoder<'_>,
+) -> Result<Option<InheritedModelPreset>, DurableTeamError> {
+    match decoder.u8()? {
+        0 => Ok(None),
+        1 => InheritedModelPreset::new(decoder.string(MAX_MODEL_PRESET_ID_BYTES)?)
+            .map(Some)
+            .map_err(DurableTeamError::Team),
+        _ => Err(DurableTeamError::CorruptEvent(
+            "invalid inherited Model Preset tag",
+        )),
     }
 }
 
@@ -1637,6 +1693,9 @@ mod tests {
                 parent: Some(other_agent),
                 budget: ResourceBudget::new(100, 2),
                 capabilities,
+                inherited_model_preset: Some(
+                    InheritedModelPreset::new("frontier").expect("valid preset"),
+                ),
             },
             TeamEventKind::TaskOwnerAssigned { task, agent },
             TeamEventKind::DelegationGranted {
@@ -1705,6 +1764,7 @@ mod tests {
                 Capability::Tool("cargo".into()),
                 Capability::WorkspaceRead,
             ]),
+            inherited_model_preset: None,
         };
         let right = TeamEventKind::AgentCreated {
             agent: AgentId(1),
@@ -1715,6 +1775,7 @@ mod tests {
                 Capability::WorkspaceRead,
                 Capability::Tool("cargo".into()),
             ]),
+            inherited_model_preset: None,
         };
         assert_eq!(
             encode_event_data(&left).expect("encode left"),
@@ -1784,15 +1845,12 @@ mod tests {
             .dispatch(root_command())
             .expect("build historical root transaction");
         let expected = volatile.snapshot();
-        let mut encoded = volatile
+        let encoded = volatile
             .event_log()
             .iter()
-            .map(|event| encode_event_data(&event.kind))
+            .map(|event| encode_event_data_for_schema(&event.kind, TEAM_EVENT_SCHEMA_V1))
             .collect::<Result<Vec<_>, _>>()
             .expect("encode historical Team transaction");
-        for event in &mut encoded {
-            event.schema = TEAM_EVENT_SCHEMA_V1;
-        }
         let (mut ledger, _) = FileLedger::open(ledger_file.path()).expect("create Team Ledger");
         ledger
             .append(LedgerHead::default(), &encoded)
@@ -1807,6 +1865,33 @@ mod tests {
         ledger_file
             .cleanup()
             .expect("cleanup schema-one Team Ledger");
+    }
+
+    #[test]
+    fn schema_two_agent_creation_replays_without_an_inherited_preset() {
+        let event = TeamEventKind::AgentCreated {
+            agent: AgentId(1),
+            task: TaskId(1),
+            parent: None,
+            budget: ResourceBudget::new(100, 1),
+            capabilities: CapabilitySnapshot::from_capabilities([Capability::WorkspaceRead]),
+            inherited_model_preset: Some(
+                InheritedModelPreset::new("frontier").expect("valid preset"),
+            ),
+        };
+        let encoded = encode_event_data_for_schema(&event, TEAM_EVENT_SCHEMA_V2)
+            .expect("encode schema-two Agent creation");
+        assert_eq!(
+            decode_event_data(&encoded).expect("decode schema-two Agent creation"),
+            TeamEventKind::AgentCreated {
+                agent: AgentId(1),
+                task: TaskId(1),
+                parent: None,
+                budget: ResourceBudget::new(100, 1),
+                capabilities: CapabilitySnapshot::from_capabilities([Capability::WorkspaceRead]),
+                inherited_model_preset: None,
+            }
+        );
     }
 
     #[test]

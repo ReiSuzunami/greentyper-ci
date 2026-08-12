@@ -48,7 +48,7 @@ impl SchemaKind {
             | Self::ToolEvent => SchemaVersion(1),
             Self::ConfigFile => SchemaVersion(2),
             Self::RuntimeEvent => SchemaVersion(14),
-            Self::TeamEvent => SchemaVersion(2),
+            Self::TeamEvent => SchemaVersion(3),
             Self::BenchmarkEvidence => SchemaVersion(2),
         }
     }
