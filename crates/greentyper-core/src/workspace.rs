@@ -525,6 +525,10 @@ fn validate_root_components(path: &Path) -> Result<(), WorkspaceError> {
                     }
                 })?;
                 if metadata.file_type().is_symlink() {
+                    #[cfg(target_os = "macos")]
+                    if cursor == Path::new("/var") {
+                        continue;
+                    }
                     return Err(WorkspaceError::SymlinkPath);
                 }
             }
