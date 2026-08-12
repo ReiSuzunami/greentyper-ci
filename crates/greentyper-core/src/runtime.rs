@@ -143,6 +143,108 @@ pub struct ContextInspection {
     recovered_tail_bytes: u64,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContextPreview {
+    head: LedgerHead,
+    source: ContextEventRange,
+    checkpoint_present: bool,
+    artifacts: Vec<ContextArtifactRef>,
+    artifact_count: u64,
+    recent_item_count: u64,
+    archived_items: u64,
+    visible_item_count: u64,
+    raw_bytes: u64,
+    estimated_tokens: u64,
+    recovered_tail_bytes: u64,
+}
+
+impl ContextPreview {
+    #[must_use]
+    pub const fn head(&self) -> LedgerHead {
+        self.head
+    }
+
+    #[must_use]
+    pub const fn source(&self) -> ContextEventRange {
+        self.source
+    }
+
+    #[must_use]
+    pub const fn checkpoint_present(&self) -> bool {
+        self.checkpoint_present
+    }
+
+    #[must_use]
+    pub fn artifacts(&self) -> &[ContextArtifactRef] {
+        &self.artifacts
+    }
+
+    #[must_use]
+    pub const fn artifact_count(&self) -> u64 {
+        self.artifact_count
+    }
+
+    #[must_use]
+    pub const fn recent_item_count(&self) -> u64 {
+        self.recent_item_count
+    }
+
+    #[must_use]
+    pub const fn archived_items(&self) -> u64 {
+        self.archived_items
+    }
+
+    #[must_use]
+    pub const fn visible_item_count(&self) -> u64 {
+        self.visible_item_count
+    }
+
+    #[must_use]
+    pub const fn raw_bytes(&self) -> u64 {
+        self.raw_bytes
+    }
+
+    #[must_use]
+    pub const fn estimated_tokens(&self) -> u64 {
+        self.estimated_tokens
+    }
+
+    #[must_use]
+    pub const fn recovered_tail_bytes(&self) -> u64 {
+        self.recovered_tail_bytes
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContextHandoff {
+    preview: ContextPreview,
+    status: RecoveryStatus,
+    pending_turn: Option<TurnId>,
+    pending_agent: Option<AgentId>,
+}
+
+impl ContextHandoff {
+    #[must_use]
+    pub const fn preview(&self) -> &ContextPreview {
+        &self.preview
+    }
+
+    #[must_use]
+    pub fn status(&self) -> &RecoveryStatus {
+        &self.status
+    }
+
+    #[must_use]
+    pub const fn pending_turn(&self) -> Option<TurnId> {
+        self.pending_turn
+    }
+
+    #[must_use]
+    pub const fn pending_agent(&self) -> Option<AgentId> {
+        self.pending_agent
+    }
+}
+
 impl ContextInspection {
     #[must_use]
     pub const fn head(&self) -> LedgerHead {
@@ -755,6 +857,65 @@ impl RuntimeKernel {
             head: report.head,
             checkpoint: state.context_checkpoint,
             recovered_tail_bytes: report.truncated_tail_bytes,
+        })
+    }
+
+    pub fn inspect_context_preview(path: impl AsRef<Path>) -> Result<ContextPreview, RuntimeError> {
+        let report = match FileLedger::inspect(path) {
+            Ok(report) => report,
+            Err(LedgerError::Io(source)) if source.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(ContextPreview {
+                    head: LedgerHead::default(),
+                    source: ContextEventRange::from_head(LedgerHead::default()),
+                    checkpoint_present: false,
+                    artifacts: Vec::new(),
+                    artifact_count: 0,
+                    recent_item_count: 0,
+                    archived_items: 0,
+                    visible_item_count: 0,
+                    raw_bytes: 0,
+                    estimated_tokens: 0,
+                    recovered_tail_bytes: 0,
+                });
+            }
+            Err(source) => return Err(RuntimeError::Ledger(source)),
+        };
+        let state = replay_runtime(&report.events)?;
+        preview_from_state(&state, report.head, report.truncated_tail_bytes)
+    }
+
+    pub fn inspect_context_handoff(path: impl AsRef<Path>) -> Result<ContextHandoff, RuntimeError> {
+        let report = match FileLedger::inspect(path) {
+            Ok(report) => report,
+            Err(LedgerError::Io(source)) if source.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(ContextHandoff {
+                    preview: ContextPreview {
+                        head: LedgerHead::default(),
+                        source: ContextEventRange::from_head(LedgerHead::default()),
+                        checkpoint_present: false,
+                        artifacts: Vec::new(),
+                        artifact_count: 0,
+                        recent_item_count: 0,
+                        archived_items: 0,
+                        visible_item_count: 0,
+                        raw_bytes: 0,
+                        estimated_tokens: 0,
+                        recovered_tail_bytes: 0,
+                    },
+                    status: RecoveryStatus::Ready,
+                    pending_turn: None,
+                    pending_agent: None,
+                });
+            }
+            Err(source) => return Err(RuntimeError::Ledger(source)),
+        };
+        let state = replay_runtime(&report.events)?;
+        let preview = preview_from_state(&state, report.head, report.truncated_tail_bytes)?;
+        Ok(ContextHandoff {
+            preview,
+            status: state.status(),
+            pending_turn: state.pending.as_ref().map(|pending| pending.turn),
+            pending_agent: state.pending.as_ref().and_then(|pending| pending.agent),
         })
     }
 
@@ -3299,6 +3460,73 @@ struct RuntimeState {
     next_delivery: u64,
     next_config: u64,
     next_provider: u64,
+}
+
+fn context_history_for_preview(state: &RuntimeState) -> Result<&[CanonicalItem], RuntimeError> {
+    if let Some(pending) = state.pending.as_ref() {
+        let turn = state
+            .turns
+            .get(&pending.turn)
+            .ok_or(RuntimeError::CorruptState(
+                "pending Context Turn is missing",
+            ))?;
+        let index = state
+            .items
+            .iter()
+            .position(|item| item.id() == turn.user_item)
+            .ok_or(RuntimeError::CorruptState(
+                "pending Context user Item is missing",
+            ))?;
+        return Ok(&state.items[..index]);
+    }
+    Ok(&state.items)
+}
+
+fn preview_from_state(
+    state: &RuntimeState,
+    head: LedgerHead,
+    recovered_tail_bytes: u64,
+) -> Result<ContextPreview, RuntimeError> {
+    let history = context_history_for_preview(state)?;
+    let request = match state.context_checkpoint.as_ref() {
+        Some(checkpoint) => checkpoint
+            .view
+            .materialize_request(history)
+            .map_err(RuntimeError::Context)?,
+        None => ContextRequestView::from_items(head, history).map_err(RuntimeError::Context)?,
+    };
+    let (artifact_count, recent_item_count, checkpoint_present) = state
+        .context_checkpoint
+        .as_ref()
+        .map(|checkpoint| {
+            (
+                checkpoint.view.artifacts().len(),
+                checkpoint.view.recent_items().len(),
+                true,
+            )
+        })
+        .unwrap_or((0, 0, false));
+    let artifacts = state
+        .context_checkpoint
+        .as_ref()
+        .map(|checkpoint| checkpoint.view.artifacts().to_vec())
+        .unwrap_or_default();
+    Ok(ContextPreview {
+        head,
+        source: request.source(),
+        checkpoint_present,
+        artifacts,
+        artifact_count: u64::try_from(artifact_count)
+            .map_err(|_| RuntimeError::CorruptState("context artifact count overflow"))?,
+        recent_item_count: u64::try_from(recent_item_count)
+            .map_err(|_| RuntimeError::CorruptState("context recent item count overflow"))?,
+        archived_items: request.archived_items(),
+        visible_item_count: u64::try_from(request.items().len())
+            .map_err(|_| RuntimeError::CorruptState("context item count overflow"))?,
+        raw_bytes: request.raw_bytes(),
+        estimated_tokens: request.estimated_tokens(),
+        recovered_tail_bytes,
+    })
 }
 
 impl Default for RuntimeState {

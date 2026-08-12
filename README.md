@@ -325,6 +325,13 @@ only at a Ready Safe Barrier, verify the prior Ledger head on replay, reject
 stale drafts without writing, and validate every persisted checkpoint against
 complete canonical Items instead of recursively reducing summaries.
 `context status` inspects this state without creating or repairing a Ledger.
+`context preview` is a read-only next-request projection: it reports the exact
+source head, checkpoint/artifact counts, archived and visible item counts, and
+bounded byte/token totals. It exposes artifact identity metadata and SHA-256
+digests only; canonical Item text and credential material never appear.
+`context handoff` adds the same bounded projection with the current Runtime
+recovery status and pending Turn/Agent identity, so a caller can decide whether
+to resume, reconcile, retry, or cancel without mutating state.
 `context reduce` explicitly publishes one bounded checkpoint, checks complete
 Product sidecars when present, and does not change Team or Tool Ledger bytes.
 The next Provider admission validates that checkpoint against canonical history

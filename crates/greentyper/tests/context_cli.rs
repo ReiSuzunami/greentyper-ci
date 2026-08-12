@@ -115,6 +115,79 @@ fn context_status_of_a_missing_runtime_is_empty_and_read_only() {
 }
 
 #[test]
+fn context_preview_and_handoff_are_read_only_and_redacted() {
+    let ledger = temp_path("preview-handoff");
+    let mut runtime = RuntimeKernel::open(&ledger).expect("open Runtime");
+    let mut provider = DeterministicProvider::default();
+    let output = runtime
+        .execute(
+            &ConfigLayers::default(),
+            "preview private input",
+            &mut provider,
+        )
+        .expect("prepare output");
+    runtime
+        .acknowledge(output.delivery())
+        .expect("complete Turn");
+    drop(runtime);
+
+    let before = fs::read(&ledger).expect("read Runtime Ledger");
+    let preview = context_command("preview", &ledger)
+        .output()
+        .expect("inspect Context preview");
+    let preview_json = json_stdout(&preview);
+    assert_eq!(preview_json["checkpoint_present"], false);
+    assert_eq!(preview_json["visible_item_count"], 2);
+    assert!(preview_json["raw_bytes"].as_u64().unwrap() > 0);
+    assert!(!String::from_utf8_lossy(&preview.stdout).contains("preview private input"));
+    assert_eq!(fs::read(&ledger).expect("reread Runtime Ledger"), before);
+
+    let handoff = context_command("handoff", &ledger)
+        .output()
+        .expect("inspect Context handoff");
+    let handoff_json = json_stdout(&handoff);
+    assert_eq!(handoff_json["status"], "ready");
+    assert!(handoff_json["pending_turn"].is_null());
+    assert_eq!(handoff_json["preview"], preview_json);
+    assert_eq!(fs::read(&ledger).expect("reread Runtime Ledger"), before);
+
+    fs::remove_file(ledger).expect("cleanup Runtime Ledger");
+}
+
+#[test]
+fn context_handoff_exposes_pending_recovery_without_context_text() {
+    let ledger = temp_path("handoff-pending");
+    let mut runtime = RuntimeKernel::open(&ledger).expect("open Runtime");
+    let mut provider = DeterministicProvider::default();
+    runtime
+        .execute(
+            &ConfigLayers::default(),
+            "pending private input",
+            &mut provider,
+        )
+        .expect("prepare output");
+    drop(runtime);
+
+    let before = fs::read(&ledger).expect("read Runtime Ledger");
+    let handoff = context_command("handoff", &ledger)
+        .output()
+        .expect("inspect pending handoff");
+    let json = json_stdout(&handoff);
+    assert!(
+        json["status"]
+            .as_str()
+            .unwrap()
+            .starts_with("reconciliation-required")
+    );
+    assert_eq!(json["pending_turn"], 1);
+    assert!(json["pending_agent"].is_null());
+    assert!(!String::from_utf8_lossy(&handoff.stdout).contains("pending private input"));
+    assert_eq!(fs::read(&ledger).expect("reread Runtime Ledger"), before);
+
+    fs::remove_file(ledger).expect("cleanup Runtime Ledger");
+}
+
+#[test]
 fn context_reduce_publishes_a_bounded_checkpoint_and_status_is_read_only() {
     let ledger = temp_path("reduce");
     let mut runtime = RuntimeKernel::open(&ledger).expect("open Runtime");
@@ -166,6 +239,24 @@ fn context_reduce_publishes_a_bounded_checkpoint_and_status_is_read_only() {
         fs::read(&ledger).expect("reread reduced Runtime Ledger"),
         after_reduce
     );
+
+    let preview = context_command("preview", &ledger)
+        .output()
+        .expect("inspect reduced Context preview");
+    let preview_json = json_stdout(&preview);
+    assert_eq!(preview_json["checkpoint_present"], true);
+    assert_eq!(preview_json["artifacts"].as_array().unwrap().len(), 1);
+    assert_eq!(preview_json["artifacts"][0]["item"], 1);
+    assert_eq!(preview_json["artifacts"][0]["turn"], 1);
+    assert_eq!(preview_json["artifacts"][0]["byte_len"], 23);
+    assert_eq!(
+        preview_json["artifacts"][0]["digest"]
+            .as_str()
+            .unwrap()
+            .len(),
+        64
+    );
+    assert!(!String::from_utf8_lossy(&preview.stdout).contains("private context request"));
 
     fs::remove_file(ledger).expect("cleanup Runtime Ledger");
 }

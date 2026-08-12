@@ -51,8 +51,9 @@ use greentyper_core::provider::{
 use greentyper_core::provider_catalog::ProviderCatalog;
 use greentyper_core::provider_discovery::{ProviderDiscoveryError, ProviderDiscoveryState};
 use greentyper_core::runtime::{
-    AcknowledgeOutcome, CancelTurnOutcome, ContextCheckpoint, ContextInspection, PreparedOutput,
-    ProviderFallbackCandidate, ProviderToolApproval, RecoveryStatus, RuntimeKernel,
+    AcknowledgeOutcome, CancelTurnOutcome, ContextCheckpoint, ContextHandoff, ContextInspection,
+    ContextPreview, PreparedOutput, ProviderFallbackCandidate, ProviderToolApproval,
+    RecoveryStatus, RuntimeKernel,
 };
 use greentyper_core::tool_runtime::{
     ToolCallRecord, ToolCallStatus, ToolEffectExecutor, ToolReconciliationDecision, ToolSnapshot,
@@ -338,6 +339,14 @@ pub fn run(arguments: impl Iterator<Item = String>) -> Result<(), CliError> {
             ContextCommand::Status { ledger } => {
                 let inspection = RuntimeKernel::inspect_context(&ledger)?;
                 write_context_inspection(&inspection)
+            }
+            ContextCommand::Preview { ledger } => {
+                let preview = RuntimeKernel::inspect_context_preview(&ledger)?;
+                write_context_preview(&preview)
+            }
+            ContextCommand::Handoff { ledger } => {
+                let handoff = RuntimeKernel::inspect_context_handoff(&ledger)?;
+                write_context_handoff(&handoff)
             }
             ContextCommand::Reduce { ledger, policy } => {
                 preflight_context_reduction(&ledger)?;
@@ -1244,6 +1253,78 @@ fn write_context_inspection(inspection: &ContextInspection) -> Result<(), CliErr
     )
 }
 
+fn write_context_preview(preview: &ContextPreview) -> Result<(), CliError> {
+    write_json(&serde_json::json!({
+        "head": {"transaction": preview.head().transaction, "sequence": preview.head().sequence},
+        "source": {
+            "first_sequence": preview.source().first_sequence(),
+            "last_sequence": preview.source().last_sequence(),
+            "transaction": preview.source().transaction(),
+        },
+        "checkpoint_present": preview.checkpoint_present(),
+        "artifacts": preview
+            .artifacts()
+            .iter()
+            .map(|artifact| {
+                serde_json::json!({
+                    "item": artifact.item(),
+                    "turn": artifact.turn(),
+                    "role": artifact.role(),
+                    "byte_len": artifact.byte_len(),
+                    "estimated_tokens": artifact.estimated_tokens(),
+                    "digest": artifact.digest_hex(),
+                })
+            })
+            .collect::<Vec<_>>(),
+        "artifact_count": preview.artifact_count(),
+        "recent_item_count": preview.recent_item_count(),
+        "archived_items": preview.archived_items(),
+        "visible_item_count": preview.visible_item_count(),
+        "raw_bytes": preview.raw_bytes(),
+        "estimated_tokens": preview.estimated_tokens(),
+        "recovered_tail_bytes": preview.recovered_tail_bytes(),
+    }))
+}
+
+fn write_context_handoff(handoff: &ContextHandoff) -> Result<(), CliError> {
+    let preview = handoff.preview();
+    write_json(&serde_json::json!({
+        "status": handoff.status().to_string(),
+        "pending_turn": handoff.pending_turn().map(|turn| turn.get()),
+        "pending_agent": handoff.pending_agent().map(|agent| agent.get()),
+        "preview": {
+            "head": {"transaction": preview.head().transaction, "sequence": preview.head().sequence},
+            "source": {
+                "first_sequence": preview.source().first_sequence(),
+                "last_sequence": preview.source().last_sequence(),
+                "transaction": preview.source().transaction(),
+            },
+            "checkpoint_present": preview.checkpoint_present(),
+            "artifacts": preview
+                .artifacts()
+                .iter()
+                .map(|artifact| {
+                    serde_json::json!({
+                        "item": artifact.item(),
+                        "turn": artifact.turn(),
+                        "role": artifact.role(),
+                        "byte_len": artifact.byte_len(),
+                        "estimated_tokens": artifact.estimated_tokens(),
+                        "digest": artifact.digest_hex(),
+                    })
+                })
+                .collect::<Vec<_>>(),
+            "artifact_count": preview.artifact_count(),
+            "recent_item_count": preview.recent_item_count(),
+            "archived_items": preview.archived_items(),
+            "visible_item_count": preview.visible_item_count(),
+            "raw_bytes": preview.raw_bytes(),
+            "estimated_tokens": preview.estimated_tokens(),
+            "recovered_tail_bytes": preview.recovered_tail_bytes(),
+        },
+    }))
+}
+
 fn write_context_state(
     head: greentyper_core::ledger::LedgerHead,
     checkpoint: Option<&ContextCheckpoint>,
@@ -1349,6 +1430,12 @@ enum Command {
 #[derive(Debug, Eq, PartialEq)]
 enum ContextCommand {
     Status {
+        ledger: PathBuf,
+    },
+    Preview {
+        ledger: PathBuf,
+    },
+    Handoff {
         ledger: PathBuf,
     },
     Reduce {
@@ -1852,9 +1939,9 @@ fn parse_provider_dialect(value: &str) -> Result<ProviderDialect, CliError> {
 }
 
 fn parse_context(mut arguments: impl Iterator<Item = String>) -> Result<ContextCommand, CliError> {
-    let action = arguments
-        .next()
-        .ok_or(CliError::Usage("context requires status or reduce"))?;
+    let action = arguments.next().ok_or(CliError::Usage(
+        "context requires status, preview, handoff, or reduce",
+    ))?;
     let mut ledger = None;
     let mut max_raw_bytes = None;
     let mut max_raw_items = None;
@@ -1892,6 +1979,22 @@ fn parse_context(mut arguments: impl Iterator<Item = String>) -> Result<ContextC
             }
             Ok(ContextCommand::Status { ledger })
         }
+        "preview" => {
+            if max_raw_bytes.is_some() || max_raw_items.is_some() {
+                return Err(CliError::Usage(
+                    "Context reduction limits require context reduce",
+                ));
+            }
+            Ok(ContextCommand::Preview { ledger })
+        }
+        "handoff" => {
+            if max_raw_bytes.is_some() || max_raw_items.is_some() {
+                return Err(CliError::Usage(
+                    "Context reduction limits require context reduce",
+                ));
+            }
+            Ok(ContextCommand::Handoff { ledger })
+        }
         "reduce" => {
             let defaults = ContextReductionPolicy::default();
             let max_raw_bytes = max_raw_bytes
@@ -1914,7 +2017,9 @@ fn parse_context(mut arguments: impl Iterator<Item = String>) -> Result<ContextC
                 .map_err(|_| CliError::Usage("Context reduction limits are invalid"))?;
             Ok(ContextCommand::Reduce { ledger, policy })
         }
-        _ => Err(CliError::Usage("context requires status or reduce")),
+        _ => Err(CliError::Usage(
+            "context requires status, preview, handoff, or reduce",
+        )),
     }
 }
 
@@ -3236,6 +3341,8 @@ Usage:\n\
   greentyper status [--ledger PATH]\n\
   greentyper stats [--ledger PATH] [--at UNIX_MS] [--summary-only | --limit N [--cursor CURSOR]]\n\
   greentyper context status [--ledger PATH]\n\
+  greentyper context preview [--ledger PATH]\n\
+  greentyper context handoff [--ledger PATH]\n\
   greentyper context reduce [--ledger PATH] [--max-raw-bytes N] [--max-raw-items N]\n\
   greentyper workspace inspect --root PATH\n\
   greentyper workspace capture --root PATH --path RELATIVE_PATH [--path RELATIVE_PATH ...]\n\

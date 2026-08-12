@@ -310,6 +310,8 @@ greentyper resume [--ledger PATH] [--tool local.echo]
 greentyper status [--ledger PATH]
 greentyper stats [--ledger PATH] [--at UNIX_MS]
 greentyper context status [--ledger PATH]
+greentyper context preview [--ledger PATH]
+greentyper context handoff [--ledger PATH]
 greentyper context reduce [--ledger PATH]
   [--max-raw-bytes N] [--max-raw-items N]
 greentyper reconcile [--ledger PATH] --delivery ID
@@ -397,6 +399,13 @@ status` uses shared read-only inspection and treats a missing Ledger as empty.
 `greentyper context reduce` strictly opens existing state, checks paired Product
 sidecars when present, and mutates only the Runtime Ledger. It returns counts and
 token/byte facts, not raw conversation text.
+`context preview` is a read-only projection of the next request boundary. It
+includes the exact source head, checkpoint/artifact metadata, archived and
+visible item counts, and bounded byte/token totals; artifact digests are
+identifiers only and never rehydrate text. `context handoff` adds the current
+Runtime recovery status plus pending Turn/Agent identity to that same bounded
+projection. Both commands treat missing state as empty and never create,
+repair, or append a Ledger.
 
 When a checkpoint exists, Turn admission validates it against the authoritative
 canonical prefix before allocating identifiers or freezing Config/Provider

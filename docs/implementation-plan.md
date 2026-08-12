@@ -737,8 +737,10 @@ ordered canonical Items from an exact Ledger head; reduction replaces old raw
 text with Item-bound SHA-256 references while retaining a bounded recent tail;
 schema 12 introduced the singleton checkpoint contract, which current schema 14
 preserves at a Safe Barrier while rejecting a
-stale source head; and `context status`/`context reduce` expose missing-safe
-inspection plus explicit recovery. Soft pressure uses the same checkpoint path
+stale source head; and `context status`/`context preview`/`context handoff`/
+`context reduce` expose missing-safe inspection plus explicit recovery. Preview
+shows the next request boundary and artifact digests; handoff adds bounded
+Runtime recovery identity without exposing Item text. Soft pressure uses the same checkpoint path
 before admission, hard pressure still stops before effects, and unknown pressure
 does not invent state. Every checkpoint is a full rebase from authoritative
 Items. Tests preserve Runtime bytes on stale/unsafe failure and preserve Team and

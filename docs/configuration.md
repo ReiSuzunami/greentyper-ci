@@ -904,6 +904,11 @@ soft/hard policy. The compact segment renders only occupancy. The core Context
 View now projects canonical Items at an exact Runtime Ledger head; soft pressure
 publishes a default bounded checkpoint at a Safe Barrier, while unknown pressure
 does not invent one. `context status` is a missing-safe read-only JSON projection.
+`context preview` exposes the bounded next-request projection (source head,
+checkpoint/artifact counts, archived/visible counts, byte/token totals, and
+artifact digests) without exposing Item text. `context handoff` adds the current
+Runtime recovery status and pending Turn/Agent identity so recovery decisions
+remain explicit and inspectable. Both commands are read-only and missing-safe.
 `context reduce` accepts bounded `--max-raw-bytes` and `--max-raw-items`, strictly
 opens existing state, and publishes only counts and source-head facts. It does
 not expose Item text or mutate Config, Team, or Tool state. Runtime validates the

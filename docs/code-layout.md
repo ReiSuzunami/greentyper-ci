@@ -97,8 +97,8 @@ schema-2 release-starter update flow shared by CLI, App Server, and Direct VT:
 complete read-only provenance gates an explicit Draft, user policy is
 preserved, and drift or CAS conflict leaves Config recoverable without any
 Provider, credential, Agent, or Ledger action. It also owns a bounded
-`context status`/`context reduce` CLI surface. Status delegates to
-read-only Runtime inspection; reduce strictly reopens existing Runtime state,
+`context status`/`context preview`/`context handoff`/`context reduce` CLI surface.
+Status, preview, and handoff delegate to read-only Runtime inspection; reduce strictly reopens existing Runtime state,
 includes Team/Tool sidecars when present so the core can enforce its Safe
 Barrier, and writes no Config, Team, Tool, credential, or Provider state. It also owns a
 bounded Provider Profile ID prompt,
