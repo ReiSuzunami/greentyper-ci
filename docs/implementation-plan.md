@@ -527,7 +527,21 @@ review mismatch, approve, deny, and restart paths; exact Ledger bytes and
 executor counts pin no-repair and no-reexecution behavior. Review and confirmed
 decision may each use credentials, append Usage/cost records, and affect quota
 or billing.
-A fifth contiguous App Server batch completes three bounded Provider Recovery
+A fifth contiguous App Server batch closes Agent Team lifecycle control in five
+bounded slices. `agent.delegate` creates a downward-only child under the
+rebound Active parent Session; `agent.message` records a direct or Team message;
+and `agent.complete`, `agent.fail`, and `agent.cancel` record explicit terminal
+outcomes. Each mutation returns stable IDs only and remains
+`committed_awaiting_acknowledgement` until `agent.acknowledge` durably closes the
+operation. `agent.list` exposes pending operation IDs after a lost response.
+Strict replay supplies the only usable Sessions, parent constraints remain in
+the core Team policy, and Runtime/Tool/Config stay unchanged. The product now
+allows two Active Agents while ordinary Provider Turns still select the unique
+Active root. Cross-process tests prove Delegate-to-child-message-to-child-
+Completion-to-parent-Completion, failure, cancellation, restart recovery,
+redaction, fail-closed pending-operation blocking, and byte identity outside the
+Team Ledger.
+A sixth contiguous App Server batch completes three bounded Provider Recovery
 slices. The cancel slice terminalizes one exact typed Provider-origin blocked
 Turn and remains idempotent. The retry slice accepts only the early retryable
 Provider failure and durably moves that same Turn to `resume-required` without
@@ -561,7 +575,7 @@ automatic Context View/token-source
 projection, provider-reported
 charge and subscription-quota accounting, richer observed Provider metadata,
 new-Agent Preset-default inheritance, Agent lifecycle
-actions, and the P0/P1/P2/P6
+actions in the TUI, Workspace coordination, and the P0/P1/P2/P6
 performance evidence remain pending.
 Background/periodic catalog discovery is outside this default plan unless an
 approved Performance Contract exception is added first.
@@ -738,6 +752,14 @@ Exit criteria:
 ## Phase 7: Agent Teams and Workspaces
 
 Implement Task DAGs, one-owner transitions, Agent lifecycle, global/sub-budgets, ledgered direct/broadcast messages, Completion Capsules, downward-only Delegation, worktree allocation, Workspace Leases, Read Set validation, explicit merge/conflict handling, and TUI Team views.
+
+The core Task/Agent state machine, durable Team Ledger, two-Active-Agent product
+limit, downward-only Delegation, bounded messages, Completion Capsules,
+failure/cancellation, process-local Session recovery, and explicit operation
+acknowledgement are implemented. The local stdio App Server makes those
+lifecycle transitions usable and recoverable without exposing Team text or
+Session authority. Workspace allocation/leases/read sets/merge, new-Agent
+Preset inheritance, Agent retry, and TUI lifecycle actions remain pending.
 
 Exit criteria:
 

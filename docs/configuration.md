@@ -350,7 +350,12 @@ The current operations are:
 | `runtime.delivery` | Return the exact canonical text for the requested delivery only while that output is prepared and awaiting acknowledgement; never mutate a Ledger |
 | `runtime.acknowledge` | Durably acknowledge the exact prepared delivery; repeated acknowledgement is idempotent and a wrong delivery does not write |
 | `runtime.stats` | Return the revision-bound Usage summary; optional `limit` and `cursor` expose a bounded Attempt page, and optional `as_of_unix_ms` pins the reporting instant |
-| `agent.list` | Return the redacted Agent Center projection: canonical identities, status, Task identity/state, budgets, reservations, bounded counts, Team head/revision, message count, and incomplete-tail bytes; never Task titles, message/capsule contents, labels, or Sessions |
+| `agent.list` | Return the redacted Agent Center projection plus committed Team operations awaiting acknowledgement: canonical identities, status, Task identity/state, budgets, reservations, bounded counts, Team head/revision, message count, and incomplete-tail bytes; never Task titles, message/capsule contents, labels, reasons, or Sessions |
+| `agent.delegate` | Under a rebound Active parent Session, create one downward-only child Task and Agent with a bounded optional scope, budget, and Capability Snapshot; return only stable IDs and the committed Team operation |
+| `agent.message` | Under the rebound selected Active Session, append one bounded direct or Team message; return only Message and operation IDs, never the body |
+| `agent.complete` | Submit one bounded Completion Capsule and terminalize an Active Agent whose children are already terminal; never return capsule contents |
+| `agent.fail` / `agent.cancel` | Record one bounded explicit terminal reason under the rebound Agent Session; never return the reason |
+| `agent.acknowledge` | While the Provider Runtime is ready and no Tool reconciliation is pending, durably acknowledge the exact committed Team operation; repeats are idempotent and unknown operations do not write |
 | `tool.status` | Return the Tool head and redacted calls containing only Call/Agent/Tool/status, approval expiry, and terminal result digest; never call identity, arguments, resources, hashes, or reasons |
 | `tool.reconcile` | Record `succeeded` with one lowercase SHA-256 result digest or fixed `failed` for the original reconciliation-required call; never invoke the executor |
 | `tool.decide` | First `review` the exact awaiting fixed `local.echo` call and receive canonical arguments/resources plus confirmation hashes; then approve or deny on the same stream by echoing both hashes; approval returns prepared output without acknowledging it |
@@ -420,9 +425,17 @@ effect. Approval crosses the existing bound approval and prepared-effect
 transaction, invokes only the fixed executor once, and returns canonical
 prepared output that remains pending until `runtime.acknowledge`.
 `runtime.delivery` can recover that output if the prior JSON response was lost.
-No operation admits an Agent, accepts an Agent ID as authority, or exposes
+Agent lifecycle mutations strictly reopen the complete Product state, consume
+only Runtime-issued Sessions rebound by validated Team replay, and use a numeric
+Agent ID only to select one of those existing Sessions. They never mint a
+Session, expand scope/capabilities/budget, touch Config, run a Provider or Tool,
+or write Runtime/Tool Ledgers. Every mutation returns before acknowledgement;
+the pending operation blocks another Team command until
+`agent.acknowledge`, and `agent.list` provides the bounded recovery identity if
+the response was lost. The current product limit is two Active Agents; ordinary
+Provider Turns still bind to the unique Active root Agent. No operation exposes
 general Runtime control beyond the exact recovery states above, arbitrary Tool
-execution, Provider selection, Team lifecycle, or filesystem path control.
+execution, Provider selection, Workspace path control, or remote transport.
 
 `runtime.stats` defaults to summary-only. `limit` must use the core bounded page
 range and is required when `cursor` is present. A follow-up page must reuse the

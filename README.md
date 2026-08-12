@@ -164,6 +164,16 @@ closed. The same stream has read-only `runtime.status`, bounded `runtime.stats`,
 redacted `agent.list`, and redacted `tool.status` operations. Missing state does
 not create files; inspection never repairs a partial Ledger tail. Bounded
 control operations reuse the existing Kernel and ProductDriver authority.
+`agent.delegate` creates a downward-only child with a bounded scope,
+Capability Snapshot, and budget; `agent.message` records direct or Team
+messages; and `agent.complete`, `agent.fail`, and `agent.cancel` record explicit
+terminal outcomes. Each mutation durably returns
+`committed_awaiting_acknowledgement`; `agent.acknowledge` separately closes that
+exact Team operation. A lost response is recoverable through `agent.list`'s
+redacted pending-operation records. Numeric Agent IDs only select among
+Sessions rebound from strict Team replay; they never mint authority. The
+product permits two Active Agents while ordinary Provider Turns remain bound to
+the unique Active root Agent.
 `runtime.cancel` terminalizes one exact Provider-origin blocked Turn,
 `runtime.retry` durably rearms only an explicitly retryable initial Provider
 failure without contacting a Provider, and `runtime.resume` reconstructs the
@@ -556,7 +566,7 @@ automatic transport retry or partial-stream reconnect, Messages reasoning
 blocks, provider-native Context Mode execution, broader multi-Tool approval
 presentation, broader Provider and Tool adapters,
 Workspace, new-Agent Preset-default inheritance,
-Agent lifecycle actions, general App Server Runtime control beyond the exact
+TUI Agent lifecycle actions, general App Server Runtime control beyond the exact
 cancel/retry/resume recovery flow, and
 remote App Server transport remain. The loopback Provider tracer remains
 an internal harness; `local.echo` is intentionally a fixed opt-in command rather

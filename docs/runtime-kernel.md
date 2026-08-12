@@ -495,7 +495,13 @@ charges still require a future dedicated authority path.
   renders message/capsule contents, or acknowledges an operation. Incomplete
   final-frame bytes remain visible as recovery required; corruption and partial
   Product sidecars fail closed before terminal entry. Manual read-only snapshot
-  refresh is available; all Agent lifecycle actions remain pending.
+  refresh is available; TUI Agent lifecycle actions remain pending. The local
+  stdio App Server separately exposes bounded Delegate, message, complete,
+  fail, cancel, and acknowledge operations. It strictly reopens existing
+  Product state, chooses only from the rebound non-terminal Session set, keeps
+  two Active Agents at most, and returns redacted operation/Agent/Task/Message
+  IDs rather than Team text or authority. Every mutation is committed first and
+  remains recoverably pending until explicit operation acknowledgement.
 - Complete Config Schema default/constraint/normalization/migration metadata and
   automatic Provider Profile starter offers. Explicit release-starter updates
   are present as schema-2 Config Draft/CAS operations and never enter Runtime,
@@ -513,8 +519,9 @@ charges still require a future dedicated authority path.
   schema/get, connection-local typed Draft begin/set/reset/validate/commit,
   origin-bound credential bind/replace/test/forget, read-only `runtime.status`,
   `runtime.stats`, `agent.list`, and `tool.status` projections, plus bounded
-  prepared-delivery read/acknowledgement, Tool reconciliation, and fixed
-  `local.echo` approval/denial controls.
+  prepared-delivery read/acknowledgement, Agent Team lifecycle and operation
+  acknowledgement, Tool reconciliation, and fixed `local.echo`
+  approval/denial controls.
   Operational reads use fixed startup paths, never create or repair Ledger
   state, and redact Runtime item/block contents, Team text/labels/Sessions, and
   Tool arguments/resources/reasons. Credential requests return status only and

@@ -142,7 +142,13 @@ existing strict inspection adapters and then apply narrow wire projections.
 They never create or repair Ledgers or return Runtime/Team/Tool text payloads.
 The same module exposes bounded `runtime.cancel`, `runtime.retry`,
 `runtime.resume`, `runtime.delivery`, `runtime.acknowledge`, `tool.reconcile`,
-and fixed `local.echo` `tool.decide` operations. It delegates mutation and
+fixed `local.echo` `tool.decide`, and Agent Team lifecycle operations. The
+Agent surface delegates downward-only creation, messaging, Completion Capsules,
+failure, cancellation, and operation acknowledgement to ProductDriver and the
+Kernel. It returns only stable IDs/counts, never Team text, scope/capability
+labels, terminal reasons, capsules, or Sessions. Each numeric Agent ID selects
+only a matching Runtime-issued Session from the validated recovery bundle. It
+delegates mutation and
 recovered Active Agent Session authority to ProductDriver and the Kernel.
 Cancel and retry operate only on typed Provider recovery state; retry merely
 commits a durable rearm and performs no Provider, credential, Tool, delivery, or
@@ -161,7 +167,7 @@ three Ledgers are inspected independently, not as a transactional snapshot.
 Project/user Preset defaults are Config-owned and now appear read-only in that
 browser; current-Agent pending selection remains a separate Runtime event.
 New-Agent inheritance and Agent lifecycle actions remain outside that browser
-boundary. The Stats browser already exposes cached Turn aggregates and
+boundary; the local App Server lifecycle surface is separate. The Stats browser already exposes cached Turn aggregates and
 per-Turn Provider/Model/Dialect/Policy distributions plus token-weighted
 cache-read/input and cache-write/input ratios without adding a write or Provider
 authority path.

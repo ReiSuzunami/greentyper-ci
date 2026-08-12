@@ -68,7 +68,8 @@ status, resume, and reconcile behavior. The standalone durable Agent Team
 adapter additionally covers synchronous receipt-before-publish ordering,
 planning failure atomicity, exclusive writer ownership, every Team Event kind
 through a complete lifecycle and restart, old-session rejection, torn-tail
-complete-prefix recovery, and checksum/schema/kind failure. Runtime Kernel
+complete-prefix recovery, higher-limit replay that preserves historical Dormant
+scheduling, and checksum/schema/kind failure. Runtime Kernel
 integration tests cover dedicated writer ownership, Kernel-owned root admission
 and duplicate rejection, per-open complete non-terminal Session rebind after replay,
 Active/Dormant/Blocked recovery, terminal exclusion, stale-session rejection,
@@ -503,8 +504,8 @@ capability labels, and scope labels are absent from VT output. Core tests
 separately prove shared-lock
 Team inspection never creates missing state, never repairs a torn final frame,
 and does not rewrite checksum corruption; Product tests prove missing and
-incomplete sidecar handling. These tests do not prove lifecycle mutation,
-Team-operation acknowledgement, Workspace coordination, or
+incomplete sidecar handling. These terminal tests do not prove lifecycle
+mutation, Team-operation acknowledgement, Workspace coordination, or
 real ConPTY behavior.
 A read-only real-key `/blockers` loop projects a pending Tool approval from the
 three Product Ledgers, keeps canonical arguments out of the list, survives
@@ -631,9 +632,17 @@ acknowledgement; denial executes zero effects and remains repeat-safe. Public
 errors omit secret, call identity, Provider details, and private failure reasons;
 only the explicit review result exposes the exact Tool material being approved.
 A clean zero-session Team cannot be auto-admitted by a failed review, and all
-three Ledgers remain byte-identical. These tests do not prove remote transport,
-general Runtime control beyond the exact cancel/retry/resume flow, Agent
-lifecycle mutation, arbitrary Tool
+three Ledgers remain byte-identical. Agent lifecycle integration separately
+drives Delegate, child-to-root message, child Completion Capsule, parent
+completion, failure, cancellation, and explicit operation acknowledgement
+through separate App Server processes. It proves the unacknowledged operation
+blocks another Team mutation, reopens through `agent.list`, never echoes Task
+titles/message bodies/capsule contents/reasons, preserves Config and
+Runtime/Tool bytes, rejects dispatch or acknowledgement without any Ledger write
+while Provider recovery is pending, and leaves ordinary Provider Turns bound to the Active root
+while a child is Active. These tests do not prove remote transport,
+general Runtime control beyond the exact cancel/retry/resume flow, Workspace
+coordination, TUI lifecycle actions, arbitrary Tool
 approval/execution, or multi-client authentication.
 Context Pressure tests freeze exact 65%/90% threshold transitions, estimated and
 missing-fact propagation, invalid policy/limit and arithmetic failure, and the
@@ -683,7 +692,7 @@ local path or credential reference.
 
 Remaining terminal-backend evidence covers real terminal/ConPTY resize and input,
 new-Agent Preset-default inheritance, Agent Center
-lifecycle actions, background refresh, broader multi-Tool/App Server approval,
+lifecycle actions in the TUI, background refresh, broader multi-Tool/App Server approval,
 panic-abort cleanup, final host cell
 geometry, and input-ready/idle resource budgets.
 
