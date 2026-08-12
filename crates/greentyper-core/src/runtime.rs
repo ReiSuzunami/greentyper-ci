@@ -907,6 +907,14 @@ impl RuntimeKernel {
         usize::try_from(self.state.pending.as_ref()?.fallback_index).ok()
     }
 
+    pub fn provider_turn_agent(&self, turn: TurnId) -> Result<Option<AgentId>, RuntimeError> {
+        self.state
+            .turns
+            .get(&turn)
+            .map(|record| record.agent)
+            .ok_or(RuntimeError::UnknownTurn(turn))
+    }
+
     #[must_use]
     pub fn team_snapshot(&self) -> Option<KernelTeamSnapshot> {
         self.team.as_ref().map(KernelTeam::snapshot)
@@ -1597,7 +1605,7 @@ impl RuntimeKernel {
         providers: &[P],
         agent: Option<AgentId>,
     ) -> Result<(), RuntimeError> {
-        if candidates.len() < 2
+        if candidates.is_empty()
             || candidates.len() > MAX_MODEL_PRESET_FALLBACK_CANDIDATES
             || candidates.len() != providers.len()
         {

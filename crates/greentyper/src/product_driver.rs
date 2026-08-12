@@ -10,9 +10,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use greentyper_core::agent_team::{
     AgentSession, AgentStatus, Capability, CapabilitySnapshot, CommandOutcome, CompletionCapsule,
-    DurableTeamError, DurableTeamRuntime, MessageRecipient, ResourceBudget, TaskScope, TaskSpec,
-    TeamCommand, TeamOperationAcknowledgeOutcome, TeamOperationCommit, TeamOperationKind,
-    TeamOperationRecord, TeamOperationStatus,
+    DurableTeamError, DurableTeamRuntime, InheritedModelPreset, MessageRecipient, ResourceBudget,
+    TaskScope, TaskSpec, TeamCommand, TeamOperationAcknowledgeOutcome, TeamOperationCommit,
+    TeamOperationKind, TeamOperationRecord, TeamOperationStatus,
 };
 use greentyper_core::config::{ConfigEpoch, ConfigLayers, ModelPresetView};
 use greentyper_core::ledger::{DurabilityReceipt, LedgerHead};
@@ -112,10 +112,69 @@ pub(crate) fn freeze_model_selection(
 pub(crate) struct ProductDriver<E> {
     kernel: RuntimeKernel,
     session: AgentSession,
+    inherited_model_preset: Option<String>,
     executor: E,
 }
 
 impl<E: ToolEffectExecutor> ProductDriver<E> {
+    pub(crate) fn open_existing_for_agent(
+        runtime_path: &Path,
+        agent: u64,
+        executor: E,
+    ) -> Result<Self, ProductDriverError> {
+        require_pending_context_mode_execution(runtime_path)
+            .map_err(ProductDriverError::Runtime)?;
+        if !runtime_path.exists() || !has_product_driver_state(runtime_path)? {
+            return Err(ProductDriverError::TeamStateUnavailable);
+        }
+        let (kernel, recovery) = RuntimeKernel::open_with_team_and_tools_existing_strict(
+            runtime_path,
+            sidecar_path(runtime_path, "team"),
+            sidecar_path(runtime_path, "tool"),
+            PRODUCT_MAX_ACTIVE_AGENTS,
+        )?;
+        if kernel.snapshot().status != RecoveryStatus::Ready {
+            return Err(ProductDriverError::Runtime(RuntimeError::Busy(
+                kernel.snapshot().status,
+            )));
+        }
+        if let Some(record) =
+            recovery.snapshot().operations.iter().find(|record| {
+                record.status == TeamOperationStatus::CommittedAwaitingAcknowledgement
+            })
+        {
+            return Err(ProductDriverError::Runtime(
+                RuntimeError::TeamOperationReconciliationRequired(record.operation),
+            ));
+        }
+        let target = recovery
+            .snapshot()
+            .projection
+            .agents
+            .iter()
+            .find(|candidate| candidate.id.get() == agent)
+            .ok_or(ProductDriverError::UnknownAgent(agent))?;
+        if target.status != AgentStatus::Active {
+            return Err(ProductDriverError::CurrentAgentUnavailable);
+        }
+        let target_id = target.id;
+        let inherited_model_preset = target
+            .inherited_model_preset
+            .as_ref()
+            .map(|preset| preset.id().to_owned());
+        let session = recovery
+            .into_sessions()
+            .into_iter()
+            .find(|session| session.agent() == target_id)
+            .ok_or(ProductDriverError::CurrentAgentUnavailable)?;
+        Ok(Self {
+            kernel,
+            session,
+            inherited_model_preset,
+            executor,
+        })
+    }
+
     pub(crate) fn open_with_executor(
         runtime_path: &Path,
         executor: E,
@@ -141,6 +200,7 @@ impl<E: ToolEffectExecutor> ProductDriver<E> {
         Self::from_recovery(kernel, recovery, executor, interaction, true)
     }
 
+    #[cfg(test)]
     pub(crate) fn open_existing_with_executor(
         runtime_path: &Path,
         executor: E,
@@ -193,11 +253,95 @@ impl<E: ToolEffectExecutor> ProductDriver<E> {
                 RuntimeError::TeamOperationReconciliationRequired(record.operation),
             ));
         }
-        let session = active_root_session(recovery)
-            .map_err(|_| ProductDriverError::ProviderTurnOwnerUnavailable(turn.get()))?;
+        let session = provider_turn_session(&kernel, recovery, turn)?;
         Ok(Self {
             kernel,
             session,
+            inherited_model_preset: None,
+            executor,
+        })
+    }
+
+    pub(crate) fn open_existing_for_tool_recovery(
+        runtime_path: &Path,
+        call: u64,
+        executor: E,
+    ) -> Result<Self, ProductDriverError> {
+        require_pending_context_mode_execution(runtime_path)
+            .map_err(ProductDriverError::Runtime)?;
+        if !runtime_path.exists() || !has_product_driver_state(runtime_path)? {
+            return Err(ProductDriverError::ToolStateUnavailable);
+        }
+        let (kernel, recovery) = RuntimeKernel::open_with_team_and_tools_existing_strict(
+            runtime_path,
+            sidecar_path(runtime_path, "team"),
+            sidecar_path(runtime_path, "tool"),
+            PRODUCT_MAX_ACTIVE_AGENTS,
+        )?;
+        if let Some(record) =
+            recovery.snapshot().operations.iter().find(|record| {
+                record.status == TeamOperationStatus::CommittedAwaitingAcknowledgement
+            })
+        {
+            return Err(ProductDriverError::Runtime(
+                RuntimeError::TeamOperationReconciliationRequired(record.operation),
+            ));
+        }
+        let owner = kernel
+            .tool_snapshot()
+            .and_then(|snapshot| {
+                snapshot.calls.into_iter().find(|record| {
+                    record.call.get() == call && record.status == ToolCallStatus::AwaitingApproval
+                })
+            })
+            .ok_or(ProductDriverError::ToolApprovalUnavailable(call))?
+            .agent;
+        let session = agent_session(recovery, owner)
+            .map_err(|_| ProductDriverError::ToolOwnerUnavailable(call))?;
+        Ok(Self {
+            kernel,
+            session,
+            inherited_model_preset: None,
+            executor,
+        })
+    }
+
+    pub(crate) fn open_existing_for_delivery(
+        runtime_path: &Path,
+        turn: TurnId,
+        executor: E,
+    ) -> Result<Self, ProductDriverError> {
+        if !runtime_path.exists() || !has_product_driver_state(runtime_path)? {
+            return Err(ProductDriverError::ProviderTurnStateUnavailable);
+        }
+        let (kernel, recovery) = RuntimeKernel::open_with_team_and_tools_existing_strict(
+            runtime_path,
+            sidecar_path(runtime_path, "team"),
+            sidecar_path(runtime_path, "tool"),
+            PRODUCT_MAX_ACTIVE_AGENTS,
+        )?;
+        if !matches!(
+            kernel.snapshot().status,
+            RecoveryStatus::ReconciliationRequired { turn: actual, .. } if actual == turn
+        ) {
+            return Err(ProductDriverError::Runtime(RuntimeError::Busy(
+                kernel.snapshot().status,
+            )));
+        }
+        if let Some(record) =
+            recovery.snapshot().operations.iter().find(|record| {
+                record.status == TeamOperationStatus::CommittedAwaitingAcknowledgement
+            })
+        {
+            return Err(ProductDriverError::Runtime(
+                RuntimeError::TeamOperationReconciliationRequired(record.operation),
+            ));
+        }
+        let session = provider_turn_session(&kernel, recovery, turn)?;
+        Ok(Self {
+            kernel,
+            session,
+            inherited_model_preset: None,
             executor,
         })
     }
@@ -239,8 +383,13 @@ impl<E: ToolEffectExecutor> ProductDriver<E> {
         Ok(Self {
             kernel,
             session,
+            inherited_model_preset: None,
             executor,
         })
+    }
+
+    pub(crate) fn inherited_model_preset(&self) -> Option<&str> {
+        self.inherited_model_preset.as_deref()
     }
 
     #[cfg(test)]
@@ -401,6 +550,21 @@ impl<E: ToolEffectExecutor> ProductDriver<E> {
         &mut self,
         delivery: DeliveryId,
     ) -> Result<AcknowledgeOutcome, ProductDriverError> {
+        let turn = match self.kernel.snapshot().status {
+            RecoveryStatus::ReconciliationRequired {
+                turn,
+                delivery: pending,
+            } if pending == delivery => turn,
+            _ => {
+                return self
+                    .kernel
+                    .acknowledge(delivery)
+                    .map_err(ProductDriverError::Runtime);
+            }
+        };
+        if self.kernel.provider_turn_agent(turn)? != Some(self.session.agent()) {
+            return Err(ProductDriverError::ProviderTurnOwnerUnavailable(turn.get()));
+        }
         self.kernel
             .acknowledge(delivery)
             .map_err(ProductDriverError::Runtime)
@@ -506,8 +670,7 @@ pub(crate) fn cancel_product_provider_turn(
         tool_path,
         PRODUCT_MAX_ACTIVE_AGENTS,
     )?;
-    let session = active_root_session(recovery)
-        .map_err(|_| ProductDriverError::ProviderTurnOwnerUnavailable(turn.get()))?;
+    let session = provider_turn_session(&kernel, recovery, turn)?;
     kernel
         .cancel_blocked_provider_turn(session, turn)
         .map_err(ProductDriverError::Runtime)
@@ -529,8 +692,7 @@ pub(crate) fn request_product_provider_turn_recovery(
         tool_path,
         PRODUCT_MAX_ACTIVE_AGENTS,
     )?;
-    let session = active_root_session(recovery)
-        .map_err(|_| ProductDriverError::ProviderTurnOwnerUnavailable(turn.get()))?;
+    let session = provider_turn_session(&kernel, recovery, turn)?;
     kernel
         .request_blocked_provider_turn_recovery(session, turn)
         .map_err(ProductDriverError::Runtime)
@@ -643,7 +805,12 @@ pub(crate) fn delegate_product_agent(
     scope: Option<TaskScope>,
     budget: ResourceBudget,
     capabilities: CapabilitySnapshot,
+    inherited_model_preset: Option<&str>,
 ) -> Result<TeamOperationCommit, ProductDriverError> {
+    let inherited_model_preset = inherited_model_preset
+        .map(InheritedModelPreset::new)
+        .transpose()
+        .map_err(|error| ProductDriverError::Team(DurableTeamError::Team(error)))?;
     dispatch_product_agent_command(runtime_path, parent, |session, snapshot| {
         let parent = snapshot
             .projection
@@ -655,11 +822,12 @@ pub(crate) fn delegate_product_agent(
             .ok_or(ProductDriverError::CurrentAgentUnavailable)?
             .scope
             .clone();
-        Ok(TeamCommand::Delegate {
+        Ok(TeamCommand::DelegateWithModelPreset {
             parent: session,
             task: TaskSpec::new(title, scope.unwrap_or(inherited_scope)),
             budget,
             capabilities,
+            inherited_model_preset,
         })
     })
 }
@@ -799,10 +967,30 @@ fn active_root_session(
     recovery: greentyper_core::runtime::KernelTeamRecovery,
 ) -> Result<AgentSession, ProductDriverError> {
     let root = active_root_agent(recovery.snapshot())?;
+    agent_session(recovery, root)
+}
+
+fn provider_turn_session(
+    kernel: &RuntimeKernel,
+    recovery: greentyper_core::runtime::KernelTeamRecovery,
+    turn: TurnId,
+) -> Result<AgentSession, ProductDriverError> {
+    let owner = kernel
+        .provider_turn_agent(turn)
+        .map_err(ProductDriverError::Runtime)?
+        .ok_or(ProductDriverError::ProviderTurnOwnerUnavailable(turn.get()))?;
+    agent_session(recovery, owner)
+        .map_err(|_| ProductDriverError::ProviderTurnOwnerUnavailable(turn.get()))
+}
+
+fn agent_session(
+    recovery: greentyper_core::runtime::KernelTeamRecovery,
+    agent: greentyper_core::agent_team::AgentId,
+) -> Result<AgentSession, ProductDriverError> {
     recovery
         .into_sessions()
         .into_iter()
-        .find(|session| session.agent() == root)
+        .find(|session| session.agent() == agent)
         .ok_or(ProductDriverError::CurrentAgentUnavailable)
 }
 
@@ -1343,6 +1531,278 @@ source = "unknown"
                 .map(|path| fs::read(path).expect("reread Product Ledger"))
                 .collect::<Vec<_>>(),
             before
+        );
+        cleanup(&ledger);
+    }
+
+    #[test]
+    fn child_provider_recovery_uses_the_exact_turn_owner() {
+        let ledger = temp_path("child-provider-recovery");
+        let team_path = sidecar_path(&ledger, "team");
+        let tool_path = sidecar_path(&ledger, "tool");
+        let (mut kernel, recovery) = RuntimeKernel::open_with_team_and_tools(
+            &ledger,
+            &team_path,
+            &tool_path,
+            PRODUCT_MAX_ACTIVE_AGENTS,
+        )
+        .expect("open child recovery state");
+        assert!(recovery.into_sessions().is_empty());
+        let root = kernel
+            .dispatch_team(TeamCommand::AdmitRoot {
+                task: TaskSpec::new("root", TaskScope::default()),
+                budget: ResourceBudget::new(2_000, 2),
+                capabilities: CapabilitySnapshot::default(),
+            })
+            .expect("admit recovery root");
+        kernel
+            .acknowledge_team_operation(root.operation)
+            .expect("acknowledge recovery root");
+        let root_session = match root.commit.outcome {
+            CommandOutcome::RootAdmitted { session, .. } => session,
+            other => panic!("unexpected root admission: {other:?}"),
+        };
+        let delegated = kernel
+            .dispatch_team(TeamCommand::DelegateWithModelPreset {
+                parent: root_session,
+                task: TaskSpec::new("child", TaskScope::default()),
+                budget: ResourceBudget::new(500, 1),
+                capabilities: CapabilitySnapshot::default(),
+                inherited_model_preset: Some(
+                    InheritedModelPreset::new("child-default").expect("child Preset"),
+                ),
+            })
+            .expect("delegate recovery child");
+        kernel
+            .acknowledge_team_operation(delegated.operation)
+            .expect("acknowledge recovery child");
+        let child = match delegated.commit.outcome {
+            CommandOutcome::Delegated { agent, .. } => agent,
+            other => panic!("unexpected delegation: {other:?}"),
+        };
+        drop(kernel);
+
+        let calls = Rc::new(Cell::new(0));
+        let mut driver = ProductDriver::open_existing_for_agent(
+            &ledger,
+            child.get(),
+            CountingEchoExecutor::new(Rc::new(Cell::new(0))),
+        )
+        .expect("open exact child");
+        assert_eq!(driver.inherited_model_preset(), Some("child-default"));
+        let mut unavailable = CountingUnavailableProvider {
+            calls: Rc::clone(&calls),
+        };
+        let mut interaction = RecordingInteraction::approve();
+        assert!(matches!(
+            driver.execute(
+                &ConfigLayers::default(),
+                "retry child Provider",
+                &mut unavailable,
+                &mut interaction,
+            ),
+            Err(ProductDriverError::Runtime(RuntimeError::Provider(
+                ProviderError::Unavailable { .. }
+            )))
+        ));
+        let RecoveryStatus::Blocked { turn, .. } = driver.snapshot().status else {
+            panic!("child Provider failure did not block")
+        };
+        assert_eq!(
+            driver
+                .kernel
+                .provider_turn_agent(turn)
+                .expect("inspect child Turn owner"),
+            Some(child)
+        );
+        drop(driver);
+        let team_before = fs::read(&team_path).expect("read child Team Ledger");
+        let tool_before = fs::read(&tool_path).expect("read child Tool Ledger");
+
+        request_product_provider_turn_recovery(&ledger, turn)
+            .expect("request child Provider recovery");
+        let mut recovered = ProductDriver::open_existing_for_provider_recovery(
+            &ledger,
+            turn,
+            CountingEchoExecutor::new(Rc::new(Cell::new(0))),
+        )
+        .expect("recover exact child Turn owner");
+        let mut provider = DeterministicProvider::default();
+        let output = recovered
+            .resume(&mut provider, &mut interaction)
+            .expect("resume child Provider Turn");
+        assert_eq!(output.text(), "simulated: retry child Provider");
+        recovered
+            .acknowledge(output.delivery())
+            .expect("acknowledge child recovery");
+        drop(recovered);
+        assert_eq!(
+            RuntimeKernel::inspect_usage(&ledger, UsageTimestamp::now().expect("usage time"),)
+                .expect("inspect child recovery usage")
+                .attempts()
+                .last()
+                .and_then(|attempt| attempt.agent()),
+            Some(child.get())
+        );
+        assert_eq!(fs::read(&team_path).expect("reread Team"), team_before);
+        assert_eq!(fs::read(&tool_path).expect("reread Tool"), tool_before);
+
+        let mut driver = ProductDriver::open_existing_for_agent(
+            &ledger,
+            child.get(),
+            CountingEchoExecutor::new(Rc::new(Cell::new(0))),
+        )
+        .expect("reopen exact child");
+        let mut unavailable = CountingUnavailableProvider {
+            calls: Rc::clone(&calls),
+        };
+        assert!(matches!(
+            driver.execute(
+                &ConfigLayers::default(),
+                "cancel child Provider",
+                &mut unavailable,
+                &mut interaction,
+            ),
+            Err(ProductDriverError::Runtime(RuntimeError::Provider(_)))
+        ));
+        let RecoveryStatus::Blocked {
+            turn: cancel_turn, ..
+        } = driver.snapshot().status
+        else {
+            panic!("second child failure did not block")
+        };
+        drop(driver);
+        assert!(matches!(
+            cancel_product_provider_turn(&ledger, cancel_turn).expect("cancel child Provider Turn"),
+            CancelTurnOutcome::Durable(_)
+        ));
+        assert_eq!(
+            fs::read(&team_path).expect("Team after cancel"),
+            team_before
+        );
+        assert_eq!(
+            fs::read(&tool_path).expect("Tool after cancel"),
+            tool_before
+        );
+        assert_eq!(calls.get(), 2);
+        cleanup(&ledger);
+    }
+
+    #[test]
+    fn child_tool_approval_recovery_uses_the_exact_call_owner() {
+        let ledger = temp_path("child-tool-recovery");
+        let team_path = sidecar_path(&ledger, "team");
+        let tool_path = sidecar_path(&ledger, "tool");
+        let (mut kernel, recovery) = RuntimeKernel::open_with_team_and_tools(
+            &ledger,
+            &team_path,
+            &tool_path,
+            PRODUCT_MAX_ACTIVE_AGENTS,
+        )
+        .expect("open child Tool recovery state");
+        assert!(recovery.into_sessions().is_empty());
+        let root = kernel
+            .dispatch_team(TeamCommand::AdmitRoot {
+                task: TaskSpec::new("root", TaskScope::default()),
+                budget: ResourceBudget::new(2_000, 2),
+                capabilities: CapabilitySnapshot::from_capabilities([
+                    Capability::Process,
+                    Capability::Tool(LOCAL_ECHO_TOOL.into()),
+                ]),
+            })
+            .expect("admit Tool recovery root");
+        kernel
+            .acknowledge_team_operation(root.operation)
+            .expect("acknowledge Tool recovery root");
+        let root_session = match root.commit.outcome {
+            CommandOutcome::RootAdmitted { session, .. } => session,
+            other => panic!("unexpected root admission: {other:?}"),
+        };
+        let delegated = kernel
+            .dispatch_team(TeamCommand::DelegateWithModelPreset {
+                parent: root_session,
+                task: TaskSpec::new("child", TaskScope::default()),
+                budget: ResourceBudget::new(500, 1),
+                capabilities: CapabilitySnapshot::from_capabilities([
+                    Capability::Process,
+                    Capability::Tool(LOCAL_ECHO_TOOL.into()),
+                ]),
+                inherited_model_preset: Some(
+                    InheritedModelPreset::new("child-default").expect("child Preset"),
+                ),
+            })
+            .expect("delegate Tool recovery child");
+        kernel
+            .acknowledge_team_operation(delegated.operation)
+            .expect("acknowledge Tool recovery child");
+        let child = match delegated.commit.outcome {
+            CommandOutcome::Delegated { agent, .. } => agent,
+            other => panic!("unexpected delegation: {other:?}"),
+        };
+        drop(kernel);
+        let team_before = fs::read(&team_path).expect("read Team before child Tool");
+
+        let calls = Rc::new(Cell::new(0));
+        let mut interrupted = RecordingInteraction::fail_approval();
+        let mut driver = ProductDriver::open_existing_for_agent(
+            &ledger,
+            child.get(),
+            CountingEchoExecutor::new(Rc::clone(&calls)),
+        )
+        .expect("open exact child for Tool");
+        let mut provider = LocalEchoProvider::default();
+        assert!(matches!(
+            driver.execute(
+                &ConfigLayers::default(),
+                "recover child Tool",
+                &mut provider,
+                &mut interrupted,
+            ),
+            Err(ProductDriverError::Interaction(_))
+        ));
+        assert_eq!(calls.get(), 0);
+        let call = driver
+            .tool_snapshot()
+            .expect("child Tool snapshot")
+            .calls
+            .into_iter()
+            .find(|record| record.status == ToolCallStatus::AwaitingApproval)
+            .expect("child pending Tool call");
+        assert_eq!(call.agent, child);
+        drop(driver);
+
+        let mut recovered = ProductDriver::open_existing_for_tool_recovery(
+            &ledger,
+            call.call.get(),
+            CountingEchoExecutor::new(Rc::clone(&calls)),
+        )
+        .expect("recover exact child Tool owner");
+        let mut provider = LocalEchoProvider::default();
+        let approval = recovered
+            .recover_pending_tool_approval(call.call.get(), &mut provider)
+            .expect("recover child Tool approval");
+        let output = recovered
+            .resolve_recovered_tool_approval(approval, ProductToolDecision::Approve, &mut provider)
+            .expect("approve child Tool");
+        let ProductToolDecisionOutcome::Prepared(output) = output else {
+            panic!("child Tool approval must prepare output")
+        };
+        assert_eq!(output.text(), "Echoed: approved message");
+        assert_eq!(calls.get(), 1);
+        recovered
+            .acknowledge(output.delivery())
+            .expect("acknowledge child Tool output");
+        drop(recovered);
+        assert_eq!(fs::read(&team_path).expect("reread Team"), team_before);
+        let usage =
+            RuntimeKernel::inspect_usage(&ledger, UsageTimestamp::now().expect("usage time"))
+                .expect("inspect child Tool usage");
+        assert_eq!(usage.attempts().len(), 3);
+        assert!(
+            usage
+                .attempts()
+                .iter()
+                .all(|attempt| attempt.agent() == Some(child.get()))
         );
         cleanup(&ledger);
     }

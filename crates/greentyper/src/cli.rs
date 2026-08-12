@@ -863,6 +863,10 @@ fn run_product_fallback_turn(
 }
 
 fn resume_product_turn(ledger: &Path) -> Result<(), CliError> {
+    let status = RuntimeKernel::inspect(ledger)?.status;
+    let RecoveryStatus::ResumeRequired { turn } = status else {
+        return Err(greentyper_core::runtime::RuntimeError::Busy(status).into());
+    };
     let stdin = io::stdin();
     let stderr = io::stderr();
     let mut interaction = CliProductInteraction {
@@ -870,7 +874,7 @@ fn resume_product_turn(ledger: &Path) -> Result<(), CliError> {
         output: stderr.lock(),
     };
     let executor = LocalProcessExecutor::current()?;
-    let mut driver = ProductDriver::open_with_executor(ledger, executor, &mut interaction)?;
+    let mut driver = ProductDriver::open_existing_for_provider_recovery(ledger, turn, executor)?;
     let mut provider = match driver.pending_provider_epoch() {
         Some(epoch) => ConfiguredProvider::from_epoch(epoch, PlatformCredentialVault)?,
         None => ConfiguredProvider::for_new_turn(None, PlatformCredentialVault)?,
