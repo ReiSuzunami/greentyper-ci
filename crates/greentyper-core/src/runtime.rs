@@ -5340,7 +5340,7 @@ mod tests {
     use crate::agent_team::{
         Capability, CapabilitySnapshot, CommandOutcome, ResourceBudget, TaskScope, TaskSpec,
     };
-    use crate::tool_runtime::{AuthorizedToolCall, ToolExecution};
+    use crate::tool_runtime::{AuthorizedToolCall, ToolExecution, inspect_tool_ledger};
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static TEST_LEDGER_NONCE: AtomicU64 = AtomicU64::new(1);
@@ -5496,12 +5496,12 @@ mod tests {
         .expect("freeze provider-native approval Config");
 
         let runtime_before = kernel.snapshot();
+        let team_before = kernel
+            .team_snapshot()
+            .expect("Team snapshot before decision");
         let tools_before = kernel
             .tool_snapshot()
             .expect("Tool snapshot before decision");
-        let runtime_bytes_before = std::fs::read(&runtime_path).expect("read Runtime ledger");
-        let team_bytes_before = std::fs::read(&team_path).expect("read Team ledger");
-        let tool_bytes_before = std::fs::read(&tool_path).expect("read Tool ledger");
         let mut executor = CountingToolExecutor::default();
         assert!(matches!(
             kernel.resolve_provider_tool_call(
@@ -5521,22 +5521,32 @@ mod tests {
         assert_eq!(kernel.snapshot(), runtime_before);
         assert_eq!(
             kernel
+                .team_snapshot()
+                .expect("Team snapshot after decision"),
+            team_before
+        );
+        assert_eq!(
+            kernel
                 .tool_snapshot()
                 .expect("Tool snapshot after decision"),
             tools_before
         );
         drop(kernel);
         assert_eq!(
-            std::fs::read(&runtime_path).expect("reread Runtime ledger"),
-            runtime_bytes_before
+            RuntimeKernel::inspect(&runtime_path).expect("replay Runtime ledger"),
+            runtime_before
         );
         assert_eq!(
-            std::fs::read(&team_path).expect("reread Team ledger"),
-            team_bytes_before
+            DurableTeamRuntime::inspect(&team_path, 1)
+                .expect("replay Team ledger")
+                .ledger_head(),
+            team_before.ledger_head
         );
         assert_eq!(
-            std::fs::read(&tool_path).expect("reread Tool ledger"),
-            tool_bytes_before
+            inspect_tool_ledger(&tool_path)
+                .expect("replay Tool ledger")
+                .ledger_head,
+            tools_before.ledger_head
         );
 
         std::fs::remove_file(runtime_path).expect("cleanup Runtime ledger");
