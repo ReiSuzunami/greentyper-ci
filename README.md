@@ -165,15 +165,19 @@ redacted `agent.list`, and redacted `tool.status` operations. Missing state does
 not create files; inspection never repairs a partial Ledger tail. Bounded
 control operations reuse the existing Kernel and ProductDriver authority.
 `agent.delegate` creates a downward-only child with a bounded scope,
-Capability Snapshot, and budget; `agent.message` records direct or Team
-messages; and `agent.complete`, `agent.fail`, and `agent.cancel` record explicit
-terminal outcomes. Each mutation durably returns
+Capability Snapshot, and budget, and copies the effective Config-owned default
+Preset ID into that child without copying Config, credentials, or authority.
+`agent.turn` runs one Provider Turn for the exact Active child under that
+inherited Preset; `agent.message` records direct or Team messages; and
+`agent.complete`, `agent.fail`, and `agent.cancel` record explicit terminal
+outcomes. Each mutation durably returns
 `committed_awaiting_acknowledgement`; `agent.acknowledge` separately closes that
 exact Team operation. A lost response is recoverable through `agent.list`'s
 redacted pending-operation records. Numeric Agent IDs only select among
 Sessions rebound from strict Team replay; they never mint authority. The
-product permits two Active Agents while ordinary Provider Turns remain bound to
-the unique Active root Agent.
+product permits two Active Agents. Ordinary headless Provider Turns remain
+bound to the root, while `agent.turn` explicitly selects one existing Active
+child and freezes that Turn's Config and Provider Epochs.
 `runtime.cancel` terminalizes one exact Provider-origin blocked Turn,
 `runtime.retry` durably rearms only an explicitly retryable initial Provider
 failure without contacting a Provider, and `runtime.resume` reconstructs the
@@ -505,8 +509,11 @@ Provider policy fails before Provider execution and preserves the pending
 selection. With no explicit or pending selection, headless execution uses the
 effective configured default. A missing target fails Config validation before
 write or Ledger creation, and the normal Config set/reset flow can replace or
-clear it. Running child Agents are unchanged; new-Agent inheritance remains
-pending.
+clear it. Delegation copies that effective default ID into the new child
+Agent's durable Team metadata. Later default changes do not rewrite existing
+children; `agent.turn` resolves the child's exact inherited ID against current
+Config, fails before writes if it is missing or invalid, and otherwise freezes
+the resolved Config/Provider Epochs for that child Turn.
 `/stats` now browses the latest successful Usage snapshot. It shows 1-hour, 1-day,
 and 7-day summaries. Tab and Shift-Tab move across Attempts, Turn,
 Provider & Model, Dialect & Policy, current Thread, Agent, Team, Named Window,
@@ -565,7 +572,7 @@ before implementation. Live inference conformance,
 automatic transport retry or partial-stream reconnect, Messages reasoning
 blocks, provider-native Context Mode execution, broader multi-Tool approval
 presentation, broader Provider and Tool adapters,
-Workspace, new-Agent Preset-default inheritance,
+Workspace, Agent retry,
 TUI Agent lifecycle actions, general App Server Runtime control beyond the exact
 cancel/retry/resume recovery flow, and
 remote App Server transport remain. The loopback Provider tracer remains

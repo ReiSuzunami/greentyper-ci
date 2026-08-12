@@ -167,7 +167,10 @@ three Ledgers are inspected independently, not as a transactional snapshot.
 Project/user Preset defaults are Config-owned and now appear read-only in that
 browser; current-Agent pending selection remains a separate Runtime event.
 New-Agent inheritance and Agent lifecycle actions remain outside that browser
-boundary; the local App Server lifecycle surface is separate. The Stats browser already exposes cached Turn aggregates and
+boundary. The local App Server lifecycle surface copies only the effective
+default Preset ID at Delegation and can run one exact Active-child Turn under
+that inherited identity; it reuses rebound Session authority and ordinary
+Config/Provider Epoch admission. The Stats browser already exposes cached Turn aggregates and
 per-Turn Provider/Model/Dialect/Policy distributions plus token-weighted
 cache-read/input and cache-write/input ratios without adding a write or Provider
 authority path.

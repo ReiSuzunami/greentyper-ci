@@ -351,7 +351,8 @@ The current operations are:
 | `runtime.acknowledge` | Durably acknowledge the exact prepared delivery; repeated acknowledgement is idempotent and a wrong delivery does not write |
 | `runtime.stats` | Return the revision-bound Usage summary; optional `limit` and `cursor` expose a bounded Attempt page, and optional `as_of_unix_ms` pins the reporting instant |
 | `agent.list` | Return the redacted Agent Center projection plus committed Team operations awaiting acknowledgement: canonical identities, status, Task identity/state, budgets, reservations, bounded counts, Team head/revision, message count, and incomplete-tail bytes; never Task titles, message/capsule contents, labels, reasons, or Sessions |
-| `agent.delegate` | Under a rebound Active parent Session, create one downward-only child Task and Agent with a bounded optional scope, budget, and Capability Snapshot; return only stable IDs and the committed Team operation |
+| `agent.delegate` | Under a rebound Active parent Session, create one downward-only child Task and Agent with a bounded optional scope, budget, and Capability Snapshot; copy the effective default Preset ID into the child without copying Config or authority; return only stable IDs and the committed Team operation |
+| `agent.turn` | Run one Provider Turn for the exact selected Active child under its inherited Preset ID; freeze the resolved Config/Provider Epochs, return prepared output or `tool_approval_required`, and leave delivery acknowledgement explicit |
 | `agent.message` | Under the rebound selected Active Session, append one bounded direct or Team message; return only Message and operation IDs, never the body |
 | `agent.complete` | Submit one bounded Completion Capsule and terminalize an Active Agent whose children are already terminal; never return capsule contents |
 | `agent.fail` / `agent.cancel` | Record one bounded explicit terminal reason under the rebound Agent Session; never return the reason |
@@ -432,10 +433,22 @@ Session, expand scope/capabilities/budget, touch Config, run a Provider or Tool,
 or write Runtime/Tool Ledgers. Every mutation returns before acknowledgement;
 the pending operation blocks another Team command until
 `agent.acknowledge`, and `agent.list` provides the bounded recovery identity if
-the response was lost. The current product limit is two Active Agents; ordinary
-Provider Turns still bind to the unique Active root Agent. No operation exposes
-general Runtime control beyond the exact recovery states above, arbitrary Tool
-execution, Provider selection, Workspace path control, or remote transport.
+the response was lost. Delegation additionally snapshots only the effective
+default Preset ID into the new child's Team metadata. It does not snapshot the
+Preset definition, Provider Profile, credential, Config document, or parent
+authority. Existing children keep that ID when the global default changes.
+The current product limit is two Active Agents. Ordinary headless Provider
+Turns still bind to the root; `agent.turn` is the explicit child path. It
+reopens the exact rebound Active child Session, resolves the inherited ID and
+bounded fallback chain from current Config, preflights Provider policy and
+credentials, and freezes the child-scoped Config/Provider Epochs at admission.
+Missing or invalid inherited Presets fail before Ledger writes. Provider work
+may append Runtime Usage/cost facts and affect billing; Team and Tool Ledgers
+remain unchanged unless that Provider requests the separately approved fixed
+Tool. Output, Tool approval, retry, cancellation, and acknowledgement recover
+under the persisted Turn or Call owner rather than the root. No operation
+exposes arbitrary Provider selection, Workspace path control, or remote
+transport.
 
 `runtime.stats` defaults to summary-only. `limit` must use the core bounded page
 range and is required when `cursor` is present. A follow-up page must reuse the
@@ -768,8 +781,8 @@ on explicit resume. `provider_native` remains a visible typed choice but fails
 before credential lookup, Provider construction, network I/O, or Ledger
 admission. Explicit Context reduction resolves the pending or default Preset
 chain and rejects any provider-native candidate before opening Product state or
-publishing a checkpoint. Provider-native continuation identity and new-Agent
-inheritance remain target behavior.
+publishing a checkpoint. Provider-native continuation identity remains target
+behavior.
 
 The rendered model browser now provides Favorites, Recent, Compatible, and All
 views with fuzzy search and bounded provider, dialect, context, capability,
@@ -805,9 +818,10 @@ pending ID, rechecks its Config fingerprint and provider/model identity, and
 consumes it atomically with Turn admission and Config/Provider Epoch freeze.
 Config drift, explicit-ID conflict, credential failure, and unsupported policy
 preserve the pending selection before Provider execution. The default remains a
-Config choice and never becomes current-Agent selection authority; new-Agent
-inheritance remains target behavior. Any provider/model/dialect change starts a
-Provider Epoch.
+Config choice and never becomes current-Agent selection authority. Delegation
+copies only its effective Preset ID into the new child; later default changes do
+not affect that child, and `agent.turn` resolves the ID again before freezing
+the child Turn. Any provider/model/dialect change starts a Provider Epoch.
 Automatic price- or latency-based routing is outside v1; fallback is explicit,
 bounded, frozen before admission, and must preserve the required capability
 contract.

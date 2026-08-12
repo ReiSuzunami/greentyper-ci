@@ -536,12 +536,24 @@ outcomes. Each mutation returns stable IDs only and remains
 operation. `agent.list` exposes pending operation IDs after a lost response.
 Strict replay supplies the only usable Sessions, parent constraints remain in
 the core Team policy, and Runtime/Tool/Config stay unchanged. The product now
-allows two Active Agents while ordinary Provider Turns still select the unique
-Active root. Cross-process tests prove Delegate-to-child-message-to-child-
+allows two Active Agents; this lifecycle-only batch leaves ordinary headless
+Provider Turns on the root. Cross-process tests prove
+Delegate-to-child-message-to-child-
 Completion-to-parent-Completion, failure, cancellation, restart recovery,
 redaction, fail-closed pending-operation blocking, and byte identity outside the
 Team Ledger.
-A sixth contiguous App Server batch completes three bounded Provider Recovery
+A sixth contiguous Agent execution batch closes four bounded child-Preset
+slices. Delegation copies only the effective Config-owned default Preset ID into
+schema-3 child Agent metadata, and historical Team schema-1/schema-2 Agents
+replay with no inherited ID. `agent.list` projects that ID without Config or
+credential material. `agent.turn` reopens one exact Active child Session,
+resolves the current Preset definition and bounded fallback plan, freezes
+child-scoped Config/Provider Epochs, and returns prepared output or the existing
+fixed Tool approval. Provider retry, cancellation, delivery acknowledgement,
+and Tool approval recovery bind to the persisted Turn or Call owner across
+restart. Tests prove child Usage attribution, exactly-once Tool execution,
+missing-Preset preflight, Team/Tool byte identity, and no authority transfer.
+A seventh contiguous App Server batch completes three bounded Provider Recovery
 slices. The cancel slice terminalizes one exact typed Provider-origin blocked
 Turn and remains idempotent. The retry slice accepts only the early retryable
 Provider failure and durably moves that same Turn to `resume-required` without
@@ -574,7 +586,7 @@ custom-template and automatic starter-offer workflow,
 automatic Context View/token-source
 projection, provider-reported
 charge and subscription-quota accounting, richer observed Provider metadata,
-new-Agent Preset-default inheritance, Agent lifecycle
+Agent lifecycle
 actions in the TUI, Workspace coordination, and the P0/P1/P2/P6
 performance evidence remain pending.
 Background/periodic catalog discovery is outside this default plan unless an
@@ -684,10 +696,9 @@ recoverable without overwrite. The paths perform no discovery, credential
 lookup, Provider request, Agent action, or Ledger write; automatic starter
 offers and silent updates remain absent.
 
-New-Agent default inheritance, provider-native Context Mode execution, and
-automatic starter offers remain pending. Background/periodic discovery is
-outside the current Performance Contract unless measured evidence supports an
-approved exception.
+Provider-native Context Mode execution and automatic starter offers remain
+pending. Background/periodic discovery is outside the current Performance
+Contract unless measured evidence supports an approved exception.
 
 Exit criteria:
 
@@ -758,8 +769,11 @@ limit, downward-only Delegation, bounded messages, Completion Capsules,
 failure/cancellation, process-local Session recovery, and explicit operation
 acknowledgement are implemented. The local stdio App Server makes those
 lifecycle transitions usable and recoverable without exposing Team text or
-Session authority. Workspace allocation/leases/read sets/merge, new-Agent
-Preset inheritance, Agent retry, and TUI lifecycle actions remain pending.
+Session authority. Delegation now freezes the effective default Preset ID into
+the child, and the App Server can execute and recover one exact Active-child
+Provider Turn under that inherited ID without copying Config, credentials, or
+parent authority. Workspace allocation/leases/read sets/merge, Agent retry, and
+TUI lifecycle actions remain pending.
 
 Exit criteria:
 

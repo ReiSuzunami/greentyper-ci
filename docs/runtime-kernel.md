@@ -220,6 +220,15 @@ Provider freeze; pre-admission failure leaves it pending. Historical schema-1
 through schema-13 Runtime transactions replay and can be followed by schema-14
 transactions; schema-1 token counts become explicitly estimated legacy attempts.
 
+Team Event schema 3 may bind one inherited Model Preset ID to a delegated child
+Agent. The ID is Team metadata only. An explicit App Server `agent.turn` reopens
+that exact Active Agent Session, resolves the current Preset definition and
+fallback chain, then freezes ordinary Config and Provider Epochs for the child
+Turn. Provider retry, cancellation, prepared-delivery acknowledgement, and Tool
+approval recovery select their Session from the persisted Turn or Call owner;
+they do not fall back to the root Agent. Historical Team schema-1 and schema-2
+Agents replay with no inherited Preset.
+
 This tracer bullet intentionally stores only the Tool result digest. If the
 process dies after durable Tool success and before Provider continuation, the
 raw result cannot be reconstructed. Recovery marks the Turn blocked rather

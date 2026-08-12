@@ -453,8 +453,7 @@ Provider call or Ledger write, then exact admission consumes one selection and
 freezes the expected Provider Epoch. Headless integration proves automatic
 pending-ID resolution plus credential-preflight and explicit-ID-conflict
 failure preserve all three Ledger byte streams. These tests do not prove
-automatic starter offers or
-new-Agent default inheritance. Separate headless and
+automatic starter offers. Separate headless and
 Config CLI integration tests now prove project `agent.default_model_preset`
 overrides the user value, an explicit Preset is used when no conflicting
 pending selection exists, missing targets are rejected without file mutation,
@@ -639,11 +638,20 @@ through separate App Server processes. It proves the unacknowledged operation
 blocks another Team mutation, reopens through `agent.list`, never echoes Task
 titles/message bodies/capsule contents/reasons, preserves Config and
 Runtime/Tool bytes, rejects dispatch or acknowledgement without any Ledger write
-while Provider recovery is pending, and leaves ordinary Provider Turns bound to the Active root
-while a child is Active. These tests do not prove remote transport,
+while Provider recovery is pending, and leaves ordinary headless Provider Turns
+bound to the root while a child is Active. These tests do not prove remote transport,
 general Runtime control beyond the exact cancel/retry/resume flow, Workspace
 coordination, TUI lifecycle actions, arbitrary Tool
 approval/execution, or multi-client authentication.
+Child-Preset integration additionally proves Delegation persists only the
+effective default Preset ID, Team schema-2 replay yields no inherited ID, and
+`agent.list` projects the inherited identity without Config or credential
+material. A real loopback child Turn freezes the selected child Agent in Usage,
+Provider Profile, model, and dialect facts; returns prepared output; and keeps
+Team/Tool bytes unchanged. Product recovery tests interrupt child Provider and
+fixed `local.echo` Tool paths, then prove retry, cancellation, approval,
+delivery acknowledgement, and reopen use the exact persisted Turn or Call
+owner, execute the effect once, and never fall back to root authority.
 Context Pressure tests freeze exact 65%/90% threshold transitions, estimated and
 missing-fact propagation, invalid policy/limit and arithmetic failure, and the
 no-side-effect hard admission gate. Product presentation tests assert estimated
@@ -691,8 +699,7 @@ read-only `config catalog` integration test proves the snapshot contains no
 local path or credential reference.
 
 Remaining terminal-backend evidence covers real terminal/ConPTY resize and input,
-new-Agent Preset-default inheritance, Agent Center
-lifecycle actions in the TUI, background refresh, broader multi-Tool/App Server approval,
+Agent Center lifecycle actions in the TUI, background refresh, broader multi-Tool/App Server approval,
 panic-abort cleanup, final host cell
 geometry, and input-ready/idle resource budgets.
 
