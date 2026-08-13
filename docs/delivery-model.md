@@ -4,7 +4,9 @@ Status: active from 2026-08-13.
 
 This document is the execution rule for turning the roadmap into progress. The
 [implementation plan](implementation-plan.md) remains the product roadmap; this
-document defines when a piece of work is allowed to count as delivered.
+document defines when a piece of work is allowed to count as delivered. When
+roadmap prose uses “batch” descriptively, it does not create a delivery Batch;
+only a numbered ledger row and its settlement record count.
 
 ## Current Goal
 
@@ -75,7 +77,8 @@ results, split it into two Milestones before coding.
 
 ### Fast coverage protocol
 
-Use this four-line note after each Slice; do not turn it into a review meeting:
+Use this required four-line note after each Slice; do not turn it into a review
+meeting. Store it in the active Batch note or the follow-up register:
 
 ```text
 Slice: <what a user can do now>
@@ -84,9 +87,10 @@ Depth: <local / recoverable / externally verified>
 Next: <the smallest remaining step for the same Milestone>
 ```
 
-The note may be approximate. It exists to show feature coverage moving, not to
-manufacture a precise percentage. Official progress is updated only once at
-Batch settlement.
+The note may be approximate, but `Slice` must name observable evidence (command,
+screen, API response, or durable state). It exists to show feature coverage
+moving, not to manufacture a precise percentage. Official progress is updated
+only once at Batch settlement.
 
 Coverage is reported in two numbers, not one invented roadmap percentage:
 
@@ -138,13 +142,15 @@ Milestone: <one user result>
 Domain/Phase: <one roadmap area>
 Slices: <one to five concrete implementation slices>
 Non-goals: <everything explicitly deferred>
+Critical checks: <one or two blocker-critical checks selected before coding>
 Exit: <the one observable result that makes the milestone usable>
 ```
 
 Also record `Status: Locked | Building | Ready | Settling | Settled | Blocked`.
 `Ready`
-means the user result works and its blocker checks pass; it is not progress
-the Batch; changing the user result starts a new Milestone.
+means the user result works and the checks listed in `Critical checks` pass; it
+is not progress for the Batch. The lock cannot be edited to add a new result;
+changing the user result starts a new Milestone.
 
 The Phase can stay open indefinitely. The Milestone cannot: once its exit is
 met, settle the Batch and move to the next Milestone. A new idea belongs in a
@@ -222,6 +228,12 @@ the full gate after every slice, review, or intermediate discovery:
 job must pass; a green smoke step alone is not a Batch Gate. CI is settlement
 evidence, not a development feedback loop.
 
+The checks named in the Milestone lock are the blocker budget for the Batch;
+they are not an invitation to add more tests. At settlement, add at most one
+new happy-path check and one new fail-closed check. The selected local
+regression pass is one existing, risk-appropriate command, not a second test
+expansion cycle.
+
 For the current CI workflow, required jobs are `Quality / macOS ARM` and
 `Windows x64 build`. Their acceptance, transport, terminal, allocator, and
 package steps are part of those jobs. A green smoke step alone is not a Batch
@@ -252,11 +264,18 @@ packaging belong here. They run at a declared release candidate or release
 batch, not after every small user result. CI smoke samples are correctness
 evidence; they are not performance approval.
 
-A Release Gate declaration must name one candidate commit SHA. That SHA is
-the unit of release evidence; run it once for that candidate and rerun only
-when the candidate changes or a recorded gate failure is repaired. R1 being
-pending does not block ordinary feature Milestones. Release Gate evidence
-cannot be substituted by a feature Batch's CI smoke run.
+A Release Gate declaration must record, at minimum:
+
+- candidate commit SHA;
+- required gate/job list;
+- evidence links or artifact names;
+- owner and status (`Pass`, `Blocked`, or `Waived`); and
+- waiver authority and reason when status is `Waived`.
+
+That SHA is the unit of release evidence; run it once for that candidate and
+rerun only when the candidate changes or a recorded gate failure is repaired.
+R1 being pending does not block ordinary feature Milestones. Release Gate
+evidence cannot be substituted by a feature Batch's CI smoke run.
 
 ## Stop and defer protocol
 
@@ -334,27 +353,23 @@ smaller list used for progress accounting.
 Current official progress is **eighteen CI-settled feature Batches**. R1 remains
 a separate Release Gate and does not block feature coverage.
 
-## Active milestone
+## Current execution slot
 
 ```text
-Batch: B18
-Status: Settled
-Milestone: A Unix CLI user can remove one clean registered Git worktree and,
-  only when explicitly requested, delete its already-merged branch.
-Domain/Phase: Workspaces (Phase 7 / Unix CLI)
-Slices: add explicit branch-delete option; perform safe worktree removal then
-  non-force merged-branch deletion; return redacted result and preserve branch
-  on refusal; add one dirty/unmerged fail-closed check.
-Non-goals: force deletion, current/root branch deletion, detached/prunable
-  cleanup, automatic/background cleanup, merge or conflict resolution, Windows
-  Git adapters, TUI/App Server surfaces, and Release Gate evidence.
-Exit: clean registered worktree removal succeeds; branch remains by default and
-  is deleted only with the explicit option after Git confirms safe deletion;
-  dirty, locked, root, current, unmerged, detached, and prunable targets fail
-  without mutation.
-Coverage target: one new Workspace mutation flow; local success plus one
-  fail-closed boundary. Stop when this exit is observable.
+Batch: none
+Status: Unlocked
+Milestone: none locked
+Domain/Phase: none
+Slices: select and lock one independent user result before coding
+Non-goals: all unselected roadmap work
+Critical checks: selected in next Milestone lock
+Exit: no code starts until the next lock names one result, one domain, one to
+  five slices, explicit non-goals, and its critical checks.
 ```
+
+B18 is already settled below. This slot is intentionally empty between
+settlements; no feature work may start until the next Milestone lock replaces
+it.
 
 ### B18 closeout
 
@@ -373,30 +388,17 @@ Coverage target: one new Workspace mutation flow; local success plus one
   surfaces, conflict resolution, and Release Gate evidence.
 - **Next slot:** choose one fresh independent Milestone; do not reopen B18.
 
-## Last settled milestone
+## Last settled Batch
 
 ```text
-Batch: B16
+Batch: B18
 Status: Settled
-Milestone: A CLI user can create one minimal Model Preset from an existing
-  Provider Profile by supplying a bounded Preset ID, model ID, and supported
-  dialect, with dry-run or atomic commit output.
-Domain/Phase: Config and Provider selection (Phase 1/4)
-Slices: add `config model add`; reuse ConfigRuntime validation/CAS commit;
-  verify dry-run, commit, and reopen through `config presets`.
-Non-goals: default selection, starter installation/update, discovery or network
-  probes, credentials, TUI/App Server surfaces, fallback execution, Workspace,
-  and Release Gate evidence.
-Exit: `config model add` previews without writing, commits a valid tuple, and
-  reopened `config presets` reports the new preset; invalid/duplicate input
-  fails closed without a Config or Ledger side effect.
-Evidence: commit `bcde3ef`; CI `31700985043` passed macOS ARM and Windows x64.
-Critical checks: `cargo test --workspace --locked`; workspace format/check/test/
-  clippy/diff gate; focused model-add flow with dry-run, commit, reopen, and
-  duplicate rejection.
-Deferred: default selection, starter installation/update, discovery/network
-  probes, credentials, TUI/App Server surfaces, fallback execution, Workspace,
-  and Release Gate evidence.
+Milestone: A Unix CLI user can remove one clean registered Git worktree and,
+  only when explicitly requested, delete its already-merged branch.
+Domain/Phase: Workspaces (Phase 7 / Unix CLI)
+Evidence: commit `813c580`; CI `31709432794` passed Quality / macOS ARM and
+  Windows x64 build.
+Next: select one fresh independent Milestone; do not reopen B18.
 ```
 
 ## Previous settled milestone

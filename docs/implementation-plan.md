@@ -31,7 +31,23 @@ beyond roughly 800 changed lines, crosses domains, or produces a second user
 result is split before more code is added. Phase exit, broad review, and
 Release Gate work remain outside this loop.
 
-Feature implementation was authorized on 2026-08-09. The first core slice fixes the Agent Team command/event interface, process-local Agent Sessions, and pure orchestration policy early; it does not claim Phase 7 completion. Plain `TeamRuntime` remains volatile. A separate durable Team adapter proves synchronous persistence, and the core Runtime Kernel now owns it, gates root admission, persists operation identity and acknowledgement records in the same Team Ledger, and rebinds the complete non-terminal Session set after recovery. The first Phase 2 slices persist Tool call identity, Approval Grant binding, prepared-effect state, terminal digests, and explicit ambiguous-effect reconciliation, and add bounded generic SSE framing plus a strict OpenAI Responses streaming decoder. Configured product Provider driving and one explicit `local.echo` approval/delivery path are now present; broader Tool catalogs and presentation remain pending.
+The 2026-08-09 authorization note below is historical context, not a current
+progress counter. Current progress and settled user results live in the
+[Delivery Model](delivery-model.md) ledger. The first core slice fixes the
+Agent Team command/event interface, process-local Agent Sessions, and pure
+orchestration policy early; it does not claim Phase 7 completion. Plain
+`TeamRuntime` remains volatile. A separate durable Team adapter proves
+synchronous persistence, and the core Runtime Kernel now owns it, gates root
+admission, persists operation identity and acknowledgement records in the same
+Team Ledger, and rebinds the complete non-terminal Session set after recovery.
+The first Phase 2 slices persist Tool call identity, Approval Grant binding,
+prepared-effect state, terminal digests, and explicit ambiguous-effect
+reconciliation, and add bounded generic SSE framing plus a strict OpenAI
+Responses streaming decoder. Configured product Provider driving and one
+explicit `local.echo` approval/delivery path are now present; broader Tool
+catalogs and presentation remain pending. Older roadmap prose that calls an
+implementation group a “batch” is descriptive only and is not a settled
+delivery Batch unless it has a B-number in the Delivery Model ledger.
 
 ## Phase 0: Repository and Measurement Foundation
 
@@ -868,7 +884,8 @@ Complete storage migrations, backup/restore, Diagnostic Bundles, fuzz campaigns,
 
 Exit criteria:
 
-- All [Testing Strategy](testing.md) release gates pass.
+- All explicitly declared [Testing Strategy](testing.md) Release Gate
+  requirements pass for the named candidate SHA.
 - All [Performance Contract](performance-contract.md) absolute limits pass or have an explicit accepted revision.
 - Signed no-admin acceptance bundle completes in 10 to 15 minutes and produces a redacted ZIP.
 - The Target Machine result is bound to the candidate executable hash and passes; an RC waiver may stage the candidate but cannot complete this phase or Alpha.

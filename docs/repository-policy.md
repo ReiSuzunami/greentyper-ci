@@ -34,7 +34,8 @@ GitHub-hosted results prove build and correctness on clean Windows and macOS hos
 
 For this transition, the Release Owner is `ReiSuzunami`. The approval to create the two repositories does not authorize their later deletion or visibility changes. After feature implementation is substantially complete, `ReiSuzunami` must give a new, explicit approval for both destructive state changes: deleting the temporary public mirror and changing the canonical repository from private to public. Approval is considered only after:
 
-1. The agreed feature-complete milestone and release gates pass.
+1. The explicitly declared Release Gate for one candidate commit SHA passes
+   (or has a Release Owner-approved waiver recorded with its evidence).
 2. The complete Git history and source tree pass secret and privacy review.
 3. Canonical CI is enabled and proven at the exact final mirror commit.
 4. The final mirror SHA, build evidence, and artifact hashes are recorded.

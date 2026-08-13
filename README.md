@@ -67,7 +67,7 @@ Initial design budgets include a headless idle Private Bytes limit of 25 MB, a s
 
 Run `direnv allow` once after cloning. The checked-in `.envrc` scopes GitHub CLI metadata, commit identity, and Cargo build output to this workspace without containing credentials.
 
-The execution rules and current progress ledger live in [docs/delivery-model.md](docs/delivery-model.md). Build feature breadth first: one Batch locks one user flow in one domain, records a rough coverage note after each Slice, then performs one short settlement pass. Non-blocking tests, reviews, polish, and adjacent findings wait for later; CI runs once at Batch settlement.
+The execution rules and current progress ledger live in [docs/delivery-model.md](docs/delivery-model.md). A Phase is a roadmap container; a Milestone is one immutable user result; a Batch is the one-to-five-slice delivery package for that Milestone. Build feature breadth first, record one short coverage note after each Slice, then settle once. Non-blocking tests, reviews, polish, and adjacent findings wait for later; CI runs once at Batch settlement. Release Gate work is separate and never an ordinary feature tax.
 
 ```text
 cargo check --workspace --all-targets
