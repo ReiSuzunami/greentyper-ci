@@ -67,6 +67,8 @@ Initial design budgets include a headless idle Private Bytes limit of 25 MB, a s
 
 Run `direnv allow` once after cloning. The checked-in `.envrc` scopes GitHub CLI metadata, commit identity, and Cargo build output to this workspace without containing credentials.
 
+The execution rules and current progress ledger live in [docs/delivery-model.md](docs/delivery-model.md).
+
 ```text
 cargo check --workspace --all-targets
 cargo test --workspace
