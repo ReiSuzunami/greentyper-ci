@@ -311,17 +311,17 @@ smaller list used for progress accounting.
 | B14 | Delegate a child Agent with an explicit bounded Workspace capability and observe the grant in CLI status. | Settled | Commit `5fc24da`; Batch CI `31693096637` passed macOS ARM and Windows x64; capability snapshot only; Workspace execution binding remains deferred. |
 | B15 | List configured Model Presets, effective default, policy, and fallback IDs through a read-only CLI projection. | Settled | Commit `7190da4`; CI `31696507296` passed macOS ARM and Windows x64. |
 | B16 | Create one minimal Model Preset from an existing Provider Profile through CLI. | Settled | Commit `bcde3ef`; CI `31700985043` passed macOS ARM and Windows x64. |
-| B17 | Refresh a configured Provider discovery snapshot, inspect the current catalog, and accept one verified discovered model as a Model Preset through CLI. | Building | One Provider/Config domain only; settlement pending. |
+| B17 | Refresh a configured Provider discovery snapshot, inspect the current catalog, and accept one verified discovered model as a Model Preset through CLI. | Settling | One Provider/Config domain only; CI settlement pending. |
 
 Current official progress is **sixteen CI-settled feature Batches**. B17 is the
-only active Batch; R1 remains
+only active Batch in settlement; R1 remains
 a separate Release Gate and does not block feature coverage.
 
 ## Active milestone
 
 ```text
 Batch: B17
-Status: Building
+Status: Settling
 Milestone: A CLI user can run a controlled Provider discovery refresh, inspect
   a current catalog entry, accept one verified discovered model as a normal
   Model Preset, and reopen Config to see the committed tuple.
@@ -640,3 +640,32 @@ not yet counted as released progress.
 - **Deferred:** defaults, starter/discovery/network/credential flows, TUI/App
   Server, fallback execution, Workspace, and R1 Release Gate evidence.
 - **Next slot:** choose one fresh independent Milestone; do not reopen B16.
+
+### B17 — Provider discovery acceptance through CLI (settling)
+
+- **Status:** `Settling`.
+- **User result:** a CLI user can refresh a configured discovery-enabled
+  Provider, inspect a current catalog, accept one verified discovered model as
+  a normal Model Preset, and reopen Config to see the exact tuple.
+- **Milestone lock:**
+  - **Domain/Phase:** Provider discovery and Config (Phase 4 / selection).
+  - **Slices:** successful fingerprint-bound refresh; current catalog merge;
+    discovered-model acceptance with dry-run and atomic commit; reopen and
+    verify provider/model/dialect.
+  - **Non-goals:** background or periodic discovery, TUI/App Server discovery,
+    starter automation, Provider inference, credential UI, fallback execution,
+    and Release Gate evidence.
+  - **Exit:** successful refresh persists a current observation; catalog marks
+    the discovered model available/acceptable; dry-run leaves Config/state
+    bytes unchanged; commit writes one ordinary Preset; reopen reports the
+    exact tuple. Stale/failed observations remain fail-closed.
+- **Critical checks:** focused CLI/core discovery tests passed; full local
+  format, locked workspace check/test/clippy, and diff checks passed.
+- **Feature change:** acceptance test now proves dry-run zero-write before the
+  existing atomic commit/reopen path.
+- **Commit/push:** pending for this settlement.
+- **Batch CI:** pending for the settlement commit; required macOS ARM and
+  Windows x64 jobs must both pass.
+- **Deferred:** true external-provider success fixture at process boundary,
+  background discovery, TUI/App Server surfaces, starter automation,
+  fallback execution, and Release Gate evidence. These do not block B17.

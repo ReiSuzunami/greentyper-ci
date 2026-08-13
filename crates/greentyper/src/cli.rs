@@ -5014,6 +5014,18 @@ source = "unknown"
             ProviderDialect::Responses,
         )
         .expect("stage discovered model Preset");
+        let preview = runtime
+            .commit(draft.clone(), true)
+            .expect("preview discovered model Preset");
+        assert!(!preview.written);
+        assert_eq!(
+            std::fs::read(&project).expect("read Config after preview"),
+            config_before
+        );
+        assert_eq!(
+            std::fs::read(&state_path).expect("read state after preview"),
+            state_before
+        );
         let commit = runtime
             .commit(draft, false)
             .expect("commit discovered model Preset");
