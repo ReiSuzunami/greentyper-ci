@@ -180,6 +180,9 @@ bound to the root, while `agent.turn` explicitly selects one existing Active
 child and freezes that Turn's Config and Provider Epochs.
 `agent retry --agent ID --turn ID` adds the same owner check to explicit
 Provider recovery, then resumes, delivers, and acknowledges that exact Turn.
+`agent requeue --agent ID` is a separate Team operation: an Active parent may
+requeue its direct Blocked, Failed, or Cancelled child after dependencies clear.
+It resets only Team scheduling and never replays Provider or Tool effects.
 The App Server `agent.retry` operation performs only the owner-bound durable
 rearm; `runtime.resume`, delivery, and acknowledgement remain separate.
 `runtime.cancel` terminalizes one exact Provider-origin blocked Turn,
@@ -549,7 +552,8 @@ incomplete final frame is reported as recovery required without truncation or
 repair, while corruption and incomplete Product sidecars fail closed. Browsing
 itself writes nothing. `A` opens a bounded action menu. Under the selected
 rebound Active Agent Session it can delegate one child, append one bounded
-message, submit a Completion Capsule, record failure, or explicitly cancel.
+message, submit a Completion Capsule, record failure, explicitly cancel, or
+requeue an eligible failed child.
 Each mutation commits only Team state and remains pending until a separate
 confirmation acknowledges its exact operation ID. Restart re-exposes that
 pending acknowledgement, and a failed acknowledgement leaves it retryable.
@@ -605,7 +609,8 @@ before implementation. Live inference conformance,
 automatic transport retry or partial-stream reconnect, Messages reasoning
 blocks, provider-native Context Mode execution, broader multi-Tool approval
 presentation, broader Provider and Tool adapters,
-Git worktree allocation/merge, retrying terminal Team Agents after terminal lifecycle failure, general App Server Runtime control beyond the exact
+Git worktree allocation/merge, broader terminal lifecycle policies beyond the
+parent-authorized Team requeue, general App Server Runtime control beyond the exact
 cancel/retry/resume recovery flow, and
 remote App Server transport remain. The loopback Provider tracer remains
 an internal harness; `local.echo` is intentionally a fixed opt-in command rather

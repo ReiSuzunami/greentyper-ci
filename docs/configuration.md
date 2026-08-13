@@ -242,7 +242,8 @@ detail opens a user-scope starter Draft; after preview and commit, the resulting
 configured Preset can be selected for the current Agent's next Turn.
 `/agent` browses the latest successful Team sidecar projection. Browsing is
 read-only; `A` opens bounded selected-Agent actions for delegation, messaging,
-completion, failure, and cancellation. Every mutation uses a rebound Active
+completion, failure, cancellation, and parent-authorized requeue of an eligible
+child. Every mutation uses a rebound Active
 Session and commits only Team state. When a Team operation is pending, the same
 key instead opens a Team-level action to acknowledge that exact operation. The numeric Agent and operation
 IDs are selectors only: every mutation still requires a Session rebound from
@@ -274,15 +275,18 @@ paths for tests and controlled automation; normal execution uses the platform
 user path and `.greentyper/config.toml` in the current project.
 
 The same executable exposes `agent status|list`, `acknowledge`, `delegate`,
-`message`, `complete`, `fail`, `cancel`, `turn`, and owner-bound Provider
-`retry`. Status/list is a redacted
+`message`, `complete`, `fail`, `cancel`, `turn`, owner-bound Provider `retry`,
+and Team-only `requeue`. Status/list is a redacted
 missing-safe projection. Mutations reuse the ProductDriver Session-rebinding and
 Team-operation acknowledgement boundary. `agent turn --agent ID` runs one Turn
 for that exact existing Active Agent under its inherited Preset and leaves all
 Provider, Tool, delivery, retry, and billing behavior on the ordinary Runtime
 paths. `agent retry --agent ID --turn ID` rejects a mismatched owner before
 mutation, then runs the ordinary explicit Provider recovery flow. It does not
-reopen a terminal Team Agent.
+reopen a terminal Team Agent. `agent requeue --agent ID` instead requires an
+Active parent and a direct Blocked, Failed, or Cancelled child with no still-
+blocking dependency or outstanding child; it changes only Team scheduling and
+never replays Provider or Tool effects.
 
 The current headless `stats` command reads the immutable Runtime usage
 projection and accepts an optional Unix-millisecond `--at` instant for
@@ -319,8 +323,9 @@ and commits one Team cancellation without touching Runtime, Tool, or Config.
 The resulting operation remains `committed_awaiting_acknowledgement`; a separate
 confirmation acknowledges only that operation ID. Restart preserves this
 recovery path, and acknowledgement failure keeps the confirmation and pending
-operation available for retry. Delegation, messaging, completion, failure,
-retry, and Workspace actions remain outside this TUI surface.
+operation available for retry. Delegation, messaging, completion, failure, and
+eligible child requeue are available Team actions; Provider retry/recovery and
+Workspace actions remain separately scoped.
 
 F6 or Ctrl-R requests one local snapshot refresh from the Slash Panel,
 `/model`, `/stats`, `/agent`, or `/blockers`. Runtime, Usage, Team, Config, statusline, and
@@ -382,6 +387,7 @@ The current operations are:
 | `agent.delegate` | Under a rebound Active parent Session, create one downward-only child Task and Agent with a bounded optional scope, budget, and Capability Snapshot; copy the effective default Preset ID into the child without copying Config or authority; return only stable IDs and the committed Team operation |
 | `agent.turn` | Run one Provider Turn for the exact selected Active child under its inherited Preset ID; freeze the resolved Config/Provider Epochs, return prepared output or `tool_approval_required`, and leave delivery acknowledgement explicit |
 | `agent.retry` | Verify the exact persisted Turn owner, then durably rearm only that Agent's retryable initial Provider failure; perform no Provider request, credential lookup, Tool execution, output delivery, or Team mutation |
+| `agent.requeue` | Under the recovered Active parent Session, reset one direct Blocked, Failed, or Cancelled child to Team `Pending`/`Dormant` scheduling when dependencies are clear; return the committed Team operation and never mutate Runtime/Tool or replay effects |
 | `agent.message` | Under the rebound selected Active Session, append one bounded direct or Team message; return only Message and operation IDs, never the body |
 | `agent.complete` | Submit one bounded Completion Capsule and terminalize an Active Agent whose children are already terminal; never return capsule contents |
 | `agent.fail` / `agent.cancel` | Record one bounded explicit terminal reason under the rebound Agent Session; never return the reason |

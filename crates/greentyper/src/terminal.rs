@@ -48,7 +48,7 @@ use crate::product_driver::{
     inspect_product_team, inspect_product_tools, message_from_product_agent,
     open_product_context_runtime, preflight_product_context_reduction,
     request_product_agent_provider_turn_recovery, request_product_provider_turn_recovery,
-    stage_product_model_selection,
+    requeue_product_agent, stage_product_model_selection,
 };
 use crate::provider_connection::{ModelsHttpConnectionTester, ProviderConnectionTester};
 use crate::provider_discovery_catalog::{
@@ -95,6 +95,8 @@ trait TerminalProductActions {
     fn retry_provider(&mut self, turn: u64) -> Result<(), TerminalError>;
 
     fn retry_agent_provider(&mut self, agent: u64, turn: u64) -> Result<(), TerminalError>;
+
+    fn requeue_agent(&mut self, agent: u64) -> Result<(), TerminalError>;
 
     fn resume_agent_provider(
         &mut self,
@@ -306,6 +308,11 @@ impl TerminalProductActions for LedgerTerminalProductActions<'_> {
     fn retry_agent_provider(&mut self, agent: u64, turn: u64) -> Result<(), TerminalError> {
         let turn = TurnId::new(turn).map_err(RuntimeError::Model)?;
         request_product_agent_provider_turn_recovery(self.ledger, agent, turn)?;
+        Ok(())
+    }
+
+    fn requeue_agent(&mut self, agent: u64) -> Result<(), TerminalError> {
+        requeue_product_agent(self.ledger, agent)?;
         Ok(())
     }
 
@@ -1495,6 +1502,7 @@ enum TerminalLoopOutcome {
         agent: u64,
         turn: u64,
     },
+    RequeueAgent(u64),
     ResumeAgentProvider {
         agent: u64,
         turn: u64,
@@ -1551,6 +1559,7 @@ enum AgentLifecycleFlow {
         agent: u64,
         active: bool,
         cancellable: bool,
+        requeueable: bool,
         pending_operation: Option<u64>,
         retry_turn: Option<u64>,
         resume_turn: Option<u64>,
@@ -1559,6 +1568,9 @@ enum AgentLifecycleFlow {
         selected: usize,
     },
     ConfirmCancel {
+        agent: u64,
+    },
+    ConfirmRequeue {
         agent: u64,
     },
     ConfirmAcknowledgement {
@@ -1933,6 +1945,7 @@ impl TerminalSession {
                         agent: target.agent,
                         active: target.active,
                         cancellable: target.cancellable,
+                        requeueable: target.requeueable,
                         pending_operation: target.pending_operation,
                         retry_turn: target.retry_turn,
                         resume_turn: target.resume_turn,
@@ -1950,6 +1963,7 @@ impl TerminalSession {
                 if let Some(AgentLifecycleFlow::Actions {
                     active,
                     cancellable,
+                    requeueable,
                     pending_operation,
                     retry_turn,
                     resume_turn,
@@ -1963,6 +1977,7 @@ impl TerminalSession {
                         .saturating_add(usize::from(resume_turn.is_some()))
                         .saturating_add(usize::from(pending_delivery.is_some()))
                         .saturating_add(usize::from(*cancellable))
+                        .saturating_add(usize::from(*requeueable))
                         .saturating_add(usize::from(pending_operation.is_some()))
                         .saturating_add(
                             if *active && pending_operation.is_none() && !*provider_recovery {
@@ -1982,6 +1997,7 @@ impl TerminalSession {
                     agent,
                     active,
                     cancellable,
+                    requeueable,
                     pending_operation,
                     retry_turn,
                     resume_turn,
@@ -2021,6 +2037,13 @@ impl TerminalSession {
                 if cancellable {
                     if selected == index {
                         self.agent_flow = Some(AgentLifecycleFlow::ConfirmCancel { agent });
+                        return Ok(TerminalLoopOutcome::Redraw);
+                    }
+                    index += 1;
+                }
+                if requeueable {
+                    if selected == index {
+                        self.agent_flow = Some(AgentLifecycleFlow::ConfirmRequeue { agent });
                         return Ok(TerminalLoopOutcome::Redraw);
                     }
                     index += 1;
@@ -2112,6 +2135,9 @@ impl TerminalSession {
                 }
                 Some(AgentLifecycleFlow::ConfirmAcknowledgement { operation }) => {
                     Ok(TerminalLoopOutcome::AcknowledgeTeamOperation(operation))
+                }
+                Some(AgentLifecycleFlow::ConfirmRequeue { agent }) => {
+                    Ok(TerminalLoopOutcome::RequeueAgent(agent))
                 }
                 _ => Ok(TerminalLoopOutcome::Noop),
             },
@@ -2760,6 +2786,7 @@ impl TerminalSession {
             self.agent_flow,
             Some(
                 AgentLifecycleFlow::ConfirmCancel { .. }
+                    | AgentLifecycleFlow::ConfirmRequeue { .. }
                     | AgentLifecycleFlow::ConfirmAcknowledgement { .. }
             )
         ) {
@@ -3166,6 +3193,7 @@ impl TerminalSession {
                     agent,
                     active,
                     cancellable,
+                    requeueable,
                     pending_operation,
                     retry_turn,
                     resume_turn,
@@ -3176,6 +3204,7 @@ impl TerminalSession {
                     agent,
                     active,
                     cancellable,
+                    requeueable,
                     pending_operation,
                     retry_turn,
                     resume_turn,
@@ -3185,6 +3214,9 @@ impl TerminalSession {
                 },
                 AgentLifecycleFlow::ConfirmCancel { agent } => {
                     AgentLifecycleFlowView::ConfirmCancel { agent }
+                }
+                AgentLifecycleFlow::ConfirmRequeue { agent } => {
+                    AgentLifecycleFlowView::ConfirmRequeue { agent }
                 }
                 AgentLifecycleFlow::ConfirmAcknowledgement { operation } => {
                     AgentLifecycleFlowView::ConfirmAcknowledgement { operation }
@@ -4134,6 +4166,37 @@ where
                 let frame = session.frame(Some(config), &view)?;
                 surface.write_frame(&renderer.draw(&frame)?)?;
             }
+            TerminalLoopOutcome::RequeueAgent(agent) => {
+                if let Some(product) = product.as_deref_mut() {
+                    match product.requeue_agent(agent) {
+                        Ok(()) => {
+                            if let Some(ledger) = snapshot.refresh_ledger
+                                && let Ok(refreshed) = refresh_terminal_view(
+                                    ledger,
+                                    config,
+                                    session.controller.slash_query(),
+                                )
+                            {
+                                session.controller.reconcile_snapshot(&refreshed.view);
+                                *config = refreshed.config;
+                                view = refreshed.view;
+                            }
+                            session.notice = Some(format!(
+                                "Agent {agent} requeued; Team operation awaits acknowledgement"
+                            ));
+                        }
+                        Err(_) => {
+                            session.notice = Some(
+                                "Agent requeue failed; prior snapshot remains available".to_owned(),
+                            );
+                        }
+                    }
+                } else {
+                    session.notice = Some("Agent requeue unavailable".to_owned());
+                }
+                let frame = session.frame(Some(config), &view)?;
+                surface.write_frame(&renderer.draw(&frame)?)?;
+            }
             TerminalLoopOutcome::AcknowledgeTeamOperation(operation) => {
                 if let Some(product) = product.as_deref_mut() {
                     match product.acknowledge_team_operation(operation) {
@@ -4742,6 +4805,7 @@ mod tests {
         agent_failures: Vec<(u64, String)>,
         team_acknowledgements: Vec<u64>,
         provider_retries: Vec<(u64, u64)>,
+        agent_requeues: Vec<u64>,
         provider_resumes: Vec<(u64, u64)>,
         agent_output_loads: Vec<(u64, u64, u64)>,
     }
@@ -4763,6 +4827,7 @@ mod tests {
                 agent_failures: Vec::new(),
                 team_acknowledgements: Vec::new(),
                 provider_retries: Vec::new(),
+                agent_requeues: Vec::new(),
                 provider_resumes: Vec::new(),
                 agent_output_loads: Vec::new(),
             }
@@ -4866,6 +4931,11 @@ mod tests {
 
         fn retry_agent_provider(&mut self, agent: u64, turn: u64) -> Result<(), TerminalError> {
             self.provider_retries.push((agent, turn));
+            Ok(())
+        }
+
+        fn requeue_agent(&mut self, agent: u64) -> Result<(), TerminalError> {
+            self.agent_requeues.push(agent);
             Ok(())
         }
 

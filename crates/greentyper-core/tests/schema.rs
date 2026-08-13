@@ -28,7 +28,7 @@ fn every_persisted_schema_has_an_explicit_current_version() {
     assert_eq!(SchemaKind::ProviderCatalog.current().get(), 1);
     assert_eq!(SchemaKind::ProviderDiscovery.current().get(), 1);
     assert_eq!(SchemaKind::RuntimeEvent.current().get(), 14);
-    assert_eq!(SchemaKind::TeamEvent.current().get(), 3);
+    assert_eq!(SchemaKind::TeamEvent.current().get(), 4);
     assert_eq!(SchemaKind::ToolEvent.current().get(), 1);
 }
 
@@ -78,11 +78,11 @@ fn team_event_schema_requires_current_and_rejects_zero_or_future_versions() {
         })
     ));
     assert!(matches!(
-        SchemaKind::TeamEvent.require_current(3),
-        Ok(version) if version.get() == 3
+        SchemaKind::TeamEvent.require_current(4),
+        Ok(version) if version.get() == 4
     ));
     assert!(matches!(
-        SchemaKind::TeamEvent.require_current(4),
+        SchemaKind::TeamEvent.require_current(5),
         Err(SchemaError::Unsupported {
             kind: SchemaKind::TeamEvent,
             ..

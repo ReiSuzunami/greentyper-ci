@@ -46,7 +46,7 @@ use crate::product_driver::{
     has_product_driver_state, inspect_product_team, inspect_product_tools,
     message_from_product_agent, reconcile_product_tool,
     request_product_agent_provider_turn_recovery, request_product_provider_turn_recovery,
-    require_context_mode_execution, require_pending_context_mode_execution,
+    requeue_product_agent, require_context_mode_execution, require_pending_context_mode_execution,
 };
 use crate::provider_http::ConfiguredProvider;
 
@@ -780,6 +780,16 @@ where
                         error_response(Some(request.id), "unknown_agent", "Agent is unknown", None)
                     }
                     Err(_) => runtime_control_error(request.id),
+                }
+            }
+            "agent.requeue" => {
+                let params = match parse_params::<AgentRequeueParams>(request.params) {
+                    Ok(params) if params.agent > 0 => params,
+                    Ok(_) | Err(()) => return invalid_params(request.id),
+                };
+                match requeue_product_agent(&self.runtime_path, params.agent) {
+                    Ok(commit) => team_operation_response(request.id, &commit),
+                    Err(error) => team_control_error(request.id, error),
                 }
             }
             "agent.message" => {
@@ -2111,6 +2121,12 @@ struct AgentTurnParams {
 struct AgentRetryParams {
     agent: u64,
     turn: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AgentRequeueParams {
+    agent: u64,
 }
 
 #[derive(Deserialize)]

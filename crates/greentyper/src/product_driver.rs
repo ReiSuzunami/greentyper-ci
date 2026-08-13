@@ -987,6 +987,38 @@ pub(crate) fn cancel_product_agent(
     })
 }
 
+/// Requeues a terminal/blocked child Agent through its still-active parent.
+///
+/// Team retry is deliberately separate from Provider Turn retry: it appends
+/// only Team events, never reopens Runtime/Tool state or invokes a Provider.
+pub(crate) fn requeue_product_agent(
+    runtime_path: &Path,
+    agent: u64,
+) -> Result<TeamOperationCommit, ProductDriverError> {
+    let (mut kernel, recovery) = open_product_team_control(runtime_path)?;
+    let snapshot = recovery.snapshot().clone();
+    let target = snapshot
+        .projection
+        .agents
+        .iter()
+        .find(|candidate| candidate.id.get() == agent)
+        .ok_or(ProductDriverError::UnknownAgent(agent))?;
+    let parent = target
+        .parent
+        .ok_or(ProductDriverError::CurrentAgentUnavailable)?;
+    let session = recovery
+        .into_sessions()
+        .into_iter()
+        .find(|session| session.agent().get() == parent.get())
+        .ok_or(ProductDriverError::CurrentAgentUnavailable)?;
+    kernel
+        .dispatch_team(TeamCommand::Retry {
+            requester: session,
+            agent: target.id,
+        })
+        .map_err(ProductDriverError::Runtime)
+}
+
 pub(crate) fn acknowledge_product_team_operation(
     runtime_path: &Path,
     operation: u64,

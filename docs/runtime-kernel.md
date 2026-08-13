@@ -170,12 +170,16 @@ leaves Team and Tool Ledgers byte-identical.
 fails before mutation when the persisted Turn owner differs. It still only
 rearms; resume, delivery, and acknowledgement remain separate. The CLI
 `agent retry --agent ID --turn ID` composes those later steps into one user
-flow. Neither surface retries a terminal Team Agent.
+flow. This Provider Turn retry is distinct from Team `agent.requeue`: the latter
+uses an Active parent Session to reset one eligible direct child to Team
+`Pending`/`Dormant` scheduling and never replays Provider or Tool effects.
 
 Agent Team recovery is separate from Turn output recovery. `open_with_team`
 holds both dedicated writers, validates the Team replay, and returns one
 `KernelTeamRecovery` containing every non-terminal process-local Session.
-Terminal Agents are omitted; old Sessions remain invalid. The same typed Kernel
+Terminal Agents are omitted; old Sessions remain invalid. An eligible terminal
+or blocked child can be requeued only by its still-active parent; the old child
+Session is never restored or reused. The same typed Kernel
 dispatch interface admits the single root and rejects duplicates without
 mutation. Each Kernel command synchronously commits a monotonic operation
 identity in the same Team transaction. A complete operation without its later
@@ -225,14 +229,16 @@ Provider freeze; pre-admission failure leaves it pending. Historical schema-1
 through schema-13 Runtime transactions replay and can be followed by schema-14
 transactions; schema-1 token counts become explicitly estimated legacy attempts.
 
-Team Event schema 3 may bind one inherited Model Preset ID to a delegated child
+Team Event schema 4 adds parent-authorized Team requeue and preserves the
+schema-3 inherited Model Preset ID binding for a delegated child
 Agent. The ID is Team metadata only. An explicit App Server `agent.turn` reopens
 that exact Active Agent Session, resolves the current Preset definition and
 fallback chain, then freezes ordinary Config and Provider Epochs for the child
 Turn. Provider retry, cancellation, prepared-delivery acknowledgement, and Tool
 approval recovery select their Session from the persisted Turn or Call owner;
 they do not fall back to the root Agent. Historical Team schema-1 and schema-2
-Agents replay with no inherited Preset.
+Agents replay with no inherited Preset; schema-3 Agents retain the inherited
+ID and schema-1/schema-2 Agents replay without one.
 
 This tracer bullet intentionally stores only the Tool result digest. If the
 process dies after durable Tool success and before Provider continuation, the

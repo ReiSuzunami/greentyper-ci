@@ -799,8 +799,10 @@ and an exclusive writer freshness gate through `greentyper-core`; the
 `workspace` CLI exposes facts, capture, and validation. Windows Lease/Read Set
 operations fail closed until an audited reparse-point-safe adapter lands.
 These facts remain independent of Team Events and do not allocate Git
-worktrees or perform mutations. Git worktree allocation, merge/conflict
-outcomes, and retrying a terminal Team Agent remain pending.
+worktrees or perform mutations. An Active parent can now explicitly requeue a
+direct Blocked, Failed, or Cancelled child once dependencies are clear; this is
+Team scheduling only and never replays Provider or Tool effects. Git worktree
+allocation and merge/conflict outcomes remain pending.
 
 Exit criteria:
 

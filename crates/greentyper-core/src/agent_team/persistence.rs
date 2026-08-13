@@ -13,6 +13,7 @@ use super::*;
 const TEAM_EVENT_SCHEMA: u16 = SchemaKind::TeamEvent.current().get();
 const TEAM_EVENT_SCHEMA_V1: u16 = 1;
 const TEAM_EVENT_SCHEMA_V2: u16 = 2;
+const TEAM_EVENT_SCHEMA_V3: u16 = 3;
 
 /// File-backed adapter for [`TeamRuntime`].
 ///
@@ -414,7 +415,7 @@ fn encode_event_data_for_schema(
             encode_optional_agent(&mut encoder, *parent);
             encode_budget(&mut encoder, *budget);
             encode_capabilities(&mut encoder, capabilities)?;
-            if schema >= TEAM_EVENT_SCHEMA {
+            if schema >= TEAM_EVENT_SCHEMA_V3 {
                 encode_optional_model_preset(&mut encoder, inherited_model_preset)?;
             }
             2
@@ -517,6 +518,15 @@ fn encode_event_data_for_schema(
             encoder.identifier(acknowledgement_transaction.get());
             19
         }
+        TeamEventKind::TaskRetryRequested { task } => {
+            encoder.identifier(task.get());
+            20
+        }
+        TeamEventKind::AgentRetryRequested { requester, agent } => {
+            encoder.identifier(requester.get());
+            encoder.identifier(agent.get());
+            21
+        }
     };
 
     Ok(EventData {
@@ -529,7 +539,7 @@ fn encode_event_data_for_schema(
 fn decode_event_data(data: &EventData) -> Result<TeamEventKind, DurableTeamError> {
     if !matches!(
         data.schema,
-        TEAM_EVENT_SCHEMA_V1 | TEAM_EVENT_SCHEMA_V2 | TEAM_EVENT_SCHEMA
+        TEAM_EVENT_SCHEMA_V1 | TEAM_EVENT_SCHEMA_V2 | TEAM_EVENT_SCHEMA_V3 | TEAM_EVENT_SCHEMA
     ) {
         return Err(DurableTeamError::UnsupportedTeamEventSchema {
             supported: TEAM_EVENT_SCHEMA,
@@ -539,6 +549,11 @@ fn decode_event_data(data: &EventData) -> Result<TeamEventKind, DurableTeamError
     if data.schema == TEAM_EVENT_SCHEMA_V1 && data.kind > 17 {
         return Err(DurableTeamError::CorruptEvent(
             "Team Event kind is unavailable in schema one",
+        ));
+    }
+    if data.schema < TEAM_EVENT_SCHEMA && data.kind > 19 {
+        return Err(DurableTeamError::CorruptEvent(
+            "Team Event kind is unavailable in prior schema",
         ));
     }
     let mut decoder = Decoder::new(&data.payload);
@@ -553,7 +568,7 @@ fn decode_event_data(data: &EventData) -> Result<TeamEventKind, DurableTeamError
             let parent = decode_optional_agent(&mut decoder)?;
             let budget = decode_budget(&mut decoder)?;
             let capabilities = decode_capabilities(&mut decoder)?;
-            let inherited_model_preset = if data.schema >= TEAM_EVENT_SCHEMA {
+            let inherited_model_preset = if data.schema >= TEAM_EVENT_SCHEMA_V3 {
                 decode_optional_model_preset(&mut decoder)?
             } else {
                 None
@@ -631,6 +646,13 @@ fn decode_event_data(data: &EventData) -> Result<TeamEventKind, DurableTeamError
             operation: decode_operation(&mut decoder)?,
             committed_transaction: decode_transaction(&mut decoder)?,
             acknowledgement_transaction: decode_transaction(&mut decoder)?,
+        },
+        20 => TeamEventKind::TaskRetryRequested {
+            task: decode_task(&mut decoder)?,
+        },
+        21 => TeamEventKind::AgentRetryRequested {
+            requester: decode_agent(&mut decoder)?,
+            agent: decode_agent(&mut decoder)?,
         },
         _ => return Err(DurableTeamError::CorruptEvent("unknown Team Event kind")),
     };
@@ -1730,6 +1752,11 @@ mod tests {
             TeamEventKind::AgentCancelled { agent },
             TeamEventKind::TaskBlocked { task, blocked_by },
             TeamEventKind::AgentBlocked { agent, blocked_by },
+            TeamEventKind::TaskRetryRequested { task },
+            TeamEventKind::AgentRetryRequested {
+                requester: other_agent,
+                agent,
+            },
             TeamEventKind::OperationCommitted {
                 operation: TeamOperationId(1),
                 transaction: TransactionId(6),

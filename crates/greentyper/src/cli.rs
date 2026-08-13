@@ -24,7 +24,7 @@ use crate::product_driver::{
     inspect_product_tools, message_from_product_agent, open_product_context_runtime,
     preflight_product_context_reduction, reconcile_product_tool,
     request_product_agent_provider_turn_recovery, request_product_provider_turn_recovery,
-    require_context_mode_execution, require_pending_context_mode_execution,
+    requeue_product_agent, require_context_mode_execution, require_pending_context_mode_execution,
 };
 use crate::provider_connection::{ModelsHttpConnectionTester, ProviderConnectionTester};
 use crate::provider_discovery_catalog::{
@@ -752,6 +752,10 @@ fn run_agent(command: AgentCommand) -> Result<(), CliError> {
             agent,
             turn,
         } => retry_product_agent_turn(&ledger, agent, turn),
+        AgentCommand::Requeue { ledger, agent } => {
+            let commit = requeue_product_agent(&ledger, agent)?;
+            write_json(&team_operation_json(&commit))
+        }
     }
 }
 
@@ -1512,6 +1516,10 @@ enum AgentCommand {
         agent: u64,
         turn: TurnId,
     },
+    Requeue {
+        ledger: PathBuf,
+        agent: u64,
+    },
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -2212,6 +2220,7 @@ fn parse_agent(mut arguments: impl Iterator<Item = String>) -> Result<AgentComma
             | "cancel"
             | "turn"
             | "retry"
+            | "requeue"
     ) {
         return Err(CliError::Usage("unknown agent action"));
     }
@@ -2588,6 +2597,28 @@ fn parse_agent(mut arguments: impl Iterator<Item = String>) -> Result<AgentComma
                 ledger,
                 agent,
                 turn,
+            })
+        }
+        "requeue" => {
+            if parent.is_some()
+                || recipient.is_some()
+                || operation.is_some()
+                || title.is_some()
+                || body.is_some()
+                || input.is_some()
+                || outcome.is_some()
+                || reason.is_some()
+                || scope.is_some()
+                || token_budget.is_some()
+                || tool_budget.is_some()
+                || turn.is_some()
+                || local_echo
+            {
+                return Err(CliError::Usage("invalid option for agent requeue"));
+            }
+            Ok(AgentCommand::Requeue {
+                ledger,
+                agent: agent.ok_or(CliError::Usage("agent requeue requires --agent"))?,
             })
         }
         _ => unreachable!("agent action was validated"),
@@ -3359,6 +3390,7 @@ Usage:\n\
   greentyper agent cancel [--ledger PATH] [--agent ID] [--reason TEXT]\n\
   greentyper agent turn [--ledger PATH] [--tool local.echo] --agent ID --input TEXT\n\
   greentyper agent retry [--ledger PATH] --agent ID --turn ID\n\
+  greentyper agent requeue [--ledger PATH] --agent ID\n\
   greentyper tool status [--ledger PATH]\n\
   greentyper tool reconcile [--ledger PATH] --call ID (--failed | --succeeded-digest SHA256)\n\
   greentyper config schema\n\

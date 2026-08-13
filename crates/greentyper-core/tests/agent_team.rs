@@ -292,6 +292,48 @@ fn failed_dependency_blocks_waiting_task_without_polling() {
 }
 
 #[test]
+fn active_parent_can_requeue_failed_child_without_replaying_effects() {
+    let mut team = TeamRuntime::new(2).expect("valid active limit");
+    let root = admitted_root(&mut team, 2);
+    let child = delegated_child(&mut team, root, "retryable child", &[]);
+    team.dispatch(TeamCommand::Fail {
+        agent: child,
+        reason: "provider unavailable".into(),
+    })
+    .expect("child failure should persist");
+    let commit = team
+        .dispatch(TeamCommand::Retry {
+            requester: root,
+            agent: child.agent(),
+        })
+        .expect("active parent may explicitly requeue child");
+    assert!(
+        commit
+            .events
+            .iter()
+            .any(|event| matches!(event.kind, TeamEventKind::TaskRetryRequested { .. }))
+    );
+    assert!(
+        commit
+            .events
+            .iter()
+            .any(|event| matches!(event.kind, TeamEventKind::AgentRetryRequested { .. }))
+    );
+    let snapshot = team.snapshot();
+    assert_eq!(
+        snapshot.agent(child.agent()).expect("child exists").status,
+        AgentStatus::Active
+    );
+    assert_eq!(
+        snapshot
+            .task(snapshot.agent(child.agent()).expect("child exists").task)
+            .expect("task exists")
+            .status,
+        TaskStatus::Running
+    );
+}
+
+#[test]
 fn active_agent_messages_are_ledgered_and_dormant_agents_cannot_send() {
     let mut team = TeamRuntime::new(1).expect("valid active limit");
     let root = admitted_root(&mut team, 1);

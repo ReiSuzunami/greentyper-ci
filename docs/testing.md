@@ -655,8 +655,9 @@ titles/message bodies/capsule contents/reasons, preserves Config and
 Runtime/Tool bytes, rejects dispatch or acknowledgement without any Ledger write
 while Provider recovery is pending, and leaves ordinary headless Provider Turns
 bound to the root while a child is Active. Direct VT tests additionally drive
-delegation, messaging, completion, failure, cancellation, pending-operation
-acknowledgement, and retryable Provider rearm through real key events. These
+delegation, messaging, completion, failure, cancellation, eligible child
+requeue, pending-operation acknowledgement, and retryable Provider rearm
+through real key events. These
 tests do not prove remote transport, general Runtime control beyond the exact
 cancel/retry/resume flow, Workspace coordination, arbitrary Tool
 approval/execution, or multi-client authentication.

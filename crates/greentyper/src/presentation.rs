@@ -1043,6 +1043,7 @@ pub(crate) struct AgentActionTarget {
     pub(crate) agent: u64,
     pub(crate) active: bool,
     pub(crate) cancellable: bool,
+    pub(crate) requeueable: bool,
     pub(crate) pending_operation: Option<u64>,
     pub(crate) retry_turn: Option<u64>,
     pub(crate) resume_turn: Option<u64>,
@@ -1702,6 +1703,15 @@ impl PresentationController {
             Some(AgentRecoveryView::Blocked { .. }) | None => (None, None, None),
         };
         let active = !matches!(agent.status, "succeeded" | "failed" | "cancelled");
+        let requeueable = pending_operation.is_none()
+            && agent.recovery.is_none()
+            && matches!(agent.status, "blocked" | "failed" | "cancelled")
+            && agent.parent.is_some_and(|parent| {
+                agents
+                    .agents
+                    .iter()
+                    .any(|candidate| candidate.id == parent && candidate.status == "active")
+            });
         Some(AgentActionTarget {
             agent: agent.id,
             active,
@@ -1711,6 +1721,7 @@ impl PresentationController {
                 && pending_delivery.is_none()
                 && agent.recovery.is_none()
                 && active,
+            requeueable,
             pending_operation,
             retry_turn,
             resume_turn,
@@ -2856,6 +2867,7 @@ pub(crate) enum AgentLifecycleFlowView {
         agent: u64,
         active: bool,
         cancellable: bool,
+        requeueable: bool,
         pending_operation: Option<u64>,
         retry_turn: Option<u64>,
         resume_turn: Option<u64>,
@@ -2864,6 +2876,9 @@ pub(crate) enum AgentLifecycleFlowView {
         selected: usize,
     },
     ConfirmCancel {
+        agent: u64,
+    },
+    ConfirmRequeue {
         agent: u64,
     },
     ConfirmAcknowledgement {
@@ -2960,6 +2975,7 @@ impl PresentationLayoutView {
                 agent,
                 active,
                 cancellable,
+                requeueable,
                 pending_operation,
                 retry_turn,
                 resume_turn,
@@ -2996,6 +3012,10 @@ impl PresentationLayoutView {
                 }
                 if cancellable {
                     rows.push(LayoutRowView::new("> Cancel Agent", selected == index));
+                    index += 1;
+                }
+                if requeueable {
+                    rows.push(LayoutRowView::new("> Requeue Agent", selected == index));
                     index += 1;
                 }
                 if let Some(operation) = pending_operation {
@@ -3036,6 +3056,15 @@ impl PresentationLayoutView {
                 LayoutRowView::new("Enter commits; Escape returns", false),
                 LayoutRowView::new(
                     "the Team operation remains pending until acknowledged",
+                    false,
+                ),
+            ],
+            AgentLifecycleFlowView::ConfirmRequeue { agent } => vec![
+                LayoutRowView::new(format!("Agents / Agent {agent} / Requeue"), false),
+                LayoutRowView::new("> Confirm requeue", true),
+                LayoutRowView::new("Enter commits; Escape returns", false),
+                LayoutRowView::new(
+                    "requeue changes Team scheduling only; Provider/Tool effects never replay",
                     false,
                 ),
             ],

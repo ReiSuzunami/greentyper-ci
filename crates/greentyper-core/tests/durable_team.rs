@@ -109,6 +109,52 @@ fn durable_commit_reopens_exactly_and_invalidates_old_sessions() {
 }
 
 #[test]
+fn durable_requeue_reopens_with_the_child_runnable_again() {
+    let path = temp_path("requeue-reopen");
+    let mut team = DurableTeamRuntime::open(&path, 2).expect("create durable Team");
+    let root = admit_root(&mut team);
+    let child_commit = team
+        .dispatch(TeamCommand::Delegate {
+            parent: root,
+            task: TaskSpec::new("retry child", TaskScope::default()),
+            budget: ResourceBudget::new(100, 1),
+            capabilities: CapabilitySnapshot::default(),
+        })
+        .expect("delegate retry child");
+    let child = match child_commit.outcome {
+        CommandOutcome::Delegated { session, .. } => session,
+        other => panic!("unexpected delegation outcome: {other:?}"),
+    };
+    team.dispatch(TeamCommand::Fail {
+        agent: child,
+        reason: "provider unavailable".into(),
+    })
+    .expect("fail child");
+    team.dispatch(TeamCommand::Retry {
+        requester: root,
+        agent: child.agent(),
+    })
+    .expect("requeue child");
+    let expected = team.snapshot();
+    drop(team);
+
+    let recovered = DurableTeamRuntime::open(&path, 2).expect("reopen durable Team");
+    assert_eq!(recovered.snapshot(), expected);
+    let recovered_snapshot = recovered.snapshot();
+    let child_view = recovered_snapshot
+        .agents
+        .iter()
+        .find(|agent| agent.id == child.agent())
+        .expect("requeued child");
+    assert_eq!(
+        child_view.status,
+        greentyper_core::agent_team::AgentStatus::Active
+    );
+    drop(recovered);
+    fs::remove_file(path).expect("cleanup ledger");
+}
+
+#[test]
 fn read_only_team_inspection_reports_a_torn_tail_without_repairing_it() {
     let path = temp_path("inspect-tail");
     let mut team = DurableTeamRuntime::open(&path, 1).expect("create durable Team");
@@ -400,6 +446,10 @@ fn every_team_transition_survives_durable_replay() {
             TeamEventKind::OperationCommitted { .. }
             | TeamEventKind::OperationAcknowledged { .. } => {
                 panic!("standalone Durable Team must not emit Kernel operation events")
+            }
+            TeamEventKind::TaskRetryRequested { .. }
+            | TeamEventKind::AgentRetryRequested { .. } => {
+                panic!("retry events are not part of this transition fixture")
             }
         };
         seen[index] = true;

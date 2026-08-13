@@ -327,6 +327,10 @@ pub enum TeamCommand {
         agent: AgentSession,
         reason: String,
     },
+    Retry {
+        requester: AgentSession,
+        agent: AgentId,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -501,6 +505,13 @@ pub enum TeamEventKind {
         agent: AgentId,
         blocked_by: TaskId,
     },
+    TaskRetryRequested {
+        task: TaskId,
+    },
+    AgentRetryRequested {
+        requester: AgentId,
+        agent: AgentId,
+    },
     OperationCommitted {
         operation: TeamOperationId,
         transaction: TransactionId,
@@ -565,6 +576,7 @@ pub enum TeamOperationKind {
     Completion,
     Failure,
     Cancellation,
+    Retry,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1027,6 +1039,10 @@ impl TeamRuntime {
             TeamCommand::Cancel { agent, reason } => {
                 let agent = self.authenticate(agent)?;
                 self.plan_cancellation(agent, reason)?
+            }
+            TeamCommand::Retry { requester, agent } => {
+                let requester = self.authenticate(requester)?;
+                self.plan_retry(requester, agent)?
             }
         };
         Ok((events, outcome))
@@ -1514,6 +1530,54 @@ impl TeamRuntime {
             ],
             CommandOutcome::StateChanged {
                 task: record.task,
+                agent,
+            },
+        ))
+    }
+
+    fn plan_retry(
+        &self,
+        requester: AgentId,
+        agent: AgentId,
+    ) -> Result<(Vec<TeamEventKind>, CommandOutcome), TeamError> {
+        self.require_active(requester)?;
+        let target = self
+            .state
+            .agents
+            .get(&agent)
+            .ok_or(TeamError::UnknownAgent { agent })?;
+        if target.parent != Some(requester) {
+            return Err(TeamError::InvalidTransition {
+                agent,
+                status: target.status,
+                operation: "retry from this parent",
+            });
+        }
+        if !matches!(
+            target.status,
+            AgentStatus::Blocked | AgentStatus::Failed | AgentStatus::Cancelled
+        ) {
+            return Err(TeamError::InvalidTransition {
+                agent,
+                status: target.status,
+                operation: "retry",
+            });
+        }
+        if self.state.first_failed_dependency(target.task)?.is_some() {
+            return Err(TeamError::InvalidTransition {
+                agent,
+                status: target.status,
+                operation: "retry while a dependency is still blocked",
+            });
+        }
+        self.require_no_outstanding_children(agent)?;
+        Ok((
+            vec![
+                TeamEventKind::TaskRetryRequested { task: target.task },
+                TeamEventKind::AgentRetryRequested { requester, agent },
+            ],
+            CommandOutcome::StateChanged {
+                task: target.task,
                 agent,
             },
         ))
@@ -2277,6 +2341,52 @@ impl TeamState {
                 }
                 record.status = AgentStatus::Blocked;
             }
+            TeamEventKind::TaskRetryRequested { task } => {
+                let record = self
+                    .tasks
+                    .get_mut(task)
+                    .ok_or(TeamError::UnknownTask { task: *task })?;
+                if !matches!(
+                    record.status,
+                    TaskStatus::Blocked { .. }
+                        | TaskStatus::Failed { .. }
+                        | TaskStatus::Cancelled { .. }
+                ) {
+                    return invariant(format!(
+                        "Task {} cannot be requeued from {:?}",
+                        task.get(),
+                        record.status
+                    ));
+                }
+                record.status = TaskStatus::Pending;
+                record.completion = None;
+            }
+            TeamEventKind::AgentRetryRequested { requester, agent } => {
+                let requester_record = self
+                    .agents
+                    .get(requester)
+                    .ok_or(TeamError::UnknownAgent { agent: *requester })?;
+                if requester_record.status != AgentStatus::Active {
+                    return Err(TeamError::AgentNotActive { agent: *requester });
+                }
+                let record = self
+                    .agents
+                    .get_mut(agent)
+                    .ok_or(TeamError::UnknownAgent { agent: *agent })?;
+                if record.parent != Some(*requester)
+                    || !matches!(
+                        record.status,
+                        AgentStatus::Blocked | AgentStatus::Failed | AgentStatus::Cancelled
+                    )
+                {
+                    return invariant(format!(
+                        "Agent {} cannot be requeued by Agent {}",
+                        agent.get(),
+                        requester.get()
+                    ));
+                }
+                record.status = AgentStatus::Dormant;
+            }
             TeamEventKind::OperationCommitted {
                 operation,
                 transaction,
@@ -2688,6 +2798,7 @@ fn classify_operation_transaction<'a>(
         TeamEventKind::CompletionCapsuleSubmitted { .. } => Some(TeamOperationKind::Completion),
         TeamEventKind::TaskFailed { .. } => Some(TeamOperationKind::Failure),
         TeamEventKind::TaskCancelled { .. } => Some(TeamOperationKind::Cancellation),
+        TeamEventKind::AgentRetryRequested { .. } => Some(TeamOperationKind::Retry),
         _ => None,
     });
     let kind = kinds.next()?;
@@ -2705,6 +2816,7 @@ fn operation_agent<'a>(
     // the newly-created child.
     if let Some(parent) = events.iter().find_map(|event| match &event.kind {
         TeamEventKind::DelegationGranted { parent, .. } => Some(*parent),
+        TeamEventKind::AgentRetryRequested { requester, .. } => Some(*requester),
         _ => None,
     }) {
         return Some(parent);
@@ -2715,6 +2827,7 @@ fn operation_agent<'a>(
         | TeamEventKind::AgentFailed { agent }
         | TeamEventKind::AgentCancelled { agent }
         | TeamEventKind::AgentBlocked { agent, .. }
+        | TeamEventKind::AgentRetryRequested { agent, .. }
         | TeamEventKind::CompletionCapsuleSubmitted { agent, .. }
         | TeamEventKind::MessageSent { from: agent, .. } => Some(*agent),
         TeamEventKind::TaskFailed { task, .. } | TeamEventKind::TaskCancelled { task, .. } => {

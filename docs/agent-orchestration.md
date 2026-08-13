@@ -72,7 +72,7 @@ Every Team transaction carries a monotonic transaction ID, Event sequence, zero-
 | `Pending` | `Dormant` | Waiting for Task dependencies |
 | `Ready` | `Dormant` | Runnable, but no Active slot is available |
 | `Running` | `Active` | Consuming one bounded execution slot |
-| `Blocked` | `Blocked` | A dependency failed, was cancelled, or became blocked; this non-terminal state requires explicit retry support in a later slice or `Cancel` now |
+| `Blocked` | `Blocked` | A dependency failed, was cancelled, or became blocked; an Active parent may explicitly requeue an eligible child after the dependency is clear, or `Cancel` it |
 | `Succeeded` | `Succeeded` | Completion Capsule accepted |
 | `Failed` | `Failed` | Explicit terminal failure recorded |
 | `Cancelled` | `Cancelled` | Explicit terminal cancellation recorded |
@@ -87,7 +87,7 @@ Root admission and Delegation automatically reconcile scheduling. When a termina
 4. A delegated Task cannot depend on its parent or any ancestor Task. That would create an implicit cycle because ancestors cannot finish while descendants remain non-terminal.
 5. Child scope and Capability Snapshot are exact set subsets of the parent's values.
 6. Child budgets are reserved monotonically from the parent's unreserved token and tool-call budget. This conservative slice does not refund unused reservations.
-7. Only a valid `AgentSession` for an Active Agent may Delegate, send messages, complete, or fail. Dormant and Blocked Agents consume no Active slot; Blocked Agents may be explicitly cancelled.
+7. Only a valid `AgentSession` for an Active Agent may Delegate, send messages, complete, fail, or requeue a direct child. Dormant and Blocked Agents consume no Active slot; Blocked Agents may be explicitly cancelled. Requeue is parent-authorized Team scheduling only and never replays Provider or Tool effects.
 8. A parent cannot complete, fail, or cancel while a child remains non-terminal.
 9. Failed, cancelled, or blocked dependencies synchronously block waiting dependents.
 10. Task titles, scope labels, dependency lists, Capability Snapshots, tool names, messages, terminal reasons, and Completion Capsules are bounded before entering the Event Ledger. Completion Capsule list counts are bounded separately so empty strings cannot evade byte accounting; larger future payloads belong in Artifacts.
@@ -95,7 +95,7 @@ Root admission and Delegation automatically reconcile scheduling. When a termina
 
 ## Commands and Events
 
-`AdmitRoot`, `Delegate`, `SendMessage`, `Complete`, `Fail`, and `Cancel` are the only command families in this slice. Delegation has a compatibility form without a Preset and a product form carrying one optional validated inherited Preset ID. Agent commands carry an opaque `AgentSession`, while Events retain the stable Agent ID. They emit canonical ownership, lifecycle, coordination, inherited-Preset identity, and Completion Capsule Events. Direct state mutation is private to the fold implementation.
+`AdmitRoot`, `Delegate`, `SendMessage`, `Complete`, `Fail`, `Cancel`, and parent-authorized `Retry` are the command families in this slice. `Retry` (surfaced as Team `requeue`) accepts only an Active parent and a direct `Blocked`, `Failed`, or `Cancelled` child with no outstanding children and no still-blocking dependency; it resets Task/Agent scheduling to `Pending`/`Dormant` and lets normal reconciliation schedule it again. Delegation has a compatibility form without a Preset and a product form carrying one optional validated inherited Preset ID. Agent commands carry an opaque `AgentSession`, while Events retain the stable Agent ID. They emit canonical ownership, lifecycle, coordination, inherited-Preset identity, and Completion Capsule Events. Direct state mutation is private to the fold implementation.
 
 Provider output, Tool effects, approvals, Workspace Leases, Read Sets, merge outcomes, Config Epochs, Provider Epochs, and Context Checkpoints remain deliberately absent from the Team Event model. Tool identity, approval, and effect recovery now live in a separate deep Tool Runtime because their authority and retry rules differ; they are not generic Team fields.
 
@@ -103,7 +103,7 @@ Provider output, Tool effects, approvals, Workspace Leases, Read Sets, merge out
 
 - Canonical Task, Agent, budget, capability, Event, and fold logic is in-process and uses only the Rust standard library.
 - The in-memory Event Ledger remains the volatile policy-test implementation.
-- `DurableTeamRuntime` is an external adapter over the provisional Phase 1 file Ledger. It uses a dedicated Team Ledger, Team Event schema 3 for optional inherited-Preset identity, historical schema-1 and schema-2 replay with no inherited ID, a versioned bounded codec for all 19 Team Event kinds, exclusive writer ownership, synchronous receipts, complete-prefix replay, and fail-closed schema/checksum/state validation.
+- `DurableTeamRuntime` is an external adapter over the provisional Phase 1 file Ledger. It uses a dedicated Team Ledger, Team Event schema 4 for Team requeue plus optional inherited-Preset identity, historical schema-1/schema-2 replay with no inherited ID and schema-3 replay with inherited identity, a versioned bounded codec for all 21 Team Event kinds, exclusive writer ownership, synchronous receipts, complete-prefix replay, and fail-closed schema/checksum/state validation.
 - The adapter is not the final storage choice or migration contract. The Kernel ownership seam is implemented in core, while candidate selection and production migration remain separate decisions.
 - Provider Runtime, Tool Runtime, and Workspace Coordinator retain separate interfaces because their retry, authority, and effect-ordering rules differ.
 - The product and acceptance binaries continue to depend inward on `greentyper-core`; the core never depends on them.

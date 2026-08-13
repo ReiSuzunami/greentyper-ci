@@ -247,6 +247,58 @@ impl TempTree {
         ));
     }
 
+    fn create_failed_child_state(&self) -> u64 {
+        let (mut kernel, recovery) = RuntimeKernel::open_with_team_and_tools(
+            self.runtime_ledger(),
+            self.team_ledger(),
+            self.tool_ledger(),
+            2,
+        )
+        .expect("open failed-child fixture");
+        assert!(recovery.into_sessions().is_empty());
+        let root_commit = kernel
+            .dispatch_team(TeamCommand::AdmitRoot {
+                task: TaskSpec::new("requeue root", TaskScope::default()),
+                budget: ResourceBudget::new(1_000, 4),
+                capabilities: CapabilitySnapshot::default(),
+            })
+            .expect("admit requeue root");
+        let root = match root_commit.commit.outcome {
+            CommandOutcome::RootAdmitted { session, .. } => session,
+            other => panic!("unexpected root outcome: {other:?}"),
+        };
+        kernel
+            .acknowledge_team_operation(root_commit.operation)
+            .expect("acknowledge requeue root");
+        let child_commit = kernel
+            .dispatch_team(TeamCommand::Delegate {
+                parent: root,
+                task: TaskSpec::new("requeue child", TaskScope::default()),
+                budget: ResourceBudget::new(100, 1),
+                capabilities: CapabilitySnapshot::default(),
+            })
+            .expect("delegate requeue child");
+        let child = match child_commit.commit.outcome {
+            CommandOutcome::Delegated { agent, session, .. } => {
+                kernel
+                    .acknowledge_team_operation(child_commit.operation)
+                    .expect("acknowledge requeue child");
+                (agent, session)
+            }
+            other => panic!("unexpected child outcome: {other:?}"),
+        };
+        let failed = kernel
+            .dispatch_team(TeamCommand::Fail {
+                agent: child.1,
+                reason: "private child failure".into(),
+            })
+            .expect("fail requeue child");
+        kernel
+            .acknowledge_team_operation(failed.operation)
+            .expect("acknowledge failed child");
+        child.0.get()
+    }
+
     fn create_tool_state(&self) {
         let (mut kernel, recovery) = RuntimeKernel::open_with_team_and_tools(
             self.runtime_ledger(),
@@ -1874,6 +1926,52 @@ fn app_server_agent_turn_missing_preset_fails_before_runtime_write() {
         fs::read(temp.tool_ledger()).expect("read Tool after preflight"),
         tool_before
     );
+}
+
+#[test]
+fn app_server_requeues_a_failed_child_without_touching_runtime_or_tools() {
+    let temp = TempTree::new();
+    let child = temp.create_failed_child_state();
+    let runtime_before = fs::read(temp.runtime_ledger()).expect("read Runtime before requeue");
+    let tool_before = fs::read(temp.tool_ledger()).expect("read Tool before requeue");
+    let response = responses(
+        &temp.run(
+            format!(
+                "{{\"id\":1,\"operation\":\"agent.requeue\",\"params\":{{\"agent\":{child}}}}}\n"
+            )
+            .as_bytes(),
+        ),
+    );
+    assert_eq!(
+        response[0]["result"]["status"],
+        "committed_awaiting_acknowledgement"
+    );
+    assert_eq!(response[0]["result"]["outcome"]["kind"], "state_changed");
+    assert_eq!(response[0]["result"]["outcome"]["agent"], child);
+    let operation = response[0]["result"]["operation"]
+        .as_u64()
+        .expect("requeue operation");
+    let listed = responses(&temp.run(b"{\"id\":2,\"operation\":\"agent.list\"}\n"));
+    assert_eq!(listed[0]["result"]["team"]["agents"][1]["status"], "active");
+    assert_eq!(
+        listed[0]["result"]["pending_operations"][0]["operation"],
+        operation
+    );
+    assert_eq!(
+        fs::read(temp.runtime_ledger()).expect("read Runtime after requeue"),
+        runtime_before
+    );
+    assert_eq!(
+        fs::read(temp.tool_ledger()).expect("read Tool after requeue"),
+        tool_before
+    );
+    let ack = responses(&temp.run(
+        format!(
+            "{{\"id\":3,\"operation\":\"agent.acknowledge\",\"params\":{{\"operation\":{operation}}}}}\n"
+        )
+        .as_bytes(),
+    ));
+    assert_eq!(ack[0]["result"]["status"], "acknowledged");
 }
 
 #[test]
