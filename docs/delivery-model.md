@@ -10,11 +10,22 @@ only a numbered ledger row and its settlement record count.
 
 ## Current Goal
 
-Maximize **verified usable user-flow coverage per unit of time**. Ship the next
-small result first; tidy, document, and certify once at the Batch boundary.
-Do not pursue “complete the roadmap”, “complete a Phase”, or “make every edge
-case uncontroversial” inside one task. Those are separate planning or Release
-Gate activities.
+Maximize **settled usable user-flow coverage per unit of time**. Lock one small
+user result, make it observable, freeze it, and settle it. Do not pursue
+roadmap completion, Phase completion, or edge-case unanimity inside a feature
+Batch. Those belong to separate Phase or Release reviews.
+
+Progress has three explicit tracks:
+
+```text
+Implemented: user result is observable locally; provisional only.
+Settled: Batch Gate is complete; counts toward feature progress.
+Released: declared Release Gate passed; release evidence only.
+```
+
+Never report these as one number. A result can be `Implemented` while its Batch
+waits for settlement; it cannot be counted as `Settled` until the Batch reaches
+its terminal success state.
 
 The only active execution unit is **one Batch = one user result in one domain**.
 Lock it, make it usable, stop, then settle it once. Phase is a roadmap label;
@@ -44,6 +55,38 @@ locked Batch is Building, Ready, or Settling.
 
 Do not alternate between passes. Non-blocking findings go to the follow-up
 register and stay out of the current Batch.
+
+### Convergence and step signals
+
+Every active Batch carries one current signal. A signal is an instruction, not
+status prose; it determines the only allowed next action.
+
+| Signal | Emit when | Only allowed next action |
+| --- | --- | --- |
+| `LOCK` | User, entry, result, blocker boundary, and non-goals are fixed. | Start the first Slice. |
+| `STEP` | Slice produced observable evidence. | Continue the smallest next Slice in same Milestone. |
+| `SPLIT` | Second result/domain, sixth Slice, or two consecutive Slices without new user evidence. | Freeze current scope; create a later Milestone. |
+| `FREEZE` | Milestone Exit is observable. | Stop feature work; enter Ready. |
+| `SETTLE` | Critical checks pass and scope is frozen. | Perform one Batch settlement. |
+| `WAIT_EXTERNAL` | Exact-SHA CI or an explicitly external dependency is running. | Wait only; no code, scope, polling, or Phase switch. |
+| `REPAIR_ONCE` | CI reports one confirmed code failure. | One repair commit, same Milestone, then one replacement run. |
+| `RERUN_ONCE` | CI reports one infrastructure/flaky failure. | Rerun same SHA once. |
+| `CLOSE` | Settlement evidence is green and recorded. | Mark Batch `Settled`; select next Milestone. |
+| `FAIL` | Repair/rerun budget is exhausted or exit cannot be met. | Mark Batch `Failed` or `Cancelled`; release slot. |
+
+No signal may be skipped silently. `Blocked` is a holding state, never a
+terminal state: it must become `REPAIR_ONCE`, `RERUN_ONCE`, `FAIL`, or an
+explicitly resumed Batch.
+
+Each Slice note must append the signal and remaining budget:
+
+```text
+Signal: STEP
+Budget: slices 2/5; new checks 1/2; code repairs 0/1; CI runs 0/1
+```
+
+When `FREEZE` is emitted, remaining feature budget is discarded. New ideas go
+to the follow-up register, even if they are small.
 
 ## The unit of progress
 
@@ -127,11 +170,16 @@ never implied by a feature Batch and never runs inside the ordinary feature
 loop. A pending Phase exit does not block the next locked Milestone unless the
 next Milestone depends on a missing Phase invariant.
 
-Every Phase is labelled `Planned`, `Active`, `Deferred`, or `Closed`.
-`Active` means only that it may supply the next Milestone; it does not require
-all listed roadmap items to be implemented. `Closed` is recorded only at a
-dedicated Phase review with its own exit evidence. Phase review and Release
+Every Phase is labelled `Planned`, `Active`, `Coverage Complete`, `Deferred`,
+or `Closed`. `Active` means only that it may supply the next Milestone. Before
+activation, Phase must list a finite `Required Milestones` set, one optional
+integration smoke, and explicit deferred work. `Coverage Complete` means every
+required Milestone is `Settled` and the smoke passes. `Closed` is recorded only
+at a dedicated Phase review with its own evidence. Phase review and Release
 Gate work never enter a normal feature Batch.
+
+Phase closure is finite, not aspirational. A later discovery never reopens a
+closed Phase; it creates a new Milestone in a new Phase review cycle.
 
 ### Milestone lock
 
@@ -146,15 +194,39 @@ Critical checks: <one or two blocker-critical checks selected before coding>
 Exit: <the one observable result that makes the milestone usable>
 ```
 
-Also record `Status: Locked | Building | Ready | Settling | Settled | Blocked`.
-`Ready`
-means the user result works and the checks listed in `Critical checks` pass; it
-is not progress for the Batch. The lock cannot be edited to add a new result;
-changing the user result starts a new Milestone.
+Also record Milestone and Batch states separately:
 
-The Phase can stay open indefinitely. The Milestone cannot: once its exit is
-met, settle the Batch and move to the next Milestone. A new idea belongs in a
-later slot unless it blocks the locked exit.
+```text
+Milestone status: Locked | Building | Ready | Achieved | Cancelled | Superseded
+Batch status: Open | Settling | Blocked | Settled | Failed | Cancelled
+Signal: LOCK | STEP | SPLIT | FREEZE | SETTLE | WAIT_EXTERNAL |
+        REPAIR_ONCE | RERUN_ONCE | CLOSE | FAIL
+Budget: slices 0/5; new checks 0/2; code repairs 0/1; CI runs 0/1
+```
+
+`Ready` means the user result works and the locked critical checks pass. It is
+not progress. `Achieved` means the Milestone Exit is met and feature work is
+frozen. `Settled` belongs only to the Batch. The lock cannot be edited to add a
+new result; changing the user result starts a new Milestone.
+
+The Phase may remain `Active` while its finite Milestones settle. The Milestone
+cannot remain open after its Exit is met: emit `FREEZE`, mark it `Achieved`,
+settle its Batch, and move to the next Milestone. A new idea belongs in a later
+slot unless it blocks the locked Exit.
+
+Milestone and Batch state machines:
+
+```text
+Milestone: Locked → Building → Ready → Achieved
+Milestone terminal alternatives: Cancelled | Superseded
+
+Batch: Open → Settling → Settled
+Batch holding state: Blocked
+Batch terminal alternatives: Failed | Cancelled
+```
+
+`Blocked` never counts and never releases the slot by itself. It must resolve to
+`Settled`, `Failed`, or `Cancelled`.
 
 ## Hard batch rules
 
@@ -184,12 +256,28 @@ later slot unless it blocks the locked exit.
 7. Do not start another feature while the active Batch is unsettled. A local
    implementation, a passing targeted test, or an unpushed commit is not
    progress yet.
-8. Switch Phase only after the current Batch is settled. Phase switching is
-   not a way to leave an unfinished Batch behind.
-9. A Phase may remain Active forever while Milestones settle. Do not wait for a
-   Phase exit review before selecting an independent result from another Phase.
+8. Do not switch Phase while current Batch is `Building`, `Ready`, or
+   `Settling`. A Phase switch requires `Settled`, `Failed`, or `Cancelled`.
+9. A Phase must have finite Required Milestones. It may remain `Active` while
+   those Milestones settle, but it must eventually become `Coverage Complete`
+   or `Deferred`; it is not an infinite work queue.
 10. A Milestone lock cannot grow. If new work creates a second user result,
     split it into a later Milestone; if it is only polish or evidence, defer it.
+
+### Fixed budgets
+
+Budgets are hard stop signals, not estimates:
+
+- maximum five Slices per Batch;
+- maximum two new settlement checks total (one happy path, one blocker);
+- maximum one code repair commit after CI failure;
+- maximum one same-SHA infrastructure rerun;
+- maximum one feature CI workflow for the final SHA.
+
+Critical checks selected in the lock consume the same two-check settlement
+budget when they are newly added. Existing checks may be reused without adding
+budget. Budget exhaustion emits `SPLIT` or `FAIL`; it never authorizes another
+review cycle.
 
 ## Three gates, not one endless gate
 
@@ -318,9 +406,9 @@ Use a rough coverage band or domain count, not a false precise percentage. This
 estimate is updated once at Batch closeout, never after each slice.
 
 Current breadth: Provider/Model, Config/Credentials, Agent/Team, Context/Usage,
-project Skills, Workspace, and local App Server each have at least one usable
-flow. MCP transport and complete Packaging/Acceptance do not. This is **7 of 9
-roadmap domains with a usable base flow**, not 78% release readiness.
+project Skills, Workspace, local App Server, and bounded MCP discovery each have
+at least one usable flow. Complete Packaging/Acceptance does not. This is **8 of
+9 roadmap domains with a usable base flow**, not 89% release readiness.
 
 ## Current delivery ledger
 
@@ -350,16 +438,17 @@ smaller list used for progress accounting.
 | B17 | Refresh a configured Provider discovery snapshot, inspect the current catalog, and accept one verified discovered model as a Model Preset through CLI. | Settled | Commit `b6c75e2`; CI `31705477912` passed macOS ARM and Windows x64. |
 | B18 | Remove one clean registered Git worktree and optionally delete its already-merged branch through Unix CLI. | Settled | Commit `813c580`; CI `31709432794` passed Quality / macOS ARM and Windows x64. |
 | B19 | Publish one bounded Context checkpoint through App Server and receive a redacted summary. | Settled | Commit `988438d`; CI `31714088503` passed Quality / macOS ARM and Windows x64. |
-| B20 | Connect to one explicitly selected local stdio MCP server and list its bounded tools through CLI. | Settling | Current MCP discovery protocol only; exact process, no shell, no execution or background connection; exact-SHA CI pending. |
+| B20 | Connect to one explicitly selected local stdio MCP server and list its bounded tools through CLI. | Settled | Commit `919c4ed`; CI `31720409216` passed Windows x64 and Quality / macOS ARM. Discovery only; no shell, execution, or background connection. |
 
-Current official progress is **nineteen CI-settled feature Batches**. R1 remains
-a separate Release Gate and does not block feature coverage.
+Current official progress is **twenty CI-settled feature Batches**. R1 remains
+a separate Release Gate and does not block feature coverage. Implemented,
+Settled, and Released counts remain separate.
 
-## Current execution slot
+## Last execution slot
 
 ```text
 Batch: B20
-Status: Settling
+Status: Settled
 Milestone: A CLI user can explicitly launch one local stdio MCP server and list
   its bounded tool names and schemas.
 Domain/Phase: Skills and MCP (Phase 5 / CLI discovery)
@@ -375,9 +464,9 @@ Exit: `greentyper mcp tools ...` prints bounded JSON for one explicitly selected
   server and exits; invalid servers terminate within the fixed timeout.
 ```
 
-B19 is settled below. B20 is the only active feature scope; adjacent MCP
-execution, Context, Agent, Provider, Workspace, and Release Gate ideas stay
-deferred.
+B19 and B20 are settled below. Select a fresh independent Milestone; adjacent
+MCP execution, Context, Agent, Provider, Workspace, and Release Gate ideas stay
+deferred until explicitly locked.
 
 ### B20 Slice notes
 
@@ -395,8 +484,29 @@ Next: fail closed on malformed, oversized, and hung servers.
 Slice: invalid servers terminate within the fixed timeout and create no product state.
 Breadth: none; same locked MCP discovery result.
 Depth: reusable Unix process-group / Windows Job containment plus bounded framing.
-Next: local gate passed; settle through one exact-SHA CI run.
+Next: closeout record complete; select a fresh independent Milestone.
 ```
+
+### B20 closeout
+
+- **Depth:** CLI accepts one explicitly selected local stdio MCP server, performs
+  bounded current-protocol initialization and `tools/list`, and returns sorted
+  bounded tool descriptors. Malformed, oversized, or hung servers fail closed
+  within the fixed timeout.
+- **Breadth:** bounded MCP discovery adds one usable MCP flow; overall usable
+  base is now 8 of 9 roadmap domains. Tool execution, approval, and remote MCP
+  remain separate results.
+- **Critical checks:** compliant discovery fixture passed; malformed,
+  oversized, and hung-server fixtures failed closed without Config or Ledger
+  creation. Local format/check/clippy/diff gates passed before settlement.
+- **Commit/push:** `919c4edae61b145f195ee7ad36289ea0dc9cb6d8`, pushed to
+  `origin/main` and `ci/main`.
+- **Batch CI:** run `31720409216` for the exact SHA passed Windows x64 and
+  Quality / macOS ARM.
+- **Deferred:** MCP tool calls, approval/effect execution, persistent server
+  Config, credential binding, remote transports, shared transports, prompts,
+  resources, elicitation, TUI/App Server surfaces, and background discovery.
+- **Next:** select one fresh independent Milestone; do not reopen B20.
 
 ### B19 Slice notes
 
@@ -458,6 +568,19 @@ Next: closeout record is complete; select a fresh independent Milestone.
 ## Last settled Batch
 
 ```text
+Batch: B20
+Status: Settled
+Milestone: A CLI user can explicitly launch one local stdio MCP server and list
+  its bounded tool names and schemas.
+Domain/Phase: Skills and MCP (Phase 5 / CLI discovery)
+Evidence: commit `919c4edae61b145f195ee7ad36289ea0dc9cb6d8`; CI `31720409216`
+passed Windows x64 and Quality / macOS ARM.
+Next: select one fresh independent Milestone; do not reopen B20.
+```
+
+## Previous settled Batch
+
+```text
 Batch: B19
 Status: Settled
 Milestone: An App Server client can submit one bounded Context reduction and
@@ -466,25 +589,6 @@ Domain/Phase: Context (Phase 6 / App Server adapter)
 Evidence: commit `988438dcc807dec24cc76d946dd2a753d39ac7ab`; CI `31714088503`
 passed Quality / macOS ARM and Windows x64 build.
 Next: select one fresh independent Milestone; do not reopen B19.
-```
-
-## Previous settled milestone
-
-```text
-Batch: B15
-Status: Settled
-Milestone: A CLI user can list configured Model Presets, see the effective
-  default, and inspect each preset's provider, model, dialect, policy, and
-  fallback chain without mutating state.
-Domain/Phase: Config and Provider selection (Phase 1/4)
-Slices: add a read-only config presets command; serialize bounded non-secret
-  preset projections; exercise one configured-preset listing flow.
-Non-goals: preset editing, starter installation/update, Provider discovery or
-  network probes, credential operations, TUI/App Server surfaces, fallback
-  execution, and Release Gate evidence.
-Exit: `greentyper config presets` returns deterministic JSON containing the
-  effective default and every valid configured preset, including fallback IDs,
-  with unchanged Config and Ledger state.
 ```
 
 Previous settled result:
