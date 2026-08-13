@@ -286,16 +286,16 @@ smaller list used for progress accounting.
 | B11 | List registered Git worktrees through CLI without exposing absolute paths or changing repository state. | Settled | Commit `a684065`; CI `31682587546` passed macOS ARM and Windows x64. |
 | B12 | Remove one clean, registered Unix Git worktree through CLI while preserving its branch. | Settled | Commit `e80fc1d`; CI `31686469234` passed macOS ARM and Windows x64. |
 | B13 | Explicitly merge one clean, conflict-free Unix Git branch through CLI while preserving the source branch. | Settled | Commit `947bf7a`; CI `31689627871` passed macOS ARM and Windows x64. |
-| B14 | Delegate a child Agent with an explicit bounded Workspace capability and observe the grant in CLI status. | Settled locally; CI pending | Commit `5fc24da`; capability snapshot only; Workspace execution binding remains deferred. |
+| B14 | Delegate a child Agent with an explicit bounded Workspace capability and observe the grant in CLI status. | Settled | Commit `5fc24da`; Batch CI `31693096637` passed macOS ARM and Windows x64; capability snapshot only; Workspace execution binding remains deferred. |
 
-Current official progress is **thirteen CI-settled feature Batches plus B14 awaiting CI settlement**. R1 remains a
-separate Release Gate and does not block feature coverage.
+Current official progress is **fourteen CI-settled feature Batches**. R1 remains
+a separate Release Gate and does not block feature coverage.
 
 ## Active Milestone
 
 ```text
 Batch: B14
-Status: Settled locally; CI pending
+Status: Settled
 Milestone: A CLI user can delegate a child Agent with an explicit bounded
   workspace_read or workspace_write capability and observe that grant in Agent
   status.
@@ -307,7 +307,7 @@ Non-goals: consuming Workspace capability in an Agent Turn, generic Tool or MCP
   Release Gate evidence.
 Exit: delegate with --capability workspace_read, acknowledge the Team operation,
   then agent status reports the child with capability_count = 1. Achieved in
-  the local CLI flow; CI settlement remains required for progress credit.
+  the local CLI flow and Batch CI.
 ```
 
 ## Batch closeout record
@@ -497,9 +497,9 @@ not yet counted as released progress.
   deletion, Windows Git adapters, TUI/App Server surfaces, and Release Gate
   evidence.
 
-### B14 — Explicit Agent Workspace capability (awaiting CI)
+### B14 — Explicit Agent Workspace capability (settled)
 
-- **Status:** `Settled locally; CI pending`.
+- **Status:** `Settled`.
 - **User result:** a CLI user can delegate a child Agent with repeated bounded
   `--capability workspace_read|workspace_write` options, acknowledge the Team
   operation, and see the child capability count in `agent status`.
@@ -513,4 +513,4 @@ not yet counted as released progress.
 - **Deferred:** Workspace capability execution binding, generic Tool/MCP
   capability syntax, TUI/App Server surfaces, Windows adapters, and Release
   Gate evidence.
-- **Next slot:** settle B14 CI, then choose one new independent user result.
+- **Next slot:** choose one new independent user result; B14 is already counted.
