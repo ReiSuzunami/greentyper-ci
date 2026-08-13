@@ -839,7 +839,10 @@ registered, clean, non-root Git worktree through `workspace remove`; it never
 uses force and verifies the branch remains. An Active parent can now explicitly requeue a
 direct Blocked, Failed, or Cancelled child once dependencies are clear; this is
 Team scheduling only and never replays Provider or Tool effects. Automatic
-merge and Windows Git worktree support remain pending.
+merge of one clean, conflict-free checked-out branch is now available through
+`workspace merge`; it rechecks references before committing and preserves the
+source branch. Conflict resolution, automatic/background scheduling, branch
+deletion, and Windows Git worktree support remain pending.
 
 Exit criteria:
 

@@ -224,8 +224,9 @@ smaller list used for progress accounting.
 | B10 | Recover an early-failed active child Agent Turn through App Server, then deliver and acknowledge exactly once. | Settled | Commit `4931e8a`; CI `31679750127` passed macOS ARM and Windows x64. |
 | B11 | List registered Git worktrees through CLI without exposing absolute paths or changing repository state. | Settled | Commit `a684065`; CI `31682587546` passed macOS ARM and Windows x64. |
 | B12 | Remove one clean, registered Unix Git worktree through CLI while preserving its branch. | Settled | Commit `e80fc1d`; CI `31686469234` passed macOS ARM and Windows x64. |
+| B13 | Explicitly merge one clean, conflict-free Unix Git branch through CLI while preserving the source branch. | Settled | Commit `947bf7a`; CI `31689627871` passed macOS ARM and Windows x64. |
 
-Current official progress is **twelve CI-settled feature Batches**. R1 remains a
+Current official progress is **thirteen CI-settled feature Batches**. R1 remains a
 separate Release Gate and does not block feature coverage.
 
 ## Batch closeout record
@@ -387,3 +388,30 @@ not yet counted as released progress.
   allocator, and acceptance pipelines.
 - **Deferred:** automatic merge, detached/prunable cleanup, Windows Git
   adapters, TUI/App Server surfaces, and Release Gate evidence.
+
+### B13 — Explicit Git branch merge (settled)
+
+- **Status:** `Settled`.
+- **User result:** a Unix CLI user can explicitly merge one clean,
+  conflict-free source branch into the checked-out target branch while keeping
+  the source branch and its commit intact.
+- **Milestone lock:**
+  - **Domain/Phase:** Workspaces (Phase 7), Unix CLI only.
+  - **Slices:** clean checked-out target validation; merge-tree preflight and
+    reference recheck; explicit non-fast-forward merge with source preservation.
+  - **Non-goals:** automatic/background merge, conflict resolution, force
+    merge, branch deletion, Windows Git adapters, TUI/App Server surfaces, and
+    Release Gate evidence.
+  - **Exit:** a clean merge returns a redacted merge result; a conflict or
+    dirty target is rejected without changing the target branch.
+- **Critical checks:** `cargo test -p greentyper --test workspace_cli --locked`
+  passed (3 tests), including clean merge success, source preservation, and
+  conflict rejection with unchanged target HEAD; full local workspace gate
+  passed.
+- **Commit/push:** `947bf7a`, pushed to `origin/main` and `ci/main`.
+- **Batch CI:** run `31689627871` passed Quality / macOS ARM and Windows x64
+  build, including workspace tests, lint, release builds, transport, terminal,
+  allocator, and acceptance pipelines.
+- **Deferred:** conflict resolution, automatic/background scheduling, branch
+  deletion, Windows Git adapters, TUI/App Server surfaces, and Release Gate
+  evidence.

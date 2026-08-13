@@ -118,10 +118,11 @@ Provider output, Tool effects, approvals, Workspace Leases, Read Sets, merge out
 2. Extend the current Kernel-owned ProductDriver and CLI receipt/approval path
    into TUI/App Server presentation, durable resumable Tool-result references,
    and richer reconciliation without exposing Agent Session authority.
-3. The Unix product adapter now adds Git worktree allocation and explicit
-   merge/conflict preflight outcomes on top of the existing Workspace Lease and
-   Read Set writer gate. It does not perform an automatic merge. Add audited
-   Windows reparse-safe Lease/Read Set/Git adapters before enabling those
-   operations there.
+3. The Unix product adapter now adds Git worktree allocation, explicit
+   merge/conflict preflight outcomes, and one explicit clean-branch merge on
+   top of the existing Workspace Lease and Read Set writer gate. It does not
+   resolve conflicts or schedule merges in the background. Add audited Windows
+   reparse-safe Lease/Read Set/Git adapters before enabling those operations
+   there.
 4. Extend byte-offset process termination from the Team Ledger transaction seam to every product Provider/Tool delivery and acknowledgement boundary.
 5. Exercise Performance Contract workload P3 with two Active Agents on the Target Machine and four on FMDev; measure Dormant increment rather than assuming it.

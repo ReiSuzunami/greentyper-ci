@@ -586,7 +586,11 @@ reports `mergeable` or `conflict` with relative conflict paths without changing
 a branch, index, or working tree. These facts remain independent of Team Events
 and do not expose the absolute root. Windows Lease, Read Set, and Git worktree
 operations currently fail closed pending audited reparse-point-safe adapters;
-facts-only inspection remains available. On Unix, `workspace remove --root PATH
+facts-only inspection remains available. On Unix, `workspace merge --root PATH
+--target BRANCH --source BRANCH` explicitly merges one clean, conflict-free
+source branch into the checked-out target branch after a bounded preflight; it
+preserves the source branch and rejects dirty targets or conflicts without
+changing the target. On Unix, `workspace remove --root PATH
 --worktree PATH` removes one registered, clean, non-root worktree without
 force, preserves its branch, and rejects dirty, locked, prunable, detached, or
 unknown targets.
