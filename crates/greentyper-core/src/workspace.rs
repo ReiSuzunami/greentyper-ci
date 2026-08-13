@@ -306,7 +306,10 @@ impl WorkspaceLease {
         drop(target);
 
         let absolute = root.path().join(&relative);
+        #[cfg(unix)]
         let mut options = atomic_write_file::OpenOptions::new();
+        #[cfg(not(unix))]
+        let options = atomic_write_file::OpenOptions::new();
         #[cfg(unix)]
         {
             use atomic_write_file::unix::OpenOptionsExt as AtomicOpenOptionsExt;
