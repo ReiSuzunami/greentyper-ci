@@ -209,10 +209,10 @@ smaller list used for progress accounting.
 | B8 | List a project Skill by stable content hash and run it once through the existing approval/capability-bounded `local.echo` path, with durable reuse on repeat. | Settled | Project-only, fixed `local.echo` path; MCP transport/client, arbitrary scripts, background polling, TUI, and general Skill catalog/authority deferred. Commit `67b36b0`; Batch CI `31670709539` passed macOS ARM and Windows x64. |
 | B9 | List and explicitly run a project Skill through App Server, with durable reuse on repeat. | Settled | Startup-directory root; fixed `local.echo` only; no MCP, scripts, background discovery, or capability grant. Commit `84ae83f`; CI `31673669506` passed macOS ARM and Windows x64. |
 | R1 | Install, recover, measure, and pass the declared release acceptance. | Pending | Release Gate only; never used to block a small feature Batch. |
-| B10 | Recover an early-failed active child Agent Turn through App Server, then deliver and acknowledge exactly once. | Ready | Local Batch Gate passed; counts only after push and exact-SHA CI. |
+| B10 | Recover an early-failed active child Agent Turn through App Server, then deliver and acknowledge exactly once. | Settled | Commit `4931e8a`; CI `31679750127` passed macOS ARM and Windows x64. |
 
-Current official progress is **nine CI-settled feature Batches**. B10 is the
-locked active Milestone; R1 remains a separate Release Gate and does not block
+Current official progress is **ten CI-settled feature Batches**. The next
+feature slot is open; R1 remains a separate Release Gate and does not block
 feature coverage.
 
 ## Batch closeout record
@@ -301,9 +301,9 @@ not yet counted as released progress.
   content migration, TUI actions, and background discovery.
 - **Next slot:** a fresh feature Milestone after CI settlement; R1 remains separate.
 
-### B10 — App Server child Provider recovery (ready)
+### B10 — App Server child Provider recovery (settled)
 
-- **Status:** `Ready`; awaiting push and exact-SHA Batch CI.
+- **Status:** `Settled`.
 - **User result:** a client can recover an early-failed active child Agent Turn,
   with exact owner validation, retrieve the prepared output, and acknowledge it
   without repeating the external effect.
@@ -324,3 +324,9 @@ not yet counted as released progress.
   push, and CI once at Batch end.
 - **Critical checks:** exact child-recovery App Server test passed; full local
   format, locked workspace check, workspace tests, clippy, and diff check passed.
+- **Commit/push:** `4931e8a`, pushed to `origin/main` and `ci/main`.
+- **Batch CI:** run `31679750127` for commit `4931e8a`; Quality / macOS ARM and
+  Windows x64 build both passed.
+- **Deferred:** automatic retry, TUI approval/recovery, remote App Server
+  transport, multi-tool recovery, and Release Gate evidence.
+- **Next slot:** a fresh feature Milestone; R1 remains separate.
