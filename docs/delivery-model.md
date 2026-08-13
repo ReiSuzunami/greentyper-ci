@@ -349,33 +349,26 @@ smaller list used for progress accounting.
 | B16 | Create one minimal Model Preset from an existing Provider Profile through CLI. | Settled | Commit `bcde3ef`; CI `31700985043` passed macOS ARM and Windows x64. |
 | B17 | Refresh a configured Provider discovery snapshot, inspect the current catalog, and accept one verified discovered model as a Model Preset through CLI. | Settled | Commit `b6c75e2`; CI `31705477912` passed macOS ARM and Windows x64. |
 | B18 | Remove one clean registered Git worktree and optionally delete its already-merged branch through Unix CLI. | Settled | Commit `813c580`; CI `31709432794` passed Quality / macOS ARM and Windows x64. |
-| B19 | Publish one bounded Context checkpoint through App Server and receive a redacted summary. | Settling | App Server adapter reuses the existing Context preflight and Safe-Barrier Runtime APIs; exact-SHA CI pending. |
+| B19 | Publish one bounded Context checkpoint through App Server and receive a redacted summary. | Settled | Commit `988438d`; CI `31714088503` passed Quality / macOS ARM and Windows x64. |
 
-Current official progress is **eighteen CI-settled feature Batches**. R1 remains
+Current official progress is **nineteen CI-settled feature Batches**. R1 remains
 a separate Release Gate and does not block feature coverage.
 
 ## Current execution slot
 
 ```text
-Batch: B19
-Status: Settling
-Milestone: An App Server client can submit one bounded Context reduction and
-  receive a redacted durable checkpoint summary.
-Domain/Phase: Context (Phase 6 / App Server adapter)
-Slices: typed `context.reduce` params; reuse Context preflight and safe-barrier
-  prepare/publish; return bounded checkpoint/status projection.
-Non-goals: Provider-native compaction, semantic Memory, external Artifact
-  storage, TUI actions, background or periodic reduction, cross-Ledger
-  transactions, credentials, and new Agent/Provider authority.
-Critical checks: one successful JSON request persists a checkpoint; one busy or
-  incomplete-state request returns a fixed error with Runtime/Team/Tool/Config
-  bytes unchanged.
-Exit: one valid request completes reduction and returns only bounded checkpoint
-  metadata; blocked or invalid product state fails closed without mutation.
+Batch: none
+Status: Unlocked
+Milestone: none locked
+Domain/Phase: none
+Slices: select and lock one independent user result before coding
+Non-goals: all unselected roadmap work
+Critical checks: selected in the next Milestone lock
+Exit: no feature code starts until the next Milestone lock is written.
 ```
 
-B18 is already settled below. B19 is the only active feature scope; adjacent
-Context, App Server, Agent, Provider, and Release Gate ideas stay deferred.
+B19 is settled below. No feature scope is active; adjacent Context, App Server,
+Agent, Provider, and Release Gate ideas stay deferred until a fresh lock.
 
 ### B19 Slice notes
 
@@ -394,8 +387,28 @@ Slice: response exposes only head/count/byte/token facts; busy Runtime refuses.
 Breadth: complete App Server Context reduction flow.
 Depth: recoverable local flow; Runtime bytes change only on success and all
   relevant bytes remain identical on refusal.
-Next: settle once through package gate, exact-SHA CI, and closeout record.
+Next: closeout record is complete; select a fresh independent Milestone.
 ```
+
+### B19 closeout
+
+- **Depth:** App Server accepts one bounded `context.reduce` request, runs the
+  existing Context preflight and Safe-Barrier prepare/publish path, and returns
+  only bounded checkpoint metadata. Busy or incomplete state returns a fixed
+  error without Runtime/Team/Tool/Config writes.
+- **Breadth:** Context/App Server mutation coverage expanded; overall usable
+  base remains 7 of 9 roadmap domains. This is deeper Context coverage, not a
+  new roadmap domain.
+- **Critical checks:** focused `context.reduce` integration check passed; the
+  App Server suite (33 tests), format/check/clippy/diff gates passed locally.
+- **Commit/push:** `988438dcc807dec24cc76d946dd2a753d39ac7ab`, pushed to
+  `origin/main` and `ci/main`.
+- **Batch CI:** run `31714088503` for the exact SHA above passed Quality /
+  macOS ARM and Windows x64 build.
+- **Deferred:** provider-native compaction, semantic Memory, external Artifact
+  storage, TUI/background reduction, cross-Ledger transactions, credentials,
+  new Agent/Provider authority, and Release Gate work.
+- **Next:** choose one fresh independent Milestone; do not reopen B19.
 
 ### B18 closeout
 
@@ -417,14 +430,14 @@ Next: settle once through package gate, exact-SHA CI, and closeout record.
 ## Last settled Batch
 
 ```text
-Batch: B18
+Batch: B19
 Status: Settled
-Milestone: A Unix CLI user can remove one clean registered Git worktree and,
-  only when explicitly requested, delete its already-merged branch.
-Domain/Phase: Workspaces (Phase 7 / Unix CLI)
-Evidence: commit `813c580`; CI `31709432794` passed Quality / macOS ARM and
-  Windows x64 build.
-Next: select one fresh independent Milestone; do not reopen B18.
+Milestone: An App Server client can submit one bounded Context reduction and
+  receive a redacted durable checkpoint summary.
+Domain/Phase: Context (Phase 6 / App Server adapter)
+Evidence: commit `988438dcc807dec24cc76d946dd2a753d39ac7ab`; CI `31714088503`
+passed Quality / macOS ARM and Windows x64 build.
+Next: select one fresh independent Milestone; do not reopen B19.
 ```
 
 ## Previous settled milestone
