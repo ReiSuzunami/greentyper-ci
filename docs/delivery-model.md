@@ -329,16 +329,16 @@ smaller list used for progress accounting.
 | B15 | List configured Model Presets, effective default, policy, and fallback IDs through a read-only CLI projection. | Settled | Commit `7190da4`; CI `31696507296` passed macOS ARM and Windows x64. |
 | B16 | Create one minimal Model Preset from an existing Provider Profile through CLI. | Settled | Commit `bcde3ef`; CI `31700985043` passed macOS ARM and Windows x64. |
 | B17 | Refresh a configured Provider discovery snapshot, inspect the current catalog, and accept one verified discovered model as a Model Preset through CLI. | Settled | Commit `b6c75e2`; CI `31705477912` passed macOS ARM and Windows x64. |
-| B18 | Remove one clean registered Git worktree and optionally delete its already-merged branch through Unix CLI. | Locked | Not counted until Batch settlement; force deletion and automatic cleanup deferred. |
+| B18 | Remove one clean registered Git worktree and optionally delete its already-merged branch through Unix CLI. | Settled | Commit `813c580`; CI `31709432794` passed Quality / macOS ARM and Windows x64. |
 
-Current official progress is **seventeen CI-settled feature Batches**. R1 remains
+Current official progress is **eighteen CI-settled feature Batches**. R1 remains
 a separate Release Gate and does not block feature coverage.
 
 ## Active milestone
 
 ```text
 Batch: B18
-Status: Locked
+Status: Settled
 Milestone: A Unix CLI user can remove one clean registered Git worktree and,
   only when explicitly requested, delete its already-merged branch.
 Domain/Phase: Workspaces (Phase 7 / Unix CLI)
@@ -355,6 +355,23 @@ Exit: clean registered worktree removal succeeds; branch remains by default and
 Coverage target: one new Workspace mutation flow; local success plus one
   fail-closed boundary. Stop when this exit is observable.
 ```
+
+### B18 closeout
+
+- **Depth:** local Unix CLI success, default branch preservation, explicit
+  merged-branch deletion, and unmerged fail-closed refusal.
+- **Breadth:** Workspace mutation coverage expanded; overall usable base remains
+  7 of 9 roadmap domains, with MCP and complete Release packaging pending.
+- **Critical checks:** `cargo test -p greentyper --test workspace_cli --locked`
+  passed (3 tests); full local format/check/test/clippy/diff gate passed.
+- **Commit/push:** `813c580`, pushed to `origin/main` and `ci/main`.
+- **Batch CI:** run `31709432794` for exact SHA
+  `813c580919c18c0430d7c38909d4119e2b3508d8`; Quality / macOS ARM and Windows
+  x64 build both passed.
+- **Deferred:** force deletion, current/root branch deletion, detached/prunable
+  cleanup, automatic/background cleanup, Windows Git adapters, TUI/App Server
+  surfaces, conflict resolution, and Release Gate evidence.
+- **Next slot:** choose one fresh independent Milestone; do not reopen B18.
 
 ## Last settled milestone
 
