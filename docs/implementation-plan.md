@@ -804,11 +804,13 @@ single-file apply path. `workspace apply` requires an exclusive Lease and a
 fresh bounded Read Set before atomically replacing an existing regular file;
 stale, uncovered, symlinked, non-regular, and oversized targets fail closed.
 Windows Lease/Read Set operations fail closed until an audited reparse-point-safe
-adapter lands. These facts remain independent of Team Events and do not allocate
-Git worktrees. An Active parent can now explicitly requeue a
+adapter lands. These facts remain independent of Team Events. Unix also exposes
+bounded Git worktree allocation and read-only `merge-check` results; the
+preflight reports mergeability or relative conflict paths without mutating the
+target branch, index, or working tree. An Active parent can now explicitly requeue a
 direct Blocked, Failed, or Cancelled child once dependencies are clear; this is
 Team scheduling only and never replays Provider or Tool effects. Git worktree
-allocation and merge/conflict outcomes remain pending.
+cleanup, automatic merge, and Windows Git worktree support remain pending.
 
 Exit criteria:
 

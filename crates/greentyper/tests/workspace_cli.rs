@@ -32,6 +32,33 @@ fn command(root: &Path) -> Command {
     command
 }
 
+fn git(root: &Path, args: &[&str]) {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(args)
+        .output()
+        .expect("git is installed for Unix workspace tests");
+    assert!(
+        output.status.success(),
+        "git {:?}: {}",
+        args,
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn git_repo() -> (PathBuf, PathBuf) {
+    let root = temp_root();
+    git(&root, &["init", "-q", "-b", "main"]);
+    git(&root, &["config", "user.email", "test@example.invalid"]);
+    git(&root, &["config", "user.name", "GreenTyper Test"]);
+    fs::write(root.join("tracked.txt"), b"base\n").expect("base file");
+    git(&root, &["add", "tracked.txt"]);
+    git(&root, &["commit", "-qm", "base"]);
+    let parent = root.parent().expect("temp root parent").to_path_buf();
+    (root, parent)
+}
+
 #[cfg(unix)]
 #[test]
 fn workspace_cli_captures_validates_and_rejects_a_stale_read_set() {
@@ -104,4 +131,112 @@ fn workspace_cli_captures_validates_and_rejects_a_stale_read_set() {
     fs::remove_file(read_set_path).expect("cleanup read set");
     fs::remove_file(replacement_path).expect("cleanup replacement");
     fs::remove_dir_all(root).expect("cleanup workspace");
+}
+
+#[test]
+fn workspace_cli_allocates_isolated_git_worktrees() {
+    let (root, parent) = git_repo();
+    let left = parent.join(format!(
+        "{}-left",
+        root.file_name().unwrap().to_string_lossy()
+    ));
+    let right = parent.join(format!(
+        "{}-right",
+        root.file_name().unwrap().to_string_lossy()
+    ));
+
+    for (branch, path) in [("agent-left", &left), ("agent-right", &right)] {
+        let output = Command::new(env!("CARGO_BIN_EXE_greentyper"))
+            .args(["workspace", "allocate", "--root"])
+            .arg(&root)
+            .args(["--worktree"])
+            .arg(path)
+            .args(["--branch", branch])
+            .output()
+            .expect("allocate worktree");
+        assert!(output.status.success(), "{output:?}");
+        let json: Value = serde_json::from_slice(&output.stdout).expect("allocation JSON");
+        assert_eq!(json["status"], "created");
+        assert_eq!(json["branch"], branch);
+        assert_eq!(json["base_commit"], json["head_commit"]);
+        assert!(path.is_dir());
+    }
+
+    fs::write(left.join("left-only.txt"), b"left\n").expect("left edit");
+    assert!(!right.join("left-only.txt").exists());
+    git(&left, &["status", "--porcelain"]);
+
+    fs::remove_dir_all(&left).expect("remove left worktree");
+    fs::remove_dir_all(&right).expect("remove right worktree");
+    git(&root, &["worktree", "prune"]);
+    fs::remove_dir_all(&root).expect("remove git repo");
+}
+
+#[test]
+fn workspace_cli_reports_mergeable_and_conflicting_heads() {
+    let (root, parent) = git_repo();
+    let clean = parent.join(format!(
+        "{}-clean",
+        root.file_name().unwrap().to_string_lossy()
+    ));
+    let conflict = parent.join(format!(
+        "{}-conflict",
+        root.file_name().unwrap().to_string_lossy()
+    ));
+
+    for (branch, path) in [("agent-clean", &clean), ("agent-conflict", &conflict)] {
+        let output = Command::new(env!("CARGO_BIN_EXE_greentyper"))
+            .args(["workspace", "allocate", "--root"])
+            .arg(&root)
+            .args(["--worktree"])
+            .arg(path)
+            .args(["--branch", branch])
+            .output()
+            .expect("allocate worktree");
+        assert!(output.status.success(), "{output:?}");
+    }
+
+    fs::write(clean.join("clean.txt"), b"clean\n").expect("clean edit");
+    git(&clean, &["add", "clean.txt"]);
+    git(&clean, &["commit", "-qm", "clean change"]);
+    let clean_check = Command::new(env!("CARGO_BIN_EXE_greentyper"))
+        .args(["workspace", "merge-check", "--root"])
+        .arg(&root)
+        .args(["--target", "main", "--source", "agent-clean"])
+        .output()
+        .expect("clean merge check");
+    assert!(clean_check.status.success(), "{clean_check:?}");
+    let clean_json: Value = serde_json::from_slice(&clean_check.stdout).expect("clean JSON");
+    assert_eq!(clean_json["status"], "mergeable");
+    assert_eq!(clean_json["conflict_paths"], serde_json::json!([]));
+
+    fs::write(root.join("tracked.txt"), b"target\n").expect("target edit");
+    git(&root, &["add", "tracked.txt"]);
+    git(&root, &["commit", "-qm", "target change"]);
+    fs::write(conflict.join("tracked.txt"), b"source\n").expect("source edit");
+    git(&conflict, &["add", "tracked.txt"]);
+    git(&conflict, &["commit", "-qm", "source change"]);
+    let conflict_check = Command::new(env!("CARGO_BIN_EXE_greentyper"))
+        .args(["workspace", "merge-check", "--root"])
+        .arg(&root)
+        .args(["--target", "main", "--source", "agent-conflict"])
+        .output()
+        .expect("conflict merge check");
+    assert!(conflict_check.status.success(), "{conflict_check:?}");
+    let conflict_json: Value =
+        serde_json::from_slice(&conflict_check.stdout).expect("conflict JSON");
+    assert_eq!(conflict_json["status"], "conflict");
+    assert_eq!(
+        conflict_json["conflict_paths"],
+        serde_json::json!(["tracked.txt"])
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("tracked.txt")).expect("target bytes"),
+        "target\n"
+    );
+
+    fs::remove_dir_all(&clean).expect("remove clean worktree");
+    fs::remove_dir_all(&conflict).expect("remove conflict worktree");
+    git(&root, &["worktree", "prune"]);
+    fs::remove_dir_all(&root).expect("remove git repo");
 }

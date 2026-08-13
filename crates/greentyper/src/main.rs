@@ -12,6 +12,7 @@ mod provider_discovery_task;
 mod provider_http;
 mod provider_http_policy;
 mod terminal;
+mod workspace_git;
 
 use std::process::ExitCode;
 

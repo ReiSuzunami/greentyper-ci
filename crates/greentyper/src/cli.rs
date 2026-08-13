@@ -34,6 +34,7 @@ use crate::provider_discovery_catalog::{
 use crate::provider_http::{
     ConfiguredProvider, ProviderHttpError, ProviderHttpSmokeOutcome, ProviderHttpSmokeScenario,
 };
+use crate::workspace_git::{WorkspaceGitError, allocate_worktree, check_merge};
 use greentyper_core::agent_team::{
     CapabilitySnapshot, CommandOutcome, CompletionCapsule, ResourceBudget, TaskScope,
     TeamOperationAcknowledgeOutcome, TeamOperationCommit, TeamOperationRecord, TeamOperationStatus,
@@ -652,6 +653,17 @@ fn run_workspace(command: WorkspaceCommand) -> Result<(), CliError> {
             let result = lease.apply_file(&root, &read_set, &path, &bytes)?;
             write_json(&result)
         }
+        WorkspaceCommand::Allocate {
+            root,
+            worktree,
+            branch,
+            base,
+        } => write_json(&allocate_worktree(root, worktree, &branch, &base)?),
+        WorkspaceCommand::MergeCheck {
+            root,
+            target,
+            source,
+        } => write_json(&check_merge(root, &target, &source)?),
     }
 }
 
@@ -1490,6 +1502,17 @@ enum WorkspaceCommand {
         path: String,
         input: PathBuf,
     },
+    Allocate {
+        root: PathBuf,
+        worktree: PathBuf,
+        branch: String,
+        base: String,
+    },
+    MergeCheck {
+        root: PathBuf,
+        target: String,
+        source: String,
+    },
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -2072,12 +2095,17 @@ fn parse_workspace(
     mut arguments: impl Iterator<Item = String>,
 ) -> Result<WorkspaceCommand, CliError> {
     let action = arguments.next().ok_or(CliError::Usage(
-        "workspace requires inspect, capture, validate, or apply",
+        "workspace requires inspect, capture, validate, apply, allocate, or merge-check",
     ))?;
     let mut root = None;
     let mut paths = Vec::new();
     let mut input = None;
     let mut read_set = None;
+    let mut worktree = None;
+    let mut branch = None;
+    let mut base = None;
+    let mut target = None;
+    let mut source = None;
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
             "--root" => {
@@ -2128,19 +2156,83 @@ fn parse_workspace(
                 }
                 input = Some(PathBuf::from(value));
             }
+            "--worktree" => {
+                if worktree.is_some() {
+                    return Err(CliError::Usage("duplicate --worktree"));
+                }
+                let value = arguments
+                    .next()
+                    .ok_or(CliError::Usage("--worktree is missing its value"))?;
+                if value.is_empty() || value.starts_with('-') {
+                    return Err(CliError::Usage("--worktree is missing its value"));
+                }
+                worktree = Some(PathBuf::from(value));
+            }
+            "--branch" => {
+                if branch.is_some() {
+                    return Err(CliError::Usage("duplicate --branch"));
+                }
+                branch = Some(parse_workspace_value(
+                    arguments.next(),
+                    "--branch is missing its value",
+                )?);
+            }
+            "--base" => {
+                if base.is_some() {
+                    return Err(CliError::Usage("duplicate --base"));
+                }
+                base = Some(parse_workspace_value(
+                    arguments.next(),
+                    "--base is missing its value",
+                )?);
+            }
+            "--target" => {
+                if target.is_some() {
+                    return Err(CliError::Usage("duplicate --target"));
+                }
+                target = Some(parse_workspace_value(
+                    arguments.next(),
+                    "--target is missing its value",
+                )?);
+            }
+            "--source" => {
+                if source.is_some() {
+                    return Err(CliError::Usage("duplicate --source"));
+                }
+                source = Some(parse_workspace_value(
+                    arguments.next(),
+                    "--source is missing its value",
+                )?);
+            }
             _ => return Err(CliError::Usage("unknown workspace option")),
         }
     }
     let root = root.ok_or(CliError::Usage("workspace requires --root"))?;
     match action.as_str() {
         "inspect" => {
-            if !paths.is_empty() || input.is_some() || read_set.is_some() {
+            if !paths.is_empty()
+                || input.is_some()
+                || read_set.is_some()
+                || worktree.is_some()
+                || branch.is_some()
+                || base.is_some()
+                || target.is_some()
+                || source.is_some()
+            {
                 return Err(CliError::Usage("workspace inspect accepts only --root"));
             }
             Ok(WorkspaceCommand::Inspect { root })
         }
         "capture" => {
-            if paths.is_empty() || input.is_some() || read_set.is_some() {
+            if paths.is_empty()
+                || input.is_some()
+                || read_set.is_some()
+                || worktree.is_some()
+                || branch.is_some()
+                || base.is_some()
+                || target.is_some()
+                || source.is_some()
+            {
                 return Err(CliError::Usage(
                     "workspace capture requires one or more --path options",
                 ));
@@ -2148,7 +2240,15 @@ fn parse_workspace(
             Ok(WorkspaceCommand::Capture { root, paths })
         }
         "validate" => {
-            if read_set.is_none() || !paths.is_empty() || input.is_some() {
+            if read_set.is_none()
+                || !paths.is_empty()
+                || input.is_some()
+                || worktree.is_some()
+                || branch.is_some()
+                || base.is_some()
+                || target.is_some()
+                || source.is_some()
+            {
                 return Err(CliError::Usage(
                     "workspace validate accepts --root and --read-set only",
                 ));
@@ -2159,7 +2259,15 @@ fn parse_workspace(
             })
         }
         "apply" => {
-            if paths.len() != 1 || read_set.is_none() || input.is_none() {
+            if paths.len() != 1
+                || read_set.is_none()
+                || input.is_none()
+                || worktree.is_some()
+                || branch.is_some()
+                || base.is_some()
+                || target.is_some()
+                || source.is_some()
+            {
                 return Err(CliError::Usage(
                     "workspace apply requires --root, --read-set, --path, and --input",
                 ));
@@ -2171,10 +2279,58 @@ fn parse_workspace(
                 input: input.expect("checked above"),
             })
         }
+        "allocate" => {
+            if worktree.is_none()
+                || branch.is_none()
+                || !paths.is_empty()
+                || input.is_some()
+                || read_set.is_some()
+                || target.is_some()
+                || source.is_some()
+            {
+                return Err(CliError::Usage(
+                    "workspace allocate requires --root, --worktree, and --branch",
+                ));
+            }
+            Ok(WorkspaceCommand::Allocate {
+                root,
+                worktree: worktree.expect("checked above"),
+                branch: branch.expect("checked above"),
+                base: base.unwrap_or_else(|| "HEAD".to_owned()),
+            })
+        }
+        "merge-check" => {
+            if target.is_none()
+                || source.is_none()
+                || !paths.is_empty()
+                || input.is_some()
+                || read_set.is_some()
+                || worktree.is_some()
+                || branch.is_some()
+                || base.is_some()
+            {
+                return Err(CliError::Usage(
+                    "workspace merge-check requires --root, --target, and --source",
+                ));
+            }
+            Ok(WorkspaceCommand::MergeCheck {
+                root,
+                target: target.expect("checked above"),
+                source: source.expect("checked above"),
+            })
+        }
         _ => Err(CliError::Usage(
-            "workspace requires inspect, capture, validate, or apply",
+            "workspace requires inspect, capture, validate, apply, allocate, or merge-check",
         )),
     }
+}
+
+fn parse_workspace_value(value: Option<String>, missing: &'static str) -> Result<String, CliError> {
+    let value = value.ok_or(CliError::Usage(missing))?;
+    if value.is_empty() || value.starts_with('-') {
+        return Err(CliError::Usage(missing));
+    }
+    Ok(value)
 }
 
 fn parse_tool(mut arguments: impl Iterator<Item = String>) -> Result<ToolCommand, CliError> {
@@ -3442,6 +3598,8 @@ Usage:\n\
   greentyper workspace capture --root PATH --path RELATIVE_PATH [--path RELATIVE_PATH ...]\n\
   greentyper workspace validate --root PATH --read-set FILE\n\
   greentyper workspace apply --root PATH --read-set FILE --path RELATIVE_PATH --input FILE\n\
+  greentyper workspace allocate --root PATH --worktree PATH --branch NAME [--base REF]\n\
+  greentyper workspace merge-check --root PATH --target REF --source REF\n\
   greentyper cancel [--ledger PATH] --turn ID\n\
   greentyper retry [--ledger PATH] --turn ID\n\
   greentyper reconcile [--ledger PATH] --delivery ID\n\
@@ -3487,6 +3645,7 @@ pub enum CliError {
     Provider(ProviderError),
     ProviderDiscovery(ProviderDiscoveryError),
     Workspace(WorkspaceError),
+    WorkspaceGit(WorkspaceGitError),
     Credential(CredentialVaultError),
     ProductDriver(ProductDriverError),
     Presentation(PresentationSmokeError),
@@ -3516,6 +3675,7 @@ impl fmt::Display for CliError {
             Self::Provider(source) => write!(formatter, "{source}"),
             Self::ProviderDiscovery(source) => write!(formatter, "{source}"),
             Self::Workspace(source) => write!(formatter, "{source}"),
+            Self::WorkspaceGit(source) => write!(formatter, "{source}"),
             Self::Credential(source) => write!(formatter, "{source}"),
             Self::ProductDriver(source) => write!(formatter, "{source}"),
             Self::Presentation(source) => write!(formatter, "{source}"),
@@ -3537,6 +3697,7 @@ impl Error for CliError {
             Self::Provider(source) => Some(source),
             Self::ProviderDiscovery(source) => Some(source),
             Self::Workspace(source) => Some(source),
+            Self::WorkspaceGit(source) => Some(source),
             Self::Credential(source) => Some(source),
             Self::ProductDriver(source) => Some(source),
             Self::Presentation(source) => Some(source),
@@ -3604,6 +3765,12 @@ impl From<ProviderDiscoveryError> for CliError {
 impl From<WorkspaceError> for CliError {
     fn from(source: WorkspaceError) -> Self {
         Self::Workspace(source)
+    }
+}
+
+impl From<WorkspaceGitError> for CliError {
+    fn from(source: WorkspaceGitError) -> Self {
+        Self::WorkspaceGit(source)
     }
 }
 

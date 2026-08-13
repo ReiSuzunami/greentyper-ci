@@ -574,10 +574,13 @@ Read Set under the same Lease and fails nonzero when any observed file changed.
 atomically replaces one existing Read Set file only after acquiring an
 exclusive Lease and revalidating the complete Read Set. Stale, uncovered,
 symlinked, non-regular, or oversized targets fail before writing and leave the
-target unchanged. These commands do not execute Git, allocate worktrees, or
-expose the absolute root. Windows Lease/Read Set operations currently fail
-closed pending an audited reparse-point-safe handle adapter; facts-only
-inspection remains available.
+target unchanged. On Unix, `workspace allocate` creates an isolated Git
+worktree from a bounded branch/base reference, and `workspace merge-check`
+reports `mergeable` or `conflict` with relative conflict paths without changing
+a branch, index, or working tree. These facts remain independent of Team Events
+and do not expose the absolute root. Windows Lease, Read Set, and Git worktree
+operations currently fail closed pending audited reparse-point-safe adapters;
+facts-only inspection remains available.
 `/blockers` now lists the latest Runtime, Team, Task, Tool, and Config blockers.
 The list and its non-Tool details come from local snapshots. A retryable blocked
 Provider Turn opens bounded detail on the first Enter; the second Enter durably
@@ -615,7 +618,7 @@ before implementation. Live inference conformance,
 automatic transport retry or partial-stream reconnect, Messages reasoning
 blocks, provider-native Context Mode execution, broader multi-Tool approval
 presentation, broader Provider and Tool adapters,
-Git worktree allocation/merge, broader terminal lifecycle policies beyond the
+automatic Git merge/cleanup, broader terminal lifecycle policies beyond the
 parent-authorized Team requeue, general App Server Runtime control beyond the exact
 cancel/retry/resume recovery flow, and
 remote App Server transport remain. The loopback Provider tracer remains

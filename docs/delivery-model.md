@@ -130,12 +130,13 @@ smaller list used for progress accounting.
 | B4 | Requeue an eligible failed/blocked Team child through parent authority. | Settled | Team-only mutation; Provider retry remains a separate result. |
 | B5 | Apply one guarded Workspace file change or reject a stale read set. | Settled | Unix guarded path; Windows/Git worktrees remain separate results. |
 | B6 | Read the bounded Context handoff through the App Server. | Settled | Commit `36de81a`; CI `31664070914` passed macOS ARM and Windows x64. |
-| B7 | Allocate isolated Git worktrees and report merge/conflict outcomes. | Pending | Do not begin until B6 is settled and B7 is explicitly locked. |
+| B7 | Allocate isolated Git worktrees and report merge/conflict outcomes. | Settled locally; CI pending | Unix `workspace allocate` + read-only `workspace merge-check`; automatic merge, cleanup, and Windows adapters deferred. Count only after this Batch's commit, push, and CI result. |
 | B8 | Run a useful Skill/MCP flow with isolated capabilities and recoverable results. | Pending | Discovery, transport, and authority are one separate Milestone. |
 | B9 | Install, recover, measure, and pass the declared release acceptance. | Pending | Release Gate only; never used to block a small feature Batch. |
 
-Current official progress is **six settled feature Batches**. B7 is the next
-available result and must be explicitly locked before implementation starts.
+Current official progress is **six CI-settled feature Batches plus B7 awaiting
+Batch Gate settlement**. Do not start B8 until B7's commit, push, and CI result
+are recorded below.
 
 ## Batch closeout record
 
