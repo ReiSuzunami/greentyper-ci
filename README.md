@@ -586,7 +586,10 @@ reports `mergeable` or `conflict` with relative conflict paths without changing
 a branch, index, or working tree. These facts remain independent of Team Events
 and do not expose the absolute root. Windows Lease, Read Set, and Git worktree
 operations currently fail closed pending audited reparse-point-safe adapters;
-facts-only inspection remains available.
+facts-only inspection remains available. On Unix, `workspace remove --root PATH
+--worktree PATH` removes one registered, clean, non-root worktree without
+force, preserves its branch, and rejects dirty, locked, prunable, detached, or
+unknown targets.
 `/blockers` now lists the latest Runtime, Team, Task, Tool, and Config blockers.
 The list and its non-Tool details come from local snapshots. A retryable blocked
 Provider Turn opens bounded detail on the first Enter; the second Enter durably

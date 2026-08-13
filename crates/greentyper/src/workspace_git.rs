@@ -88,6 +88,24 @@ pub struct WorktreeStatus {
     pub prunable: bool,
 }
 
+#[cfg_attr(not(unix), allow(dead_code))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorktreeRemovalStatus {
+    Removed,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorktreeRemoval {
+    pub status: WorktreeRemovalStatus,
+    pub repository: WorkspaceFacts,
+    pub worktree: WorkspaceFacts,
+    pub branch: String,
+    pub head_commit: String,
+    pub branch_preserved: bool,
+}
+
 pub fn list_worktrees(root_path: impl AsRef<Path>) -> Result<WorktreeList, WorkspaceGitError> {
     #[cfg(not(unix))]
     {
@@ -106,6 +124,89 @@ pub fn list_worktrees(root_path: impl AsRef<Path>) -> Result<WorktreeList, Works
         Ok(WorktreeList {
             repository: root.facts(),
             worktrees: parse_worktree_list(&output.stdout)?,
+        })
+    }
+}
+
+pub fn remove_worktree(
+    root_path: impl AsRef<Path>,
+    worktree_path: impl AsRef<Path>,
+) -> Result<WorktreeRemoval, WorkspaceGitError> {
+    #[cfg(not(unix))]
+    {
+        let _ = (root_path, worktree_path);
+        Err(WorkspaceGitError::UnsupportedPlatform)
+    }
+
+    #[cfg(unix)]
+    {
+        let root = WorkspaceRoot::open(root_path).map_err(WorkspaceGitError::Workspace)?;
+        verify_repository(&root)?;
+        let _lease = root
+            .acquire_lease(WorkspaceAccess::ReadWrite)
+            .map_err(WorkspaceGitError::Workspace)?;
+        let target = fs::canonicalize(worktree_path.as_ref())
+            .map_err(|_| WorkspaceGitError::WorktreeNotRegistered)?;
+        if target == root.path() {
+            return Err(WorkspaceGitError::WorktreeIsRoot);
+        }
+
+        let output = git(root.path(), ["worktree", "list", "--porcelain", "-z"])?;
+        if !output.status.success() {
+            return Err(WorkspaceGitError::CommandFailed("worktree listing"));
+        }
+        let parsed = parse_worktree_records(&output.stdout)?
+            .into_iter()
+            .find(|candidate| parsed_worktree_path(candidate).ok().as_ref() == Some(&target))
+            .ok_or(WorkspaceGitError::WorktreeNotRegistered)?;
+        if parsed.prunable {
+            return Err(WorkspaceGitError::WorktreePrunable);
+        }
+        if parsed.locked {
+            return Err(WorkspaceGitError::WorktreeLocked);
+        }
+        if parsed.detached {
+            return Err(WorkspaceGitError::DetachedWorktree);
+        }
+        let branch = parsed.branch.ok_or(WorkspaceGitError::UnexpectedOutput)?;
+        let head_commit = parsed
+            .head_commit
+            .ok_or(WorkspaceGitError::UnexpectedOutput)?;
+        let worktree = WorkspaceRoot::open(&target).map_err(WorkspaceGitError::Workspace)?;
+        let status = git(
+            worktree.path(),
+            ["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+        )?;
+        if !status.status.success() {
+            return Err(WorkspaceGitError::CommandFailed("worktree status"));
+        }
+        if !status.stdout.is_empty() {
+            return Err(WorkspaceGitError::WorktreeDirty);
+        }
+
+        let target_arg = target
+            .to_str()
+            .ok_or(WorkspaceGitError::InvalidWorktreePath)?;
+        let removal = git(root.path(), ["worktree", "remove", target_arg])?;
+        if !removal.status.success() {
+            return Err(WorkspaceGitError::CommandFailed("worktree removal"));
+        }
+        let branch_ref = format!("refs/heads/{branch}");
+        let branch_probe = git(
+            root.path(),
+            ["show-ref", "--verify", "--quiet", &branch_ref],
+        )?;
+        if !branch_probe.status.success() {
+            return Err(WorkspaceGitError::UnexpectedOutput);
+        }
+
+        Ok(WorktreeRemoval {
+            status: WorktreeRemovalStatus::Removed,
+            repository: root.facts(),
+            worktree: worktree.facts(),
+            branch,
+            head_commit,
+            branch_preserved: true,
         })
     }
 }
@@ -373,6 +474,14 @@ struct ParsedWorktree {
 
 #[cfg(unix)]
 fn parse_worktree_list(bytes: &[u8]) -> Result<Vec<WorktreeStatus>, WorkspaceGitError> {
+    parse_worktree_records(bytes)?
+        .into_iter()
+        .map(finish_worktree)
+        .collect()
+}
+
+#[cfg(unix)]
+fn parse_worktree_records(bytes: &[u8]) -> Result<Vec<ParsedWorktree>, WorkspaceGitError> {
     let mut parsed = ParsedWorktree::default();
     let mut has_fields = false;
     let mut worktrees = Vec::new();
@@ -380,7 +489,7 @@ fn parse_worktree_list(bytes: &[u8]) -> Result<Vec<WorktreeStatus>, WorkspaceGit
     for field in bytes.split(|byte| *byte == 0) {
         if field.is_empty() {
             if has_fields {
-                worktrees.push(finish_worktree(std::mem::take(&mut parsed))?);
+                worktrees.push(std::mem::take(&mut parsed));
                 if worktrees.len() > MAX_WORKTREES {
                     return Err(WorkspaceGitError::OutputTooLarge);
                 }
@@ -428,7 +537,7 @@ fn parse_worktree_list(bytes: &[u8]) -> Result<Vec<WorktreeStatus>, WorkspaceGit
         }
     }
     if has_fields {
-        worktrees.push(finish_worktree(parsed)?);
+        worktrees.push(parsed);
     }
     if worktrees.is_empty() {
         return Err(WorkspaceGitError::UnexpectedOutput);
@@ -437,13 +546,22 @@ fn parse_worktree_list(bytes: &[u8]) -> Result<Vec<WorktreeStatus>, WorkspaceGit
 }
 
 #[cfg(unix)]
+fn parsed_worktree_path(parsed: &ParsedWorktree) -> Result<PathBuf, WorkspaceGitError> {
+    let path = parsed
+        .path
+        .as_ref()
+        .ok_or(WorkspaceGitError::UnexpectedOutput)?;
+    let path = PathBuf::from(OsString::from_vec(path.clone()));
+    if !path.is_absolute() {
+        return Err(WorkspaceGitError::UnexpectedOutput);
+    }
+    Ok(path)
+}
+
+#[cfg(unix)]
 fn finish_worktree(parsed: ParsedWorktree) -> Result<WorktreeStatus, WorkspaceGitError> {
-    let path = parsed.path.ok_or(WorkspaceGitError::UnexpectedOutput)?;
-    let path = PathBuf::from(OsString::from_vec(path));
-    if !path.is_absolute()
-        || parsed.head_commit.is_none()
-        || parsed.branch.is_some() == parsed.detached
-    {
+    let path = parsed_worktree_path(&parsed)?;
+    if parsed.head_commit.is_none() || parsed.branch.is_some() == parsed.detached {
         return Err(WorkspaceGitError::UnexpectedOutput);
     }
     let worktree = match WorkspaceRoot::open(&path) {
@@ -545,6 +663,12 @@ pub enum WorkspaceGitError {
     InvalidWorktreePath,
     WorktreeExists,
     BranchExists,
+    WorktreeNotRegistered,
+    WorktreeIsRoot,
+    WorktreeDirty,
+    WorktreeLocked,
+    WorktreePrunable,
+    DetachedWorktree,
     StaleReference,
     UnexpectedOutput,
     OutputTooLarge,
@@ -569,6 +693,14 @@ impl fmt::Display for WorkspaceGitError {
             Self::InvalidWorktreePath => write!(formatter, "Git worktree path is invalid"),
             Self::WorktreeExists => write!(formatter, "Git worktree path already exists"),
             Self::BranchExists => write!(formatter, "Git worktree branch already exists"),
+            Self::WorktreeNotRegistered => write!(formatter, "Git worktree is not registered"),
+            Self::WorktreeIsRoot => write!(formatter, "Git worktree root cannot be removed"),
+            Self::WorktreeDirty => write!(formatter, "Git worktree is dirty"),
+            Self::WorktreeLocked => write!(formatter, "Git worktree is locked"),
+            Self::WorktreePrunable => write!(formatter, "Git worktree is prunable"),
+            Self::DetachedWorktree => {
+                write!(formatter, "detached Git worktrees cannot be removed")
+            }
             Self::StaleReference => write!(formatter, "Git reference changed during merge check"),
             Self::UnexpectedOutput => write!(formatter, "Git returned an invalid worktree result"),
             Self::OutputTooLarge => write!(formatter, "Git worktree result is too large"),

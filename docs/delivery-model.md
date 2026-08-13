@@ -8,14 +8,16 @@ document defines when a piece of work is allowed to count as delivered.
 
 ## Current Goal
 
-Maximize the number of distinct, user-visible workflows that reach a
-CI-settled state per unit of execution time. “Overall progress” means more
-usable results, not more roadmap text, review passes, commits, or test count.
-Work on one locked Milestone at a time: make the smallest usable vertical flow,
-protect only its blocking boundary, settle it once, and move on. A roadmap
-Phase is a container, not a reason to widen the active work. Local code, a
-focused test, a commit, or an in-progress CI run is not counted progress; only
-a successful Batch Gate is counted.
+Maximize distinct, user-visible workflows that reach a CI-settled state per
+unit of execution time. Overall progress means usable results, not roadmap
+coverage, review passes, commit count, or test count.
+
+Execution has one hard unit: **one Batch delivers one user result**. Lock that
+result, make the smallest vertical flow work, protect only its blocking
+boundary, settle it once, then move on. A Phase is only a roadmap container;
+unfinished Phase work never becomes an implicit requirement for the active
+Batch. Local code, a focused test, a commit, or an in-progress CI run is not
+progress. Only a successful Batch Gate counts.
 
 ## The unit of progress
 
@@ -26,7 +28,7 @@ unit tests, or opened pull requests.
 | --- | --- | --- |
 | Phase | A broad roadmap grouping (Provider, Context, Team, and so on). It holds a queue of Milestones and has separate exit criteria. | No. A Phase may stay open while several Milestones ship. |
 | Milestone | One sentence describing one user-visible result in one domain. It has one owner, one boundary, and one observable exit. | Yes. This is the feature decision unit. |
-| Batch | The delivery package for exactly one Milestone: at most five slices, normally two-to-four, and never padded to reach a count. | Yes. A Batch is settled and counted once. |
+| Batch | The delivery package for exactly one Milestone: one to five slices, normally two to four, and never padded to reach a count. | Yes. A Batch is settled and counted once. |
 | Slice | A small implementation step toward the same Milestone; it includes only the check needed to keep moving. | Local checkpoint only. |
 | Release Gate | The full platform, performance, packaging, and acceptance bar. | Only for a release candidate or an explicitly declared release batch. |
 
@@ -39,6 +41,12 @@ Examples of a Milestone:
 
 “Improve the Provider phase” and “finish the docs” are not Milestones because
 they do not describe one usable result.
+
+Phase does not equal Milestone. A Phase may contain many Milestones and remain
+`Active` while several user results ship. Milestone does not equal Batch. The
+Milestone is the immutable user-result lock; the Batch is its implementation,
+settlement, and CI package. No feature ledger row may be phrased as “finish a
+Phase”.
 
 ### Phase status and exit
 
@@ -121,7 +129,7 @@ progress.
 ### Batch Gate
 
 Run exactly once, after all slices for the one result are usable. Do not run
-the full gate after every slice or repeated review:
+the full gate after every slice, review, or intermediate discovery:
 
 1. the one or two blocker-critical checks selected in the Milestone lock;
 2. one local regression pass appropriate to the change. Executable,
@@ -132,6 +140,10 @@ the full gate after every slice or repeated review:
 4. removal of temporary files and a clean intended diff;
 5. one commit and push to configured remotes; and
 6. one workflow run for that exact commit SHA, with every required job green.
+
+“One CI run” means one workflow run for one commit, not one job. Every required
+job must pass; a green smoke step alone is not a Batch Gate. CI is settlement
+evidence, not a development feedback loop.
 
 For the current CI workflow, required jobs are `Quality / macOS ARM` and
 `Windows x64 build`. Their acceptance, transport, terminal, allocator, and
@@ -211,10 +223,11 @@ smaller list used for progress accounting.
 | R1 | Install, recover, measure, and pass the declared release acceptance. | Pending | Release Gate only; never used to block a small feature Batch. |
 | B10 | Recover an early-failed active child Agent Turn through App Server, then deliver and acknowledge exactly once. | Settled | Commit `4931e8a`; CI `31679750127` passed macOS ARM and Windows x64. |
 | B11 | List registered Git worktrees through CLI without exposing absolute paths or changing repository state. | Settled | Commit `a684065`; CI `31682587546` passed macOS ARM and Windows x64. |
+| B12 | Remove one clean, registered Unix Git worktree through CLI while preserving its branch. | Ready | Slice Gate passed; Batch Gate and CI settlement pending. |
 
-Current official progress is **eleven CI-settled feature Batches**. The next
-feature slot is open; R1 remains a separate Release Gate and does not block
-feature coverage.
+Current official progress is **eleven CI-settled feature Batches**. B12 is the
+locked active Batch in `Ready` state; it is not counted until Batch Gate and CI
+pass. R1 remains a separate Release Gate and does not block feature coverage.
 
 ## Batch closeout record
 
@@ -348,3 +361,24 @@ not yet counted as released progress.
 - **Deferred:** cleanup, automatic merge, dirty-state expansion, Windows Git
   adapters, TUI/App Server surfaces, and Release Gate evidence.
 - **Next slot:** a fresh feature Milestone; R1 remains separate.
+
+### B12 — Safe Git worktree removal (active)
+
+- **Status:** `Ready`.
+- **User result:** a Unix CLI user can remove one registered, clean, non-root
+  Git worktree while preserving its branch.
+- **Milestone lock:**
+  - **Domain/Phase:** Workspaces (Phase 7), Unix CLI only.
+  - **Slices:** bounded registered-target lookup; dirty/locked/prunable/
+    detached/root rejection; non-force removal with branch-preservation check.
+  - **Non-goals:** force removal, branch deletion, detached/prunable cleanup,
+    automatic merge, Windows Git adapters, TUI/App Server surfaces, and
+    Release Gate evidence.
+  - **Exit:** dirty target is rejected without mutation; clean target is
+    removed, no longer listed, and its branch still resolves.
+- **Critical check:** `cargo test -p greentyper --test workspace_cli --locked`
+  passed (3 tests), including dirty rejection, clean removal, list absence,
+  branch preservation, and redaction.
+- **Batch Gate:** pending full local gate, commit/push, and one CI workflow run.
+- **Deferred:** automatic merge, detached/prunable cleanup, Windows Git
+  adapters, TUI/App Server surfaces, and Release Gate evidence.

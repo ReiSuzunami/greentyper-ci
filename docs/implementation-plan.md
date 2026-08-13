@@ -2,7 +2,10 @@
 
 ## Delivery Rule
 
-Implementation proceeds as runnable vertical slices. Each phase must preserve Ledger recovery, authority boundaries, and measured resource behavior; no phase may defer all testing or performance work to the end.
+Implementation proceeds as runnable vertical slices. Each Batch protects its
+own Ledger recovery and authority boundary with only blocker-critical checks.
+Phase exit and Release Gate evidence are separate reviews; they do not run
+after every feature result and do not turn a Phase into the active Batch.
 
 The execution units are defined in [Delivery Model](delivery-model.md): a Phase
 is a roadmap container, a Milestone is one user-visible result, and a Batch is
@@ -11,6 +14,12 @@ do not create work for the active Batch. Phase exit is reviewed separately at
 an explicit Phase or Release Gate; it is not rerun after every feature result.
 When this roadmap lists unfinished work inside an otherwise active Phase, that
 work remains a later Milestone unless it blocks the locked user result.
+
+Progress is recorded only in the [Delivery Model](delivery-model.md) ledger. A
+Phase can remain open while multiple Milestones settle; a Milestone is one
+user-visible result; and a Batch contains only that result. CI runs once at
+Batch settlement, not inside the implementation loop. Non-blocking findings
+stay registered for a later Milestone instead of widening the current one.
 
 Feature implementation was authorized on 2026-08-09. The first core slice fixes the Agent Team command/event interface, process-local Agent Sessions, and pure orchestration policy early; it does not claim Phase 7 completion. Plain `TeamRuntime` remains volatile. A separate durable Team adapter proves synchronous persistence, and the core Runtime Kernel now owns it, gates root admission, persists operation identity and acknowledgement records in the same Team Ledger, and rebinds the complete non-terminal Session set after recovery. The first Phase 2 slices persist Tool call identity, Approval Grant binding, prepared-effect state, terminal digests, and explicit ambiguous-effect reconciliation, and add bounded generic SSE framing plus a strict OpenAI Responses streaming decoder. Configured product Provider driving and one explicit `local.echo` approval/delivery path are now present; broader Tool catalogs and presentation remain pending.
 
@@ -825,10 +834,12 @@ Windows Lease/Read Set operations fail closed until an audited reparse-point-saf
 adapter lands. These facts remain independent of Team Events. Unix also exposes
 bounded Git worktree allocation and read-only `merge-check` results; the
 preflight reports mergeability or relative conflict paths without mutating the
-target branch, index, or working tree. An Active parent can now explicitly requeue a
+target branch, index, or working tree. Unix also supports safe cleanup of one
+registered, clean, non-root Git worktree through `workspace remove`; it never
+uses force and verifies the branch remains. An Active parent can now explicitly requeue a
 direct Blocked, Failed, or Cancelled child once dependencies are clear; this is
-Team scheduling only and never replays Provider or Tool effects. Git worktree
-cleanup, automatic merge, and Windows Git worktree support remain pending.
+Team scheduling only and never replays Provider or Tool effects. Automatic
+merge and Windows Git worktree support remain pending.
 
 Exit criteria:
 

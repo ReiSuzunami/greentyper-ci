@@ -35,7 +35,9 @@ use crate::provider_http::{
     ConfiguredProvider, ProviderHttpError, ProviderHttpSmokeOutcome, ProviderHttpSmokeScenario,
 };
 use crate::skill::{SkillError, list_skills, run_skill};
-use crate::workspace_git::{WorkspaceGitError, allocate_worktree, check_merge, list_worktrees};
+use crate::workspace_git::{
+    WorkspaceGitError, allocate_worktree, check_merge, list_worktrees, remove_worktree,
+};
 use greentyper_core::agent_team::{
     CapabilitySnapshot, CommandOutcome, CompletionCapsule, ResourceBudget, TaskScope,
     TeamOperationAcknowledgeOutcome, TeamOperationCommit, TeamOperationRecord, TeamOperationStatus,
@@ -623,6 +625,9 @@ fn run_workspace(command: WorkspaceCommand) -> Result<(), CliError> {
             write_json(&root.facts())
         }
         WorkspaceCommand::List { root } => write_json(&list_worktrees(root)?),
+        WorkspaceCommand::Remove { root, worktree } => {
+            write_json(&remove_worktree(root, worktree)?)
+        }
         WorkspaceCommand::Capture { root, paths } => {
             let root = WorkspaceRoot::open(root)?;
             let lease = root.acquire_lease(WorkspaceAccess::ReadOnly)?;
@@ -1516,6 +1521,10 @@ enum WorkspaceCommand {
     List {
         root: PathBuf,
     },
+    Remove {
+        root: PathBuf,
+        worktree: PathBuf,
+    },
     Capture {
         root: PathBuf,
         paths: Vec<String>,
@@ -2140,7 +2149,7 @@ fn parse_workspace(
     mut arguments: impl Iterator<Item = String>,
 ) -> Result<WorkspaceCommand, CliError> {
     let action = arguments.next().ok_or(CliError::Usage(
-        "workspace requires inspect, list, capture, validate, apply, allocate, or merge-check",
+        "workspace requires inspect, list, remove, capture, validate, apply, allocate, or merge-check",
     ))?;
     let mut root = None;
     let mut paths = Vec::new();
@@ -2282,6 +2291,25 @@ fn parse_workspace(
             }
             Ok(WorkspaceCommand::List { root })
         }
+        "remove" => {
+            if worktree.is_none()
+                || !paths.is_empty()
+                || input.is_some()
+                || read_set.is_some()
+                || branch.is_some()
+                || base.is_some()
+                || target.is_some()
+                || source.is_some()
+            {
+                return Err(CliError::Usage(
+                    "workspace remove requires --root and --worktree",
+                ));
+            }
+            Ok(WorkspaceCommand::Remove {
+                root,
+                worktree: worktree.expect("checked above"),
+            })
+        }
         "capture" => {
             if paths.is_empty()
                 || input.is_some()
@@ -2379,7 +2407,7 @@ fn parse_workspace(
             })
         }
         _ => Err(CliError::Usage(
-            "workspace requires inspect, list, capture, validate, apply, allocate, or merge-check",
+            "workspace requires inspect, list, remove, capture, validate, apply, allocate, or merge-check",
         )),
     }
 }
@@ -3734,6 +3762,7 @@ Usage:\n\
   greentyper context reduce [--ledger PATH] [--max-raw-bytes N] [--max-raw-items N]\n\
   greentyper workspace inspect --root PATH\n\
   greentyper workspace list --root PATH\n\
+  greentyper workspace remove --root PATH --worktree PATH\n\
   greentyper workspace capture --root PATH --path RELATIVE_PATH [--path RELATIVE_PATH ...]\n\
   greentyper workspace validate --root PATH --read-set FILE\n\
   greentyper workspace apply --root PATH --read-set FILE --path RELATIVE_PATH --input FILE\n\

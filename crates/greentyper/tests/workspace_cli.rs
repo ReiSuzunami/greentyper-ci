@@ -190,10 +190,60 @@ fn workspace_cli_allocates_isolated_git_worktrees() {
     assert_eq!(branches, ["agent-left", "agent-right", "main"]);
 
     fs::write(left.join("left-only.txt"), b"left\n").expect("left edit");
+    let dirty_remove = Command::new(env!("CARGO_BIN_EXE_greentyper"))
+        .args(["workspace", "remove", "--root"])
+        .arg(&root)
+        .args(["--worktree"])
+        .arg(&left)
+        .output()
+        .expect("reject dirty worktree removal");
+    assert!(!dirty_remove.status.success(), "{dirty_remove:?}");
+    assert!(dirty_remove.stdout.is_empty(), "{dirty_remove:?}");
+    assert!(String::from_utf8_lossy(&dirty_remove.stderr).contains("worktree is dirty"));
+    assert!(left.is_dir());
     assert!(!right.join("left-only.txt").exists());
-    git(&left, &["status", "--porcelain"]);
 
-    fs::remove_dir_all(&left).expect("remove left worktree");
+    fs::remove_file(left.join("left-only.txt")).expect("clean left worktree");
+    let remove = Command::new(env!("CARGO_BIN_EXE_greentyper"))
+        .args(["workspace", "remove", "--root"])
+        .arg(&root)
+        .args(["--worktree"])
+        .arg(&left)
+        .output()
+        .expect("remove clean worktree");
+    assert!(remove.status.success(), "{remove:?}");
+    assert!(remove.stderr.is_empty(), "{remove:?}");
+    assert!(
+        !remove
+            .stdout
+            .windows(root.to_string_lossy().len())
+            .any(|window| window == root.to_string_lossy().as_bytes())
+    );
+    let removed: Value = serde_json::from_slice(&remove.stdout).expect("removal JSON");
+    assert_eq!(removed["status"], "removed");
+    assert_eq!(removed["branch"], "agent-left");
+    assert_eq!(removed["branch_preserved"], true);
+    assert!(!left.exists());
+    git(
+        &root,
+        &["show-ref", "--verify", "--quiet", "refs/heads/agent-left"],
+    );
+
+    let listed_after = Command::new(env!("CARGO_BIN_EXE_greentyper"))
+        .args(["workspace", "list", "--root"])
+        .arg(&root)
+        .output()
+        .expect("list after removal");
+    assert!(listed_after.status.success(), "{listed_after:?}");
+    let listed_after: Value = serde_json::from_slice(&listed_after.stdout).expect("list JSON");
+    let branches_after = listed_after["worktrees"]
+        .as_array()
+        .expect("worktree array after removal")
+        .iter()
+        .map(|worktree| worktree["branch"].as_str().expect("branch").to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(branches_after, ["main", "agent-right"]);
+
     fs::remove_dir_all(&right).expect("remove right worktree");
     git(&root, &["worktree", "prune"]);
     fs::remove_dir_all(&root).expect("remove git repo");
