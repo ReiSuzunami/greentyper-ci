@@ -713,6 +713,39 @@ fn app_server_runtime_status_inspects_missing_state_without_creating_it() {
 }
 
 #[test]
+fn app_server_context_handoff_is_missing_safe_and_redacted() {
+    let temp = TempTree::new();
+    let missing = temp.run(
+        concat!(
+            "{\"id\":1,\"operation\":\"context.handoff\"}\n",
+            "{\"id\":2,\"operation\":\"context.handoff\",\"params\":{\"extra\":true}}\n",
+        )
+        .as_bytes(),
+    );
+    let results = responses(&missing);
+    assert_eq!(results[0]["result"]["status"], "ready");
+    assert_eq!(results[0]["result"]["pending_turn"], Value::Null);
+    assert_eq!(results[0]["result"]["preview"]["head"]["transaction"], 0);
+    assert_eq!(results[1]["error"]["category"], "invalid_request");
+    assert!(!temp.runtime_ledger().exists());
+
+    let temp = TempTree::new();
+    temp.run_headless("private App Server handoff input");
+    let before = fs::read(temp.runtime_ledger()).expect("read Runtime before handoff");
+    let output = temp.run(b"{\"id\":3,\"operation\":\"context.handoff\"}\n");
+    let result = &responses(&output)[0];
+    assert_eq!(result["result"]["status"], "ready");
+    assert_eq!(result["result"]["preview"]["visible_item_count"], 2);
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("private App Server handoff input"));
+    assert_eq!(
+        fs::read(temp.runtime_ledger()).expect("read Runtime after handoff"),
+        before
+    );
+    assert!(!temp.team_ledger().exists());
+    assert!(!temp.tool_ledger().exists());
+}
+
+#[test]
 fn app_server_cancels_provider_blocks_strictly_without_cross_ledger_mutation() {
     let missing = TempTree::new();
     let missing_output = missing.run(

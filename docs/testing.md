@@ -692,8 +692,9 @@ wrong prior heads and tampered references fail closed, soft pressure checkpoints
 before the next Turn, and unknown pressure creates none. CLI tests prove missing
 `context status`, `context preview`, and `context handoff` are read-only;
 preview/handoff expose no Item text or credential material, and only bounded
-artifact identity/digest metadata. `context reduce` exposes no Item text, busy or
-incomplete state is retryable without writes, and Product Team/Tool Ledgers stay
+artifact identity/digest metadata. The App Server `context.handoff` operation
+proves the same missing-safe, redacted projection without Runtime, Team, or Tool
+writes. `context reduce` exposes no Item text, busy or incomplete state is retryable without writes, and Product Team/Tool Ledgers stay
 byte-identical. Tool tests also reject an unresolved approval as non-barrier.
 Request-projection tests prove archived bodies stay omitted while the recent tail
 and post-checkpoint Items remain ordered, an incomplete leading Assistant turn

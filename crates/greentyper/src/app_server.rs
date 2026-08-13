@@ -18,8 +18,8 @@ use greentyper_core::model::{DeliveryId, ItemRole, TurnId};
 use greentyper_core::pricing::PriceScheduleBook;
 use greentyper_core::provider::ProviderRuntime;
 use greentyper_core::runtime::{
-    AcknowledgeOutcome, CancelTurnOutcome, PreparedOutput, ProviderFallbackCandidate,
-    ProviderToolApproval, RecoveryStatus, RuntimeError, RuntimeKernel,
+    AcknowledgeOutcome, CancelTurnOutcome, ContextHandoff, ContextPreview, PreparedOutput,
+    ProviderFallbackCandidate, ProviderToolApproval, RecoveryStatus, RuntimeError, RuntimeKernel,
 };
 use greentyper_core::tool_runtime::{
     AuthorizedToolCall, ToolCallRecord, ToolCallStatus, ToolEffectExecutor, ToolExecution,
@@ -573,6 +573,13 @@ where
                     Err(error) => runtime_usage_error_response(request.id, error),
                 }
             }
+            "context.handoff" => match parse_params::<EmptyParams>(request.params) {
+                Ok(_) => match RuntimeKernel::inspect_context_handoff(&self.runtime_path) {
+                    Ok(handoff) => success_response(request.id, context_handoff_json(&handoff)),
+                    Err(_) => runtime_inspection_error(request.id),
+                },
+                Err(()) => invalid_params(request.id),
+            },
             "agent.list" => match parse_params::<EmptyParams>(request.params) {
                 Ok(_) => match inspect_product_team(&self.runtime_path) {
                     Ok(Some(team)) => {
@@ -1597,6 +1604,52 @@ fn runtime_status(snapshot: greentyper_core::runtime::RuntimeSnapshot) -> Value 
         "thread": snapshot.thread.map(|thread| thread.get()),
         "item_count": snapshot.items.len(),
         "pending_model_selection": snapshot.pending_model_selection.is_some(),
+    })
+}
+
+fn context_handoff_json(handoff: &ContextHandoff) -> Value {
+    let preview = handoff.preview();
+    json!({
+        "status": handoff.status().to_string(),
+        "pending_turn": handoff.pending_turn().map(|turn| turn.get()),
+        "pending_agent": handoff.pending_agent().map(|agent| agent.get()),
+        "preview": context_preview_json(preview),
+    })
+}
+
+fn context_preview_json(preview: &ContextPreview) -> Value {
+    json!({
+        "head": {
+            "transaction": preview.head().transaction,
+            "sequence": preview.head().sequence,
+        },
+        "source": {
+            "first_sequence": preview.source().first_sequence(),
+            "last_sequence": preview.source().last_sequence(),
+            "transaction": preview.source().transaction(),
+        },
+        "checkpoint_present": preview.checkpoint_present(),
+        "artifacts": preview
+            .artifacts()
+            .iter()
+            .map(|artifact| {
+                json!({
+                    "item": artifact.item(),
+                    "turn": artifact.turn(),
+                    "role": artifact.role(),
+                    "byte_len": artifact.byte_len(),
+                    "estimated_tokens": artifact.estimated_tokens(),
+                    "digest": artifact.digest_hex(),
+                })
+            })
+            .collect::<Vec<_>>(),
+        "artifact_count": preview.artifact_count(),
+        "recent_item_count": preview.recent_item_count(),
+        "archived_items": preview.archived_items(),
+        "visible_item_count": preview.visible_item_count(),
+        "raw_bytes": preview.raw_bytes(),
+        "estimated_tokens": preview.estimated_tokens(),
+        "recovered_tail_bytes": preview.recovered_tail_bytes(),
     })
 }
 

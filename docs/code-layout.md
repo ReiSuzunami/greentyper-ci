@@ -101,6 +101,7 @@ Provider, credential, Agent, or Ledger action. It also owns a bounded
 Status, preview, and handoff delegate to read-only Runtime inspection; reduce strictly reopens existing Runtime state,
 includes Team/Tool sidecars when present so the core can enforce its Safe
 Barrier, and writes no Config, Team, Tool, credential, or Provider state. It also owns a
+read-only App Server `context.handoff` projection over the same Runtime API. It also owns a
 bounded Provider Profile ID prompt,
 complete non-secret Profile field flow, status-only opaque-reference editor, an
 F5 control that invokes the bounded Provider candidate connection tester, and
