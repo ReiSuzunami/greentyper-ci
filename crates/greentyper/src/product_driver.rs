@@ -1146,6 +1146,8 @@ fn admit_root(
         capabilities: CapabilitySnapshot::from_capabilities([
             Capability::Tool(LOCAL_ECHO_TOOL.into()),
             Capability::Process,
+            Capability::WorkspaceRead,
+            Capability::WorkspaceWrite,
         ]),
     })?;
     let record = kernel

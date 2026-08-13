@@ -40,7 +40,7 @@ use crate::workspace_git::{
     remove_worktree,
 };
 use greentyper_core::agent_team::{
-    CapabilitySnapshot, CommandOutcome, CompletionCapsule, ResourceBudget, TaskScope,
+    Capability, CapabilitySnapshot, CommandOutcome, CompletionCapsule, ResourceBudget, TaskScope,
     TeamOperationAcknowledgeOutcome, TeamOperationCommit, TeamOperationRecord, TeamOperationStatus,
 };
 use greentyper_core::config::{
@@ -759,6 +759,7 @@ fn run_agent(command: AgentCommand) -> Result<(), CliError> {
             scope,
             token_budget,
             tool_budget,
+            capabilities,
         } => {
             let config = open_config_runtime(default_config_paths()?)?;
             let inherited_model_preset = config.default_model_preset()?.map(str::to_owned);
@@ -773,7 +774,7 @@ fn run_agent(command: AgentCommand) -> Result<(), CliError> {
                 title,
                 scope,
                 ResourceBudget::new(token_budget, tool_budget),
-                CapabilitySnapshot::empty(),
+                CapabilitySnapshot::from_capabilities(capabilities),
                 inherited_model_preset.as_deref(),
             )?;
             write_json(&team_operation_json(&commit))
@@ -1605,6 +1606,7 @@ enum AgentCommand {
         scope: Vec<String>,
         token_budget: u64,
         tool_budget: u32,
+        capabilities: Vec<Capability>,
     },
     Message {
         ledger: PathBuf,
@@ -2654,6 +2656,7 @@ fn parse_agent(mut arguments: impl Iterator<Item = String>) -> Result<AgentComma
     let mut scope = None;
     let mut token_budget = None;
     let mut tool_budget = None;
+    let mut capabilities = Vec::new();
     let mut local_echo = false;
     while let Some(argument) = arguments.next() {
         if argument == "--tool" {
@@ -2665,6 +2668,28 @@ fn parse_agent(mut arguments: impl Iterator<Item = String>) -> Result<AgentComma
                 return Err(CliError::Usage("--tool must be local.echo"));
             }
             local_echo = true;
+            continue;
+        }
+        if argument == "--capability" {
+            if action != "delegate" {
+                return Err(CliError::Usage(
+                    "--capability is supported only for agent delegate",
+                ));
+            }
+            let value = next_agent_value(&mut arguments, "--capability")?;
+            let capability = match value.as_str() {
+                "workspace_read" => Capability::WorkspaceRead,
+                "workspace_write" => Capability::WorkspaceWrite,
+                _ => {
+                    return Err(CliError::Usage(
+                        "agent delegate capability must be workspace_read or workspace_write",
+                    ));
+                }
+            };
+            if capabilities.contains(&capability) {
+                return Err(CliError::Usage("duplicate --capability"));
+            }
+            capabilities.push(capability);
             continue;
         }
         let value = match argument.as_str() {
@@ -2874,6 +2899,7 @@ fn parse_agent(mut arguments: impl Iterator<Item = String>) -> Result<AgentComma
                     .unwrap_or_else(|| "1".to_owned())
                     .parse()
                     .map_err(|_| CliError::Usage("tool budget must be a nonnegative integer"))?,
+                capabilities,
             })
         }
         "message" => {
@@ -3807,7 +3833,7 @@ Usage:\n\
   greentyper reconcile [--ledger PATH] --delivery ID\n\
   greentyper agent status [--ledger PATH]\n\
   greentyper agent acknowledge [--ledger PATH] --operation ID\n\
-  greentyper agent delegate [--ledger PATH] [--parent ID] --title TEXT [--scope LABELS] [--token-budget N] [--tool-budget N]\n\
+  greentyper agent delegate [--ledger PATH] [--parent ID] --title TEXT [--scope LABELS] [--token-budget N] [--tool-budget N] [--capability workspace_read|workspace_write ...]\n\
   greentyper agent message [--ledger PATH] [--agent ID] [--recipient ID] --body TEXT\n\
   greentyper agent complete [--ledger PATH] [--agent ID] --outcome TEXT\n\
   greentyper agent fail [--ledger PATH] [--agent ID] --reason TEXT\n\
@@ -4248,6 +4274,41 @@ mod tests {
                     "validate".to_owned(),
                     "--root".to_owned(),
                     "/tmp/workspace".to_owned(),
+                ]
+                .into_iter()
+            )
+            .is_err()
+        );
+        assert!(matches!(
+            parse(
+                [
+                    "agent".to_owned(),
+                    "delegate".to_owned(),
+                    "--title".to_owned(),
+                    "child".to_owned(),
+                    "--capability".to_owned(),
+                    "workspace_read".to_owned(),
+                    "--capability".to_owned(),
+                    "workspace_write".to_owned(),
+                ]
+                .into_iter()
+            ),
+            Ok(Command::Agent(AgentCommand::Delegate { capabilities, .. }))
+                if capabilities
+                    == vec![
+                        greentyper_core::agent_team::Capability::WorkspaceRead,
+                        greentyper_core::agent_team::Capability::WorkspaceWrite,
+                    ]
+        ));
+        assert!(
+            parse(
+                [
+                    "agent".to_owned(),
+                    "delegate".to_owned(),
+                    "--title".to_owned(),
+                    "child".to_owned(),
+                    "--capability".to_owned(),
+                    "network".to_owned(),
                 ]
                 .into_iter()
             )
