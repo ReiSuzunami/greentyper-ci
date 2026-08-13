@@ -164,7 +164,10 @@ putting secret material in arguments, Config, or Ledgers. Windows stores values
 in the current user's Credential Manager; other platforms currently fail
 closed. The same stream has read-only `runtime.status`, bounded `runtime.stats`,
 bounded read-only `context.handoff`, redacted `agent.list`, and redacted
-`tool.status` operations. Missing state does
+`tool.status` operations. It also exposes project-scoped `skill.list` and
+`skill.run` from the server startup directory: a run requires explicit approval,
+uses only the fixed capability-bounded `local.echo` path, and repeats reuse the
+same durable Tool call. Missing state does
 not create files; inspection never repairs a partial Ledger tail. Bounded
 control operations reuse the existing Kernel and ProductDriver authority.
 `agent.delegate` creates a downward-only child with a bounded scope,

@@ -150,11 +150,11 @@ smaller list used for progress accounting.
 | B6 | Read the bounded Context handoff through the App Server. | Settled | Commit `36de81a`; CI `31664070914` passed macOS ARM and Windows x64. |
 | B7 | Allocate isolated Git worktrees and report merge/conflict outcomes. | Settled | Unix `workspace allocate` + read-only `workspace merge-check`; automatic merge, cleanup, and Windows adapters deferred. Functional commit `2388721`; Batch CI `31667302886` passed macOS ARM and Windows x64. |
 | B8 | List a project Skill by stable content hash and run it once through the existing approval/capability-bounded `local.echo` path, with durable reuse on repeat. | Settled | Project-only, fixed `local.echo` path; MCP transport/client, arbitrary scripts, background polling, TUI, and general Skill catalog/authority deferred. Commit `67b36b0`; Batch CI `31670709539` passed macOS ARM and Windows x64. |
-| B9 | Install, recover, measure, and pass the declared release acceptance. | Pending | Release Gate only; never used to block a small feature Batch. |
+| B9 | List and explicitly run a project Skill through App Server, with durable reuse on repeat. | Settled | Startup-directory root; fixed `local.echo` only; no MCP, scripts, background discovery, or capability grant. Batch CI recorded below. |
+| R1 | Install, recover, measure, and pass the declared release acceptance. | Pending | Release Gate only; never used to block a small feature Batch. |
 
-Current official progress is **eight CI-settled feature Batches**. B9 is the
-next available slot and remains a Release Gate; no B9 feature work starts
-without a new Milestone lock.
+Current official progress is **nine CI-settled feature Batches**. R1 remains the
+next Release Gate; no Release Gate work is mixed into a feature Batch.
 
 ## Batch closeout record
 
@@ -212,4 +212,29 @@ not yet counted as released progress.
 - **Deferred:** MCP transport/client, arbitrary scripts, background polling,
   TUI actions, and general Skill catalog/authority. These are later
   Milestones, not B8 defects.
-- **Next slot:** B9, the declared Release Gate only.
+- **Next slot:** R1, the declared Release Gate only.
+
+### B9 — App Server project Skill flow
+
+- **User result:** a client can list project Skill metadata, reject an
+  unapproved run without state creation, explicitly run one fixed `local.echo`
+  Skill, and repeat it without duplicating the durable Tool effect.
+- **Milestone lock:**
+  - **Domain/Phase:** Skills (Phase 5), App Server surface only.
+  - **Slices:** fixed startup project root; bounded `skill.list`; explicit
+    approval/error boundary; executor-factory-backed `skill.run`; durable
+    repeat reuse.
+  - **Non-goals:** MCP transport/client, arbitrary scripts, user/built-in Skill
+    catalogs, TUI integration, background or periodic discovery, and any Skill
+    capability grant.
+  - **Exit:** one App Server stream completes list → reject → approve/run →
+    repeat/reuse with no private path leakage.
+- **Critical checks:** `cargo test -p greentyper --test app_server` (32 passed)
+  and `cargo test -p greentyper --test skill_cli` (3 passed); focused flow
+  covers list, approval refusal, successful execution, repeat reuse, and no
+  path disclosure.
+- **Functional change:** App Server dispatch and executor seam added to the
+  existing project Skill implementation.
+- **Deferred:** MCP transport/client, arbitrary scripts, user/built-in catalogs,
+  content migration, TUI actions, and background discovery.
+- **Next slot:** R1, the declared Release Gate only.

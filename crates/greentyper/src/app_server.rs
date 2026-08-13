@@ -49,6 +49,7 @@ use crate::product_driver::{
     requeue_product_agent, require_context_mode_execution, require_pending_context_mode_execution,
 };
 use crate::provider_http::ConfiguredProvider;
+use crate::skill::{SkillError, list_skills, run_skill_with_executor};
 
 const MAX_REQUEST_BYTES: usize = 64 * 1024;
 const MAX_ACTIVE_DRAFTS: usize = 64;
@@ -88,7 +89,14 @@ fn run_stdio_with_vault_and_executor_factory<F>(
 where
     F: FnMut() -> Result<BoxedToolExecutor, ()>,
 {
-    let mut server = AppServer::new(config, runtime_path, vault, executor_factory);
+    let project_root = std::env::current_dir().map_err(AppServerError::Io)?;
+    let mut server = AppServer::new_with_project_root(
+        config,
+        runtime_path,
+        project_root,
+        vault,
+        executor_factory,
+    );
     loop {
         let response = match read_request_line(&mut input)? {
             RequestLine::End => return Ok(()),
@@ -138,6 +146,7 @@ struct ToolReviewBinding {
 struct AppServer<'vault, V, F> {
     config: ConfigRuntime,
     runtime_path: PathBuf,
+    project_root: PathBuf,
     drafts: BTreeMap<u64, ConfigDraft>,
     next_draft_id: u64,
     tool_review: Option<ToolReviewBinding>,
@@ -150,15 +159,28 @@ where
     V: CredentialVault,
     F: FnMut() -> Result<BoxedToolExecutor, ()>,
 {
+    #[cfg(test)]
     fn new(
         config: ConfigRuntime,
         runtime_path: PathBuf,
         vault: &'vault mut V,
         executor_factory: F,
     ) -> Self {
+        let project_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        Self::new_with_project_root(config, runtime_path, project_root, vault, executor_factory)
+    }
+
+    fn new_with_project_root(
+        config: ConfigRuntime,
+        runtime_path: PathBuf,
+        project_root: PathBuf,
+        vault: &'vault mut V,
+        executor_factory: F,
+    ) -> Self {
         Self {
             config,
             runtime_path,
+            project_root,
             drafts: BTreeMap::new(),
             next_draft_id: 1,
             tool_review: None,
@@ -1297,6 +1319,49 @@ where
                     }
                 }
             }
+            "skill.list" => match parse_params::<EmptyParams>(request.params) {
+                Ok(_) => match list_skills(&self.project_root) {
+                    Ok(skills) => success_response(request.id, json!({ "skills": skills })),
+                    Err(error) => skill_error_response(request.id, error),
+                },
+                Err(()) => invalid_params(request.id),
+            },
+            "skill.run" => {
+                let params = match parse_params::<SkillRunParams>(request.params) {
+                    Ok(params) => params,
+                    Err(()) => return invalid_params(request.id),
+                };
+                if !params.approve {
+                    return error_response(
+                        Some(request.id),
+                        "invalid_value",
+                        "Skill execution requires explicit approval",
+                        None,
+                    );
+                }
+                let mut executor = match (self.executor_factory)() {
+                    Ok(executor) => executor,
+                    Err(()) => {
+                        return error_response(
+                            Some(request.id),
+                            "skill_unavailable",
+                            "Skill execution is unavailable",
+                            None,
+                        );
+                    }
+                };
+                match run_skill_with_executor(
+                    &self.project_root,
+                    &self.runtime_path,
+                    &params.id,
+                    params.message.as_deref(),
+                    params.approve,
+                    &mut executor,
+                ) {
+                    Ok(result) => success_response(request.id, result),
+                    Err(error) => skill_error_response(request.id, error),
+                }
+            }
             "credential.bind" => {
                 let (scope, secret) = match credential_mutation_values(request.params) {
                     Ok(values) => values,
@@ -2183,6 +2248,16 @@ struct AgentRequeueParams {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SkillRunParams {
+    id: String,
+    #[serde(default)]
+    message: Option<String>,
+    #[serde(default)]
+    approve: bool,
+}
+
+#[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum WireCapability {
     WorkspaceRead,
@@ -2587,6 +2662,18 @@ fn credential_error_response(id: u64, error: CredentialVaultError) -> Value {
         CredentialVaultError::Unavailable => (
             "credential_unavailable",
             "platform credential vault is unavailable",
+        ),
+    };
+    error_response(Some(id), category, message, None)
+}
+
+fn skill_error_response(id: u64, error: SkillError) -> Value {
+    let (category, message) = match error {
+        SkillError::Unknown(_) => ("unknown_skill", "Skill is unknown"),
+        SkillError::Invalid(_) => ("invalid_value", "Skill request is invalid"),
+        SkillError::Io(_) | SkillError::Runtime(_) | SkillError::Tool(_) => (
+            "skill_unavailable",
+            "Skill state or execution is unavailable",
         ),
     };
     error_response(Some(id), category, message, None)

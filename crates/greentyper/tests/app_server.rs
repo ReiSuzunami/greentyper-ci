@@ -629,6 +629,51 @@ fn credential_reference() -> String {
 }
 
 #[test]
+fn app_server_lists_runs_and_reuses_project_skill() {
+    let temp = TempTree::new();
+    let skill_dir = temp.root.join(".greentyper").join("skills").join("echo");
+    fs::create_dir_all(&skill_dir).expect("create project Skill directory");
+    fs::write(
+        skill_dir.join("skill.toml"),
+        "id = \"echo\"\nname = \"Echo\"\ndescription = \"bounded echo\"\ntool = \"local.echo\"\nmessage = \"app server hello\"\n",
+    )
+    .expect("write project Skill manifest");
+
+    let mut server = temp.spawn();
+    let listed = server.request(r#"{"id":1,"operation":"skill.list"}"#);
+    assert_eq!(listed["result"]["skills"][0]["id"], "echo");
+    assert_eq!(listed["result"]["skills"][0]["source"], "project");
+    assert_eq!(
+        listed["result"]["skills"][0]["content_sha256"]
+            .as_str()
+            .expect("Skill hash")
+            .len(),
+        64
+    );
+
+    let denied = server.request(r#"{"id":2,"operation":"skill.run","params":{"id":"echo"}}"#);
+    assert_eq!(denied["error"]["category"], "invalid_value");
+    assert!(!temp.runtime_ledger().exists());
+
+    let first =
+        server.request(r#"{"id":3,"operation":"skill.run","params":{"id":"echo","approve":true}}"#);
+    assert_eq!(first["result"]["status"], "succeeded");
+    assert_eq!(first["result"]["output"], "app server hello");
+    assert_eq!(first["result"]["reused"], false);
+
+    let second =
+        server.request(r#"{"id":4,"operation":"skill.run","params":{"id":"echo","approve":true}}"#);
+    assert_eq!(second["result"]["status"], "succeeded");
+    assert_eq!(second["result"]["reused"], true);
+    assert!(
+        !second
+            .to_string()
+            .contains(temp.root.to_string_lossy().as_ref())
+    );
+    server.finish();
+}
+
+#[test]
 fn app_server_schema_get_and_bounded_errors_are_streamed_without_writes() {
     let temp = TempTree::new();
     let mut requests = Vec::new();

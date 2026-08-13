@@ -20,7 +20,14 @@ Configuration resolves in this order, with later layers winning:
 3. Project configuration: `.greentyper/config.toml`
 4. Command-line overrides
 
-Project Skills live under `.greentyper/skills/`. User Skills live under the user configuration area. Runtime state, Ledgers, checkpoints, caches, logs, and usage projections live under `%LOCALAPPDATA%\GreenTyper` and are not configuration.
+Project Skills live under `.greentyper/skills/`. The shipped project Skill
+slice uses the App Server startup directory as its fixed project root, lists
+bounded manifest summaries with content hashes, and runs only explicitly
+approved `local.echo` invocations; repeated identity reuses the durable Tool
+call. User Skills, MCP transport, arbitrary scripts, and background discovery
+remain separate pending work. Runtime state, Ledgers, checkpoints, caches,
+logs, and usage projections live under `%LOCALAPPDATA%\GreenTyper` and are not
+configuration.
 
 The TUI shows both the effective value and its source. A Config Draft targets one writable layer. A command-line override remains visible as the winning read-only value; editing a lower layer does not pretend to change the current process.
 
@@ -355,7 +362,8 @@ response carries the same `id` and exactly one `result` or `error`. A request
 frame is limited to 64 KiB. Malformed or oversized frames receive a fixed error
 and do not stop the stream. Draft handles are process-local to that stream, at
 most 64 may be active, and EOF discards every uncommitted Draft without writing
-Config.
+Config. Skill operations use the server startup directory as their fixed
+project root; requests cannot select another project or Ledger path.
 
 ```json
 {"id":1,"operation":"config.get","params":{"path":"provider.model"}}
@@ -384,6 +392,8 @@ The current operations are:
 | `runtime.acknowledge` | Durably acknowledge the exact prepared delivery; repeated acknowledgement is idempotent and a wrong delivery does not write |
 | `runtime.stats` | Return the revision-bound Usage summary; optional `limit` and `cursor` expose a bounded Attempt page, and optional `as_of_unix_ms` pins the reporting instant |
 | `context.handoff` | Return the same bounded read-only Context handoff as the CLI: Runtime recovery status, pending Turn/Agent identity, source/head facts, counts, and artifact digests; never Item text or semantic summary |
+| `skill.list` | List bounded project Skill summaries from the startup directory, including stable content hashes and no private paths |
+| `skill.run` | Require explicit approval, run one exact project Skill through fixed `local.echo`, and report durable reuse on an identical repeat; never grant Skill capabilities |
 | `agent.list` | Return the redacted Agent Center projection plus committed Team operations awaiting acknowledgement: canonical identities, status, Task identity/state, budgets, reservations, bounded counts, Team head/revision, message count, and incomplete-tail bytes; never Task titles, message/capsule contents, labels, reasons, or Sessions |
 | `agent.delegate` | Under a rebound Active parent Session, create one downward-only child Task and Agent with a bounded optional scope, budget, and Capability Snapshot; copy the effective default Preset ID into the child without copying Config or authority; return only stable IDs and the committed Team operation |
 | `agent.turn` | Run one Provider Turn for the exact selected Active child under its inherited Preset ID; freeze the resolved Config/Provider Epochs, return prepared output or `tool_approval_required`, and leave delivery acknowledgement explicit |

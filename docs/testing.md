@@ -596,6 +596,12 @@ replace, forget, and final not-found status. Tests assert secret bytes never
 appear in stdout or stderr. They do not prove remote network transport,
 multi-client authentication, non-Windows
 credential backends, OS-level memory locking, or long-lived resource behavior.
+An App Server Skill flow creates one project manifest, lists its bounded summary
+and content hash, rejects an unapproved run without creating Ledgers, then runs
+the fixed `local.echo` Skill and repeats it to prove durable call reuse. The
+test also proves the response contains no private project path. It does not
+prove MCP transport, arbitrary scripts, user Skill catalogs, or background
+discovery.
 Additional real-process JSONL tests pin the App Server's fixed Ledger path and
 four read-only operational flows. Missing `runtime.status`, `agent.list`, and
 `tool.status` state returns ready/empty projections without creating files.

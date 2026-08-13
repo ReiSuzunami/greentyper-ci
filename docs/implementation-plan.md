@@ -720,6 +720,15 @@ Exit criteria:
 
 Implement built-in, user, and project Skill discovery; pinned Skill Invocation identity; progressive loading; secure script execution through Tool Runtime; lazy MCP connections; shared transports with isolated capability views; direct and gateway tool exposure; Elicitation; and server-fault isolation.
 
+The first bounded project-only Skill result is shipped: the local stdio App
+Server lists manifest summaries with stable content hashes and runs one exact
+Skill through explicit approval and the fixed `local.echo` Tool Runtime path.
+Repeated identity reuses the durable Tool call. The project root is fixed at
+server startup, Skills cannot grant capabilities, and no arbitrary script or
+MCP transport is involved. User/built-in catalogs, content-change migration,
+progressive loading, general scripts, MCP clients/transports, elicitation, and
+server isolation remain later Milestones.
+
 Exit criteria:
 
 - Changed Skill content blocks resume until explicit migration.

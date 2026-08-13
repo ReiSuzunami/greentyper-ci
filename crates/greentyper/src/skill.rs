@@ -15,7 +15,8 @@ use greentyper_core::agent_team::{
 };
 use greentyper_core::runtime::RuntimeKernel;
 use greentyper_core::tool_runtime::{
-    ApprovalDecision, ToolArguments, ToolCallOutcome, ToolIntent, ToolRequestOutcome, ToolResources,
+    ApprovalDecision, ToolArguments, ToolCallOutcome, ToolEffectExecutor, ToolIntent,
+    ToolRequestOutcome, ToolResources,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -145,6 +146,26 @@ pub(crate) fn run_skill(
     message_override: Option<&str>,
     approve: bool,
 ) -> Result<serde_json::Value, SkillError> {
+    let mut executor =
+        LocalProcessExecutor::current().map_err(|error| SkillError::Invalid(error.to_string()))?;
+    run_skill_with_executor(
+        project_root,
+        runtime_path,
+        id,
+        message_override,
+        approve,
+        &mut executor,
+    )
+}
+
+pub(crate) fn run_skill_with_executor<E: ToolEffectExecutor>(
+    project_root: &Path,
+    runtime_path: &Path,
+    id: &str,
+    message_override: Option<&str>,
+    approve: bool,
+    executor: &mut E,
+) -> Result<serde_json::Value, SkillError> {
     let skill = load_named_skill(project_root, id)?;
     if skill.summary.tool != LOCAL_ECHO_TOOL {
         return Err(SkillError::Invalid(
@@ -216,14 +237,12 @@ pub(crate) fn run_skill(
             }));
         }
     };
-    let mut executor =
-        LocalProcessExecutor::current().map_err(|error| SkillError::Invalid(error.to_string()))?;
     let outcome = kernel.resolve_tool_call(
         request,
         ApprovalDecision::Grant {
             expires_at_unix_ms: u64::MAX,
         },
-        &mut executor,
+        executor,
     )?;
     match outcome {
         ToolCallOutcome::Succeeded { record, output } => Ok(serde_json::json!({

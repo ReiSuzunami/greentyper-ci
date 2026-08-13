@@ -159,6 +159,11 @@ frame, return status only, and never acquire Provider or Agent authority.
 Its read-only Runtime status/Usage, Agent Team, and Tool status operations call
 existing strict inspection adapters and then apply narrow wire projections.
 They never create or repair Ledgers or return Runtime/Team/Tool text payloads.
+It also owns the bounded project Skill adapter: `skill.list` reads only the
+startup project root, while `skill.run` pins manifest content, requires explicit
+approval, and delegates the fixed `local.echo` effect to Tool Runtime. Skills
+cannot add capabilities, choose another filesystem root, or invoke arbitrary
+scripts.
 The same module exposes bounded `runtime.cancel`, `runtime.retry`,
 `runtime.resume`, `runtime.delivery`, `runtime.acknowledge`, `tool.reconcile`,
 fixed `local.echo` `tool.decide`, and Agent Team lifecycle operations. The
