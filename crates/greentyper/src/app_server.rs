@@ -3011,6 +3011,46 @@ source = "unknown"
         (format!("http://{address}"), handle)
     }
 
+    fn spawn_failure_then_text_server() -> (String, JoinHandle<()>) {
+        let listener =
+            TcpListener::bind(("127.0.0.1", 0)).expect("bind App Server recovery Provider server");
+        let address = listener
+            .local_addr()
+            .expect("App Server recovery Provider server address");
+        let handle = thread::spawn(move || {
+            for (index, response) in [
+                ProviderFixtureResponse::Unavailable,
+                ProviderFixtureResponse::Text(TEXT_SSE),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let (mut stream, _) = listener
+                    .accept()
+                    .expect("accept App Server recovery Provider request");
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .expect("set App Server recovery Provider read timeout");
+                let request = read_http_request(&mut stream);
+                assert!(request.starts_with("POST /v1/responses HTTP/1.1\r\n"));
+                assert!(request.contains("Bearer private-app-server-recovery-secret"));
+                match response {
+                    ProviderFixtureResponse::Unavailable => {
+                        write_http_unavailable_response(&mut stream)
+                    }
+                    ProviderFixtureResponse::Text(body) => write_http_response(&mut stream, body),
+                }
+                assert!(index < 2);
+            }
+        });
+        (format!("http://{address}"), handle)
+    }
+
+    enum ProviderFixtureResponse {
+        Unavailable,
+        Text(&'static [u8]),
+    }
+
     #[test]
     fn app_server_runs_a_turn_for_the_exact_active_child_agent() {
         let nonce = SystemTime::now()
@@ -3182,6 +3222,216 @@ dialect = "responses"
         fs::remove_dir_all(root).expect("remove child Turn directory");
     }
 
+    #[test]
+    fn app_server_recovers_an_early_failed_child_turn_for_exact_owner() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time after epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "greentyper-app-server-child-recovery-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).expect("create child recovery directory");
+        let runtime_path = root.join("runtime.ledger");
+        let team_path = runtime_path.with_extension("ledger.team");
+        let tool_path = runtime_path.with_extension("ledger.tool");
+        let (base_url, server) = spawn_failure_then_text_server();
+        let document = ConfigDocument::parse(&format!(
+            r#"
+schema_version = 2
+
+[agent]
+default_model_preset = "child-default"
+
+[providers.child-provider]
+template = "openai-compatible"
+credential = "private-app-server-recovery-secret"
+base_url = {base_url:?}
+dialects = ["responses"]
+allow_insecure_loopback = true
+
+[providers.child-provider.routes]
+responses = "/v1/responses"
+
+[providers.child-provider.pricing]
+source = "unknown"
+
+[model_presets.child-default]
+provider = "child-provider"
+model = "fixture-model"
+dialect = "responses"
+"#,
+        ))
+        .expect("parse child recovery Config");
+        let config = ConfigRuntime::open(
+            ConfigPaths::new(root.join("user.toml"), root.join("project.toml")),
+            document,
+        )
+        .expect("open child recovery Config");
+        let profile = config
+            .provider_profile("child-provider")
+            .expect("resolve child recovery profile")
+            .expect("child recovery profile");
+        let scope = ProviderCredentialScope::from_profile(&profile)
+            .expect("child recovery credential scope");
+        let mut vault = InMemoryCredentialVault::default();
+        vault
+            .bind(
+                &scope,
+                SecretValue::new(b"private-app-server-recovery-secret".to_vec())
+                    .expect("child recovery credential"),
+            )
+            .expect("bind child recovery credential");
+
+        let (mut kernel, recovery) =
+            RuntimeKernel::open_with_team_and_tools(&runtime_path, &team_path, &tool_path, 2)
+                .expect("open child recovery Product state");
+        assert!(recovery.into_sessions().is_empty());
+        let root_admission = kernel
+            .dispatch_team(TeamCommand::AdmitRoot {
+                task: TaskSpec::new("root", TaskScope::default()),
+                budget: ResourceBudget::new(2_000, 2),
+                capabilities: CapabilitySnapshot::from_capabilities([Capability::Process]),
+            })
+            .expect("admit child recovery root");
+        kernel
+            .acknowledge_team_operation(root_admission.operation)
+            .expect("acknowledge child recovery root");
+        let root_session = match root_admission.commit.outcome {
+            CommandOutcome::RootAdmitted { session, .. } => session,
+            other => panic!("unexpected child recovery root: {other:?}"),
+        };
+        let delegation = kernel
+            .dispatch_team(TeamCommand::DelegateWithModelPreset {
+                parent: root_session,
+                task: TaskSpec::new("child", TaskScope::default()),
+                budget: ResourceBudget::new(500, 1),
+                capabilities: CapabilitySnapshot::default(),
+                inherited_model_preset: Some(
+                    InheritedModelPreset::new("child-default").expect("child recovery preset"),
+                ),
+            })
+            .expect("delegate child recovery Agent");
+        kernel
+            .acknowledge_team_operation(delegation.operation)
+            .expect("acknowledge child recovery Agent");
+        let child = match delegation.commit.outcome {
+            CommandOutcome::Delegated { agent, .. } => agent,
+            other => panic!("unexpected child recovery delegation: {other:?}"),
+        };
+        drop(kernel);
+        let team_before = fs::read(&team_path).expect("read Team before child recovery");
+        let tool_before = fs::read(&tool_path).expect("read Tool before child recovery");
+
+        let mut app = AppServer::new(config, runtime_path.clone(), &mut vault, || {
+            Ok(BoxedToolExecutor(Box::new(NeverExecutor)))
+        });
+        let failed = app.handle(
+            json!({
+                "id": 1,
+                "operation": "agent.turn",
+                "params": {"agent": child.get(), "input": "child recovery input"},
+            })
+            .to_string()
+            .as_bytes(),
+        );
+        assert_eq!(failed["error"]["category"], "provider_unavailable");
+        let status = app.handle(br#"{"id":2,"operation":"runtime.status"}"#);
+        assert_eq!(status["result"]["status"], "blocked");
+        let turn = status["result"]["turn"]
+            .as_u64()
+            .expect("blocked child recovery Turn");
+        let runtime_before_retry = fs::read(&runtime_path).expect("read Runtime before retry");
+
+        let wrong_owner = app.handle(
+            json!({
+                "id": 3,
+                "operation": "agent.retry",
+                "params": {"agent": 1, "turn": turn},
+            })
+            .to_string()
+            .as_bytes(),
+        );
+        assert_eq!(wrong_owner["error"]["category"], "turn_not_retryable");
+        assert_eq!(
+            fs::read(&runtime_path).expect("read Runtime after wrong owner"),
+            runtime_before_retry
+        );
+
+        let retry = app.handle(
+            json!({
+                "id": 4,
+                "operation": "agent.retry",
+                "params": {"agent": child.get(), "turn": turn},
+            })
+            .to_string()
+            .as_bytes(),
+        );
+        assert_eq!(retry["result"]["status"], "resume_required");
+        let resumed = app.handle(
+            json!({
+                "id": 5,
+                "operation": "runtime.resume",
+                "params": {"turn": turn},
+            })
+            .to_string()
+            .as_bytes(),
+        );
+        assert_eq!(resumed["result"]["status"], "prepared");
+        assert_eq!(resumed["result"]["text"], "fixture network 中");
+        let delivery = resumed["result"]["delivery"]
+            .as_u64()
+            .expect("recovered child delivery");
+        let recovered = app.handle(
+            json!({
+                "id": 6,
+                "operation": "runtime.delivery",
+                "params": {"delivery": delivery},
+            })
+            .to_string()
+            .as_bytes(),
+        );
+        assert_eq!(recovered["result"]["status"], "prepared");
+        assert_eq!(recovered["result"]["text"], "fixture network 中");
+        let acknowledged = app.handle(
+            json!({
+                "id": 7,
+                "operation": "runtime.acknowledge",
+                "params": {"delivery": delivery},
+            })
+            .to_string()
+            .as_bytes(),
+        );
+        assert_eq!(acknowledged["result"]["status"], "acknowledged");
+        let ready = app.handle(br#"{"id":8,"operation":"runtime.status"}"#);
+        assert_eq!(ready["result"]["status"], "ready");
+        drop(app);
+        server.join().expect("join child recovery Provider server");
+
+        let usage = RuntimeKernel::inspect_usage(
+            &runtime_path,
+            greentyper_core::usage::UsageTimestamp::now().expect("usage time"),
+        )
+        .expect("inspect child recovery usage");
+        assert_eq!(usage.attempts().len(), 2);
+        assert!(
+            usage
+                .attempts()
+                .iter()
+                .all(|attempt| attempt.agent() == Some(child.get()))
+        );
+        assert_eq!(
+            fs::read(&team_path).expect("read Team after child recovery"),
+            team_before
+        );
+        assert_eq!(
+            fs::read(&tool_path).expect("read Tool after child recovery"),
+            tool_before
+        );
+        fs::remove_dir_all(root).expect("remove child recovery directory");
+    }
+
     fn read_http_request(stream: &mut TcpStream) -> String {
         let mut request = Vec::new();
         let mut buffer = [0_u8; 4096];
@@ -3226,6 +3476,17 @@ dialect = "responses"
             .write_all(body)
             .expect("write App Server Tool response body");
         stream.flush().expect("flush App Server Tool response");
+    }
+
+    fn write_http_unavailable_response(stream: &mut TcpStream) {
+        write!(
+            stream,
+            "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        )
+        .expect("write App Server unavailable response");
+        stream
+            .flush()
+            .expect("flush App Server unavailable response");
     }
 
     #[test]

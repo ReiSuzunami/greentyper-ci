@@ -9,12 +9,13 @@ document defines when a piece of work is allowed to count as delivered.
 ## Current Goal
 
 Maximize the number of distinct, user-visible workflows that reach a
-CI-settled state per unit of execution time. Work on one locked Milestone at a
-time. Make its smallest usable vertical flow first, add only the checks that
-protect its highest-risk boundary, then settle it and move on. A roadmap Phase
-is never a reason to keep polishing the current result or to block the next
-result. Local code, a passing focused test, a commit, or an in-progress CI run
-is not counted progress; only a successful Batch Gate is counted.
+CI-settled state per unit of execution time. “Overall progress” means more
+usable results, not more roadmap text, review passes, commits, or test count.
+Work on one locked Milestone at a time: make the smallest usable vertical flow,
+protect only its blocking boundary, settle it once, and move on. A roadmap
+Phase is a container, not a reason to widen the active work. Local code, a
+focused test, a commit, or an in-progress CI run is not counted progress; only
+a successful Batch Gate is counted.
 
 ## The unit of progress
 
@@ -23,10 +24,10 @@ unit tests, or opened pull requests.
 
 | Term | Meaning | Is it a completion gate? |
 | --- | --- | --- |
-| Phase | A broad roadmap grouping (Provider, Context, Team, and so on). It is a queue of possible work, not an execution task. | No. A Phase never needs to be “finished” before another result is shipped. |
-| Milestone | One sentence describing one user-visible result in one domain. It has one owner, one boundary, and one exit statement. | Yes. This is the only feature-level completion unit. |
-| Batch | The implementation package for exactly one Milestone: one-to-five slices (usually two-to-four), with explicit non-goals. | Yes. A Batch is committed, pushed, and counted once. |
-| Slice | The smallest implementation step that moves the same user result forward. | Local checkpoint only. |
+| Phase | A broad roadmap grouping (Provider, Context, Team, and so on). It holds a queue of Milestones and has separate exit criteria. | No. A Phase may stay open while several Milestones ship. |
+| Milestone | One sentence describing one user-visible result in one domain. It has one owner, one boundary, and one observable exit. | Yes. This is the feature decision unit. |
+| Batch | The delivery package for exactly one Milestone: at most five slices, normally two-to-four, and never padded to reach a count. | Yes. A Batch is settled and counted once. |
+| Slice | A small implementation step toward the same Milestone; it includes only the check needed to keep moving. | Local checkpoint only. |
 | Release Gate | The full platform, performance, packaging, and acceptance bar. | Only for a release candidate or an explicitly declared release batch. |
 
 Examples of a Milestone:
@@ -39,7 +40,7 @@ Examples of a Milestone:
 “Improve the Provider phase” and “finish the docs” are not Milestones because
 they do not describe one usable result.
 
-### Phase status
+### Phase status and exit
 
 Phases are roadmap containers, not work items. A Phase may contain many
 Milestones and may remain open while later Phases ship results. “Phase complete”
@@ -47,6 +48,12 @@ is a separate, explicit roadmap review against that Phase's exit criteria; it is
 never implied by a feature Batch and never runs inside the ordinary feature
 loop. A pending Phase exit does not block the next locked Milestone unless the
 next Milestone depends on a missing Phase invariant.
+
+Every Phase is labelled `Planned`, `Active`, `Deferred`, or `Closed`.
+`Active` means only that it may supply the next Milestone; it does not require
+all listed roadmap items to be implemented. `Closed` is recorded only at a
+dedicated Phase review with its own exit evidence. Phase review and Release
+Gate work never enter a normal feature Batch.
 
 ### Milestone lock
 
@@ -60,28 +67,33 @@ Non-goals: <everything explicitly deferred>
 Exit: <the one observable result that makes the milestone usable>
 ```
 
+Also record `Status: Locked | Building | Ready | Settled | Blocked`. `Ready`
+means the user result works and its blocker checks pass; it is not progress
+credit. `Settled` requires the Batch Gate below. The lock is immutable during
+the Batch; changing the user result starts a new Milestone.
+
 The Phase can stay open indefinitely. The Milestone cannot: once its exit is
 met, settle the Batch and move to the next Milestone. A new idea belongs in a
 later slot unless it blocks the locked exit.
 
 ## Hard batch rules
 
-1. Lock one user result before coding. Write the five-line Milestone lock and
-   do not change it mid-Batch.
+1. Lock one user result before coding. Write the Milestone lock and do not
+   change it mid-Batch.
 2. Keep the batch in one domain. A discovery, security, documentation, or
    architecture finding does not open a second domain.
-3. Stop when the locked result works. Never add a sixth slice or a second user
-   result to make the Batch feel complete; put it in the follow-up register.
+3. Stop as soon as the exit is observable. Do not add a sixth slice, a second
+   user result, or “completeness” work; register it for a later Milestone.
 4. A finding may interrupt the batch only when it is one of these blockers:
    - the advertised flow cannot complete;
    - data, Ledger recovery, or atomicity can be corrupted;
    - an external effect can be repeated or authority can cross an Agent;
    - the changed code does not compile or its critical path test fails; or
    - the change violates the formal Performance Contract.
-5. After the flow is usable, add at most one or two blocker-critical checks.
-   Use one owner and, at most, one independent review. Do not repeat
-   correctness, security, terminal, and documentation reviews in parallel
-   unless a blocker is found.
+5. During implementation, run only a Slice Gate when the touched code needs
+   one. After the flow is usable, add at most one or two blocker-critical
+   checks. Skip redundant tests and repeated reviews; use one owner and at
+   most one independent review unless a blocker is found.
 6. Update product/status documentation once, at Batch settlement. During
    implementation, keep discoveries in the follow-up register.
 7. Do not start another feature while the active Batch is unsettled. A local
@@ -94,10 +106,12 @@ later slot unless it blocks the locked exit.
 
 ### Slice Gate
 
-Run only the checks needed to keep the current slice moving:
+Run only the checks needed to keep the current slice moving. Slice Gate is a
+development checkpoint, not progress credit:
 
 - formatter/check for touched crates;
-- the changed package's focused test or deterministic fixture;
+- the changed package's focused test or deterministic fixture only when the
+  slice changes executable behavior or a blocker boundary;
 - `git diff --check`.
 
 The Slice Gate never runs the whole workspace, release packaging, FMDev, or
@@ -106,22 +120,31 @@ progress.
 
 ### Batch Gate
 
-Run once, after all slices for the one result are usable:
+Run exactly once, after all slices for the one result are usable. Do not run
+the full gate after every slice or repeated review:
 
-1. the focused checks for every changed surface;
-2. one local regression pass appropriate to the risk. A full workspace pass is
-   required only for cross-cutting, persistence, or release-sensitive changes;
+1. the one or two blocker-critical checks selected in the Milestone lock;
+2. one local regression pass appropriate to the change. Executable,
+   persistence, cross-platform, or authority changes use the full local gate
+   (format, locked check, tests, and clippy); docs-only changes use the relevant
+   link/format check;
 3. one documentation update and link/format check;
 4. removal of temporary files and a clean intended diff;
-5. one commit and push; and
+5. one commit and push to configured remotes; and
 6. one workflow run for that exact commit SHA, with every required job green.
+
+For the current CI workflow, required jobs are `Quality / macOS ARM` and
+`Windows x64 build`. Their acceptance, transport, terminal, allocator, and
+package steps are part of those jobs. A green smoke step alone is not a Batch
+Gate.
 
 Only a successful Batch Gate increments the progress ledger. If CI fails,
 repair the current Batch only. Classify the failure before changing code:
 
 - **Code failure:** one repair commit and one replacement workflow run are
   allowed. Do not add a new slice or change the Milestone.
-- **Infrastructure/flaky failure:** one rerun of the same commit is allowed.
+- **Infrastructure/flaky failure:** one rerun of the same commit is allowed;
+  do not create a code commit just to rerun CI.
 
 If the replacement run (or the one infrastructure rerun) fails again, mark the
 Batch **Blocked**, record the failing job and reason, and stop. Do not create
@@ -137,10 +160,10 @@ batch, not after every small user result. CI smoke samples are correctness
 evidence; they are not performance approval.
 
 A Release Gate declaration must name one candidate commit SHA. That SHA is
-the unit of release evidence; rerun only when the candidate changes or a
-recorded gate failure is repaired. R1 being pending does not block ordinary
-feature Milestones. Release Gate evidence cannot be substituted by a feature
-Batch's CI smoke run.
+the unit of release evidence; run it once for that candidate and rerun only
+when the candidate changes or a recorded gate failure is repaired. R1 being
+pending does not block ordinary feature Milestones. Release Gate evidence
+cannot be substituted by a feature Batch's CI smoke run.
 
 ## Stop and defer protocol
 
@@ -154,6 +177,15 @@ When a non-blocking issue appears:
 The follow-up register is allowed to contain incomplete documentation,
 additional platform evidence, richer UI, performance measurement, and future
 authority surfaces. They are not silently folded into the active Batch.
+
+### CI stop rule
+
+CI is a Batch settlement action, not a development loop. No CI run is required
+while a Batch is `Building` or `Ready`. After one code repair or one same-SHA
+infrastructure rerun, a second failure makes the Batch `Blocked`; record the
+job, SHA, and reason, stop changing scope, and wait for an explicit decision.
+Select the next Milestone only after the current Batch is `Settled` or formally
+marked `Blocked`.
 
 Background work, periodic polling, and resident discovery remain prohibited by
 the formal [Performance Contract](performance-contract.md) unless a separately
@@ -177,10 +209,11 @@ smaller list used for progress accounting.
 | B8 | List a project Skill by stable content hash and run it once through the existing approval/capability-bounded `local.echo` path, with durable reuse on repeat. | Settled | Project-only, fixed `local.echo` path; MCP transport/client, arbitrary scripts, background polling, TUI, and general Skill catalog/authority deferred. Commit `67b36b0`; Batch CI `31670709539` passed macOS ARM and Windows x64. |
 | B9 | List and explicitly run a project Skill through App Server, with durable reuse on repeat. | Settled | Startup-directory root; fixed `local.echo` only; no MCP, scripts, background discovery, or capability grant. Commit `84ae83f`; CI `31673669506` passed macOS ARM and Windows x64. |
 | R1 | Install, recover, measure, and pass the declared release acceptance. | Pending | Release Gate only; never used to block a small feature Batch. |
+| B10 | Recover an early-failed active child Agent Turn through App Server, then deliver and acknowledge exactly once. | Ready | Local Batch Gate passed; counts only after push and exact-SHA CI. |
 
-Current official progress is **nine CI-settled feature Batches**. The next slot
-is a new feature Milestone selected by a fresh lock; R1 remains a separate
-Release Gate and does not block feature coverage.
+Current official progress is **nine CI-settled feature Batches**. B10 is the
+locked active Milestone; R1 remains a separate Release Gate and does not block
+feature coverage.
 
 ## Batch closeout record
 
@@ -267,3 +300,27 @@ not yet counted as released progress.
 - **Deferred:** MCP transport/client, arbitrary scripts, user/built-in catalogs,
   content migration, TUI actions, and background discovery.
 - **Next slot:** a fresh feature Milestone after CI settlement; R1 remains separate.
+
+### B10 — App Server child Provider recovery (ready)
+
+- **Status:** `Ready`; awaiting push and exact-SHA Batch CI.
+- **User result:** a client can recover an early-failed active child Agent Turn,
+  with exact owner validation, retrieve the prepared output, and acknowledge it
+  without repeating the external effect.
+- **Milestone lock:**
+  - **Domain/Phase:** Agent/Provider Recovery (Phase 1/2 runtime surface),
+    App Server only.
+  - **Slices:** child fixture with inherited Preset and an early blocked
+    loopback Provider; owner-checked `agent.retry`; `runtime.resume` → `runtime.delivery`
+    → `runtime.acknowledge`; one wrong-owner or duplicate-recovery blocker check.
+  - **Non-goals:** automatic retry, TUI approval/recovery, remote App Server
+    transport, multi-tool recovery, Windows/Release Gate evidence, and unrelated
+    docs or roadmap cleanup.
+  - **Exit:** one deterministic App Server stream reaches `resume_required`,
+    then `prepared`/delivery, then `ready`; wrong owner or repeat recovery is
+    rejected without a second effect.
+- **Batch rule:** keep implementation and checks inside this result. Register
+  all other findings in the follow-up register; settle docs, local gate, commit,
+  push, and CI once at Batch end.
+- **Critical checks:** exact child-recovery App Server test passed; full local
+  format, locked workspace check, workspace tests, clippy, and diff check passed.

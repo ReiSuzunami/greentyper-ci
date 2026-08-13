@@ -4,6 +4,14 @@
 
 Implementation proceeds as runnable vertical slices. Each phase must preserve Ledger recovery, authority boundaries, and measured resource behavior; no phase may defer all testing or performance work to the end.
 
+The execution units are defined in [Delivery Model](delivery-model.md): a Phase
+is a roadmap container, a Milestone is one user-visible result, and a Batch is
+the bounded delivery package for that Milestone. Phase prose and exit criteria
+do not create work for the active Batch. Phase exit is reviewed separately at
+an explicit Phase or Release Gate; it is not rerun after every feature result.
+When this roadmap lists unfinished work inside an otherwise active Phase, that
+work remains a later Milestone unless it blocks the locked user result.
+
 Feature implementation was authorized on 2026-08-09. The first core slice fixes the Agent Team command/event interface, process-local Agent Sessions, and pure orchestration policy early; it does not claim Phase 7 completion. Plain `TeamRuntime` remains volatile. A separate durable Team adapter proves synchronous persistence, and the core Runtime Kernel now owns it, gates root admission, persists operation identity and acknowledgement records in the same Team Ledger, and rebinds the complete non-terminal Session set after recovery. The first Phase 2 slices persist Tool call identity, Approval Grant binding, prepared-effect state, terminal digests, and explicit ambiguous-effect reconciliation, and add bounded generic SSE framing plus a strict OpenAI Responses streaming decoder. Configured product Provider driving and one explicit `local.echo` approval/delivery path are now present; broader Tool catalogs and presentation remain pending.
 
 ## Phase 0: Repository and Measurement Foundation
