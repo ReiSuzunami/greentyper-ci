@@ -8,11 +8,11 @@ document defines when a piece of work is allowed to count as delivered.
 
 ## Current Goal
 
-Maximize the number of distinct, usable user flows delivered per unit of time.
-**Make things usable first; tidy and certify once at the boundary.** The goal
-is feature coverage, not completion of every roadmap paragraph. A working local
-flow may guide implementation; it does not count as shipped progress until its
-Batch settles.
+Maximize **usable feature coverage per unit of time**. Make the next user result
+work first; tidy, document, and certify once at the Batch boundary. Do not turn
+the whole roadmap into one task, and do not treat every open Phase item as a
+blocker. A local flow is provisional until its Batch settles, but unfinished
+polish is not a reason to stop building the locked result.
 
 The only active execution unit is **one Batch = one user flow in one domain**.
 Lock it, make it usable, write one short coverage note, then settle it once.
@@ -21,19 +21,20 @@ user-result lock. Local code, tests, reviews, commits, and in-progress CI are
 provisional; only a successful settlement records progress.
 
 This is a hard stop against scope drift: when the locked result works, stop
-adding functionality. Put adjacent ideas and non-blocking findings in the
-follow-up register, then move to settlement. Do not reopen the Batch because a
-different domain has a more interesting issue.
+adding functionality. Put adjacent ideas, extra review findings, and non-
+blocking test gaps in the follow-up register, then settle. Do not reopen the
+Batch because another domain has a more interesting issue.
 
 The default loop is deliberately non-interleaved:
 
-1. **Coverage pass:** implement the smallest end-to-end path. Skip everything
-   that does not block the advertised result.
+1. **Coverage pass:** implement the smallest end-to-end path. Skip tests,
+   polish, and architecture work that do not block the advertised result.
 2. **Coverage note:** after each Slice, write one short estimate of breadth
    (new usable domain/flow) and depth (how much of the locked flow works). This
    is a planning signal, not a gate or a reason to start a second domain.
 3. **Settlement pass:** when the exit is visible, stop coding, run only the
-   critical checks, update docs once, clean, push, and run CI once.
+   critical checks, update docs once, clean, push, and run CI once. CI is a
+   closeout action, not a development loop.
 
 Do not alternate between passes. Non-blocking findings go to the follow-up
 register and stay out of the current Batch.
@@ -89,14 +90,16 @@ Keep these modes separate:
 
 | Mode | Allowed work | Stop condition |
 | --- | --- | --- |
-| Building | Implement slices in the locked domain; run only Slice Gate checks. | The one user result is observable. |
+| Building | Implement slices in the locked domain; run only Slice Gate checks. It is acceptable to leave non-blocking polish for settlement. | The one user result is observable. |
 | Ready | Freeze feature scope; add at most one happy-path and one blocker check. | No blocker remains for the locked exit. |
 | Settling | Update docs once, run the selected local gate once, clean, commit, push, and run one exact-SHA CI workflow. | CI is green, or Batch is marked Blocked after the allowed repair/rerun. |
 | Settled | Record result, depth, breadth, evidence, and deferred work. | Move to the next Milestone. |
 
 CI is a settlement action, not a development loop. Do not trigger CI for every
 Slice, review finding, or documentation edit. Do not rerun unchanged checks
-whose inputs and environment have not changed.
+whose inputs and environment have not changed. Repeated PASS reviews do not
+create progress; one owner and one independent review are enough unless a
+blocker is found.
 
 ### Phase status and exit
 
@@ -155,7 +158,8 @@ later slot unless it blocks the locked exit.
    security, credentials, billing, recovery, authority, or a formal contract
    could be violated. At settlement, add at most one happy-path and one
    fail-closed check. Skip redundant tests and repeated reviews; use one owner
-   and at most one independent review unless a blocker is found.
+   and at most one independent review unless a blocker is found. “More tests”
+   is not an exit criterion by itself.
 6. Update product/status documentation once, at Batch settlement. During
    implementation, keep discoveries in the follow-up register.
 7. Do not start another feature while the active Batch is unsettled. A local
@@ -307,9 +311,36 @@ smaller list used for progress accounting.
 | B14 | Delegate a child Agent with an explicit bounded Workspace capability and observe the grant in CLI status. | Settled | Commit `5fc24da`; Batch CI `31693096637` passed macOS ARM and Windows x64; capability snapshot only; Workspace execution binding remains deferred. |
 | B15 | List configured Model Presets, effective default, policy, and fallback IDs through a read-only CLI projection. | Settled | Commit `7190da4`; CI `31696507296` passed macOS ARM and Windows x64. |
 | B16 | Create one minimal Model Preset from an existing Provider Profile through CLI. | Settled | Commit `bcde3ef`; CI `31700985043` passed macOS ARM and Windows x64. |
+| B17 | Refresh a configured Provider discovery snapshot, inspect the current catalog, and accept one verified discovered model as a Model Preset through CLI. | Building | One Provider/Config domain only; settlement pending. |
 
-Current official progress is **sixteen CI-settled feature Batches**. R1 remains
+Current official progress is **sixteen CI-settled feature Batches**. B17 is the
+only active Batch; R1 remains
 a separate Release Gate and does not block feature coverage.
+
+## Active milestone
+
+```text
+Batch: B17
+Status: Building
+Milestone: A CLI user can run a controlled Provider discovery refresh, inspect
+  a current catalog entry, accept one verified discovered model as a normal
+  Model Preset, and reopen Config to see the committed tuple.
+Domain/Phase: Provider discovery and Config (Phase 4 / Config selection)
+Slices: deterministic successful discovery snapshot; current catalog projection;
+  accept with dry-run then atomic commit; reopen and verify preset/state
+  boundaries.
+Non-goals: background or periodic discovery, TUI/App Server discovery, starter
+  automation, Provider inference, credentials UI, fallback execution, broad
+  parser cleanup, Release Gate evidence, and unrelated review findings.
+Exit: successful refresh produces a current fingerprint-bound observation;
+  catalog exposes the discovered model as available/acceptable; accept dry-run
+  does not write, commit writes one ordinary preset, and reopen reports the
+  exact provider/model/dialect tuple. Failed or stale observations remain
+  fail-closed without Config or discovery-state mutation.
+Coverage target: one new Provider/Config user flow; local success plus one
+  persistence/fail-closed boundary. Do not expand scope to improve the rough
+  percentage during this Batch.
+```
 
 ## Last settled milestone
 
