@@ -305,15 +305,30 @@ smaller list used for progress accounting.
 | B12 | Remove one clean, registered Unix Git worktree through CLI while preserving its branch. | Settled | Commit `e80fc1d`; CI `31686469234` passed macOS ARM and Windows x64. |
 | B13 | Explicitly merge one clean, conflict-free Unix Git branch through CLI while preserving the source branch. | Settled | Commit `947bf7a`; CI `31689627871` passed macOS ARM and Windows x64. |
 | B14 | Delegate a child Agent with an explicit bounded Workspace capability and observe the grant in CLI status. | Settled | Commit `5fc24da`; Batch CI `31693096637` passed macOS ARM and Windows x64; capability snapshot only; Workspace execution binding remains deferred. |
+| B15 | List configured Model Presets, effective default, policy, and fallback IDs through a read-only CLI projection. | Settling | Feature flow ready; local Batch Gate and CI pending. |
 
-Current official progress is **fourteen CI-settled feature Batches**. R1 remains
+Current official progress remains **fourteen CI-settled feature Batches** until
+B15's exact-SHA CI is green. R1 remains
 a separate Release Gate and does not block feature coverage.
 
 ## Active Milestone
 
-No Milestone is active. B14 is settled; the next feature must receive a new
-five-line lock before implementation starts. Do not use a Phase heading,
-roadmap TODO, review finding, or an older CI failure as an implicit lock.
+```text
+Batch: B15
+Status: Settling
+Milestone: A CLI user can list configured Model Presets, see the effective
+  default, and inspect each preset's provider, model, dialect, policy, and
+  fallback chain without mutating state.
+Domain/Phase: Config and Provider selection (Phase 1/4)
+Slices: add a read-only config presets command; serialize bounded non-secret
+  preset projections; exercise one configured-preset listing flow.
+Non-goals: preset editing, starter installation/update, Provider discovery or
+  network probes, credential operations, TUI/App Server surfaces, fallback
+  execution, and Release Gate evidence.
+Exit: `greentyper config presets` returns deterministic JSON containing the
+  effective default and every valid configured preset, including fallback IDs,
+  with unchanged Config and Ledger state.
+```
 
 Last settled result:
 

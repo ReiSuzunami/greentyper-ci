@@ -89,6 +89,7 @@ cargo run -p greentyper -- tool status --ledger ./target/tool-runtime.ledger
 cargo run -p greentyper -- tool reconcile --ledger ./target/tool-runtime.ledger --call 1 --failed
 cargo run -p greentyper -- config schema
 cargo run -p greentyper -- config catalog
+cargo run -p greentyper -- config presets
 cargo run -p greentyper -- config discovery status
 cargo run -p greentyper -- config discovery refresh openai-main
 cargo run -p greentyper -- config discovery catalog openai-main
@@ -97,6 +98,13 @@ cargo run -p greentyper -- config update-starter frontier --scope user --dry-run
 cargo run -p greentyper -- config get provider.model
 cargo run -p greentyper -- config test-provider
 ```
+
+`config presets` is a read-only projection of effective configured Model
+Presets. It reports the exact default ID plus each Preset's provider, model,
+dialect, request policy, and bounded fallback IDs. It performs no Provider
+probe, credential lookup, Config write, or Ledger write; explicit
+`--user-config` and `--project-config` paths are supported for controlled
+automation.
 
 For a configured OpenAI or openai-compatible Profile, `headless` accepts
 `--dialect responses` or `--dialect chat_completions`. A configured DeepSeek

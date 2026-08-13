@@ -320,6 +320,58 @@ fn config_catalog_emits_the_versioned_public_release_seed_only() {
 }
 
 #[test]
+fn config_presets_lists_default_policy_and_fallback_without_writing_state() {
+    let temp = TempTree::new();
+    fs::create_dir_all(temp.user_config().parent().expect("user Config parent"))
+        .expect("create user Config parent");
+    let config = br#"schema_version = 1
+
+[agent]
+default_model_preset = "fast"
+
+[model_presets.backup]
+provider = "simulator"
+model = "deterministic-backup"
+dialect = "responses"
+reasoning_effort = "high"
+service_tier = "priority"
+
+[model_presets.fast]
+provider = "simulator"
+model = "deterministic-fast"
+dialect = "responses"
+reasoning_effort = "high"
+service_tier = "priority"
+fallback = ["backup"]
+"#;
+    fs::write(temp.user_config(), config).expect("write preset config");
+
+    let output = temp
+        .config_command("presets")
+        .output()
+        .expect("run config presets");
+    assert_success(&output);
+    let listed = json(&output.stdout);
+    assert_eq!(listed["default"], "fast");
+    let presets = listed["presets"].as_array().expect("preset list");
+    assert_eq!(presets.len(), 2);
+    assert_eq!(presets[0]["id"], "backup");
+    assert_eq!(presets[1]["id"], "fast");
+    assert_eq!(presets[1]["provider"], "simulator");
+    assert_eq!(presets[1]["model"], "deterministic-fast");
+    assert_eq!(presets[1]["dialect"], "responses");
+    assert_eq!(presets[1]["reasoning_effort"], "high");
+    assert_eq!(presets[1]["service_tier"], "priority");
+    assert_eq!(presets[1]["fallback"], serde_json::json!(["backup"]));
+    assert_eq!(
+        fs::read(temp.user_config()).expect("read unchanged config"),
+        config
+    );
+    assert!(!temp.root.join("runtime.ledger").exists());
+    assert!(output.stderr.is_empty(), "{output:?}");
+}
+
+#[test]
 fn config_discovery_status_is_read_only_and_fails_closed_on_corruption() {
     let temp = TempTree::new();
     let state = temp.discovery_state();

@@ -272,14 +272,18 @@ records, and affect Provider quota or billing. It does not edit Config or
 persist raw approval material.
 
 Slash commands navigate and select scope; mutation occurs in a validated
-dialog. The current headless CLI provides `config schema`, `config get`,
-`config set`, `config reset`, backup-based `config repair`, and
-`config test-provider` for the currently selected committed Profile. `set` and
-`reset` require an explicit `user` or `project` scope, are single-operation
-Config Drafts, and accept `--dry-run` to return the normalized diff without
-committing. `--user-config` and `--project-config` select explicit absolute
-paths for tests and controlled automation; normal execution uses the platform
-user path and `.greentyper/config.toml` in the current project.
+dialog. The current headless CLI provides `config schema`, read-only
+`config presets`, `config get`, `config set`, `config reset`, backup-based
+`config repair`, and `config test-provider` for the currently selected
+committed Profile. `config presets` returns the effective default ID and every
+valid configured Model Preset, including provider, model, dialect, request
+policy, and fallback IDs. It performs no Provider probe, credential lookup,
+Config write, or Ledger write. `set` and `reset` require an explicit `user` or
+`project` scope, are single-operation Config Drafts, and accept `--dry-run` to
+return the normalized diff without committing. `--user-config` and
+`--project-config` select explicit absolute paths for tests and controlled
+automation; normal execution uses the platform user path and
+`.greentyper/config.toml` in the current project.
 
 The same executable exposes `agent status|list`, `acknowledge`, `delegate`,
 `message`, `complete`, `fail`, `cancel`, `turn`, owner-bound Provider `retry`,

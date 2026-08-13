@@ -500,6 +500,15 @@ fn run_config(command: ConfigCommand) -> Result<(), CliError> {
             "entries": config_schema(),
         })),
         ConfigCommand::Catalog => write_json(ProviderCatalog::release()),
+        ConfigCommand::Presets { paths } => {
+            let runtime = open_config_runtime(paths)?;
+            let presets = runtime.model_presets()?;
+            let default = runtime.default_model_preset()?.map(str::to_owned);
+            write_json(&serde_json::json!({
+                "default": default,
+                "presets": presets,
+            }))
+        }
         ConfigCommand::DiscoveryStatus { state } => {
             write_json(&ProviderDiscoveryState::inspect(&state)?)
         }
@@ -1650,6 +1659,9 @@ enum AgentCommand {
 enum ConfigCommand {
     Schema,
     Catalog,
+    Presets {
+        paths: ConfigPaths,
+    },
     DiscoveryStatus {
         state: PathBuf,
     },
@@ -3533,6 +3545,14 @@ fn parse_config(mut arguments: impl Iterator<Item = String>) -> Result<ConfigCom
                 _ => Err(CliError::Usage("invalid config discovery arguments")),
             }
         }
+        "presets" => {
+            reject_config_scope(scope, "--scope is not valid for config presets")?;
+            reject_dry_run(dry_run, "--dry-run is not valid for config presets")?;
+            if !positionals.is_empty() {
+                return Err(CliError::Usage("config presets does not accept a path"));
+            }
+            Ok(ConfigCommand::Presets { paths })
+        }
         "accept-starter" => {
             let scope = scope.ok_or(CliError::Usage("config accept-starter requires --scope"))?;
             let [preset, provider, catalog_key]: [String; 3] =
@@ -3845,6 +3865,7 @@ Usage:\n\
   greentyper tool reconcile [--ledger PATH] --call ID (--failed | --succeeded-digest SHA256)\n\
   greentyper config schema\n\
   greentyper config catalog\n\
+  greentyper config presets [--user-config PATH] [--project-config PATH]\n\
   greentyper config discovery status|refresh|catalog [PROFILE] [--discovery-state PATH]\n\
   greentyper config discovery accept PRESET_ID PROFILE MODEL --dialect DIALECT --scope user|project [--dry-run]\n\
   greentyper config accept-starter PRESET_ID PROVIDER CATALOG_KEY --scope user|project [--dry-run]\n\
