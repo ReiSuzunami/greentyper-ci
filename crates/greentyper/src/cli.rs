@@ -35,7 +35,7 @@ use crate::provider_http::{
     ConfiguredProvider, ProviderHttpError, ProviderHttpSmokeOutcome, ProviderHttpSmokeScenario,
 };
 use crate::skill::{SkillError, list_skills, run_skill};
-use crate::workspace_git::{WorkspaceGitError, allocate_worktree, check_merge};
+use crate::workspace_git::{WorkspaceGitError, allocate_worktree, check_merge, list_worktrees};
 use greentyper_core::agent_team::{
     CapabilitySnapshot, CommandOutcome, CompletionCapsule, ResourceBudget, TaskScope,
     TeamOperationAcknowledgeOutcome, TeamOperationCommit, TeamOperationRecord, TeamOperationStatus,
@@ -622,6 +622,7 @@ fn run_workspace(command: WorkspaceCommand) -> Result<(), CliError> {
             let root = WorkspaceRoot::open(root)?;
             write_json(&root.facts())
         }
+        WorkspaceCommand::List { root } => write_json(&list_worktrees(root)?),
         WorkspaceCommand::Capture { root, paths } => {
             let root = WorkspaceRoot::open(root)?;
             let lease = root.acquire_lease(WorkspaceAccess::ReadOnly)?;
@@ -1512,6 +1513,9 @@ enum WorkspaceCommand {
     Inspect {
         root: PathBuf,
     },
+    List {
+        root: PathBuf,
+    },
     Capture {
         root: PathBuf,
         paths: Vec<String>,
@@ -2136,7 +2140,7 @@ fn parse_workspace(
     mut arguments: impl Iterator<Item = String>,
 ) -> Result<WorkspaceCommand, CliError> {
     let action = arguments.next().ok_or(CliError::Usage(
-        "workspace requires inspect, capture, validate, apply, allocate, or merge-check",
+        "workspace requires inspect, list, capture, validate, apply, allocate, or merge-check",
     ))?;
     let mut root = None;
     let mut paths = Vec::new();
@@ -2264,6 +2268,20 @@ fn parse_workspace(
             }
             Ok(WorkspaceCommand::Inspect { root })
         }
+        "list" => {
+            if !paths.is_empty()
+                || input.is_some()
+                || read_set.is_some()
+                || worktree.is_some()
+                || branch.is_some()
+                || base.is_some()
+                || target.is_some()
+                || source.is_some()
+            {
+                return Err(CliError::Usage("workspace list accepts only --root"));
+            }
+            Ok(WorkspaceCommand::List { root })
+        }
         "capture" => {
             if paths.is_empty()
                 || input.is_some()
@@ -2361,7 +2379,7 @@ fn parse_workspace(
             })
         }
         _ => Err(CliError::Usage(
-            "workspace requires inspect, capture, validate, apply, allocate, or merge-check",
+            "workspace requires inspect, list, capture, validate, apply, allocate, or merge-check",
         )),
     }
 }
@@ -3715,6 +3733,7 @@ Usage:\n\
   greentyper context handoff [--ledger PATH]\n\
   greentyper context reduce [--ledger PATH] [--max-raw-bytes N] [--max-raw-items N]\n\
   greentyper workspace inspect --root PATH\n\
+  greentyper workspace list --root PATH\n\
   greentyper workspace capture --root PATH --path RELATIVE_PATH [--path RELATIVE_PATH ...]\n\
   greentyper workspace validate --root PATH --read-set FILE\n\
   greentyper workspace apply --root PATH --read-set FILE --path RELATIVE_PATH --input FILE\n\

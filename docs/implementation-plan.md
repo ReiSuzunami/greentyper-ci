@@ -813,7 +813,8 @@ can durably rearm an explicitly retryable Provider block without automatically
 resuming it. CLI/App Server now also expose that exact Provider recovery with a
 persisted Agent-owner check; the CLI composes resume, delivery, and
 acknowledgement. Workspace Coordinator facts and canonical workspace/worktree
-identities are portable. Unix now adds root-inode-bound directory Leases,
+identities are portable. Unix now adds a read-only redacted Git worktree list,
+root-inode-bound directory Leases,
 component-by-component no-follow Read Set capture, bounded JSON revalidation,
 and an exclusive writer freshness gate through `greentyper-core`; the
 `workspace` CLI exposes facts, capture, validation, and one guarded Unix

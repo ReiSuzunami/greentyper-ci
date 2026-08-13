@@ -569,6 +569,9 @@ persisted Agent owner, and reopen prepared output before the existing explicit
 delivery acknowledgement.
 These actions never write Runtime, Tool, or Config state.
 `workspace inspect --root PATH` emits stable redacted Workspace/Worktree facts.
+On Unix, `workspace list --root PATH` lists every registered Git worktree by
+stable redacted Workspace facts, commit, branch, and detached/locked/prunable
+state without returning an absolute path or changing repository state.
 On Unix, `workspace capture` holds a shared directory Lease while opening each
 bounded relative file component-by-component without following symlinks, then
 emits a digest-only Read Set. `workspace validate` reopens that bounded JSON
@@ -577,7 +580,7 @@ Read Set under the same Lease and fails nonzero when any observed file changed.
 atomically replaces one existing Read Set file only after acquiring an
 exclusive Lease and revalidating the complete Read Set. Stale, uncovered,
 symlinked, non-regular, or oversized targets fail before writing and leave the
-target unchanged. On Unix, `workspace allocate` creates an isolated Git
+target unchanged. `workspace allocate` creates an isolated Git
 worktree from a bounded branch/base reference, and `workspace merge-check`
 reports `mergeable` or `conflict` with relative conflict paths without changing
 a branch, index, or working tree. These facts remain independent of Team Events

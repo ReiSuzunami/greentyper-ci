@@ -162,6 +162,33 @@ fn workspace_cli_allocates_isolated_git_worktrees() {
         assert!(path.is_dir());
     }
 
+    let list = Command::new(env!("CARGO_BIN_EXE_greentyper"))
+        .args(["workspace", "list", "--root"])
+        .arg(&root)
+        .output()
+        .expect("list worktrees");
+    assert!(list.status.success(), "{list:?}");
+    assert!(list.stderr.is_empty(), "{list:?}");
+    let list_text = String::from_utf8(list.stdout).expect("worktree list UTF-8");
+    for private_path in [&root, &left, &right] {
+        assert!(!list_text.contains(private_path.to_string_lossy().as_ref()));
+    }
+    let listed: Value = serde_json::from_str(&list_text).expect("worktree list JSON");
+    let worktrees = listed["worktrees"].as_array().expect("worktree array");
+    assert_eq!(worktrees.len(), 3);
+    let mut branches = worktrees
+        .iter()
+        .map(|worktree| {
+            assert!(worktree["worktree"].is_object());
+            assert_eq!(worktree["detached"], false);
+            assert_eq!(worktree["locked"], false);
+            assert_eq!(worktree["prunable"], false);
+            worktree["branch"].as_str().expect("branch").to_owned()
+        })
+        .collect::<Vec<_>>();
+    branches.sort();
+    assert_eq!(branches, ["agent-left", "agent-right", "main"]);
+
     fs::write(left.join("left-only.txt"), b"left\n").expect("left edit");
     assert!(!right.join("left-only.txt").exists());
     git(&left, &["status", "--porcelain"]);

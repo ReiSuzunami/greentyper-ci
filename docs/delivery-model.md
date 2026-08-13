@@ -210,10 +210,11 @@ smaller list used for progress accounting.
 | B9 | List and explicitly run a project Skill through App Server, with durable reuse on repeat. | Settled | Startup-directory root; fixed `local.echo` only; no MCP, scripts, background discovery, or capability grant. Commit `84ae83f`; CI `31673669506` passed macOS ARM and Windows x64. |
 | R1 | Install, recover, measure, and pass the declared release acceptance. | Pending | Release Gate only; never used to block a small feature Batch. |
 | B10 | Recover an early-failed active child Agent Turn through App Server, then deliver and acknowledge exactly once. | Settled | Commit `4931e8a`; CI `31679750127` passed macOS ARM and Windows x64. |
+| B11 | List registered Git worktrees through CLI without exposing absolute paths or changing repository state. | Ready | Focused Workspace CLI flow passed; counts only after commit, push, and exact-SHA CI. |
 
 Current official progress is **ten CI-settled feature Batches**. The next
-feature slot is open; R1 remains a separate Release Gate and does not block
-feature coverage.
+feature result is B11 and remains uncounted until exact-SHA CI succeeds; R1
+remains a separate Release Gate and does not block feature coverage.
 
 ## Batch closeout record
 
@@ -330,3 +331,16 @@ not yet counted as released progress.
 - **Deferred:** automatic retry, TUI approval/recovery, remote App Server
   transport, multi-tool recovery, and Release Gate evidence.
 - **Next slot:** a fresh feature Milestone; R1 remains separate.
+
+### B11 — Redacted Git worktree list (ready)
+
+- **Status:** `Ready`; awaiting commit, push, and exact-SHA Batch CI.
+- **User result:** a Unix CLI user can list every registered Git worktree with
+  stable Workspace facts, commit, branch, and detached/locked/prunable state,
+  without receiving an absolute path or mutating repository state.
+- **Slices delivered:** bounded Git porcelain projection; redacted list model;
+  `workspace list --root PATH` parser, runner, and help; one real CLI flow.
+- **Critical check:** `cargo test -p greentyper --test workspace_cli --locked`
+  passed (3 tests), including three-worktree listing and path redaction.
+- **Deferred:** cleanup, automatic merge, dirty-state expansion, Windows Git
+  adapters, TUI/App Server surfaces, and Release Gate evidence.

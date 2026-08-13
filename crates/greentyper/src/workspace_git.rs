@@ -4,10 +4,14 @@
 //! limited to local identity, leases, read sets, and guarded file writes.
 
 use std::error::Error;
+#[cfg(unix)]
+use std::ffi::OsString;
 use std::fmt;
 #[cfg(unix)]
 use std::fs;
 use std::io;
+#[cfg(unix)]
+use std::os::unix::ffi::OsStringExt;
 use std::path::Path;
 #[cfg(unix)]
 use std::path::PathBuf;
@@ -25,6 +29,10 @@ const MAX_GIT_OUTPUT_BYTES: usize = 1024 * 1024;
 const MAX_REF_BYTES: usize = 128;
 #[cfg(unix)]
 const MAX_CONFLICT_PATH_BYTES: usize = 512;
+#[cfg(unix)]
+const MAX_WORKTREES: usize = 1024;
+#[cfg(unix)]
+const MAX_BRANCH_BYTES: usize = 512;
 
 #[cfg_attr(not(unix), allow(dead_code))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -60,6 +68,46 @@ pub struct MergeCheck {
     pub source_commit: String,
     pub merge_tree: String,
     pub conflict_paths: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorktreeList {
+    pub repository: WorkspaceFacts,
+    pub worktrees: Vec<WorktreeStatus>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorktreeStatus {
+    pub worktree: Option<WorkspaceFacts>,
+    pub head_commit: String,
+    pub branch: Option<String>,
+    pub detached: bool,
+    pub locked: bool,
+    pub prunable: bool,
+}
+
+pub fn list_worktrees(root_path: impl AsRef<Path>) -> Result<WorktreeList, WorkspaceGitError> {
+    #[cfg(not(unix))]
+    {
+        let _ = root_path;
+        Err(WorkspaceGitError::UnsupportedPlatform)
+    }
+
+    #[cfg(unix)]
+    {
+        let root = WorkspaceRoot::open(root_path).map_err(WorkspaceGitError::Workspace)?;
+        verify_repository(&root)?;
+        let output = git(root.path(), ["worktree", "list", "--porcelain", "-z"])?;
+        if !output.status.success() {
+            return Err(WorkspaceGitError::CommandFailed("worktree listing"));
+        }
+        Ok(WorktreeList {
+            repository: root.facts(),
+            worktrees: parse_worktree_list(&output.stdout)?,
+        })
+    }
 }
 
 pub fn allocate_worktree(
@@ -310,6 +358,114 @@ fn parse_merge_tree_output(bytes: &[u8]) -> Result<(String, Vec<String>), Worksp
     conflicts.sort();
     conflicts.dedup();
     Ok((tree, conflicts))
+}
+
+#[cfg(unix)]
+#[derive(Default)]
+struct ParsedWorktree {
+    path: Option<Vec<u8>>,
+    head_commit: Option<String>,
+    branch: Option<String>,
+    detached: bool,
+    locked: bool,
+    prunable: bool,
+}
+
+#[cfg(unix)]
+fn parse_worktree_list(bytes: &[u8]) -> Result<Vec<WorktreeStatus>, WorkspaceGitError> {
+    let mut parsed = ParsedWorktree::default();
+    let mut has_fields = false;
+    let mut worktrees = Vec::new();
+
+    for field in bytes.split(|byte| *byte == 0) {
+        if field.is_empty() {
+            if has_fields {
+                worktrees.push(finish_worktree(std::mem::take(&mut parsed))?);
+                if worktrees.len() > MAX_WORKTREES {
+                    return Err(WorkspaceGitError::OutputTooLarge);
+                }
+                has_fields = false;
+            }
+            continue;
+        }
+        has_fields = true;
+        if let Some(path) = field.strip_prefix(b"worktree ") {
+            if path.is_empty() || parsed.path.replace(path.to_vec()).is_some() {
+                return Err(WorkspaceGitError::UnexpectedOutput);
+            }
+        } else if let Some(head) = field.strip_prefix(b"HEAD ") {
+            let head = field_text(head)?;
+            validate_object_id(&head)?;
+            if parsed.head_commit.replace(head).is_some() {
+                return Err(WorkspaceGitError::UnexpectedOutput);
+            }
+        } else if let Some(branch) = field.strip_prefix(b"branch refs/heads/") {
+            let branch = field_text(branch)?;
+            if branch.is_empty()
+                || branch.len() > MAX_BRANCH_BYTES
+                || branch.bytes().any(|byte| byte.is_ascii_control())
+                || parsed.branch.replace(branch).is_some()
+            {
+                return Err(WorkspaceGitError::UnexpectedOutput);
+            }
+        } else if field == b"detached" {
+            if parsed.detached {
+                return Err(WorkspaceGitError::UnexpectedOutput);
+            }
+            parsed.detached = true;
+        } else if field == b"locked" || field.starts_with(b"locked ") {
+            if parsed.locked {
+                return Err(WorkspaceGitError::UnexpectedOutput);
+            }
+            parsed.locked = true;
+        } else if field == b"prunable" || field.starts_with(b"prunable ") {
+            if parsed.prunable {
+                return Err(WorkspaceGitError::UnexpectedOutput);
+            }
+            parsed.prunable = true;
+        } else {
+            return Err(WorkspaceGitError::UnexpectedOutput);
+        }
+    }
+    if has_fields {
+        worktrees.push(finish_worktree(parsed)?);
+    }
+    if worktrees.is_empty() {
+        return Err(WorkspaceGitError::UnexpectedOutput);
+    }
+    Ok(worktrees)
+}
+
+#[cfg(unix)]
+fn finish_worktree(parsed: ParsedWorktree) -> Result<WorktreeStatus, WorkspaceGitError> {
+    let path = parsed.path.ok_or(WorkspaceGitError::UnexpectedOutput)?;
+    let path = PathBuf::from(OsString::from_vec(path));
+    if !path.is_absolute()
+        || parsed.head_commit.is_none()
+        || parsed.branch.is_some() == parsed.detached
+    {
+        return Err(WorkspaceGitError::UnexpectedOutput);
+    }
+    let worktree = match WorkspaceRoot::open(&path) {
+        Ok(worktree) => Some(worktree.facts()),
+        Err(_) if parsed.prunable => None,
+        Err(error) => return Err(WorkspaceGitError::Workspace(error)),
+    };
+    Ok(WorktreeStatus {
+        worktree,
+        head_commit: parsed.head_commit.expect("checked above"),
+        branch: parsed.branch,
+        detached: parsed.detached,
+        locked: parsed.locked,
+        prunable: parsed.prunable,
+    })
+}
+
+#[cfg(unix)]
+fn field_text(bytes: &[u8]) -> Result<String, WorkspaceGitError> {
+    std::str::from_utf8(bytes)
+        .map(str::to_owned)
+        .map_err(|_| WorkspaceGitError::UnexpectedOutput)
 }
 
 #[cfg(unix)]
