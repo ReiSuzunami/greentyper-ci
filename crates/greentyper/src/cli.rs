@@ -36,7 +36,8 @@ use crate::provider_http::{
 };
 use crate::skill::{SkillError, list_skills, run_skill};
 use crate::workspace_git::{
-    WorkspaceGitError, allocate_worktree, check_merge, list_worktrees, remove_worktree,
+    WorkspaceGitError, allocate_worktree, check_merge, list_worktrees, merge_worktree,
+    remove_worktree,
 };
 use greentyper_core::agent_team::{
     CapabilitySnapshot, CommandOutcome, CompletionCapsule, ResourceBudget, TaskScope,
@@ -672,6 +673,11 @@ fn run_workspace(command: WorkspaceCommand) -> Result<(), CliError> {
             target,
             source,
         } => write_json(&check_merge(root, &target, &source)?),
+        WorkspaceCommand::Merge {
+            root,
+            target,
+            source,
+        } => write_json(&merge_worktree(root, &target, &source)?),
     }
 }
 
@@ -1550,6 +1556,11 @@ enum WorkspaceCommand {
         target: String,
         source: String,
     },
+    Merge {
+        root: PathBuf,
+        target: String,
+        source: String,
+    },
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -2149,7 +2160,7 @@ fn parse_workspace(
     mut arguments: impl Iterator<Item = String>,
 ) -> Result<WorkspaceCommand, CliError> {
     let action = arguments.next().ok_or(CliError::Usage(
-        "workspace requires inspect, list, remove, capture, validate, apply, allocate, or merge-check",
+        "workspace requires inspect, list, remove, capture, validate, apply, allocate, merge-check, or merge",
     ))?;
     let mut root = None;
     let mut paths = Vec::new();
@@ -2406,8 +2417,28 @@ fn parse_workspace(
                 source: source.expect("checked above"),
             })
         }
+        "merge" => {
+            if target.is_none()
+                || source.is_none()
+                || !paths.is_empty()
+                || input.is_some()
+                || read_set.is_some()
+                || worktree.is_some()
+                || branch.is_some()
+                || base.is_some()
+            {
+                return Err(CliError::Usage(
+                    "workspace merge requires --root, --target, and --source",
+                ));
+            }
+            Ok(WorkspaceCommand::Merge {
+                root,
+                target: target.expect("checked above"),
+                source: source.expect("checked above"),
+            })
+        }
         _ => Err(CliError::Usage(
-            "workspace requires inspect, list, remove, capture, validate, apply, allocate, or merge-check",
+            "workspace requires inspect, list, remove, capture, validate, apply, allocate, merge-check, or merge",
         )),
     }
 }
@@ -3768,6 +3799,7 @@ Usage:\n\
   greentyper workspace apply --root PATH --read-set FILE --path RELATIVE_PATH --input FILE\n\
   greentyper workspace allocate --root PATH --worktree PATH --branch NAME [--base REF]\n\
   greentyper workspace merge-check --root PATH --target REF --source REF\n\
+  greentyper workspace merge --root PATH --target BRANCH --source BRANCH\n\
   greentyper skill list [--project PATH]\n\
   greentyper skill run --id ID [--project PATH] [--ledger PATH] [--message TEXT] --approve\n\
   greentyper cancel [--ledger PATH] --turn ID\n\

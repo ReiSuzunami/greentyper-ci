@@ -70,6 +70,26 @@ pub struct MergeCheck {
     pub conflict_paths: Vec<String>,
 }
 
+#[cfg_attr(not(unix), allow(dead_code))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorktreeMergeStatus {
+    Merged,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorktreeMerge {
+    pub status: WorktreeMergeStatus,
+    pub repository: WorkspaceFacts,
+    pub target_branch: String,
+    pub source_branch: String,
+    pub previous_target_commit: String,
+    pub source_commit: String,
+    pub merge_commit: String,
+    pub source_branch_preserved: bool,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorktreeList {
@@ -346,6 +366,123 @@ pub fn check_merge(
             source_commit,
             merge_tree,
             conflict_paths,
+        })
+    }
+}
+
+pub fn merge_worktree(
+    root_path: impl AsRef<Path>,
+    target: &str,
+    source: &str,
+) -> Result<WorktreeMerge, WorkspaceGitError> {
+    #[cfg(not(unix))]
+    {
+        let _ = (root_path, target, source);
+        Err(WorkspaceGitError::UnsupportedPlatform)
+    }
+
+    #[cfg(unix)]
+    {
+        validate_ref(target, true)?;
+        validate_ref(source, true)?;
+        if target == source {
+            return Err(WorkspaceGitError::SameReference);
+        }
+
+        let root = WorkspaceRoot::open(root_path).map_err(WorkspaceGitError::Workspace)?;
+        verify_repository(&root)?;
+        let _lease = root
+            .acquire_lease(WorkspaceAccess::ReadWrite)
+            .map_err(WorkspaceGitError::Workspace)?;
+
+        let checked_out = git_text(root.path(), ["branch", "--show-current"])?;
+        if checked_out != target {
+            return Err(WorkspaceGitError::MergeTargetNotCheckedOut);
+        }
+        let status = git(
+            root.path(),
+            ["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+        )?;
+        if !status.status.success() {
+            return Err(WorkspaceGitError::CommandFailed("target status"));
+        }
+        if !status.stdout.is_empty() {
+            return Err(WorkspaceGitError::MergeTargetDirty);
+        }
+
+        let previous_target_commit = resolve_commit(root.path(), target)?;
+        let source_commit = resolve_commit(root.path(), source)?;
+        let preflight = git(
+            root.path(),
+            [
+                "merge-tree",
+                "--write-tree",
+                "--name-only",
+                "-z",
+                "--no-messages",
+                &previous_target_commit,
+                &source_commit,
+            ],
+        )?;
+        match preflight.status.code() {
+            Some(0) => {
+                let (_, conflict_paths) = parse_merge_tree_output(&preflight.stdout)?;
+                if !conflict_paths.is_empty() {
+                    return Err(WorkspaceGitError::MergeConflict);
+                }
+            }
+            Some(1) => return Err(WorkspaceGitError::MergeConflict),
+            _ => return Err(WorkspaceGitError::CommandFailed("merge preflight")),
+        }
+
+        if resolve_commit(root.path(), target)? != previous_target_commit
+            || resolve_commit(root.path(), source)? != source_commit
+        {
+            return Err(WorkspaceGitError::StaleReference);
+        }
+
+        let merge = git(
+            root.path(),
+            [
+                "merge",
+                "--no-edit",
+                "--no-ff",
+                "--no-commit",
+                &source_commit,
+            ],
+        )?;
+        if !merge.status.success() {
+            let _ = git(root.path(), ["merge", "--abort"]);
+            return Err(WorkspaceGitError::MergeFailed);
+        }
+
+        if resolve_commit(root.path(), target)? != previous_target_commit
+            || resolve_commit(root.path(), source)? != source_commit
+        {
+            let _ = git(root.path(), ["merge", "--abort"]);
+            return Err(WorkspaceGitError::StaleReference);
+        }
+
+        let commit = git(root.path(), ["commit", "--no-edit"])?;
+        if !commit.status.success() {
+            let _ = git(root.path(), ["merge", "--abort"]);
+            return Err(WorkspaceGitError::MergeFailed);
+        }
+        let merge_commit = resolve_commit(root.path(), target)?;
+        let source_branch_preserved = resolve_commit(root.path(), source)? == source_commit;
+        if !source_branch_preserved {
+            return Err(WorkspaceGitError::StaleReference);
+        }
+
+        Ok(WorktreeMerge {
+            status: WorktreeMergeStatus::Merged,
+            repository: root.facts(),
+            target_branch: target.to_owned(),
+            source_branch: source.to_owned(),
+            previous_target_commit,
+            source_commit,
+            merge_commit,
+            source_branch_preserved,
         })
     }
 }
@@ -669,6 +806,11 @@ pub enum WorkspaceGitError {
     WorktreeLocked,
     WorktreePrunable,
     DetachedWorktree,
+    SameReference,
+    MergeTargetNotCheckedOut,
+    MergeTargetDirty,
+    MergeConflict,
+    MergeFailed,
     StaleReference,
     UnexpectedOutput,
     OutputTooLarge,
@@ -701,6 +843,13 @@ impl fmt::Display for WorkspaceGitError {
             Self::DetachedWorktree => {
                 write!(formatter, "detached Git worktrees cannot be removed")
             }
+            Self::SameReference => write!(formatter, "Git merge target and source must differ"),
+            Self::MergeTargetNotCheckedOut => {
+                write!(formatter, "Git merge target must be the checked-out branch")
+            }
+            Self::MergeTargetDirty => write!(formatter, "Git merge target is dirty"),
+            Self::MergeConflict => write!(formatter, "Git merge has conflicts"),
+            Self::MergeFailed => write!(formatter, "Git merge failed"),
             Self::StaleReference => write!(formatter, "Git reference changed during merge check"),
             Self::UnexpectedOutput => write!(formatter, "Git returned an invalid worktree result"),
             Self::OutputTooLarge => write!(formatter, "Git worktree result is too large"),

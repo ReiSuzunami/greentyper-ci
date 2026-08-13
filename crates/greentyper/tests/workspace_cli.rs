@@ -287,6 +287,26 @@ fn workspace_cli_reports_mergeable_and_conflicting_heads() {
     assert_eq!(clean_json["status"], "mergeable");
     assert_eq!(clean_json["conflict_paths"], serde_json::json!([]));
 
+    let merge = Command::new(env!("CARGO_BIN_EXE_greentyper"))
+        .args(["workspace", "merge", "--root"])
+        .arg(&root)
+        .args(["--target", "main", "--source", "agent-clean"])
+        .output()
+        .expect("merge clean branch");
+    assert!(merge.status.success(), "{merge:?}");
+    assert!(merge.stderr.is_empty(), "{merge:?}");
+    assert!(!String::from_utf8_lossy(&merge.stdout).contains(root.to_string_lossy().as_ref()));
+    let merged: Value = serde_json::from_slice(&merge.stdout).expect("merge JSON");
+    assert_eq!(merged["status"], "merged");
+    assert_eq!(merged["target_branch"], "main");
+    assert_eq!(merged["source_branch"], "agent-clean");
+    assert_eq!(merged["source_branch_preserved"], true);
+    assert_ne!(merged["previous_target_commit"], merged["merge_commit"]);
+    assert_eq!(
+        fs::read_to_string(root.join("clean.txt")).expect("merged file"),
+        "clean\n"
+    );
+
     fs::write(root.join("tracked.txt"), b"target\n").expect("target edit");
     git(&root, &["add", "tracked.txt"]);
     git(&root, &["commit", "-qm", "target change"]);
@@ -307,6 +327,21 @@ fn workspace_cli_reports_mergeable_and_conflicting_heads() {
         conflict_json["conflict_paths"],
         serde_json::json!(["tracked.txt"])
     );
+    let target_before_rejected_merge =
+        git_output(&root, &["rev-parse", "HEAD"]).expect("target head before conflict merge");
+    let rejected_merge = Command::new(env!("CARGO_BIN_EXE_greentyper"))
+        .args(["workspace", "merge", "--root"])
+        .arg(&root)
+        .args(["--target", "main", "--source", "agent-conflict"])
+        .output()
+        .expect("reject conflicting merge");
+    assert!(!rejected_merge.status.success(), "{rejected_merge:?}");
+    assert!(rejected_merge.stdout.is_empty(), "{rejected_merge:?}");
+    assert!(String::from_utf8_lossy(&rejected_merge.stderr).contains("Git merge has conflicts"));
+    assert_eq!(
+        git_output(&root, &["rev-parse", "HEAD"]).expect("target head after conflict merge"),
+        target_before_rejected_merge
+    );
     assert_eq!(
         fs::read_to_string(root.join("tracked.txt")).expect("target bytes"),
         "target\n"
@@ -316,4 +351,17 @@ fn workspace_cli_reports_mergeable_and_conflicting_heads() {
     fs::remove_dir_all(&conflict).expect("remove conflict worktree");
     git(&root, &["worktree", "prune"]);
     fs::remove_dir_all(&root).expect("remove git repo");
+}
+
+fn git_output(root: &Path, args: &[&str]) -> Option<String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(args)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
