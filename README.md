@@ -534,6 +534,11 @@ Agent's durable Team metadata. Later default changes do not rewrite existing
 children; `agent.turn` resolves the child's exact inherited ID against current
 Config, fails before writes if it is missing or invalid, and otherwise freezes
 the resolved Config/Provider Epochs for that child Turn.
+CLI delegation also accepts repeated bounded `--capability workspace_read` or
+`--capability workspace_write` options. The child receives only the selected
+subset of the parent's capability snapshot, and `agent status` exposes the
+resulting count. This records authority for a later Workspace action; it does
+not yet bind an Agent Turn to Workspace execution.
 `/stats` now browses the latest successful Usage snapshot. It shows 1-hour, 1-day,
 and 7-day summaries. Tab and Shift-Tab move across Attempts, Turn,
 Provider & Model, Dialect & Policy, current Thread, Agent, Team, Named Window,
