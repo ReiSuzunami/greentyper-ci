@@ -639,7 +639,30 @@ fn run_workspace(command: WorkspaceCommand) -> Result<(), CliError> {
                 .into())
             }
         }
+        WorkspaceCommand::Apply {
+            root,
+            read_set,
+            path,
+            input,
+        } => {
+            let root = WorkspaceRoot::open(root)?;
+            let lease = root.acquire_lease(WorkspaceAccess::ReadWrite)?;
+            let read_set = ReadSet::from_json_reader(fs::File::open(read_set)?)?;
+            let bytes = read_bounded_workspace_input(fs::File::open(input)?)?;
+            let result = lease.apply_file(&root, &read_set, &path, &bytes)?;
+            write_json(&result)
+        }
     }
+}
+
+fn read_bounded_workspace_input(file: fs::File) -> Result<Vec<u8>, CliError> {
+    let mut bytes = Vec::new();
+    file.take(greentyper_core::workspace::MAX_WORKSPACE_WRITE_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > greentyper_core::workspace::MAX_WORKSPACE_WRITE_BYTES {
+        return Err(WorkspaceError::TooLarge.into());
+    }
+    Ok(bytes)
 }
 
 fn run_agent(command: AgentCommand) -> Result<(), CliError> {
@@ -1450,9 +1473,23 @@ enum ContextCommand {
 
 #[derive(Debug, Eq, PartialEq)]
 enum WorkspaceCommand {
-    Inspect { root: PathBuf },
-    Capture { root: PathBuf, paths: Vec<String> },
-    Validate { root: PathBuf, input: PathBuf },
+    Inspect {
+        root: PathBuf,
+    },
+    Capture {
+        root: PathBuf,
+        paths: Vec<String>,
+    },
+    Validate {
+        root: PathBuf,
+        input: PathBuf,
+    },
+    Apply {
+        root: PathBuf,
+        read_set: PathBuf,
+        path: String,
+        input: PathBuf,
+    },
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -2035,11 +2072,12 @@ fn parse_workspace(
     mut arguments: impl Iterator<Item = String>,
 ) -> Result<WorkspaceCommand, CliError> {
     let action = arguments.next().ok_or(CliError::Usage(
-        "workspace requires inspect, capture, or validate",
+        "workspace requires inspect, capture, validate, or apply",
     ))?;
     let mut root = None;
     let mut paths = Vec::new();
     let mut input = None;
+    let mut read_set = None;
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
             "--root" => {
@@ -2067,7 +2105,7 @@ fn parse_workspace(
                 paths.push(value);
             }
             "--read-set" => {
-                if input.is_some() {
+                if read_set.is_some() {
                     return Err(CliError::Usage("duplicate --read-set"));
                 }
                 let value = arguments
@@ -2075,6 +2113,18 @@ fn parse_workspace(
                     .ok_or(CliError::Usage("--read-set is missing its value"))?;
                 if value.is_empty() || value.starts_with('-') {
                     return Err(CliError::Usage("--read-set is missing its value"));
+                }
+                read_set = Some(PathBuf::from(value));
+            }
+            "--input" => {
+                if input.is_some() {
+                    return Err(CliError::Usage("duplicate --input"));
+                }
+                let value = arguments
+                    .next()
+                    .ok_or(CliError::Usage("--input is missing its value"))?;
+                if value.is_empty() || value.starts_with('-') {
+                    return Err(CliError::Usage("--input is missing its value"));
                 }
                 input = Some(PathBuf::from(value));
             }
@@ -2084,13 +2134,13 @@ fn parse_workspace(
     let root = root.ok_or(CliError::Usage("workspace requires --root"))?;
     match action.as_str() {
         "inspect" => {
-            if !paths.is_empty() || input.is_some() {
+            if !paths.is_empty() || input.is_some() || read_set.is_some() {
                 return Err(CliError::Usage("workspace inspect accepts only --root"));
             }
             Ok(WorkspaceCommand::Inspect { root })
         }
         "capture" => {
-            if paths.is_empty() || input.is_some() {
+            if paths.is_empty() || input.is_some() || read_set.is_some() {
                 return Err(CliError::Usage(
                     "workspace capture requires one or more --path options",
                 ));
@@ -2098,18 +2148,31 @@ fn parse_workspace(
             Ok(WorkspaceCommand::Capture { root, paths })
         }
         "validate" => {
-            if input.is_none() || !paths.is_empty() {
+            if read_set.is_none() || !paths.is_empty() || input.is_some() {
                 return Err(CliError::Usage(
                     "workspace validate accepts --root and --read-set only",
                 ));
             }
             Ok(WorkspaceCommand::Validate {
                 root,
+                input: read_set.expect("checked above"),
+            })
+        }
+        "apply" => {
+            if paths.len() != 1 || read_set.is_none() || input.is_none() {
+                return Err(CliError::Usage(
+                    "workspace apply requires --root, --read-set, --path, and --input",
+                ));
+            }
+            Ok(WorkspaceCommand::Apply {
+                root,
+                read_set: read_set.expect("checked above"),
+                path: paths.pop().expect("checked above"),
                 input: input.expect("checked above"),
             })
         }
         _ => Err(CliError::Usage(
-            "workspace requires inspect, capture, or validate",
+            "workspace requires inspect, capture, validate, or apply",
         )),
     }
 }
@@ -3378,6 +3441,7 @@ Usage:\n\
   greentyper workspace inspect --root PATH\n\
   greentyper workspace capture --root PATH --path RELATIVE_PATH [--path RELATIVE_PATH ...]\n\
   greentyper workspace validate --root PATH --read-set FILE\n\
+  greentyper workspace apply --root PATH --read-set FILE --path RELATIVE_PATH --input FILE\n\
   greentyper cancel [--ledger PATH] --turn ID\n\
   greentyper retry [--ledger PATH] --turn ID\n\
   greentyper reconcile [--ledger PATH] --delivery ID\n\

@@ -796,10 +796,13 @@ acknowledgement. Workspace Coordinator facts and canonical workspace/worktree
 identities are portable. Unix now adds root-inode-bound directory Leases,
 component-by-component no-follow Read Set capture, bounded JSON revalidation,
 and an exclusive writer freshness gate through `greentyper-core`; the
-`workspace` CLI exposes facts, capture, and validation. Windows Lease/Read Set
-operations fail closed until an audited reparse-point-safe adapter lands.
-These facts remain independent of Team Events and do not allocate Git
-worktrees or perform mutations. An Active parent can now explicitly requeue a
+`workspace` CLI exposes facts, capture, validation, and one guarded Unix
+single-file apply path. `workspace apply` requires an exclusive Lease and a
+fresh bounded Read Set before atomically replacing an existing regular file;
+stale, uncovered, symlinked, non-regular, and oversized targets fail closed.
+Windows Lease/Read Set operations fail closed until an audited reparse-point-safe
+adapter lands. These facts remain independent of Team Events and do not allocate
+Git worktrees. An Active parent can now explicitly requeue a
 direct Blocked, Failed, or Cancelled child once dependencies are clear; this is
 Team scheduling only and never replays Provider or Tool effects. Git worktree
 allocation and merge/conflict outcomes remain pending.

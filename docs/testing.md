@@ -22,6 +22,9 @@ Property tests must include:
   Leases coexist, read-write Leases exclude readers/writers,
   component-by-component opens reject symlinks, bounded JSON rejects
   oversized/corrupt Read Sets, and stale Read Sets fail before mutation.
+  The Unix workspace CLI apply path proves one fresh Read Set can replace one
+  existing file atomically, while a stale Read Set leaves the target bytes
+  unchanged.
   Windows Lease/Read Set operations fail closed pending an audited
   reparse-point-safe adapter.
 - Usage Rollups equal aggregation over their source Usage Records.

@@ -9,7 +9,7 @@
 use std::error::Error;
 use std::fmt;
 use std::fs::{self, File, TryLockError};
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -21,6 +21,7 @@ const MAX_RELATIVE_PATH_BYTES: usize = 512;
 pub const MAX_READ_SET_ENTRIES: usize = 1024;
 pub const MAX_READ_SET_JSON_BYTES: u64 = 1024 * 1024;
 const MAX_READ_SET_FILE_BYTES: u64 = 16 * 1024 * 1024;
+pub const MAX_WORKSPACE_WRITE_BYTES: usize = MAX_READ_SET_FILE_BYTES as usize;
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -117,6 +118,15 @@ pub struct ReadSetValidation {
     pub current_revision: String,
     pub stale_paths: Vec<String>,
     pub valid: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceWriteResult {
+    pub path: String,
+    pub bytes: u64,
+    pub digest: String,
+    pub read_set_id: ReadSetId,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -264,6 +274,55 @@ impl WorkspaceLease {
         }
         self.ensure_root(root)?;
         read_set.validate_before_mutation(root)
+    }
+
+    /// Atomically replace one file observed by a fresh Read Set.
+    ///
+    /// The exclusive lease and full Read Set validation happen before any
+    /// write. The target must be an existing regular file included in the
+    /// Read Set; unknown, stale, symlinked, and oversized targets fail closed.
+    pub fn apply_file(
+        &self,
+        root: &WorkspaceRoot,
+        read_set: &ReadSet,
+        path: &str,
+        bytes: &[u8],
+    ) -> Result<WorkspaceWriteResult, WorkspaceError> {
+        self.validate_before_mutation(root, read_set)?;
+        if bytes.len() > MAX_WORKSPACE_WRITE_BYTES {
+            return Err(WorkspaceError::TooLarge);
+        }
+        let relative = validate_relative_path(path)?;
+        if !read_set.entries.iter().any(|entry| entry.path == path) {
+            return Err(WorkspaceError::ReadSetPathRequired);
+        }
+        // Open through the root descriptor before constructing the absolute
+        // path. This rejects symlink/non-regular targets component-by-component.
+        let target = open_relative_file(root, &relative)?;
+        let metadata = target.metadata().map_err(WorkspaceError::Io)?;
+        if !metadata.is_file() {
+            return Err(WorkspaceError::NotRegularFile);
+        }
+        drop(target);
+
+        let absolute = root.path().join(&relative);
+        let mut options = atomic_write_file::OpenOptions::new();
+        #[cfg(unix)]
+        {
+            use atomic_write_file::unix::OpenOptionsExt as AtomicOpenOptionsExt;
+            AtomicOpenOptionsExt::preserve_mode(&mut options, true);
+        }
+        let mut file = options.open(&absolute).map_err(WorkspaceError::Io)?;
+        file.write_all(bytes).map_err(WorkspaceError::Io)?;
+        file.flush().map_err(WorkspaceError::Io)?;
+        file.commit().map_err(WorkspaceError::Io)?;
+
+        Ok(WorkspaceWriteResult {
+            path: relative.to_string_lossy().into_owned(),
+            bytes: bytes.len() as u64,
+            digest: sha256_digest(bytes),
+            read_set_id: read_set.read_set_id.clone(),
+        })
     }
 
     fn ensure_root(&self, root: &WorkspaceRoot) -> Result<(), WorkspaceError> {
@@ -432,6 +491,7 @@ pub enum WorkspaceError {
     WriteLeaseRequired,
     IdentityMismatch,
     StaleReadSet { changed_paths: Vec<String> },
+    ReadSetPathRequired,
     Corrupt,
     UnsupportedPlatform,
     Io(io::Error),
@@ -462,6 +522,12 @@ impl fmt::Display for WorkspaceError {
                     formatter,
                     "workspace read-set is stale ({} changed paths)",
                     changed_paths.len()
+                )
+            }
+            Self::ReadSetPathRequired => {
+                write!(
+                    formatter,
+                    "workspace write path is not covered by the read-set"
                 )
             }
             Self::Corrupt => write!(formatter, "workspace read-set is corrupt"),

@@ -567,11 +567,14 @@ On Unix, `workspace capture` holds a shared directory Lease while opening each
 bounded relative file component-by-component without following symlinks, then
 emits a digest-only Read Set. `workspace validate` reopens that bounded JSON
 Read Set under the same Lease and fails nonzero when any observed file changed.
-The writer-facing core gate requires an exclusive Lease plus a fresh Read Set
-before mutation. These commands do not execute Git, allocate worktrees, expose
-the absolute root, or modify user files. Windows Lease/Read Set operations
-currently fail closed pending an audited reparse-point-safe handle adapter;
-facts-only inspection remains available.
+`workspace apply --root PATH --read-set FILE --path RELATIVE_PATH --input FILE`
+atomically replaces one existing Read Set file only after acquiring an
+exclusive Lease and revalidating the complete Read Set. Stale, uncovered,
+symlinked, non-regular, or oversized targets fail before writing and leave the
+target unchanged. These commands do not execute Git, allocate worktrees, or
+expose the absolute root. Windows Lease/Read Set operations currently fail
+closed pending an audited reparse-point-safe handle adapter; facts-only
+inspection remains available.
 `/blockers` now lists the latest Runtime, Team, Task, Tool, and Config blockers.
 The list and its non-Tool details come from local snapshots. A retryable blocked
 Provider Turn opens bounded detail on the first Enter; the second Enter durably

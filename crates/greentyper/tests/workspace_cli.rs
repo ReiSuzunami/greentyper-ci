@@ -58,6 +58,23 @@ fn workspace_cli_captures_validates_and_rejects_a_stale_read_set() {
     assert_eq!(json["valid"], true);
     assert_eq!(fs::read(&tracked).expect("tracked bytes"), b"before");
 
+    let replacement_path = root.with_extension("replacement");
+    fs::write(&replacement_path, b"applied").expect("write replacement fixture");
+    let apply = Command::new(env!("CARGO_BIN_EXE_greentyper"))
+        .args(["workspace", "apply", "--root"])
+        .arg(&root)
+        .args(["--read-set"])
+        .arg(&read_set_path)
+        .args(["--path", "tracked.txt", "--input"])
+        .arg(&replacement_path)
+        .output()
+        .expect("apply fresh read set");
+    assert!(apply.status.success(), "{apply:?}");
+    let applied: Value = serde_json::from_slice(&apply.stdout).expect("write JSON");
+    assert_eq!(applied["path"], "tracked.txt");
+    assert_eq!(applied["bytes"], 7);
+    assert_eq!(fs::read(&tracked).expect("applied bytes"), b"applied");
+
     fs::write(&tracked, b"after").expect("mutate tracked file");
     let stale = Command::new(env!("CARGO_BIN_EXE_greentyper"))
         .args(["workspace", "validate", "--root"])
@@ -70,6 +87,21 @@ fn workspace_cli_captures_validates_and_rejects_a_stale_read_set() {
     assert!(stale.stdout.is_empty(), "{stale:?}");
     assert!(String::from_utf8_lossy(&stale.stderr).contains("read-set is stale"));
 
+    let stale_apply = Command::new(env!("CARGO_BIN_EXE_greentyper"))
+        .args(["workspace", "apply", "--root"])
+        .arg(&root)
+        .args(["--read-set"])
+        .arg(&read_set_path)
+        .args(["--path", "tracked.txt", "--input"])
+        .arg(&replacement_path)
+        .output()
+        .expect("reject stale apply");
+    assert!(!stale_apply.status.success(), "{stale_apply:?}");
+    assert!(stale_apply.stdout.is_empty(), "{stale_apply:?}");
+    assert!(String::from_utf8_lossy(&stale_apply.stderr).contains("read-set is stale"));
+    assert_eq!(fs::read(&tracked).expect("stale bytes"), b"after");
+
     fs::remove_file(read_set_path).expect("cleanup read set");
+    fs::remove_file(replacement_path).expect("cleanup replacement");
     fs::remove_dir_all(root).expect("cleanup workspace");
 }
