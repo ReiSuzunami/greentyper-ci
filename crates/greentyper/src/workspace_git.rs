@@ -26,6 +26,7 @@ const MAX_REF_BYTES: usize = 128;
 #[cfg(unix)]
 const MAX_CONFLICT_PATH_BYTES: usize = 512;
 
+#[cfg_attr(not(unix), allow(dead_code))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorktreeAllocationStatus {
@@ -43,6 +44,7 @@ pub struct WorktreeAllocation {
     pub worktree: WorkspaceFacts,
 }
 
+#[cfg_attr(not(unix), allow(dead_code))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MergeCheckStatus {
@@ -69,7 +71,7 @@ pub fn allocate_worktree(
     #[cfg(not(unix))]
     {
         let _ = (root_path, worktree_path, branch, base);
-        return Err(WorkspaceGitError::UnsupportedPlatform);
+        Err(WorkspaceGitError::UnsupportedPlatform)
     }
 
     #[cfg(unix)]
@@ -146,7 +148,7 @@ pub fn check_merge(
     #[cfg(not(unix))]
     {
         let _ = (root_path, target, source);
-        return Err(WorkspaceGitError::UnsupportedPlatform);
+        Err(WorkspaceGitError::UnsupportedPlatform)
     }
 
     #[cfg(unix)]
@@ -375,6 +377,7 @@ fn rollback_allocation(root: &Path, target: &Path, branch: &str) {
     let _ = git(root, ["branch", "-D", branch]);
 }
 
+#[cfg_attr(not(unix), allow(dead_code))]
 #[derive(Debug)]
 pub enum WorkspaceGitError {
     #[cfg(not(unix))]
