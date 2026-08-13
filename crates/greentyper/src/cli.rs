@@ -509,6 +509,19 @@ fn run_config(command: ConfigCommand) -> Result<(), CliError> {
                 "presets": presets,
             }))
         }
+        ConfigCommand::ModelAdd {
+            paths,
+            scope,
+            preset,
+            provider,
+            model,
+            dialect,
+            dry_run,
+        } => {
+            let mut runtime = open_config_runtime(paths)?;
+            let draft = runtime.begin_model_preset(scope, &preset, &provider, &model, dialect)?;
+            write_json(&runtime.commit(draft, dry_run)?)
+        }
         ConfigCommand::DiscoveryStatus { state } => {
             write_json(&ProviderDiscoveryState::inspect(&state)?)
         }
@@ -1661,6 +1674,15 @@ enum ConfigCommand {
     Catalog,
     Presets {
         paths: ConfigPaths,
+    },
+    ModelAdd {
+        paths: ConfigPaths,
+        scope: ConfigScope,
+        preset: String,
+        provider: String,
+        model: String,
+        dialect: ProviderDialect,
+        dry_run: bool,
     },
     DiscoveryStatus {
         state: PathBuf,
@@ -3470,7 +3492,10 @@ fn parse_config(mut arguments: impl Iterator<Item = String>) -> Result<ConfigCom
     }
 
     let paths = config_paths_with_overrides(user_config, project_config)?;
-    if action != "discovery" && (discovery_state.is_some() || discovery_dialect.is_some()) {
+    if action != "discovery"
+        && action != "model"
+        && (discovery_state.is_some() || discovery_dialect.is_some())
+    {
         return Err(CliError::Usage(
             "--discovery-state and --dialect are only valid for config discovery",
         ));
@@ -3552,6 +3577,32 @@ fn parse_config(mut arguments: impl Iterator<Item = String>) -> Result<ConfigCom
                 return Err(CliError::Usage("config presets does not accept a path"));
             }
             Ok(ConfigCommand::Presets { paths })
+        }
+        "model" => {
+            if discovery_state.is_some() {
+                return Err(CliError::Usage(
+                    "--discovery-state is not valid for config model",
+                ));
+            }
+            let scope = scope.ok_or(CliError::Usage("config model add requires --scope"))?;
+            let dialect =
+                discovery_dialect.ok_or(CliError::Usage("config model add requires --dialect"))?;
+            let [subcommand, preset, provider, model]: [String; 4] =
+                positionals.try_into().map_err(|_| {
+                    CliError::Usage("config model add requires ADD, PRESET_ID, PROVIDER, and MODEL")
+                })?;
+            if subcommand != "add" {
+                return Err(CliError::Usage("unknown config model subcommand"));
+            }
+            Ok(ConfigCommand::ModelAdd {
+                paths,
+                scope,
+                preset,
+                provider,
+                model,
+                dialect,
+                dry_run,
+            })
         }
         "accept-starter" => {
             let scope = scope.ok_or(CliError::Usage("config accept-starter requires --scope"))?;
@@ -3866,6 +3917,7 @@ Usage:\n\
   greentyper config schema\n\
   greentyper config catalog\n\
   greentyper config presets [--user-config PATH] [--project-config PATH]\n\
+  greentyper config model add PRESET_ID PROVIDER MODEL --dialect DIALECT --scope user|project [--dry-run]\n\
   greentyper config discovery status|refresh|catalog [PROFILE] [--discovery-state PATH]\n\
   greentyper config discovery accept PRESET_ID PROFILE MODEL --dialect DIALECT --scope user|project [--dry-run]\n\
   greentyper config accept-starter PRESET_ID PROVIDER CATALOG_KEY --scope user|project [--dry-run]\n\

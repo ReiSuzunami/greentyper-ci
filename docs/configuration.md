@@ -285,6 +285,13 @@ return the normalized diff without committing. `--user-config` and
 automation; normal execution uses the platform user path and
 `.greentyper/config.toml` in the current project.
 
+`config model add PRESET_ID PROVIDER MODEL --dialect DIALECT --scope user|project`
+creates the required provider/model/dialect fields for one new Preset by
+reusing the existing Provider Profile validation. `--dry-run` previews the
+normalized three-field diff; commit uses the normal Config CAS/atomic-write
+path. It does not select a default, probe a Provider, read credentials, write a
+Runtime Ledger, install a starter, or execute fallback.
+
 The same executable exposes `agent status|list`, `acknowledge`, `delegate`,
 `message`, `complete`, `fail`, `cancel`, `turn`, owner-bound Provider `retry`,
 and Team-only `requeue`. Status/list is a redacted

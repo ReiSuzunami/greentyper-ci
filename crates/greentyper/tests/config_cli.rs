@@ -372,6 +372,97 @@ fallback = ["backup"]
 }
 
 #[test]
+fn config_model_add_previews_commits_and_reopens_a_minimal_preset() {
+    let temp = TempTree::new();
+    fs::create_dir_all(temp.user_config().parent().expect("user Config parent"))
+        .expect("create user Config parent");
+    let before =
+        b"schema_version = 1\n\n[providers.openai-main]\ntemplate = \"openai\"\ncredential = \"synthetic-model-add-reference\"\n";
+    fs::write(temp.user_config(), before).expect("write Provider profile");
+
+    let preview = temp
+        .config_command("model")
+        .args([
+            "add",
+            "fast",
+            "openai-main",
+            "fixture-model",
+            "--dialect",
+            "responses",
+            "--scope",
+            "user",
+            "--dry-run",
+        ])
+        .output()
+        .expect("preview model preset");
+    assert_success(&preview);
+    assert_eq!(json(&preview.stdout)["written"], false);
+    assert_eq!(
+        fs::read(temp.user_config()).expect("read preview bytes"),
+        before
+    );
+    assert!(!lock_path(&temp.user_config()).exists());
+
+    let committed = temp
+        .config_command("model")
+        .args([
+            "add",
+            "fast",
+            "openai-main",
+            "fixture-model",
+            "--dialect",
+            "responses",
+            "--scope",
+            "user",
+        ])
+        .output()
+        .expect("commit model preset");
+    assert_success(&committed);
+    let commit = json(&committed.stdout);
+    assert_eq!(commit["written"], true);
+    assert_eq!(commit["scope"], "user");
+    assert_eq!(commit["changes"].as_array().map(Vec::len), Some(3));
+
+    let reopened = temp
+        .config_command("presets")
+        .output()
+        .expect("reopen model presets");
+    assert_success(&reopened);
+    let listed = json(&reopened.stdout);
+    let preset = listed["presets"]
+        .as_array()
+        .expect("preset list")
+        .iter()
+        .find(|preset| preset["id"] == "fast")
+        .expect("new preset");
+    assert_eq!(preset["provider"], "openai-main");
+    assert_eq!(preset["model"], "fixture-model");
+    assert_eq!(preset["dialect"], "responses");
+
+    let duplicate = temp
+        .config_command("model")
+        .args([
+            "add",
+            "fast",
+            "openai-main",
+            "other-model",
+            "--dialect",
+            "responses",
+            "--scope",
+            "user",
+        ])
+        .output()
+        .expect("reject duplicate model preset");
+    assert!(!duplicate.status.success());
+    assert!(duplicate.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&duplicate.stderr).contains("cannot replace"));
+    assert!(!temp.root.join("runtime.ledger").exists());
+    assert!(preview.stderr.is_empty(), "{preview:?}");
+    assert!(committed.stderr.is_empty(), "{committed:?}");
+    assert!(reopened.stderr.is_empty(), "{reopened:?}");
+}
+
+#[test]
 fn config_discovery_status_is_read_only_and_fails_closed_on_corruption() {
     let temp = TempTree::new();
     let state = temp.discovery_state();

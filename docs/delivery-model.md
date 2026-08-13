@@ -306,9 +306,29 @@ smaller list used for progress accounting.
 | B13 | Explicitly merge one clean, conflict-free Unix Git branch through CLI while preserving the source branch. | Settled | Commit `947bf7a`; CI `31689627871` passed macOS ARM and Windows x64. |
 | B14 | Delegate a child Agent with an explicit bounded Workspace capability and observe the grant in CLI status. | Settled | Commit `5fc24da`; Batch CI `31693096637` passed macOS ARM and Windows x64; capability snapshot only; Workspace execution binding remains deferred. |
 | B15 | List configured Model Presets, effective default, policy, and fallback IDs through a read-only CLI projection. | Settled | Commit `7190da4`; CI `31696507296` passed macOS ARM and Windows x64. |
+| B16 | Create one minimal Model Preset from an existing Provider Profile through CLI. | Building | Locked; settlement pending. |
 
 Current official progress is **fifteen CI-settled feature Batches**. R1 remains
 a separate Release Gate and does not block feature coverage.
+
+## Active milestone
+
+```text
+Batch: B16
+Status: Building
+Milestone: A CLI user can create one minimal Model Preset from an existing
+  Provider Profile by supplying a bounded Preset ID, model ID, and supported
+  dialect, with dry-run or atomic commit output.
+Domain/Phase: Config and Provider selection (Phase 1/4)
+Slices: add `config model add`; reuse ConfigRuntime validation/CAS commit;
+  verify dry-run, commit, and reopen through `config presets`.
+Non-goals: default selection, starter installation/update, discovery or network
+  probes, credentials, TUI/App Server surfaces, fallback execution, Workspace,
+  and Release Gate evidence.
+Exit: `config model add` previews without writing, commits a valid tuple, and
+  reopened `config presets` reports the new preset; invalid/duplicate input
+  fails closed without a Config or Ledger side effect.
+```
 
 ## Last settled milestone
 

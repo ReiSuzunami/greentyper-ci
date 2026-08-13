@@ -90,6 +90,7 @@ cargo run -p greentyper -- tool reconcile --ledger ./target/tool-runtime.ledger 
 cargo run -p greentyper -- config schema
 cargo run -p greentyper -- config catalog
 cargo run -p greentyper -- config presets
+cargo run -p greentyper -- config model add fast openai-main fixture-model --dialect responses --scope user --dry-run
 cargo run -p greentyper -- config discovery status
 cargo run -p greentyper -- config discovery refresh openai-main
 cargo run -p greentyper -- config discovery catalog openai-main
@@ -105,6 +106,13 @@ dialect, request policy, and bounded fallback IDs. It performs no Provider
 probe, credential lookup, Config write, or Ledger write; explicit
 `--user-config` and `--project-config` paths are supported for controlled
 automation.
+
+`config model add PRESET_ID PROVIDER MODEL --dialect DIALECT --scope user|project`
+creates one minimal Model Preset from an existing Provider Profile. `--dry-run`
+returns the normalized diff without writing. The command validates the exact
+Provider Profile and supported dialect, performs no network probe or credential
+lookup, and writes only Config; defaults, discovery, starter provenance, and
+fallback execution remain separate flows.
 
 For a configured OpenAI or openai-compatible Profile, `headless` accepts
 `--dialect responses` or `--dialect chat_completions`. A configured DeepSeek
