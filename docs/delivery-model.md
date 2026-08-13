@@ -9,18 +9,21 @@ document defines when a piece of work is allowed to count as delivered.
 ## Current Goal
 
 Maximize the number of distinct, usable user flows delivered per unit of time.
-**Build breadth first; tidy and certify second.** A flow that works locally is
-the only thing allowed to drive implementation. Documentation polish, broad
-test expansion, repeated reviews, architecture cleanup, and adjacent fixes are
-settlement work or later Milestones, never reasons to pause the coverage pass.
+**Make things usable first; tidy and certify once at the boundary.** The goal
+is feature coverage, not completion of every roadmap paragraph. A working local
+flow may guide implementation; it does not count as shipped progress until its
+Batch settles.
 
 The only active execution unit is **one Batch = one user flow in one domain**.
-Lock it, make it usable, record a rough coverage note, then settle it once.
-Phase language is roadmap context only; it cannot expand the active Batch.
-Milestone language is the one-sentence user-result lock; it cannot become a
-collection of unbounded subprojects. Local code, a focused test, a commit, or
-an in-progress CI run is provisional progress. A Batch is official only after
-its one settlement pass succeeds.
+Lock it, make it usable, write one short coverage note, then settle it once.
+Phase language is roadmap context only. Milestone language is one immutable
+user-result lock. Local code, tests, reviews, commits, and in-progress CI are
+provisional; only a successful settlement records progress.
+
+This is a hard stop against scope drift: when the locked result works, stop
+adding functionality. Put adjacent ideas and non-blocking findings in the
+follow-up register, then move to settlement. Do not reopen the Batch because a
+different domain has a more interesting issue.
 
 The default loop is deliberately non-interleaved:
 
@@ -42,11 +45,11 @@ unit tests, or opened pull requests.
 
 | Term | Meaning | Is it a completion gate? |
 | --- | --- | --- |
-| Phase | A broad roadmap grouping (Provider, Context, Team, and so on). It holds a queue of Milestones and has separate exit criteria. | No. A Phase may stay open while several Milestones ship. |
-| Milestone | One sentence describing one user-visible result in one domain. It has one owner, one boundary, and one observable exit. | Yes. This is the feature decision unit. |
-| Batch | The delivery package for exactly one Milestone: one to five slices, normally two to four, and never padded to reach a count. | Yes. A Batch is settled and counted once. |
-| Slice | A small implementation step toward the same Milestone; it includes only the check needed to keep moving. | Local checkpoint only. |
-| Release Gate | The full platform, performance, packaging, and acceptance bar. | Only for a release candidate or an explicitly declared release batch. |
+| Phase | Broad roadmap grouping (Provider, Context, Team, and so on). It owns a queue of Milestones and separate exit criteria. | Never. An open Phase does not block another settled Milestone. |
+| Milestone | One immutable sentence describing one user-visible result in one domain. It has one owner, one boundary, and one observable exit. | Yes. This is the product decision unit. |
+| Batch | Delivery package for exactly one Milestone: one to five slices, normally two to four, never padded. | Yes. A Batch settles once and is counted once. |
+| Slice | Small implementation step toward the same locked Milestone; it carries only the check needed to keep moving. | No. Slice success is local evidence only. |
+| Release Gate | Full platform, performance, packaging, and acceptance bar for a release candidate. | Only when explicitly declared; never an ordinary feature tax. |
 
 Examples of a Milestone:
 
@@ -79,6 +82,21 @@ Next: <the smallest remaining step for the same Milestone>
 The note may be approximate. It exists to show feature coverage moving, not to
 manufacture a precise percentage. Official progress is updated only once at
 Batch settlement.
+
+### Development versus settlement
+
+Keep these modes separate:
+
+| Mode | Allowed work | Stop condition |
+| --- | --- | --- |
+| Building | Implement slices in the locked domain; run only Slice Gate checks. | The one user result is observable. |
+| Ready | Freeze feature scope; add at most one happy-path and one blocker check. | No blocker remains for the locked exit. |
+| Settling | Update docs once, run the selected local gate once, clean, commit, push, and run one exact-SHA CI workflow. | CI is green, or Batch is marked Blocked after the allowed repair/rerun. |
+| Settled | Record result, depth, breadth, evidence, and deferred work. | Move to the next Milestone. |
+
+CI is a settlement action, not a development loop. Do not trigger CI for every
+Slice, review finding, or documentation edit. Do not rerun unchanged checks
+whose inputs and environment have not changed.
 
 ### Phase status and exit
 
@@ -293,6 +311,12 @@ a separate Release Gate and does not block feature coverage.
 
 ## Active Milestone
 
+No Milestone is active. B14 is settled; the next feature must receive a new
+five-line lock before implementation starts. Do not use a Phase heading,
+roadmap TODO, review finding, or an older CI failure as an implicit lock.
+
+Last settled result:
+
 ```text
 Batch: B14
 Status: Settled
@@ -300,14 +324,9 @@ Milestone: A CLI user can delegate a child Agent with an explicit bounded
   workspace_read or workspace_write capability and observe that grant in Agent
   status.
 Domain/Phase: Agent Team (Phase 7)
-Slices: parse bounded capability names; pass the Capability Snapshot through the
-  existing ProductDriver delegation path; exercise one CLI delegate/status flow.
-Non-goals: consuming Workspace capability in an Agent Turn, generic Tool or MCP
-  capability syntax, TUI/App Server changes, Windows Workspace adapters, and
-  Release Gate evidence.
-Exit: delegate with --capability workspace_read, acknowledge the Team operation,
-  then agent status reports the child with capability_count = 1. Achieved in
-  the local CLI flow and Batch CI.
+Exit: delegate with --capability workspace_read, acknowledge the Team
+  operation, then agent status reports capability_count = 1.
+Evidence: commit 5fc24da; CI 31693096637.
 ```
 
 ## Batch closeout record
