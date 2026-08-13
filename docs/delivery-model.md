@@ -8,29 +8,32 @@ document defines when a piece of work is allowed to count as delivered.
 
 ## Current Goal
 
-Maximize distinct, user-visible workflows that reach a CI-settled state per
-unit of execution time. Optimize for **feature coverage first, one settlement
-pass second**. Overall progress means usable results, not roadmap prose,
-review passes, commit count, test count, or modified lines.
+Maximize the number of distinct, usable user flows delivered per unit of time.
+**Build breadth first; tidy and certify second.** A flow that works locally is
+the only thing allowed to drive implementation. Documentation polish, broad
+test expansion, repeated reviews, architecture cleanup, and adjacent fixes are
+settlement work or later Milestones, never reasons to pause the coverage pass.
 
-Execution has one hard unit: **one Batch delivers one user result**. Lock that
-result, make the smallest vertical flow work, protect only its blocking
-boundary, settle it once, then move on. A Phase is only a roadmap container;
-unfinished Phase work never becomes an implicit requirement for the active
-Batch. Local code, a focused test, a commit, or an in-progress CI run is not
-progress. Only a successful Batch Gate counts.
+The only active execution unit is **one Batch = one user flow in one domain**.
+Lock it, make it usable, record a rough coverage note, then settle it once.
+Phase language is roadmap context only; it cannot expand the active Batch.
+Milestone language is the one-sentence user-result lock; it cannot become a
+collection of unbounded subprojects. Local code, a focused test, a commit, or
+an in-progress CI run is provisional progress. A Batch is official only after
+its one settlement pass succeeds.
 
-The default operating mode has two non-interleaved passes:
+The default loop is deliberately non-interleaved:
 
-1. **Coverage pass:** make the locked user flow work. Do not pause for
-   documentation cleanup, broad test expansion, repeated review, or adjacent
-   fixes.
-2. **Settlement pass:** once the flow works, add only blocker-critical checks,
-   update docs once, clean the worktree, run the Batch Gate once, push once,
-   and record one CI result.
+1. **Coverage pass:** implement the smallest end-to-end path. Skip everything
+   that does not block the advertised result.
+2. **Coverage note:** after each Slice, write one short estimate of breadth
+   (new usable domain/flow) and depth (how much of the locked flow works). This
+   is a planning signal, not a gate or a reason to start a second domain.
+3. **Settlement pass:** when the exit is visible, stop coding, run only the
+   critical checks, update docs once, clean, push, and run CI once.
 
-Do not alternate between these passes. A discovered improvement belongs in the
-follow-up register unless it blocks the locked exit.
+Do not alternate between passes. Non-blocking findings go to the follow-up
+register and stay out of the current Batch.
 
 ## The unit of progress
 
@@ -57,9 +60,25 @@ they do not describe one usable result.
 
 Phase does not equal Milestone. A Phase may contain many Milestones and remain
 `Active` while several user results ship. Milestone does not equal Batch. The
-Milestone is the immutable user-result lock; the Batch is its implementation,
-settlement, and CI package. No feature ledger row may be phrased as “finish a
-Phase”.
+Milestone is the immutable user-result lock; the Batch is the short
+implementation and settlement cycle for that lock. No feature ledger row may
+be phrased as “finish a Phase”. If a roadmap item would produce two user
+results, split it into two Milestones before coding.
+
+### Fast coverage protocol
+
+Use this four-line note after each Slice; do not turn it into a review meeting:
+
+```text
+Slice: <what a user can do now>
+Breadth: <new usable domain/flow, or none>
+Depth: <local / recoverable / externally verified>
+Next: <the smallest remaining step for the same Milestone>
+```
+
+The note may be approximate. It exists to show feature coverage moving, not to
+manufacture a precise percentage. Official progress is updated only once at
+Batch settlement.
 
 ### Phase status and exit
 
@@ -88,9 +107,9 @@ Non-goals: <everything explicitly deferred>
 Exit: <the one observable result that makes the milestone usable>
 ```
 
-Also record `Status: Locked | Building | Ready | Settled | Blocked`. `Ready`
+Also record `Status: Locked | Building | Ready | Settling | Settled | Blocked`.
+`Ready`
 means the user result works and its blocker checks pass; it is not progress
-credit. `Settled` requires the Batch Gate below. The lock is immutable during
 the Batch; changing the user result starts a new Milestone.
 
 The Phase can stay open indefinitely. The Milestone cannot: once its exit is
@@ -113,11 +132,12 @@ later slot unless it blocks the locked exit.
    - an external effect can be repeated or authority can cross an Agent;
    - the changed code does not compile or its critical path test fails; or
    - the change violates the formal Performance Contract.
-5. During implementation, run only a Slice Gate when the touched code needs
-   one. Default new-test budget is zero; after the flow is usable, add at most
-   one happy-path check and one destructive/fail-closed check when needed to
-   protect a blocker boundary. Skip redundant tests and repeated reviews; use
-   one owner and at most one independent review unless a blocker is found.
+5. During the coverage pass, the default new-test budget is zero. Run a check
+   only when code would otherwise be unobservable, or when persistence,
+   security, credentials, billing, recovery, authority, or a formal contract
+   could be violated. At settlement, add at most one happy-path and one
+   fail-closed check. Skip redundant tests and repeated reviews; use one owner
+   and at most one independent review unless a blocker is found.
 6. Update product/status documentation once, at Batch settlement. During
    implementation, keep discoveries in the follow-up register.
 7. Do not start another feature while the active Batch is unsettled. A local
@@ -148,10 +168,12 @@ Run exactly once, after all slices for the one result are usable. Do not run
 the full gate after every slice, review, or intermediate discovery:
 
 1. the one or two blocker-critical checks selected in the Milestone lock;
-2. one local regression pass appropriate to the change. Executable,
-   persistence, cross-platform, or authority changes use the full local gate
-   (format, locked check, tests, and clippy); docs-only changes use the relevant
-   link/format check;
+2. one local regression pass appropriate to the risk. Ordinary UI, projection,
+   and read-only surface work uses format/check plus the critical smoke only.
+   Persistence, security, credentials, billing, recovery, authority, and
+   cross-platform changes use the full relevant local gate. A full workspace
+   test/clippy pass is a release-style choice, not a default per-Batch tax;
+   docs-only changes use the relevant link/format check;
 3. one documentation update and link/format check;
 4. removal of temporary files and a clean intended diff;
 5. one commit and push to configured remotes; and

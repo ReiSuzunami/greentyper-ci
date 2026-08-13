@@ -22,11 +22,14 @@ Batch settlement, not inside the implementation loop. Non-blocking findings
 stay registered for a later Milestone instead of widening the current one.
 
 Implementation uses two non-interleaved passes: make the locked flow work,
-then settle it once. New tests default to none and are limited to one happy-path
-and one destructive/fail-closed check when a blocker boundary needs proof. A
-slice that grows beyond roughly 800 changed lines, crosses domains, or produces
-a second user result is split before more code is added. Phase exit, broad
-review, and Release Gate work remain outside this loop.
+then settle it once. Feature breadth is the primary progress signal. After each
+Slice, record a short approximate breadth/depth note; do not stop to polish the
+roadmap or expand tests. New tests default to none and are added only when the
+flow or a persistence, security, credential, billing, authority, recovery, or
+formal-contract boundary would otherwise be unobservable. A slice that grows
+beyond roughly 800 changed lines, crosses domains, or produces a second user
+result is split before more code is added. Phase exit, broad review, and
+Release Gate work remain outside this loop.
 
 Feature implementation was authorized on 2026-08-09. The first core slice fixes the Agent Team command/event interface, process-local Agent Sessions, and pure orchestration policy early; it does not claim Phase 7 completion. Plain `TeamRuntime` remains volatile. A separate durable Team adapter proves synchronous persistence, and the core Runtime Kernel now owns it, gates root admission, persists operation identity and acknowledgement records in the same Team Ledger, and rebinds the complete non-terminal Session set after recovery. The first Phase 2 slices persist Tool call identity, Approval Grant binding, prepared-effect state, terminal digests, and explicit ambiguous-effect reconciliation, and add bounded generic SSE framing plus a strict OpenAI Responses streaming decoder. Configured product Provider driving and one explicit `local.echo` approval/delivery path are now present; broader Tool catalogs and presentation remain pending.
 
