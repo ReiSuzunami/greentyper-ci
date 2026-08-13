@@ -130,13 +130,13 @@ smaller list used for progress accounting.
 | B4 | Requeue an eligible failed/blocked Team child through parent authority. | Settled | Team-only mutation; Provider retry remains a separate result. |
 | B5 | Apply one guarded Workspace file change or reject a stale read set. | Settled | Unix guarded path; Windows/Git worktrees remain separate results. |
 | B6 | Read the bounded Context handoff through the App Server. | Settled | Commit `36de81a`; CI `31664070914` passed macOS ARM and Windows x64. |
-| B7 | Allocate isolated Git worktrees and report merge/conflict outcomes. | Settled locally; CI pending | Unix `workspace allocate` + read-only `workspace merge-check`; automatic merge, cleanup, and Windows adapters deferred. Count only after this Batch's commit, push, and CI result. |
+| B7 | Allocate isolated Git worktrees and report merge/conflict outcomes. | Settled | Unix `workspace allocate` + read-only `workspace merge-check`; automatic merge, cleanup, and Windows adapters deferred. Functional commit `2388721`; Batch CI `31667302886` passed macOS ARM and Windows x64. |
 | B8 | Run a useful Skill/MCP flow with isolated capabilities and recoverable results. | Pending | Discovery, transport, and authority are one separate Milestone. |
 | B9 | Install, recover, measure, and pass the declared release acceptance. | Pending | Release Gate only; never used to block a small feature Batch. |
 
-Current official progress is **six CI-settled feature Batches plus B7 awaiting
-Batch Gate settlement**. Do not start B8 until B7's commit, push, and CI result
-are recorded below.
+Current official progress is **seven CI-settled feature Batches**. B8 remains
+the next available result slot; do not start it until a new Batch note locks
+one user result and its explicit non-goals.
 
 ## Batch closeout record
 
@@ -150,3 +150,22 @@ Every settled Batch gets one short record containing:
 
 If any of those fields is missing, the work may be usable locally, but it is
 not yet counted as released progress.
+
+### B7 — Git worktree allocation and merge preflight
+
+- **User result:** a user can allocate two isolated Unix Git worktrees and run
+  a read-only merge preflight that reports `mergeable` or `conflict` with
+  bounded relative paths.
+- **Slices delivered:** bounded repository/reference validation; isolated
+  `workspace allocate`; non-mutating `workspace merge-check`; CLI JSON output
+  and focused integration coverage.
+- **Critical checks:** `cargo test -p greentyper --test workspace_cli` (3
+  passed); full local workspace format/check/test/clippy gate passed.
+- **Functional commits:** `91fd2bd` and cross-platform lint fix `2388721`.
+  Both were pushed to `origin/main` and `ci/main`.
+- **CI evidence:** run `31667302886` passed Quality / macOS ARM and Windows x64
+  build, including workspace tests, lint, release builds, transport, terminal,
+  allocator, and acceptance pipelines.
+- **Deferred:** automatic merge, cleanup/leases, Windows Git/reparse-point
+  adapters, MCP integration, and TUI actions. These do not block B7.
+- **Next slot:** B8, one isolated Skill/MCP user result.
