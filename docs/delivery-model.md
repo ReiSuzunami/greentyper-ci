@@ -262,7 +262,6 @@ not yet counted as released progress.
 - **Functional change:** App Server dispatch and executor seam added to the
   existing project Skill implementation.
 - **Commit/push:** `84ae83f`, pushed to `origin/main` and `ci/main`.
-- **Commit/push:** `84ae83f`, pushed to `origin/main` and `ci/main`.
 - **Batch CI:** run `31673669506` for commit `84ae83f`; Quality / macOS ARM and
   Windows x64 build both passed.
 - **Deferred:** MCP transport/client, arbitrary scripts, user/built-in catalogs,
