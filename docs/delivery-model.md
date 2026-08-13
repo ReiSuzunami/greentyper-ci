@@ -9,8 +9,9 @@ document defines when a piece of work is allowed to count as delivered.
 ## Current Goal
 
 Maximize distinct, user-visible workflows that reach a CI-settled state per
-unit of execution time. Overall progress means usable results, not roadmap
-coverage, review passes, commit count, or test count.
+unit of execution time. Optimize for **feature coverage first, one settlement
+pass second**. Overall progress means usable results, not roadmap prose,
+review passes, commit count, test count, or modified lines.
 
 Execution has one hard unit: **one Batch delivers one user result**. Lock that
 result, make the smallest vertical flow work, protect only its blocking
@@ -18,6 +19,18 @@ boundary, settle it once, then move on. A Phase is only a roadmap container;
 unfinished Phase work never becomes an implicit requirement for the active
 Batch. Local code, a focused test, a commit, or an in-progress CI run is not
 progress. Only a successful Batch Gate counts.
+
+The default operating mode has two non-interleaved passes:
+
+1. **Coverage pass:** make the locked user flow work. Do not pause for
+   documentation cleanup, broad test expansion, repeated review, or adjacent
+   fixes.
+2. **Settlement pass:** once the flow works, add only blocker-critical checks,
+   update docs once, clean the worktree, run the Batch Gate once, push once,
+   and record one CI result.
+
+Do not alternate between these passes. A discovered improvement belongs in the
+follow-up register unless it blocks the locked exit.
 
 ## The unit of progress
 
@@ -91,7 +104,9 @@ later slot unless it blocks the locked exit.
 2. Keep the batch in one domain. A discovery, security, documentation, or
    architecture finding does not open a second domain.
 3. Stop as soon as the exit is observable. Do not add a sixth slice, a second
-   user result, or “completeness” work; register it for a later Milestone.
+   user result, or “completeness” work; register it for a later Milestone. If
+   one slice grows beyond roughly 800 changed lines, crosses domains, or
+   produces a second user result, split it before continuing.
 4. A finding may interrupt the batch only when it is one of these blockers:
    - the advertised flow cannot complete;
    - data, Ledger recovery, or atomicity can be corrupted;
@@ -99,9 +114,10 @@ later slot unless it blocks the locked exit.
    - the changed code does not compile or its critical path test fails; or
    - the change violates the formal Performance Contract.
 5. During implementation, run only a Slice Gate when the touched code needs
-   one. After the flow is usable, add at most one or two blocker-critical
-   checks. Skip redundant tests and repeated reviews; use one owner and at
-   most one independent review unless a blocker is found.
+   one. Default new-test budget is zero; after the flow is usable, add at most
+   one happy-path check and one destructive/fail-closed check when needed to
+   protect a blocker boundary. Skip redundant tests and repeated reviews; use
+   one owner and at most one independent review unless a blocker is found.
 6. Update product/status documentation once, at Batch settlement. During
    implementation, keep discoveries in the follow-up register.
 7. Do not start another feature while the active Batch is unsettled. A local
@@ -163,6 +179,10 @@ Batch **Blocked**, record the failing job and reason, and stop. Do not create
 more commits merely to chase CI. A Blocked Batch counts zero until explicitly
 resumed or waived by the release owner.
 
+Documentation-only governance or status corrections do not create a feature
+Batch and do not increment progress. They receive a link/format/diff check and
+may use a `[skip ci]` commit; they do not trigger a feature CI run.
+
 ### Release Gate
 
 The full Windows/macOS/Linux matrix, crash/fuzz/security coverage, FMDev
@@ -203,6 +223,25 @@ Background work, periodic polling, and resident discovery remain prohibited by
 the formal [Performance Contract](performance-contract.md) unless a separately
 approved exception changes that contract first.
 
+## Coverage reporting
+
+Every settled Batch reports depth and breadth separately:
+
+- **Depth:** the exact user result made usable;
+- **Breadth:** roadmap domains with at least one usable end-to-end flow;
+- **Progress:** settled feature-Batch count and next shortest independent user
+  result; and
+- **Release readiness:** reported separately, never inferred from feature
+  breadth.
+
+Use a rough coverage band or domain count, not a false precise percentage. This
+estimate is updated once at Batch closeout, never after each slice.
+
+Current breadth: Provider/Model, Config/Credentials, Agent/Team, Context/Usage,
+project Skills, Workspace, and local App Server each have at least one usable
+flow. MCP transport and complete Packaging/Acceptance do not. This is **7 of 9
+roadmap domains with a usable base flow**, not 78% release readiness.
+
 ## Current delivery ledger
 
 The roadmap phases are intentionally broad. The execution ledger below is the
@@ -228,6 +267,24 @@ smaller list used for progress accounting.
 
 Current official progress is **thirteen CI-settled feature Batches**. R1 remains a
 separate Release Gate and does not block feature coverage.
+
+## Active Milestone
+
+```text
+Batch: B14
+Status: Locked
+Milestone: A CLI user can delegate a child Agent with an explicit bounded
+  workspace_read or workspace_write capability and observe that grant in Agent
+  status.
+Domain/Phase: Agent Team (Phase 7)
+Slices: parse bounded capability names; pass the Capability Snapshot through the
+  existing ProductDriver delegation path; exercise one CLI delegate/status flow.
+Non-goals: consuming Workspace capability in an Agent Turn, generic Tool or MCP
+  capability syntax, TUI/App Server changes, Windows Workspace adapters, and
+  Release Gate evidence.
+Exit: delegate with --capability workspace_read, acknowledge the Team operation,
+  then agent status reports the child with capability_count = 1.
+```
 
 ## Batch closeout record
 
