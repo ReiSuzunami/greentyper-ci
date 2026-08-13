@@ -306,16 +306,16 @@ smaller list used for progress accounting.
 | B13 | Explicitly merge one clean, conflict-free Unix Git branch through CLI while preserving the source branch. | Settled | Commit `947bf7a`; CI `31689627871` passed macOS ARM and Windows x64. |
 | B14 | Delegate a child Agent with an explicit bounded Workspace capability and observe the grant in CLI status. | Settled | Commit `5fc24da`; Batch CI `31693096637` passed macOS ARM and Windows x64; capability snapshot only; Workspace execution binding remains deferred. |
 | B15 | List configured Model Presets, effective default, policy, and fallback IDs through a read-only CLI projection. | Settled | Commit `7190da4`; CI `31696507296` passed macOS ARM and Windows x64. |
-| B16 | Create one minimal Model Preset from an existing Provider Profile through CLI. | Building | Locked; settlement pending. |
+| B16 | Create one minimal Model Preset from an existing Provider Profile through CLI. | Settled | Commit `bcde3ef`; CI `31700985043` passed macOS ARM and Windows x64. |
 
-Current official progress is **fifteen CI-settled feature Batches**. R1 remains
+Current official progress is **sixteen CI-settled feature Batches**. R1 remains
 a separate Release Gate and does not block feature coverage.
 
-## Active milestone
+## Last settled milestone
 
 ```text
 Batch: B16
-Status: Building
+Status: Settled
 Milestone: A CLI user can create one minimal Model Preset from an existing
   Provider Profile by supplying a bounded Preset ID, model ID, and supported
   dialect, with dry-run or atomic commit output.
@@ -328,9 +328,16 @@ Non-goals: default selection, starter installation/update, discovery or network
 Exit: `config model add` previews without writing, commits a valid tuple, and
   reopened `config presets` reports the new preset; invalid/duplicate input
   fails closed without a Config or Ledger side effect.
+Evidence: commit `bcde3ef`; CI `31700985043` passed macOS ARM and Windows x64.
+Critical checks: `cargo test --workspace --locked`; workspace format/check/test/
+  clippy/diff gate; focused model-add flow with dry-run, commit, reopen, and
+  duplicate rejection.
+Deferred: default selection, starter installation/update, discovery/network
+  probes, credentials, TUI/App Server surfaces, fallback execution, Workspace,
+  and Release Gate evidence.
 ```
 
-## Last settled milestone
+## Previous settled milestone
 
 ```text
 Batch: B15
@@ -585,3 +592,20 @@ not yet counted as released progress.
   credential operations, TUI/App Server surfaces, fallback execution, and R1
   Release Gate evidence.
 - **Next slot:** choose one fresh independent Milestone; do not reopen B15.
+
+### B16 — Minimal Model Preset creation through CLI (settled)
+
+- **Status:** `Settled`.
+- **User result:** a CLI user can create one minimal Model Preset from an
+  existing Provider Profile by supplying Preset ID, model, and supported
+  dialect; dry-run previews, commit writes atomically, and reopen lists it.
+- **Slices delivered:** `config model add` parser/help; ConfigRuntime-backed
+  three-field draft/CAS commit; dry-run/commit/reopen/duplicate integration
+  flow.
+- **Critical checks:** focused `config_cli` flow passed; full workspace
+  format/check/test/clippy/diff gate passed.
+- **Commit/push:** `bcde3ef`, pushed to `origin/main` and `ci/main`.
+- **Batch CI:** run `31700985043` passed Quality / macOS ARM and Windows x64.
+- **Deferred:** defaults, starter/discovery/network/credential flows, TUI/App
+  Server, fallback execution, Workspace, and R1 Release Gate evidence.
+- **Next slot:** choose one fresh independent Milestone; do not reopen B16.
