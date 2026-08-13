@@ -403,6 +403,7 @@ The current operations are:
 | `runtime.acknowledge` | Durably acknowledge the exact prepared delivery; repeated acknowledgement is idempotent and a wrong delivery does not write |
 | `runtime.stats` | Return the revision-bound Usage summary; optional `limit` and `cursor` expose a bounded Attempt page, and optional `as_of_unix_ms` pins the reporting instant |
 | `context.handoff` | Return the same bounded read-only Context handoff as the CLI: Runtime recovery status, pending Turn/Agent identity, source/head facts, counts, and artifact digests; never Item text or semantic summary |
+| `context.reduce` | Accept optional bounded `max_raw_bytes` and `max_raw_items`, preflight canonical Context Mode, publish one Safe-Barrier checkpoint, and return only head/count/byte/token metadata; busy, stale, invalid, or incomplete state fails with fixed errors and no cross-Ledger write |
 | `skill.list` | List bounded project Skill summaries from the startup directory, including stable content hashes and no private paths |
 | `skill.run` | Require explicit approval, run one exact project Skill through fixed `local.echo`, and report durable reuse on an identical repeat; never grant Skill capabilities |
 | `agent.list` | Return the redacted Agent Center projection plus committed Team operations awaiting acknowledgement: canonical identities, status, Task identity/state, budgets, reservations, bounded counts, Team head/revision, message count, and incomplete-tail bytes; never Task titles, message/capsule contents, labels, reasons, or Sessions |

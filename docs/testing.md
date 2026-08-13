@@ -700,8 +700,11 @@ before the next Turn, and unknown pressure creates none. CLI tests prove missing
 preview/handoff expose no Item text or credential material, and only bounded
 artifact identity/digest metadata. The App Server `context.handoff` operation
 proves the same missing-safe, redacted projection without Runtime, Team, or Tool
-writes. `context reduce` exposes no Item text, busy or incomplete state is retryable without writes, and Product Team/Tool Ledgers stay
-byte-identical. Tool tests also reject an unresolved approval as non-barrier.
+writes. The App Server `context.reduce` operation proves one bounded checkpoint
+publication returns no Item text, while a busy Runtime fails closed with Runtime,
+Team, Tool, and Config bytes unchanged. CLI `context reduce` additionally covers
+incomplete Product state and Team/Tool byte identity. Tool tests also reject an
+unresolved approval as non-barrier.
 Request-projection tests prove archived bodies stay omitted while the recent tail
 and post-checkpoint Items remain ordered, an incomplete leading Assistant turn
 is omitted, malformed authoritative history fails closed, and an oversized

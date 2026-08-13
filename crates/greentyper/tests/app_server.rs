@@ -791,6 +791,45 @@ fn app_server_context_handoff_is_missing_safe_and_redacted() {
 }
 
 #[test]
+fn app_server_reduces_context_once_and_rejects_busy_state_without_writes() {
+    let temp = TempTree::new();
+    temp.run_headless("private App Server reduction input");
+    let before = fs::read(temp.runtime_ledger()).expect("read Runtime before reduction");
+    let output = temp.run(
+        b"{\"id\":1,\"operation\":\"context.reduce\",\"params\":{\"max_raw_bytes\":1024,\"max_raw_items\":1}}\n",
+    );
+    let result = &responses(&output)[0];
+    assert!(result.get("error").is_none(), "{result}");
+    assert_eq!(result["result"]["recovered_tail_bytes"], 0);
+    assert_eq!(result["result"]["checkpoint"]["recent_item_count"], 1);
+    assert_eq!(result["result"]["checkpoint"]["artifact_count"], 1);
+    assert!(
+        !String::from_utf8_lossy(&output.stdout).contains("private App Server reduction input")
+    );
+    assert_ne!(
+        fs::read(temp.runtime_ledger()).expect("read Runtime after reduction"),
+        before
+    );
+    assert!(!temp.team_ledger().exists());
+    assert!(!temp.tool_ledger().exists());
+
+    let busy = TempTree::new();
+    busy.create_blocked_runtime(ProviderUnavailableStage::BeforeFirstEvent);
+    let runtime_before = fs::read(busy.runtime_ledger()).expect("read blocked Runtime");
+    let output = busy.run(b"{\"id\":2,\"operation\":\"context.reduce\"}\n");
+    let result = &responses(&output)[0];
+    assert_eq!(result["error"]["category"], "context_busy");
+    assert_eq!(
+        fs::read(busy.runtime_ledger()).expect("read blocked Runtime after refusal"),
+        runtime_before
+    );
+    assert!(!busy.team_ledger().exists());
+    assert!(!busy.tool_ledger().exists());
+    assert!(!busy.user_config().exists());
+    assert!(!busy.project_config().exists());
+}
+
+#[test]
 fn app_server_cancels_provider_blocks_strictly_without_cross_ledger_mutation() {
     let missing = TempTree::new();
     let missing_output = missing.run(

@@ -179,7 +179,7 @@ frame after dispatch. The product CLI exposes the same operations without
 putting secret material in arguments, Config, or Ledgers. Windows stores values
 in the current user's Credential Manager; other platforms currently fail
 closed. The same stream has read-only `runtime.status`, bounded `runtime.stats`,
-bounded read-only `context.handoff`, redacted `agent.list`, and redacted
+bounded read-only `context.handoff`, explicit bounded `context.reduce`, redacted `agent.list`, and redacted
 `tool.status` operations. It also exposes project-scoped `skill.list` and
 `skill.run` from the server startup directory: a run requires explicit approval,
 uses only the fixed capability-bounded `local.echo` path, and repeats reuse the

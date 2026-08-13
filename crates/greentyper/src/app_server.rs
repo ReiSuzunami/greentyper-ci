@@ -14,6 +14,7 @@ use greentyper_core::config::{
     CONFIG_FILE_SCHEMA_VERSION, ConfigCommit, ConfigDraft, ConfigErrorCategory, ConfigRuntime,
     ConfigRuntimeError, ConfigScope, ConfigValue, MAX_CONFIG_STRING_BYTES, config_schema,
 };
+use greentyper_core::context::ContextReductionPolicy;
 use greentyper_core::model::{DeliveryId, ItemRole, TurnId};
 use greentyper_core::pricing::PriceScheduleBook;
 use greentyper_core::provider::ProviderRuntime;
@@ -44,9 +45,10 @@ use crate::product_driver::{
     apply_model_preset_to_next_turn, cancel_product_agent, cancel_product_provider_turn,
     complete_product_agent, delegate_product_agent, fail_product_agent, freeze_model_selection,
     has_product_driver_state, inspect_product_team, inspect_product_tools,
-    message_from_product_agent, reconcile_product_tool,
-    request_product_agent_provider_turn_recovery, request_product_provider_turn_recovery,
-    requeue_product_agent, require_context_mode_execution, require_pending_context_mode_execution,
+    message_from_product_agent, open_product_context_runtime, preflight_product_context_reduction,
+    reconcile_product_tool, request_product_agent_provider_turn_recovery,
+    request_product_provider_turn_recovery, requeue_product_agent, require_context_mode_execution,
+    require_pending_context_mode_execution,
 };
 use crate::provider_http::ConfiguredProvider;
 use crate::skill::{SkillError, list_skills, run_skill_with_executor};
@@ -602,6 +604,48 @@ where
                 },
                 Err(()) => invalid_params(request.id),
             },
+            "context.reduce" => {
+                let params = match parse_params::<ContextReduceParams>(request.params) {
+                    Ok(params) => params,
+                    Err(()) => return invalid_params(request.id),
+                };
+                let policy = match params.policy() {
+                    Ok(policy) => policy,
+                    Err(()) => {
+                        return error_response(
+                            Some(request.id),
+                            "invalid_value",
+                            "Context reduction limits are outside their boundary",
+                            None,
+                        );
+                    }
+                };
+                if let Err(error) =
+                    preflight_product_context_reduction(&self.runtime_path, &self.config)
+                {
+                    return context_reduce_error(request.id, error);
+                }
+                let mut runtime = match open_product_context_runtime(&self.runtime_path) {
+                    Ok(runtime) => runtime,
+                    Err(error) => return context_reduce_error(request.id, error),
+                };
+                let draft = match runtime.prepare_context_checkpoint(policy) {
+                    Ok(draft) => draft,
+                    Err(error) => return context_reduce_runtime_error(request.id, error),
+                };
+                if let Err(error) = runtime.publish_context_checkpoint(draft) {
+                    return context_reduce_runtime_error(request.id, error);
+                }
+                let snapshot = runtime.snapshot();
+                success_response(
+                    request.id,
+                    context_state_json(
+                        snapshot.head,
+                        runtime.context_checkpoint(),
+                        snapshot.recovered_tail_bytes,
+                    ),
+                )
+            }
             "agent.list" => match parse_params::<EmptyParams>(request.params) {
                 Ok(_) => match inspect_product_team(&self.runtime_path) {
                     Ok(Some(team)) => {
@@ -1718,6 +1762,34 @@ fn context_preview_json(preview: &ContextPreview) -> Value {
     })
 }
 
+fn context_state_json(
+    head: greentyper_core::ledger::LedgerHead,
+    checkpoint: Option<&greentyper_core::runtime::ContextCheckpoint>,
+    recovered_tail_bytes: u64,
+) -> Value {
+    let checkpoint = checkpoint.map(|checkpoint| {
+        let source = checkpoint.source().head();
+        json!({
+            "source": {
+                "transaction": source.transaction,
+                "sequence": source.sequence,
+            },
+            "artifact_count": checkpoint.view().artifacts().len(),
+            "recent_item_count": checkpoint.view().recent_items().len(),
+            "raw_bytes": checkpoint.view().raw_bytes(),
+            "estimated_tokens": checkpoint.view().estimated_tokens(),
+        })
+    });
+    json!({
+        "head": {
+            "transaction": head.transaction,
+            "sequence": head.sequence,
+        },
+        "recovered_tail_bytes": recovered_tail_bytes,
+        "checkpoint": checkpoint,
+    })
+}
+
 fn runtime_inspection_error(id: u64) -> Value {
     error_response(
         Some(id),
@@ -2179,6 +2251,66 @@ fn runtime_usage_error_response(id: u64, error: RuntimeError) -> Value {
     }
 }
 
+fn context_reduce_error(id: u64, error: ProductDriverError) -> Value {
+    match error {
+        ProductDriverError::Runtime(error) => context_reduce_runtime_error(id, error),
+        ProductDriverError::Config(_) => error_response(
+            Some(id),
+            "context_unavailable",
+            "Context reduction prerequisites are unavailable",
+            None,
+        ),
+        ProductDriverError::IncompleteState
+        | ProductDriverError::TeamStateUnavailable
+        | ProductDriverError::ToolStateUnavailable
+        | ProductDriverError::CurrentAgentUnavailable
+        | ProductDriverError::UnexpectedRecovery => error_response(
+            Some(id),
+            "context_unavailable",
+            "Context reduction state is unavailable",
+            None,
+        ),
+        _ => error_response(
+            Some(id),
+            "context_unavailable",
+            "Context reduction state is unavailable",
+            None,
+        ),
+    }
+}
+
+fn context_reduce_runtime_error(id: u64, error: RuntimeError) -> Value {
+    match error {
+        RuntimeError::Busy(_)
+        | RuntimeError::ContextCheckpointNotAtSafeBarrier
+        | RuntimeError::ToolReconciliationRequired(_)
+        | RuntimeError::TeamOperationReconciliationRequired(_) => error_response(
+            Some(id),
+            "context_busy",
+            "Context reduction requires a ready Safe Barrier",
+            None,
+        ),
+        RuntimeError::Context(_) | RuntimeError::UnsupportedContextMode(_) => error_response(
+            Some(id),
+            "context_unavailable",
+            "Context reduction prerequisites are unavailable",
+            None,
+        ),
+        RuntimeError::StaleContextCheckpoint { .. } => error_response(
+            Some(id),
+            "context_stale",
+            "Context changed before checkpoint publication",
+            None,
+        ),
+        _ => error_response(
+            Some(id),
+            "context_unavailable",
+            "Context reduction state is unavailable",
+            None,
+        ),
+    }
+}
+
 fn usage_error_response(id: u64, error: UsageError) -> Value {
     let (category, message) = match error {
         UsageError::InvalidPageSize => (
@@ -2214,6 +2346,26 @@ struct Request<'request> {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct EmptyParams {}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ContextReduceParams {
+    #[serde(default)]
+    max_raw_bytes: Option<usize>,
+    #[serde(default)]
+    max_raw_items: Option<usize>,
+}
+
+impl ContextReduceParams {
+    fn policy(&self) -> Result<ContextReductionPolicy, ()> {
+        let defaults = ContextReductionPolicy::default();
+        ContextReductionPolicy::new(
+            self.max_raw_bytes.unwrap_or(defaults.max_raw_bytes()),
+            self.max_raw_items.unwrap_or(defaults.max_raw_items()),
+        )
+        .map_err(|_| ())
+    }
+}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]

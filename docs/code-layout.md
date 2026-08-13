@@ -100,8 +100,10 @@ Provider, credential, Agent, or Ledger action. It also owns a bounded
 `context status`/`context preview`/`context handoff`/`context reduce` CLI surface.
 Status, preview, and handoff delegate to read-only Runtime inspection; reduce strictly reopens existing Runtime state,
 includes Team/Tool sidecars when present so the core can enforce its Safe
-Barrier, and writes no Config, Team, Tool, credential, or Provider state. It also owns a
-read-only App Server `context.handoff` projection over the same Runtime API. It also owns a
+Barrier, and writes no Config, Team, Tool, credential, or Provider state. It also owns App
+Server `context.handoff` inspection and explicit `context.reduce` publication
+over the same Runtime API; the mutation returns only bounded checkpoint facts
+and keeps Config/Team/Tool state unchanged. It also owns a
 bounded Provider Profile ID prompt,
 complete non-secret Profile field flow, status-only opaque-reference editor, an
 F5 control that invokes the bounded Provider candidate connection tester, and
