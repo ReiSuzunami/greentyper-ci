@@ -34,6 +34,7 @@ use crate::provider_discovery_catalog::{
 use crate::provider_http::{
     ConfiguredProvider, ProviderHttpError, ProviderHttpSmokeOutcome, ProviderHttpSmokeScenario,
 };
+use crate::skill::{SkillError, list_skills, run_skill};
 use crate::workspace_git::{WorkspaceGitError, allocate_worktree, check_merge};
 use greentyper_core::agent_team::{
     CapabilitySnapshot, CommandOutcome, CompletionCapsule, ResourceBudget, TaskScope,
@@ -363,6 +364,7 @@ pub fn run(arguments: impl Iterator<Item = String>) -> Result<(), CliError> {
             }
         },
         Command::Workspace(command) => run_workspace(command),
+        Command::Skill(command) => run_skill_command(command),
         Command::Cancel { ledger, turn } => {
             let outcome = if has_product_driver_state(&ledger)? {
                 cancel_product_provider_turn(&ledger, turn)?
@@ -664,6 +666,27 @@ fn run_workspace(command: WorkspaceCommand) -> Result<(), CliError> {
             target,
             source,
         } => write_json(&check_merge(root, &target, &source)?),
+    }
+}
+
+fn run_skill_command(command: SkillCommand) -> Result<(), CliError> {
+    match command {
+        SkillCommand::List { project } => write_json(&serde_json::json!({
+            "skills": list_skills(&project)?,
+        })),
+        SkillCommand::Run {
+            project,
+            ledger,
+            id,
+            message,
+            approve,
+        } => write_json(&run_skill(
+            &project,
+            &ledger,
+            &id,
+            message.as_deref(),
+            approve,
+        )?),
     }
 }
 
@@ -1431,6 +1454,7 @@ enum Command {
     },
     Context(ContextCommand),
     Workspace(WorkspaceCommand),
+    Skill(SkillCommand),
     Cancel {
         ledger: PathBuf,
         turn: TurnId,
@@ -1512,6 +1536,20 @@ enum WorkspaceCommand {
         root: PathBuf,
         target: String,
         source: String,
+    },
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum SkillCommand {
+    List {
+        project: PathBuf,
+    },
+    Run {
+        project: PathBuf,
+        ledger: PathBuf,
+        id: String,
+        message: Option<String>,
+        approve: bool,
     },
 }
 
@@ -1732,6 +1770,9 @@ fn parse(mut arguments: impl Iterator<Item = String>) -> Result<Command, CliErro
     }
     if command == "workspace" {
         return parse_workspace(arguments).map(Command::Workspace);
+    }
+    if command == "skill" {
+        return parse_skill(arguments).map(Command::Skill);
     }
     if command == "app-server" {
         return parse_app_server(arguments);
@@ -2326,6 +2367,85 @@ fn parse_workspace(
 }
 
 fn parse_workspace_value(value: Option<String>, missing: &'static str) -> Result<String, CliError> {
+    let value = value.ok_or(CliError::Usage(missing))?;
+    if value.is_empty() || value.starts_with('-') {
+        return Err(CliError::Usage(missing));
+    }
+    Ok(value)
+}
+
+fn parse_skill(mut arguments: impl Iterator<Item = String>) -> Result<SkillCommand, CliError> {
+    let action = arguments
+        .next()
+        .ok_or(CliError::Usage("skill requires list or run"))?;
+    let mut project = None;
+    let mut ledger = None;
+    let mut id = None;
+    let mut message = None;
+    let mut approve = false;
+    while let Some(argument) = arguments.next() {
+        match argument.as_str() {
+            "--project" => {
+                if project.is_some() {
+                    return Err(CliError::Usage("duplicate --project"));
+                }
+                project = Some(PathBuf::from(parse_skill_value(
+                    arguments.next(),
+                    "--project is missing its value",
+                )?));
+            }
+            "--ledger" => {
+                if ledger.is_some() {
+                    return Err(CliError::Usage("duplicate --ledger"));
+                }
+                ledger = Some(PathBuf::from(parse_skill_value(
+                    arguments.next(),
+                    "--ledger is missing its value",
+                )?));
+            }
+            "--id" => {
+                if id.is_some() {
+                    return Err(CliError::Usage("duplicate --id"));
+                }
+                id = Some(parse_skill_value(
+                    arguments.next(),
+                    "--id is missing its value",
+                )?);
+            }
+            "--message" => {
+                if message.is_some() {
+                    return Err(CliError::Usage("duplicate --message"));
+                }
+                message = Some(parse_skill_value(
+                    arguments.next(),
+                    "--message is missing its value",
+                )?);
+            }
+            "--approve" if !approve => approve = true,
+            "--approve" => return Err(CliError::Usage("duplicate --approve")),
+            _ => return Err(CliError::Usage("unknown skill option")),
+        }
+    }
+    let project = project.unwrap_or(env::current_dir()?);
+    match action.as_str() {
+        "list" => {
+            if ledger.is_some() || id.is_some() || message.is_some() || approve {
+                return Err(CliError::Usage("skill list accepts only --project"));
+            }
+            Ok(SkillCommand::List { project })
+        }
+        "run" => Ok(SkillCommand::Run {
+            project,
+            ledger: ledger.unwrap_or(default_ledger_path()?),
+            id: id.ok_or(CliError::Usage("skill run requires --id"))?,
+            message,
+            approve,
+        }),
+        _ => Err(CliError::Usage("skill requires list or run")),
+    }
+}
+
+fn parse_skill_value(value: Option<String>, missing: &'static str) -> Result<String, CliError> {
     let value = value.ok_or(CliError::Usage(missing))?;
     if value.is_empty() || value.starts_with('-') {
         return Err(CliError::Usage(missing));
@@ -3600,6 +3720,8 @@ Usage:\n\
   greentyper workspace apply --root PATH --read-set FILE --path RELATIVE_PATH --input FILE\n\
   greentyper workspace allocate --root PATH --worktree PATH --branch NAME [--base REF]\n\
   greentyper workspace merge-check --root PATH --target REF --source REF\n\
+  greentyper skill list [--project PATH]\n\
+  greentyper skill run --id ID [--project PATH] [--ledger PATH] [--message TEXT] --approve\n\
   greentyper cancel [--ledger PATH] --turn ID\n\
   greentyper retry [--ledger PATH] --turn ID\n\
   greentyper reconcile [--ledger PATH] --delivery ID\n\
@@ -3646,6 +3768,7 @@ pub enum CliError {
     ProviderDiscovery(ProviderDiscoveryError),
     Workspace(WorkspaceError),
     WorkspaceGit(WorkspaceGitError),
+    Skill(SkillError),
     Credential(CredentialVaultError),
     ProductDriver(ProductDriverError),
     Presentation(PresentationSmokeError),
@@ -3676,6 +3799,7 @@ impl fmt::Display for CliError {
             Self::ProviderDiscovery(source) => write!(formatter, "{source}"),
             Self::Workspace(source) => write!(formatter, "{source}"),
             Self::WorkspaceGit(source) => write!(formatter, "{source}"),
+            Self::Skill(source) => write!(formatter, "{source}"),
             Self::Credential(source) => write!(formatter, "{source}"),
             Self::ProductDriver(source) => write!(formatter, "{source}"),
             Self::Presentation(source) => write!(formatter, "{source}"),
@@ -3698,6 +3822,7 @@ impl Error for CliError {
             Self::ProviderDiscovery(source) => Some(source),
             Self::Workspace(source) => Some(source),
             Self::WorkspaceGit(source) => Some(source),
+            Self::Skill(source) => Some(source),
             Self::Credential(source) => Some(source),
             Self::ProductDriver(source) => Some(source),
             Self::Presentation(source) => Some(source),
@@ -3771,6 +3896,12 @@ impl From<WorkspaceError> for CliError {
 impl From<WorkspaceGitError> for CliError {
     fn from(source: WorkspaceGitError) -> Self {
         Self::WorkspaceGit(source)
+    }
+}
+
+impl From<SkillError> for CliError {
+    fn from(source: SkillError) -> Self {
+        Self::Skill(source)
     }
 }
 

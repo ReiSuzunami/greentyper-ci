@@ -11,6 +11,7 @@ mod provider_discovery_catalog;
 mod provider_discovery_task;
 mod provider_http;
 mod provider_http_policy;
+mod skill;
 mod terminal;
 mod workspace_git;
 
