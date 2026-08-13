@@ -149,12 +149,12 @@ smaller list used for progress accounting.
 | B5 | Apply one guarded Workspace file change or reject a stale read set. | Settled | Unix guarded path; Windows/Git worktrees remain separate results. |
 | B6 | Read the bounded Context handoff through the App Server. | Settled | Commit `36de81a`; CI `31664070914` passed macOS ARM and Windows x64. |
 | B7 | Allocate isolated Git worktrees and report merge/conflict outcomes. | Settled | Unix `workspace allocate` + read-only `workspace merge-check`; automatic merge, cleanup, and Windows adapters deferred. Functional commit `2388721`; Batch CI `31667302886` passed macOS ARM and Windows x64. |
-| B8 | List a project Skill by stable content hash and run it once through the existing approval/capability-bounded `local.echo` path, with durable reuse on repeat. | Active | Three-to-five slices: bounded manifest discovery; hash/source-safe projection; explicit approval; fixed capability execution; durable call reuse. Deferred: MCP transport/client, arbitrary scripts, background polling, TUI, and general Skill catalog/authority. |
+| B8 | List a project Skill by stable content hash and run it once through the existing approval/capability-bounded `local.echo` path, with durable reuse on repeat. | Settled | Project-only, fixed `local.echo` path; MCP transport/client, arbitrary scripts, background polling, TUI, and general Skill catalog/authority deferred. Commit `67b36b0`; Batch CI `31670709539` passed macOS ARM and Windows x64. |
 | B9 | Install, recover, measure, and pass the declared release acceptance. | Pending | Release Gate only; never used to block a small feature Batch. |
 
-Current official progress is **seven CI-settled feature Batches**. B8 is the
-only active Batch and is not counted until its Batch Gate succeeds. No B9 work
-starts before B8 is settled.
+Current official progress is **eight CI-settled feature Batches**. B9 is the
+next available slot and remains a Release Gate; no B9 feature work starts
+without a new Milestone lock.
 
 ## Batch closeout record
 
@@ -187,3 +187,29 @@ not yet counted as released progress.
 - **Deferred:** automatic merge, cleanup/leases, Windows Git/reparse-point
   adapters, MCP integration, and TUI actions. These do not block B7.
 - **Next slot:** B8, one isolated Skill/MCP user result.
+
+### B8 — Project Skill through the bounded local tool path
+
+- **User result:** a user can list a project Skill with a stable content hash,
+  explicitly approve one fixed `local.echo` invocation, and repeat it without
+  creating a duplicate durable Tool effect.
+- **Milestone lock:**
+  - **Domain/Phase:** Skills (Phase 5), project-only.
+  - **Slices:** bounded manifest discovery; hash/source-safe projection;
+    explicit approval; fixed capability execution; durable call reuse.
+  - **Non-goals:** MCP transport/client, arbitrary scripts, background or
+    periodic discovery, TUI integration, and general Skill catalog/authority.
+  - **Exit:** `skill list` reports the project manifest and hash; `skill run`
+    requires `--approve`, succeeds through `local.echo`, and a repeat reuses
+    the durable call.
+- **Critical checks:** focused `skill_cli` integration suite (3 passed);
+  full local Batch Gate passed: formatter, workspace check, workspace tests,
+  workspace clippy, and diff check.
+- **Functional commit:** `67b36b0`, pushed to `origin/main` and `ci/main`.
+- **CI evidence:** run `31670709539` passed Quality / macOS ARM and Windows
+  x64 build, including workspace tests, lint, release builds, transport,
+  terminal, allocator, and acceptance pipelines.
+- **Deferred:** MCP transport/client, arbitrary scripts, background polling,
+  TUI actions, and general Skill catalog/authority. These are later
+  Milestones, not B8 defects.
+- **Next slot:** B9, the declared Release Gate only.
