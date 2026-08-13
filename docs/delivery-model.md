@@ -223,11 +223,10 @@ smaller list used for progress accounting.
 | R1 | Install, recover, measure, and pass the declared release acceptance. | Pending | Release Gate only; never used to block a small feature Batch. |
 | B10 | Recover an early-failed active child Agent Turn through App Server, then deliver and acknowledge exactly once. | Settled | Commit `4931e8a`; CI `31679750127` passed macOS ARM and Windows x64. |
 | B11 | List registered Git worktrees through CLI without exposing absolute paths or changing repository state. | Settled | Commit `a684065`; CI `31682587546` passed macOS ARM and Windows x64. |
-| B12 | Remove one clean, registered Unix Git worktree through CLI while preserving its branch. | Ready | Slice Gate passed; Batch Gate and CI settlement pending. |
+| B12 | Remove one clean, registered Unix Git worktree through CLI while preserving its branch. | Settled | Commit `e80fc1d`; CI `31686469234` passed macOS ARM and Windows x64. |
 
-Current official progress is **eleven CI-settled feature Batches**. B12 is the
-locked active Batch in `Ready` state; it is not counted until Batch Gate and CI
-pass. R1 remains a separate Release Gate and does not block feature coverage.
+Current official progress is **twelve CI-settled feature Batches**. R1 remains a
+separate Release Gate and does not block feature coverage.
 
 ## Batch closeout record
 
@@ -362,9 +361,9 @@ not yet counted as released progress.
   adapters, TUI/App Server surfaces, and Release Gate evidence.
 - **Next slot:** a fresh feature Milestone; R1 remains separate.
 
-### B12 — Safe Git worktree removal (active)
+### B12 — Safe Git worktree removal (settled)
 
-- **Status:** `Ready`.
+- **Status:** `Settled`.
 - **User result:** a Unix CLI user can remove one registered, clean, non-root
   Git worktree while preserving its branch.
 - **Milestone lock:**
@@ -379,6 +378,12 @@ not yet counted as released progress.
 - **Critical check:** `cargo test -p greentyper --test workspace_cli --locked`
   passed (3 tests), including dirty rejection, clean removal, list absence,
   branch preservation, and redaction.
-- **Batch Gate:** pending full local gate, commit/push, and one CI workflow run.
+- **Batch Gate:** passed: full local format/check/test/clippy/diff/clean gate,
+  commit and push to both remotes, and one CI workflow run with both required
+  jobs green.
+- **Commit/push:** `e80fc1d`, pushed to `origin/main` and `ci/main`.
+- **Batch CI:** run `31686469234` passed Quality / macOS ARM and Windows x64
+  build, including workspace tests, lint, release builds, transport, terminal,
+  allocator, and acceptance pipelines.
 - **Deferred:** automatic merge, detached/prunable cleanup, Windows Git
   adapters, TUI/App Server surfaces, and Release Gate evidence.
