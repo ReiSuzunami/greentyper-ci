@@ -244,6 +244,86 @@ fn workspace_cli_allocates_isolated_git_worktrees() {
         .collect::<Vec<_>>();
     assert_eq!(branches_after, ["main", "agent-right"]);
 
+    let deleted = parent.join(format!(
+        "{}-deleted",
+        root.file_name().unwrap().to_string_lossy()
+    ));
+    let allocate_deleted = Command::new(env!("CARGO_BIN_EXE_greentyper"))
+        .args(["workspace", "allocate", "--root"])
+        .arg(&root)
+        .args(["--worktree"])
+        .arg(&deleted)
+        .args(["--branch", "agent-deleted"])
+        .output()
+        .expect("allocate branch-delete worktree");
+    assert!(allocate_deleted.status.success(), "{allocate_deleted:?}");
+    let delete = Command::new(env!("CARGO_BIN_EXE_greentyper"))
+        .args(["workspace", "remove", "--root"])
+        .arg(&root)
+        .args(["--worktree"])
+        .arg(&deleted)
+        .args(["--delete-branch"])
+        .output()
+        .expect("remove and delete merged branch");
+    assert!(delete.status.success(), "{delete:?}");
+    let deleted_json: Value = serde_json::from_slice(&delete.stdout).expect("delete JSON");
+    assert_eq!(deleted_json["branch"], "agent-deleted");
+    assert_eq!(deleted_json["branch_preserved"], false);
+    assert_eq!(deleted_json["branch_deleted"], true);
+    assert!(!deleted.exists());
+    let deleted_ref = Command::new("git")
+        .args(["-C"])
+        .arg(&root)
+        .args([
+            "show-ref",
+            "--verify",
+            "--quiet",
+            "refs/heads/agent-deleted",
+        ])
+        .status()
+        .expect("probe deleted branch");
+    assert!(!deleted_ref.success());
+
+    let unmerged = parent.join(format!(
+        "{}-unmerged",
+        root.file_name().unwrap().to_string_lossy()
+    ));
+    let allocate_unmerged = Command::new(env!("CARGO_BIN_EXE_greentyper"))
+        .args(["workspace", "allocate", "--root"])
+        .arg(&root)
+        .args(["--worktree"])
+        .arg(&unmerged)
+        .args(["--branch", "agent-unmerged"])
+        .output()
+        .expect("allocate unmerged worktree");
+    assert!(allocate_unmerged.status.success(), "{allocate_unmerged:?}");
+    fs::write(unmerged.join("unmerged.txt"), b"unmerged\n").expect("unmerged edit");
+    git(&unmerged, &["add", "unmerged.txt"]);
+    git(&unmerged, &["commit", "-qm", "unmerged change"]);
+    let reject_delete = Command::new(env!("CARGO_BIN_EXE_greentyper"))
+        .args(["workspace", "remove", "--root"])
+        .arg(&root)
+        .args(["--worktree"])
+        .arg(&unmerged)
+        .args(["--delete-branch"])
+        .output()
+        .expect("reject unmerged branch deletion");
+    assert!(!reject_delete.status.success(), "{reject_delete:?}");
+    assert!(reject_delete.stdout.is_empty(), "{reject_delete:?}");
+    assert!(String::from_utf8_lossy(&reject_delete.stderr).contains("not merged"));
+    assert!(unmerged.is_dir());
+    git(
+        &root,
+        &[
+            "show-ref",
+            "--verify",
+            "--quiet",
+            "refs/heads/agent-unmerged",
+        ],
+    );
+    fs::remove_dir_all(&unmerged).expect("remove unmerged worktree");
+    git(&root, &["worktree", "prune"]);
+
     fs::remove_dir_all(&right).expect("remove right worktree");
     git(&root, &["worktree", "prune"]);
     fs::remove_dir_all(&root).expect("remove git repo");

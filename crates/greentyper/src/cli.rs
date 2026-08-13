@@ -648,9 +648,11 @@ fn run_workspace(command: WorkspaceCommand) -> Result<(), CliError> {
             write_json(&root.facts())
         }
         WorkspaceCommand::List { root } => write_json(&list_worktrees(root)?),
-        WorkspaceCommand::Remove { root, worktree } => {
-            write_json(&remove_worktree(root, worktree)?)
-        }
+        WorkspaceCommand::Remove {
+            root,
+            worktree,
+            delete_branch,
+        } => write_json(&remove_worktree(root, worktree, delete_branch)?),
         WorkspaceCommand::Capture { root, paths } => {
             let root = WorkspaceRoot::open(root)?;
             let lease = root.acquire_lease(WorkspaceAccess::ReadOnly)?;
@@ -1553,6 +1555,7 @@ enum WorkspaceCommand {
     Remove {
         root: PathBuf,
         worktree: PathBuf,
+        delete_branch: bool,
     },
     Capture {
         root: PathBuf,
@@ -2207,6 +2210,7 @@ fn parse_workspace(
     let mut base = None;
     let mut target = None;
     let mut source = None;
+    let mut delete_branch = false;
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
             "--root" => {
@@ -2305,6 +2309,12 @@ fn parse_workspace(
                     "--source is missing its value",
                 )?);
             }
+            "--delete-branch" => {
+                if delete_branch {
+                    return Err(CliError::Usage("duplicate --delete-branch"));
+                }
+                delete_branch = true;
+            }
             _ => return Err(CliError::Usage("unknown workspace option")),
         }
     }
@@ -2319,6 +2329,7 @@ fn parse_workspace(
                 || base.is_some()
                 || target.is_some()
                 || source.is_some()
+                || delete_branch
             {
                 return Err(CliError::Usage("workspace inspect accepts only --root"));
             }
@@ -2333,6 +2344,7 @@ fn parse_workspace(
                 || base.is_some()
                 || target.is_some()
                 || source.is_some()
+                || delete_branch
             {
                 return Err(CliError::Usage("workspace list accepts only --root"));
             }
@@ -2355,6 +2367,7 @@ fn parse_workspace(
             Ok(WorkspaceCommand::Remove {
                 root,
                 worktree: worktree.expect("checked above"),
+                delete_branch,
             })
         }
         "capture" => {
@@ -2366,6 +2379,7 @@ fn parse_workspace(
                 || base.is_some()
                 || target.is_some()
                 || source.is_some()
+                || delete_branch
             {
                 return Err(CliError::Usage(
                     "workspace capture requires one or more --path options",
@@ -2382,6 +2396,7 @@ fn parse_workspace(
                 || base.is_some()
                 || target.is_some()
                 || source.is_some()
+                || delete_branch
             {
                 return Err(CliError::Usage(
                     "workspace validate accepts --root and --read-set only",
@@ -2401,6 +2416,7 @@ fn parse_workspace(
                 || base.is_some()
                 || target.is_some()
                 || source.is_some()
+                || delete_branch
             {
                 return Err(CliError::Usage(
                     "workspace apply requires --root, --read-set, --path, and --input",
@@ -2421,6 +2437,7 @@ fn parse_workspace(
                 || read_set.is_some()
                 || target.is_some()
                 || source.is_some()
+                || delete_branch
             {
                 return Err(CliError::Usage(
                     "workspace allocate requires --root, --worktree, and --branch",
@@ -2442,6 +2459,7 @@ fn parse_workspace(
                 || worktree.is_some()
                 || branch.is_some()
                 || base.is_some()
+                || delete_branch
             {
                 return Err(CliError::Usage(
                     "workspace merge-check requires --root, --target, and --source",
@@ -2462,6 +2480,7 @@ fn parse_workspace(
                 || worktree.is_some()
                 || branch.is_some()
                 || base.is_some()
+                || delete_branch
             {
                 return Err(CliError::Usage(
                     "workspace merge requires --root, --target, and --source",
@@ -3890,7 +3909,7 @@ Usage:\n\
   greentyper context reduce [--ledger PATH] [--max-raw-bytes N] [--max-raw-items N]\n\
   greentyper workspace inspect --root PATH\n\
   greentyper workspace list --root PATH\n\
-  greentyper workspace remove --root PATH --worktree PATH\n\
+  greentyper workspace remove --root PATH --worktree PATH [--delete-branch]\n\
   greentyper workspace capture --root PATH --path RELATIVE_PATH [--path RELATIVE_PATH ...]\n\
   greentyper workspace validate --root PATH --read-set FILE\n\
   greentyper workspace apply --root PATH --read-set FILE --path RELATIVE_PATH --input FILE\n\

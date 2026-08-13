@@ -124,6 +124,7 @@ pub struct WorktreeRemoval {
     pub branch: String,
     pub head_commit: String,
     pub branch_preserved: bool,
+    pub branch_deleted: bool,
 }
 
 pub fn list_worktrees(root_path: impl AsRef<Path>) -> Result<WorktreeList, WorkspaceGitError> {
@@ -151,10 +152,11 @@ pub fn list_worktrees(root_path: impl AsRef<Path>) -> Result<WorktreeList, Works
 pub fn remove_worktree(
     root_path: impl AsRef<Path>,
     worktree_path: impl AsRef<Path>,
+    delete_branch: bool,
 ) -> Result<WorktreeRemoval, WorkspaceGitError> {
     #[cfg(not(unix))]
     {
-        let _ = (root_path, worktree_path);
+        let _ = (root_path, worktree_path, delete_branch);
         Err(WorkspaceGitError::UnsupportedPlatform)
     }
 
@@ -204,6 +206,23 @@ pub fn remove_worktree(
             return Err(WorkspaceGitError::WorktreeDirty);
         }
 
+        if delete_branch {
+            let root_branch = git_text(root.path(), ["branch", "--show-current"])?;
+            if root_branch == branch {
+                return Err(WorkspaceGitError::BranchDeleteTargetIsCurrent);
+            }
+            let merged = git(
+                root.path(),
+                ["merge-base", "--is-ancestor", &branch, "HEAD"],
+            )?;
+            if !merged.status.success() {
+                if merged.status.code() == Some(1) {
+                    return Err(WorkspaceGitError::BranchNotMerged);
+                }
+                return Err(WorkspaceGitError::CommandFailed("branch merge check"));
+            }
+        }
+
         let target_arg = target
             .to_str()
             .ok_or(WorkspaceGitError::InvalidWorktreePath)?;
@@ -211,14 +230,31 @@ pub fn remove_worktree(
         if !removal.status.success() {
             return Err(WorkspaceGitError::CommandFailed("worktree removal"));
         }
-        let branch_ref = format!("refs/heads/{branch}");
-        let branch_probe = git(
-            root.path(),
-            ["show-ref", "--verify", "--quiet", &branch_ref],
-        )?;
-        if !branch_probe.status.success() {
-            return Err(WorkspaceGitError::UnexpectedOutput);
-        }
+        let (branch_preserved, branch_deleted) = if delete_branch {
+            let deletion = git(root.path(), ["branch", "-d", &branch])?;
+            if !deletion.status.success() {
+                return Err(WorkspaceGitError::BranchDeletionFailed);
+            }
+            let branch_ref = format!("refs/heads/{branch}");
+            let branch_probe = git(
+                root.path(),
+                ["show-ref", "--verify", "--quiet", &branch_ref],
+            )?;
+            if branch_probe.status.success() {
+                return Err(WorkspaceGitError::BranchDeletionFailed);
+            }
+            (false, true)
+        } else {
+            let branch_ref = format!("refs/heads/{branch}");
+            let branch_probe = git(
+                root.path(),
+                ["show-ref", "--verify", "--quiet", &branch_ref],
+            )?;
+            if !branch_probe.status.success() {
+                return Err(WorkspaceGitError::UnexpectedOutput);
+            }
+            (true, false)
+        };
 
         Ok(WorktreeRemoval {
             status: WorktreeRemovalStatus::Removed,
@@ -226,7 +262,8 @@ pub fn remove_worktree(
             worktree: worktree.facts(),
             branch,
             head_commit,
-            branch_preserved: true,
+            branch_preserved,
+            branch_deleted,
         })
     }
 }
@@ -806,6 +843,9 @@ pub enum WorkspaceGitError {
     WorktreeLocked,
     WorktreePrunable,
     DetachedWorktree,
+    BranchNotMerged,
+    BranchDeleteTargetIsCurrent,
+    BranchDeletionFailed,
     SameReference,
     MergeTargetNotCheckedOut,
     MergeTargetDirty,
@@ -843,6 +883,11 @@ impl fmt::Display for WorkspaceGitError {
             Self::DetachedWorktree => {
                 write!(formatter, "detached Git worktrees cannot be removed")
             }
+            Self::BranchNotMerged => write!(formatter, "Git branch is not merged into the root"),
+            Self::BranchDeleteTargetIsCurrent => {
+                write!(formatter, "the checked-out root branch cannot be deleted")
+            }
+            Self::BranchDeletionFailed => write!(formatter, "Git branch deletion failed"),
             Self::SameReference => write!(formatter, "Git merge target and source must differ"),
             Self::MergeTargetNotCheckedOut => {
                 write!(formatter, "Git merge target must be the checked-out branch")

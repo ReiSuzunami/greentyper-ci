@@ -8,17 +8,17 @@ document defines when a piece of work is allowed to count as delivered.
 
 ## Current Goal
 
-Maximize **usable feature coverage per unit of time**. Make the next user result
-work first; tidy, document, and certify once at the Batch boundary. Do not turn
-the whole roadmap into one task, and do not treat every open Phase item as a
-blocker. A local flow is provisional until its Batch settles, but unfinished
-polish is not a reason to stop building the locked result.
+Maximize **verified usable user-flow coverage per unit of time**. Ship the next
+small result first; tidy, document, and certify once at the Batch boundary.
+Do not pursue “complete the roadmap”, “complete a Phase”, or “make every edge
+case uncontroversial” inside one task. Those are separate planning or Release
+Gate activities.
 
-The only active execution unit is **one Batch = one user flow in one domain**.
-Lock it, make it usable, write one short coverage note, then settle it once.
-Phase language is roadmap context only. Milestone language is one immutable
-user-result lock. Local code, tests, reviews, commits, and in-progress CI are
-provisional; only a successful settlement records progress.
+The only active execution unit is **one Batch = one user result in one domain**.
+Lock it, make it usable, stop, then settle it once. Phase is a roadmap label;
+Milestone is the immutable user-result decision; Batch is the implementation and
+settlement package. Local code, focused checks, reviews, commits, and running CI
+are provisional. **Only a green Batch settlement increments progress.**
 
 This is a hard stop against scope drift: when the locked result works, stop
 adding functionality. Put adjacent ideas, extra review findings, and non-
@@ -27,14 +27,18 @@ Batch because another domain has a more interesting issue.
 
 The default loop is deliberately non-interleaved:
 
-1. **Coverage pass:** implement the smallest end-to-end path. Skip tests,
-   polish, and architecture work that do not block the advertised result.
-2. **Coverage note:** after each Slice, write one short estimate of breadth
-   (new usable domain/flow) and depth (how much of the locked flow works). This
-   is a planning signal, not a gate or a reason to start a second domain.
-3. **Settlement pass:** when the exit is visible, stop coding, run only the
-   critical checks, update docs once, clean, push, and run CI once. CI is a
-   closeout action, not a development loop.
+1. **Select:** choose the shortest independent user result, not the largest
+   open Phase item.
+2. **Lock:** write one Milestone lock with one domain, one exit, one to five
+   slices, and explicit non-goals.
+3. **Cover:** implement only that result. Skip tests, polish, architecture
+   cleanup, and adjacent domains unless they block the exit.
+4. **Settle:** when the exit is visible, freeze code, add at most one happy-path
+   and one blocker check, update docs once, clean, push, and run one CI workflow
+   for the exact feature SHA.
+
+No “temporary” CI loop exists between steps. No new feature starts while the
+locked Batch is Building, Ready, or Settling.
 
 Do not alternate between passes. Non-blocking findings go to the follow-up
 register and stay out of the current Batch.
@@ -83,6 +87,15 @@ Next: <the smallest remaining step for the same Milestone>
 The note may be approximate. It exists to show feature coverage moving, not to
 manufacture a precise percentage. Official progress is updated only once at
 Batch settlement.
+
+Coverage is reported in two numbers, not one invented roadmap percentage:
+
+- **Depth:** how much of the locked user result works (local, recoverable, or
+  externally verified).
+- **Breadth:** how many roadmap domains have at least one settled end-to-end
+  flow.
+
+Code volume, test count, review count, and CI count are never coverage metrics.
 
 ### Development versus settlement
 
@@ -167,6 +180,10 @@ later slot unless it blocks the locked exit.
    progress yet.
 8. Switch Phase only after the current Batch is settled. Phase switching is
    not a way to leave an unfinished Batch behind.
+9. A Phase may remain Active forever while Milestones settle. Do not wait for a
+   Phase exit review before selecting an independent result from another Phase.
+10. A Milestone lock cannot grow. If new work creates a second user result,
+    split it into a later Milestone; if it is only polish or evidence, defer it.
 
 ## Three gates, not one endless gate
 
@@ -312,6 +329,7 @@ smaller list used for progress accounting.
 | B15 | List configured Model Presets, effective default, policy, and fallback IDs through a read-only CLI projection. | Settled | Commit `7190da4`; CI `31696507296` passed macOS ARM and Windows x64. |
 | B16 | Create one minimal Model Preset from an existing Provider Profile through CLI. | Settled | Commit `bcde3ef`; CI `31700985043` passed macOS ARM and Windows x64. |
 | B17 | Refresh a configured Provider discovery snapshot, inspect the current catalog, and accept one verified discovered model as a Model Preset through CLI. | Settled | Commit `b6c75e2`; CI `31705477912` passed macOS ARM and Windows x64. |
+| B18 | Remove one clean registered Git worktree and optionally delete its already-merged branch through Unix CLI. | Locked | Not counted until Batch settlement; force deletion and automatic cleanup deferred. |
 
 Current official progress is **seventeen CI-settled feature Batches**. R1 remains
 a separate Release Gate and does not block feature coverage.
@@ -319,26 +337,23 @@ a separate Release Gate and does not block feature coverage.
 ## Active milestone
 
 ```text
-Batch: B17
-Status: Settled
-Milestone: A CLI user can run a controlled Provider discovery refresh, inspect
-  a current catalog entry, accept one verified discovered model as a normal
-  Model Preset, and reopen Config to see the committed tuple.
-Domain/Phase: Provider discovery and Config (Phase 4 / Config selection)
-Slices: deterministic successful discovery snapshot; current catalog projection;
-  accept with dry-run then atomic commit; reopen and verify preset/state
-  boundaries.
-Non-goals: background or periodic discovery, TUI/App Server discovery, starter
-  automation, Provider inference, credentials UI, fallback execution, broad
-  parser cleanup, Release Gate evidence, and unrelated review findings.
-Exit: successful refresh produces a current fingerprint-bound observation;
-  catalog exposes the discovered model as available/acceptable; accept dry-run
-  does not write, commit writes one ordinary preset, and reopen reports the
-  exact provider/model/dialect tuple. Failed or stale observations remain
-  fail-closed without Config or discovery-state mutation.
-Coverage target: one new Provider/Config user flow; local success plus one
-  persistence/fail-closed boundary. Do not expand scope to improve the rough
-  percentage during this Batch.
+Batch: B18
+Status: Locked
+Milestone: A Unix CLI user can remove one clean registered Git worktree and,
+  only when explicitly requested, delete its already-merged branch.
+Domain/Phase: Workspaces (Phase 7 / Unix CLI)
+Slices: add explicit branch-delete option; perform safe worktree removal then
+  non-force merged-branch deletion; return redacted result and preserve branch
+  on refusal; add one dirty/unmerged fail-closed check.
+Non-goals: force deletion, current/root branch deletion, detached/prunable
+  cleanup, automatic/background cleanup, merge or conflict resolution, Windows
+  Git adapters, TUI/App Server surfaces, and Release Gate evidence.
+Exit: clean registered worktree removal succeeds; branch remains by default and
+  is deleted only with the explicit option after Git confirms safe deletion;
+  dirty, locked, root, current, unmerged, detached, and prunable targets fail
+  without mutation.
+Coverage target: one new Workspace mutation flow; local success plus one
+  fail-closed boundary. Stop when this exit is observable.
 ```
 
 ## Last settled milestone
