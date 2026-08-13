@@ -95,6 +95,7 @@ cargo run -p greentyper -- config discovery status
 cargo run -p greentyper -- config discovery refresh openai-main
 cargo run -p greentyper -- config discovery catalog openai-main
 cargo run -p greentyper -- config discovery accept frontier-live openai-main gpt-5.6-live --dialect responses --scope user
+cargo run -p greentyper -- mcp tools -- /absolute/path/to/mcp-server [ARG ...]
 cargo run -p greentyper -- config update-starter frontier --scope user --dry-run
 cargo run -p greentyper -- config get provider.model
 cargo run -p greentyper -- config test-provider
@@ -250,6 +251,17 @@ writes for success, failure, and ambiguous results. Restart either recognizes a
 complete outcome or requires reconciliation, while the external effect remains
 exactly once; this does not claim real power-loss or exhaustive byte-offset
 coverage.
+
+The CLI also has one discovery-only MCP surface:
+`mcp tools -- /absolute/path/to/server [ARG ...]` launches one explicitly
+selected local stdio server, negotiates the current MCP protocol, and returns a
+bounded, sorted `tools/list` projection. It reuses the existing child-process
+containment, clears ambient environment, rejects shell expansion, and
+terminates malformed, oversized, or hung servers without creating Config or
+Ledger state. It does not call tools, request approval, read credentials,
+persist a server, use remote HTTP, or poll in the background. MCP execution and
+shared transports remain later work. The explicitly selected server is trusted
+local code: lifecycle containment is not a filesystem or network sandbox.
 
 Configured OpenAI-compatible Responses and Chat Completions profiles, the
 official DeepSeek Responses, Chat Completions, and Anthropic-compatible Messages

@@ -600,8 +600,13 @@ An App Server Skill flow creates one project manifest, lists its bounded summary
 and content hash, rejects an unapproved run without creating Ledgers, then runs
 the fixed `local.echo` Skill and repeats it to prove durable call reuse. The
 test also proves the response contains no private project path. It does not
-prove MCP transport, arbitrary scripts, user Skill catalogs, or background
-discovery.
+prove MCP execution, arbitrary scripts, user Skill catalogs, or background
+discovery. A separate real-process CLI test launches an explicit local stdio
+MCP fixture, verifies the current-protocol `tools/list` projection and stable
+ordering, then rejects malformed, oversized, and hung server output within the
+bounded timeout without creating Config or Ledger state. It does not prove MCP
+tool calls, approval/effect delivery, credentials, remote HTTP, shared
+transports, or background polling.
 Additional real-process JSONL tests pin the App Server's fixed Ledger path and
 four read-only operational flows. Missing `runtime.status`, `agent.list`, and
 `tool.status` state returns ready/empty projections without creating files.

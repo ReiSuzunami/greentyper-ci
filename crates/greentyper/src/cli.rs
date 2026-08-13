@@ -15,6 +15,7 @@ use crate::local_process::{
     LOCAL_ECHO_TOOL, LocalProcessChildMode, LocalProcessError, LocalProcessExecutor,
     LocalProcessSmokeOutcome, LocalProcessSmokeScenario,
 };
+use crate::mcp::{McpCommandSpec, McpError, discover as discover_mcp};
 use crate::presentation::{AgentCenterView, PresentationSmokeError};
 use crate::product_driver::{
     ProductDriver, ProductDriverError, ProductInteraction, ProductToolDecision,
@@ -486,6 +487,8 @@ pub fn run(arguments: impl Iterator<Item = String>) -> Result<(), CliError> {
             let view = crate::presentation::build_smoke_view(&query)?;
             write_json(&view)
         }
+        Command::Mcp(McpCommand::Tools { command }) => write_json(&discover_mcp(&command)?),
+        Command::McpFixture { mode } => crate::mcp::run_fixture(&mode).map_err(CliError::Io),
         Command::Help => {
             print!("{USAGE}");
             Ok(())
@@ -1524,7 +1527,16 @@ enum Command {
     PresentationSmoke {
         query: String,
     },
+    Mcp(McpCommand),
+    McpFixture {
+        mode: String,
+    },
     Help,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum McpCommand {
+    Tools { command: McpCommandSpec },
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -1840,6 +1852,9 @@ fn parse(mut arguments: impl Iterator<Item = String>) -> Result<Command, CliErro
     if command == "app-server" {
         return parse_app_server(arguments);
     }
+    if command == "mcp" {
+        return parse_mcp(arguments).map(Command::Mcp);
+    }
     if command == "cancel" {
         let (ledger, turn) = parse_turn_target(arguments, "cancel")?;
         return Ok(Command::Cancel { ledger, turn });
@@ -1866,6 +1881,15 @@ fn parse(mut arguments: impl Iterator<Item = String>) -> Result<Command, CliErro
     }
     if command == "__presentation-smoke" {
         return parse_presentation_smoke(arguments);
+    }
+    if command == "__mcp-fixture" {
+        let mode = arguments
+            .next()
+            .ok_or(CliError::Usage("MCP fixture requires a mode"))?;
+        if arguments.next().is_some() {
+            return Err(CliError::Usage("MCP fixture does not accept options"));
+        }
+        return Ok(Command::McpFixture { mode });
     }
     let mut ledger = None;
     let mut input = None;
@@ -2096,6 +2120,38 @@ fn parse_app_server(mut arguments: impl Iterator<Item = String>) -> Result<Comma
     }
     Ok(Command::AppServer {
         ledger: ledger.unwrap_or(default_ledger_path()?),
+    })
+}
+
+fn parse_mcp(mut arguments: impl Iterator<Item = String>) -> Result<McpCommand, CliError> {
+    let action = arguments
+        .next()
+        .ok_or(CliError::Usage("mcp requires tools"))?;
+    if action != "tools" {
+        return Err(CliError::Usage("mcp requires tools"));
+    }
+    let separator = arguments.next().ok_or(CliError::Usage(
+        "mcp tools requires -- followed by a server command",
+    ))?;
+    if separator != "--" {
+        return Err(CliError::Usage(
+            "mcp tools requires -- followed by a server command",
+        ));
+    }
+    let program = arguments
+        .next()
+        .ok_or(CliError::Usage("mcp tools requires a server command"))?;
+    let arguments = arguments.collect::<Vec<_>>();
+    if program.starts_with('-') {
+        return Err(CliError::Usage("mcp server command cannot start with --"));
+    }
+    if !Path::new(&program).is_absolute() {
+        return Err(CliError::Usage(
+            "mcp server command must be an absolute path",
+        ));
+    }
+    Ok(McpCommand::Tools {
+        command: McpCommandSpec { program, arguments },
     })
 }
 
@@ -3918,6 +3974,7 @@ Usage:\n\
   greentyper workspace merge --root PATH --target BRANCH --source BRANCH\n\
   greentyper skill list [--project PATH]\n\
   greentyper skill run --id ID [--project PATH] [--ledger PATH] [--message TEXT] --approve\n\
+  greentyper mcp tools -- ABSOLUTE_PROGRAM [ARG ...]\n\
   greentyper cancel [--ledger PATH] --turn ID\n\
   greentyper retry [--ledger PATH] --turn ID\n\
   greentyper reconcile [--ledger PATH] --delivery ID\n\
@@ -3964,6 +4021,7 @@ pub enum CliError {
     ProviderHttp(ProviderHttpError),
     Provider(ProviderError),
     ProviderDiscovery(ProviderDiscoveryError),
+    Mcp(McpError),
     Workspace(WorkspaceError),
     WorkspaceGit(WorkspaceGitError),
     Skill(SkillError),
@@ -3995,6 +4053,7 @@ impl fmt::Display for CliError {
             Self::ProviderHttp(source) => write!(formatter, "{source}"),
             Self::Provider(source) => write!(formatter, "{source}"),
             Self::ProviderDiscovery(source) => write!(formatter, "{source}"),
+            Self::Mcp(source) => write!(formatter, "{source}"),
             Self::Workspace(source) => write!(formatter, "{source}"),
             Self::WorkspaceGit(source) => write!(formatter, "{source}"),
             Self::Skill(source) => write!(formatter, "{source}"),
@@ -4018,6 +4077,7 @@ impl Error for CliError {
             Self::ProviderHttp(source) => Some(source),
             Self::Provider(source) => Some(source),
             Self::ProviderDiscovery(source) => Some(source),
+            Self::Mcp(source) => Some(source),
             Self::Workspace(source) => Some(source),
             Self::WorkspaceGit(source) => Some(source),
             Self::Skill(source) => Some(source),
@@ -4085,6 +4145,12 @@ impl From<ProviderDiscoveryError> for CliError {
     }
 }
 
+impl From<McpError> for CliError {
+    fn from(source: McpError) -> Self {
+        Self::Mcp(source)
+    }
+}
+
 impl From<WorkspaceError> for CliError {
     fn from(source: WorkspaceError) -> Self {
         Self::Workspace(source)
@@ -4149,6 +4215,7 @@ mod tests {
         AuthorizedToolCall, ToolEffectExecutor, ToolExecution, ToolReconciliationDecision,
     };
 
+    use crate::cli::McpCommand;
     use crate::credential_vault::InMemoryCredentialVault;
     use crate::product_driver::{ProductDriver, ProductInteraction, ProductToolDecision};
     use crate::provider_connection::{
@@ -4181,6 +4248,10 @@ mod tests {
 
     #[test]
     fn parser_requires_command_specific_options() {
+        let absolute_program = std::env::current_exe()
+            .expect("current test executable")
+            .to_string_lossy()
+            .into_owned();
         assert!(matches!(
             parse(
                 [
@@ -4198,6 +4269,33 @@ mod tests {
                     "tui".to_owned(),
                     "--input".to_owned(),
                     "not-headless".to_owned(),
+                ]
+                .into_iter()
+            )
+            .is_err()
+        );
+        assert!(matches!(
+            parse(
+                [
+                    "mcp".to_owned(),
+                    "tools".to_owned(),
+                    "--".to_owned(),
+                    absolute_program.clone(),
+                    "--fixture".to_owned(),
+                ]
+                .into_iter()
+            ),
+            Ok(Command::Mcp(McpCommand::Tools { command }))
+                if command.program == absolute_program && command.arguments == ["--fixture"]
+        ));
+        assert!(parse(["mcp".to_owned(), "tools".to_owned()].into_iter()).is_err());
+        assert!(
+            parse(
+                [
+                    "mcp".to_owned(),
+                    "tools".to_owned(),
+                    "--".to_owned(),
+                    "server".to_owned(),
                 ]
                 .into_iter()
             )

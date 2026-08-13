@@ -768,9 +768,13 @@ Server lists manifest summaries with stable content hashes and runs one exact
 Skill through explicit approval and the fixed `local.echo` Tool Runtime path.
 Repeated identity reuses the durable Tool call. The project root is fixed at
 server startup, Skills cannot grant capabilities, and no arbitrary script or
-MCP transport is involved. User/built-in catalogs, content-change migration,
-progressive loading, general scripts, MCP clients/transports, elicitation, and
-server isolation remain later Milestones.
+MCP execution is involved. A separate CLI discovery slice now launches one
+explicit absolute-path local stdio MCP server, negotiates the current protocol,
+and returns a bounded sorted `tools/list` projection. It reuses child-process
+containment and fails closed on malformed, oversized, or hung output without
+creating Config or Ledger state. User/built-in catalogs, content-change
+migration, progressive loading, general scripts, MCP tool calls, shared
+transports, elicitation, and server isolation remain later Milestones.
 
 Exit criteria:
 

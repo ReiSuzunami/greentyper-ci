@@ -521,17 +521,17 @@ fn classify_process(
 }
 
 #[cfg(unix)]
-fn configure_command(command: &mut Command) {
+pub(crate) fn configure_command(command: &mut Command) {
     use std::os::unix::process::CommandExt;
 
     command.process_group(0);
 }
 
 #[cfg(all(not(unix), not(windows)))]
-fn configure_command(_command: &mut Command) {}
+pub(crate) fn configure_command(_command: &mut Command) {}
 
 #[cfg(windows)]
-fn configure_command(command: &mut Command) {
+pub(crate) fn configure_command(command: &mut Command) {
     use std::os::windows::process::CommandExt;
     use windows_sys::Win32::System::Threading::{CREATE_NO_WINDOW, CREATE_SUSPENDED};
 
@@ -562,19 +562,19 @@ fn wait_for_exit(
 }
 
 #[cfg(unix)]
-struct ProcessContainer {
+pub(crate) struct ProcessContainer {
     process_group: Option<i32>,
 }
 
 #[cfg(unix)]
 impl ProcessContainer {
-    fn new() -> io::Result<Self> {
+    pub(crate) fn new() -> io::Result<Self> {
         Ok(Self {
             process_group: None,
         })
     }
 
-    fn activate(&mut self, child: &mut Child) -> io::Result<()> {
+    pub(crate) fn activate(&mut self, child: &mut Child) -> io::Result<()> {
         self.process_group = Some(
             i32::try_from(child.id())
                 .map_err(|_| io::Error::other("local process id exceeds the Unix pid range"))?,
@@ -582,7 +582,7 @@ impl ProcessContainer {
         Ok(())
     }
 
-    fn terminate(&self, child: &mut Child) -> io::Result<()> {
+    pub(crate) fn terminate(&self, child: &mut Child) -> io::Result<()> {
         if child.try_wait()?.is_some() {
             return Ok(());
         }
@@ -591,28 +591,41 @@ impl ProcessContainer {
                 .ok_or_else(|| io::Error::other("local process group is unavailable"))?,
         )
     }
+
+    pub(crate) fn terminate_tree(&self, child: &mut Child) -> io::Result<()> {
+        let result = unix_process::terminate_group(
+            self.process_group
+                .ok_or_else(|| io::Error::other("local process group is unavailable"))?,
+        );
+        let _ = child.try_wait();
+        result
+    }
 }
 
 #[cfg(all(not(unix), not(windows)))]
-struct ProcessContainer;
+pub(crate) struct ProcessContainer;
 
 #[cfg(all(not(unix), not(windows)))]
 impl ProcessContainer {
-    fn new() -> io::Result<Self> {
+    pub(crate) fn new() -> io::Result<Self> {
         Ok(Self)
     }
 
-    fn activate(&mut self, _child: &mut Child) -> io::Result<()> {
+    pub(crate) fn activate(&mut self, _child: &mut Child) -> io::Result<()> {
         Ok(())
     }
 
-    fn terminate(&self, child: &mut Child) -> io::Result<()> {
+    pub(crate) fn terminate(&self, child: &mut Child) -> io::Result<()> {
         child.kill()
+    }
+
+    pub(crate) fn terminate_tree(&self, child: &mut Child) -> io::Result<()> {
+        self.terminate(child)
     }
 }
 
 #[cfg(windows)]
-type ProcessContainer = windows_job::Job;
+pub(crate) type ProcessContainer = windows_job::Job;
 
 fn terminate_uncontained(child: &mut Child) {
     let _ = child.kill();
@@ -992,12 +1005,12 @@ mod windows_job {
 
     const PROCESS_MEMORY_LIMIT_BYTES: usize = 128 * 1024 * 1024;
 
-    pub(super) struct Job {
+    pub(crate) struct Job {
         handle: OwnedHandle,
     }
 
     impl Job {
-        pub(super) fn new() -> io::Result<Self> {
+        pub(crate) fn new() -> io::Result<Self> {
             // SAFETY: null attributes and name request a private, non-inheritable Job handle.
             let handle = unsafe { CreateJobObjectW(null(), null()) };
             let handle = OwnedHandle::from_nullable(handle)?;
@@ -1023,7 +1036,7 @@ mod windows_job {
             Ok(job)
         }
 
-        pub(super) fn activate(&mut self, child: &mut Child) -> io::Result<()> {
+        pub(crate) fn activate(&mut self, child: &mut Child) -> io::Result<()> {
             let process = child.as_raw_handle() as HANDLE;
             // SAFETY: process is borrowed from a live Child and self owns a live Job handle.
             if unsafe { AssignProcessToJobObject(self.raw(), process) } == 0 {
@@ -1032,13 +1045,17 @@ mod windows_job {
             resume_main_thread(child.id())
         }
 
-        pub(super) fn terminate(&self, _child: &mut Child) -> io::Result<()> {
+        pub(crate) fn terminate(&self, _child: &mut Child) -> io::Result<()> {
             // SAFETY: self owns a live Job handle; exit code is an internal failure marker.
             if unsafe { TerminateJobObject(self.raw(), 1) } == 0 {
                 Err(io::Error::last_os_error())
             } else {
                 Ok(())
             }
+        }
+
+        pub(crate) fn terminate_tree(&self, child: &mut Child) -> io::Result<()> {
+            self.terminate(child)
         }
 
         fn raw(&self) -> HANDLE {

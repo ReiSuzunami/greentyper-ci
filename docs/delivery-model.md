@@ -350,6 +350,7 @@ smaller list used for progress accounting.
 | B17 | Refresh a configured Provider discovery snapshot, inspect the current catalog, and accept one verified discovered model as a Model Preset through CLI. | Settled | Commit `b6c75e2`; CI `31705477912` passed macOS ARM and Windows x64. |
 | B18 | Remove one clean registered Git worktree and optionally delete its already-merged branch through Unix CLI. | Settled | Commit `813c580`; CI `31709432794` passed Quality / macOS ARM and Windows x64. |
 | B19 | Publish one bounded Context checkpoint through App Server and receive a redacted summary. | Settled | Commit `988438d`; CI `31714088503` passed Quality / macOS ARM and Windows x64. |
+| B20 | Connect to one explicitly selected local stdio MCP server and list its bounded tools through CLI. | Settling | Current MCP discovery protocol only; exact process, no shell, no execution or background connection; exact-SHA CI pending. |
 
 Current official progress is **nineteen CI-settled feature Batches**. R1 remains
 a separate Release Gate and does not block feature coverage.
@@ -357,18 +358,45 @@ a separate Release Gate and does not block feature coverage.
 ## Current execution slot
 
 ```text
-Batch: none
-Status: Unlocked
-Milestone: none locked
-Domain/Phase: none
-Slices: select and lock one independent user result before coding
-Non-goals: all unselected roadmap work
-Critical checks: selected in the next Milestone lock
-Exit: no feature code starts until the next Milestone lock is written.
+Batch: B20
+Status: Settling
+Milestone: A CLI user can explicitly launch one local stdio MCP server and list
+  its bounded tool names and schemas.
+Domain/Phase: Skills and MCP (Phase 5 / CLI discovery)
+Slices: parse one exact-command MCP CLI request; perform bounded current-protocol
+  stdio discovery and `tools/list`; return a deterministic bounded projection.
+Non-goals: tool calls, approval/effect execution, persistent server Config,
+  credentials, remote HTTP, legacy MCP, shared transports, prompts/resources,
+  TUI/App Server surfaces, background polling, and automatic reconnect.
+Critical checks: one compliant fixture returns its tool list; one malformed or
+  oversized or hung server response fails closed without creating Config or
+  Ledgers.
+Exit: `greentyper mcp tools ...` prints bounded JSON for one explicitly selected
+  server and exits; invalid servers terminate within the fixed timeout.
 ```
 
-B19 is settled below. No feature scope is active; adjacent Context, App Server,
-Agent, Provider, and Release Gate ideas stay deferred until a fresh lock.
+B19 is settled below. B20 is the only active feature scope; adjacent MCP
+execution, Context, Agent, Provider, Workspace, and Release Gate ideas stay
+deferred.
+
+### B20 Slice notes
+
+```text
+Slice: CLI accepts one explicit MCP stdio command after `--`.
+Breadth: MCP becomes a reachable product surface.
+Depth: local command selection only; no server process yet.
+Next: launch one bounded stdio session and negotiate current MCP discovery.
+
+Slice: CLI negotiates the current protocol and returns sorted bounded tool descriptors.
+Breadth: Skills/MCP now has one usable discovery flow.
+Depth: one foreground stdio session; no execution, persistence, or authority.
+Next: fail closed on malformed, oversized, and hung servers.
+
+Slice: invalid servers terminate within the fixed timeout and create no product state.
+Breadth: none; same locked MCP discovery result.
+Depth: reusable Unix process-group / Windows Job containment plus bounded framing.
+Next: local gate passed; settle through one exact-SHA CI run.
+```
 
 ### B19 Slice notes
 

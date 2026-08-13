@@ -17,6 +17,14 @@ Object, then resumes it. This does not claim a general filesystem/network
 sandbox, network transport, MCP client, credential store, or product approval
 surface beyond the fixed tracer.
 
+The product also contains a separate discovery-only MCP stdio adapter. It can
+inspect one explicitly selected local server's bounded tool descriptors through
+the CLI, but it does not turn those descriptors into Tool intents or execute
+them. MCP calls, approvals, credentials, shared transports, and server
+capability views remain outside this slice. The explicitly selected server is
+trusted local code; process containment does not grant a filesystem or network
+sandbox.
+
 The product CLI exposes this one adapter through
 `headless --tool local.echo`. A product-owned driver restores the Agent
 Session, publishes the durable Team receipt, displays the exact bounded

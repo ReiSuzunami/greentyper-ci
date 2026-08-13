@@ -24,8 +24,12 @@ Project Skills live under `.greentyper/skills/`. The shipped project Skill
 slice uses the App Server startup directory as its fixed project root, lists
 bounded manifest summaries with content hashes, and runs only explicitly
 approved `local.echo` invocations; repeated identity reuses the durable Tool
-call. User Skills, MCP transport, arbitrary scripts, and background discovery
-remain separate pending work. Runtime state, Ledgers, checkpoints, caches,
+call. User Skills, MCP execution/transport, arbitrary scripts, and background
+discovery remain separate pending work. The CLI does provide an explicit,
+read-only `mcp tools -- /absolute/path/to/server [ARG ...]` discovery flow for
+one trusted local stdio server. It returns bounded tool names and schemas only,
+does not persist configuration or credentials, and never polls in the
+background. Runtime state, Ledgers, checkpoints, caches,
 logs, and usage projections live under `%LOCALAPPDATA%\GreenTyper` and are not
 configuration.
 

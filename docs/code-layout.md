@@ -66,10 +66,11 @@ include configured Responses and Chat Completions HTTP/SSE plus the DeepSeek
 Chat Completions and Messages HTTP/SSE request policies, a bounded
 Provider connection and model-list observation adapter, origin-bound Windows Credential
 Manager access, the fixed
-`local.echo` process executor, a terminal-neutral presentation projection, Config
-Object lifecycle/Provider-wizard controller, deterministic viewport-row layout, and a
-ProductDriver that composes the Kernel-owned Team, Tool, Provider, approval, and
-delivery seams. The public `retry --turn ID` and `cancel --turn ID` paths use
+`local.echo` process executor, a bounded discovery-only MCP stdio adapter, a
+terminal-neutral presentation projection, Config Object lifecycle/Provider-wizard
+controller, deterministic viewport-row layout, and a ProductDriver that composes
+the Kernel-owned Team, Tool, Provider, approval, and delivery seams. The public
+`retry --turn ID` and `cancel --turn ID` paths use
 strict existing-state open, recovered Active Agent authority for Product
 Ledgers, and schema-14 Runtime recovery. A recovery request for an initial
 Provider failure selects the next already-frozen Preset fallback first; when no
@@ -166,6 +167,11 @@ startup project root, while `skill.run` pins manifest content, requires explicit
 approval, and delegates the fixed `local.echo` effect to Tool Runtime. Skills
 cannot add capabilities, choose another filesystem root, or invoke arbitrary
 scripts.
+The `mcp` CLI adapter launches one explicitly selected absolute-path local
+stdio server, negotiates the current protocol, and returns only a bounded
+`tools/list` projection. It reuses product child containment and has no Tool
+Runtime, Config, credential, approval, remote transport, or background
+authority.
 The same module exposes bounded `runtime.cancel`, `runtime.retry`,
 `runtime.resume`, `runtime.delivery`, `runtime.acknowledge`, `tool.reconcile`,
 fixed `local.echo` `tool.decide`, and Agent Team lifecycle operations. The

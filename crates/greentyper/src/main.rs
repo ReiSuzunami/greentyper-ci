@@ -4,6 +4,7 @@ mod app_server;
 mod cli;
 mod credential_vault;
 mod local_process;
+mod mcp;
 mod presentation;
 mod product_driver;
 mod provider_connection;
