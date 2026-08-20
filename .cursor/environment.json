@@ -1,5 +1,5 @@
 {
   "name": "GreenTyper",
   "user": "ubuntu",
-  "install": "cargo fetch --locked"
+  "install": "cd /agent/repos/greentyper-ci && cargo fetch --locked"
 }
