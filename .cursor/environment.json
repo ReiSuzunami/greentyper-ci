@@ -1,0 +1,5 @@
+{
+  "name": "GreenTyper",
+  "user": "ubuntu",
+  "install": "cargo fetch --locked"
+}
